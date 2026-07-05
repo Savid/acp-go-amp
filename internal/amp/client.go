@@ -18,6 +18,8 @@ import (
 	"time"
 )
 
+const maxCapturedStderrBytes = 64 * 1024
+
 type Options struct {
 	CLIPath       string
 	Cwd           string
@@ -252,6 +254,8 @@ type Turn struct {
 	maxLineBytes int
 	messages     chan Message
 	errs         chan error
+	stderrMu     sync.Mutex
+	stderrTail   bytes.Buffer
 	waitOnce     sync.Once
 	waitErr      error
 	closeOnce    sync.Once
@@ -288,8 +292,8 @@ func (t *Turn) readStdout(ctx context.Context) {
 	defer close(t.messages)
 	defer close(t.errs)
 	defer func() {
-		if err := t.wait(); err != nil && !expectedExit(err) {
-			t.sendErr(fmt.Errorf("amp process exited: %w", err))
+		if err := t.wait(); err != nil {
+			t.sendErr(t.exitError(err))
 		}
 	}()
 
@@ -320,6 +324,7 @@ func (t *Turn) readStdout(ctx context.Context) {
 func (t *Turn) drainStderr() {
 	scanner := bufio.NewScanner(t.stderr)
 	for scanner.Scan() {
+		t.captureStderr(scanner.Text())
 		if t.log != nil {
 			t.log.Debug("amp stderr", slog.String("line", scanner.Text()))
 		}
@@ -392,6 +397,33 @@ func (t *Turn) sendErr(err error) {
 	}
 }
 
+func (t *Turn) captureStderr(line string) {
+	t.stderrMu.Lock()
+	defer t.stderrMu.Unlock()
+
+	if t.stderrTail.Len() > 0 {
+		t.stderrTail.WriteByte('\n')
+	}
+	t.stderrTail.WriteString(line)
+	for t.stderrTail.Len() > maxCapturedStderrBytes {
+		_, _ = t.stderrTail.ReadByte()
+	}
+}
+
+func (t *Turn) stderrText() string {
+	t.stderrMu.Lock()
+	defer t.stderrMu.Unlock()
+	return strings.TrimSpace(stripANSI(t.stderrTail.String()))
+}
+
+func (t *Turn) exitError(err error) error {
+	detail := t.stderrText()
+	if detail == "" {
+		return fmt.Errorf("amp process exited: %w", err)
+	}
+	return fmt.Errorf("amp process exited: %w: %s", err, detail)
+}
+
 func expectedExit(err error) bool {
 	if err == nil || errors.Is(err, context.Canceled) {
 		return true
@@ -406,6 +438,9 @@ func stripANSI(s string) string {
 	for i := 0; i < len(s); i++ {
 		ch := s[i]
 		if inEscape {
+			if ch == '[' || (ch >= '0' && ch <= '?') {
+				continue
+			}
 			if ch >= '@' && ch <= '~' {
 				inEscape = false
 			}

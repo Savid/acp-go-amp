@@ -406,12 +406,6 @@ func (a *Agent) validateSessionStartOptions(options AmpOptions) error {
 	if len(options.OutputSchema) > 0 {
 		return acp.NewInvalidParams(map[string]any{jsonFieldError: "unsupported", jsonFieldField: "outputSchema"})
 	}
-	if options.Mode != "" && !slices.Contains(validModes(), options.Mode) {
-		return acp.NewInvalidParams(map[string]any{jsonFieldField: "mode", jsonFieldError: "unknown value"})
-	}
-	if options.Effort != "" && !slices.Contains(validEfforts(), options.Effort) {
-		return acp.NewInvalidParams(map[string]any{jsonFieldField: "effort", jsonFieldError: "unknown value"})
-	}
 	return nil
 }
 

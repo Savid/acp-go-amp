@@ -7,6 +7,8 @@ import (
 	ampacp "github.com/savid/acp-go-amp"
 )
 
+var serve = ampacp.Serve
+
 func main() {
-	_ = ampacp.Serve(context.Background(), os.Stdin, os.Stdout, ampacp.WithSessionStore(ampacp.NewInMemorySessionStore()))
+	_ = serve(context.Background(), os.Stdin, os.Stdout, ampacp.WithSessionStore(ampacp.NewInMemorySessionStore()))
 }

@@ -182,6 +182,9 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (ac
 		case msg, ok := <-turn.Messages():
 			if !ok {
 				if terminal == nil {
+					if err := receiveTurnError(turn); err != nil {
+						return acp.PromptResponse{}, classifyNativePromptError(err)
+					}
 					return acp.PromptResponse{}, acp.NewInternalError(map[string]any{jsonFieldError: "amp stream ended without result"})
 				}
 				if terminal.IsError {
@@ -216,7 +219,10 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (ac
 					promptUsage = usage
 				}
 			}
-		case err := <-turn.Errors():
+		case err, ok := <-turn.Errors():
+			if !ok {
+				continue
+			}
 			if ctx.Err() != nil {
 				return acp.PromptResponse{StopReason: acp.StopReasonCancelled, Usage: promptUsage, UserMessageId: params.MessageId}, nil
 			}
@@ -552,6 +558,15 @@ func messageUsage(msg amp.Message) *acp.Usage {
 		return usageFromAmp(assistant.Usage)
 	}
 	return nil
+}
+
+func receiveTurnError(turn *amp.Turn) error {
+	select {
+	case err := <-turn.Errors():
+		return err
+	default:
+		return nil
+	}
 }
 
 func classifyNativePromptError(err error) error {
