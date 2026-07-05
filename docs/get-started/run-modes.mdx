@@ -6,8 +6,11 @@ The command is intended to be launched by an ACP host:
 acp-go-amp -path amp -home /path/to/wrapper-home
 ```
 
-`-home` is a parent directory. The wrapper creates an isolated settings file
-directory for each ACP session and removes it on close/delete.
+`-home` is a parent directory. The wrapper creates one isolated directory per
+ACP session under it, sets native `HOME` plus `XDG_CONFIG_HOME`,
+`XDG_CACHE_HOME`, `XDG_DATA_HOME`, and `XDG_STATE_HOME` inside that directory,
+and writes the per-session Amp settings file inside the isolated config tree.
+The directory is removed on close/delete.
 
 `-debug` writes adapter logs to stderr. ACP JSON-RPC remains on stdout only.
 

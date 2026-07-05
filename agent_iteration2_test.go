@@ -137,12 +137,11 @@ func TestIteration2LoadReplayDeleteAndConfigEdges(t *testing.T) {
 		t.Fatal("empty MCP transport accepted after manifest")
 	}
 
-	options, err := parseAmpOptions(map[string]any{"model": 42, "outputSchema": "wrong"})
-	if err != nil {
-		t.Fatalf("parseAmpOptions non-string symmetry fields: %v", err)
+	if _, err := parseAmpOptions(map[string]any{"model": 42}); err == nil {
+		t.Fatal("non-string model accepted")
 	}
-	if options.Model != "" || options.OutputSchema != nil {
-		t.Fatalf("non-string symmetry fields were retained: %#v", options)
+	if _, err := parseAmpOptions(map[string]any{"outputSchema": map[string]any{}}); err == nil {
+		t.Fatal("empty output schema accepted")
 	}
 
 	replaceErr := errors.New("replace failed")
@@ -264,20 +263,16 @@ func TestIteration2PromptAndPersistenceEdges(t *testing.T) {
 	if persistErr := nilStoreSession.persistAfterTurn(ctx, []SessionStoreEntry{json.RawMessage(`{"type":"result"}`)}); persistErr != nil {
 		t.Fatalf("nil-store persist: %v", persistErr)
 	}
-	appendErr := errors.New("append failed")
-	appendSession := &agentSession{agent: NewAgent(WithSessionStore(&errorStore{appendErr: appendErr})), id: "T-append"}
-	if persistErr := appendSession.persistAfterTurn(ctx, []SessionStoreEntry{json.RawMessage(`{"type":"result"}`)}); !errors.Is(persistErr, appendErr) {
-		t.Fatalf("append persist error = %v", persistErr)
+	atomicStore := &recordingStore{}
+	atomicSession := &agentSession{agent: NewAgent(WithSessionStore(atomicStore)), id: "T-atomic"}
+	if persistErr := atomicSession.persistAfterTurn(ctx, []SessionStoreEntry{json.RawMessage(`{"type":"result"}`)}); persistErr != nil {
+		t.Fatalf("atomic persist: %v", persistErr)
 	}
-
-	badExportPath, _ := fakeAgentAmpPath(t, "bad-export-json")
-	badExportAgent := NewAgent(WithExecutablePath(badExportPath), WithHome(t.TempDir()), WithSessionStore(NewInMemorySessionStore()))
-	badExportSession, err := newAgentSession(badExportAgent, "T-bad-export", t.TempDir(), parsedSessionMeta{}, "", nil)
-	if err != nil {
-		t.Fatal(err)
+	if atomicStore.appendCalls != 0 || atomicStore.replaceCalls != 1 {
+		t.Fatalf("persist calls append=%d replace=%d", atomicStore.appendCalls, atomicStore.replaceCalls)
 	}
-	if err := badExportSession.persistAfterTurn(ctx, nil); err == nil {
-		t.Fatal("invalid native export JSON was accepted in manifest")
+	if len(atomicStore.lastReplacements) != 2 || atomicStore.lastReplacements[1].Key.Subpath != transcriptSubpath || len(atomicStore.lastReplacements[1].Entries) != 1 {
+		t.Fatalf("atomic replacements = %#v", atomicStore.lastReplacements)
 	}
 }
 
@@ -315,27 +310,21 @@ func TestIteration2EmitAndRawEventEdges(t *testing.T) {
 	}
 	streamErrs := make(chan error, 1)
 	streamErrs <- errors.New("stream failed")
-	if _, err := streamEndedWithoutTerminal(ctx, nil, nil, fakeTurnErrors{errs: streamErrs}); err == nil || !strings.Contains(err.Error(), "stream failed") {
+	if _, err := streamEndedWithoutTerminal(ctx, nil, nil, nil, fakeTurnErrors{errs: streamErrs}); err == nil || !strings.Contains(err.Error(), "stream failed") {
 		t.Fatalf("stream ended error = %v", err)
 	}
-	if _, err := streamEndedWithoutTerminal(ctx, nil, nil, fakeTurnErrors{errs: emptyErrs}); err == nil || !strings.Contains(err.Error(), "stream ended without result") {
+	if _, err := streamEndedWithoutTerminal(ctx, nil, nil, nil, fakeTurnErrors{errs: emptyErrs}); err == nil || !strings.Contains(err.Error(), "stream ended without result") {
 		t.Fatalf("stream ended default = %v", err)
 	}
 	messageID := "mid"
 	cancelCtx, cancel := context.WithCancel(ctx)
 	cancel()
-	resp, err := promptErrorResponse(cancelCtx, &acp.Usage{TotalTokens: 1}, &messageID, errors.New("late native error"))
+	resp, err := promptErrorResponse(cancelCtx, nil, &acp.Usage{TotalTokens: 1}, &messageID, errors.New("late native error"))
 	if err != nil || resp.StopReason != acp.StopReasonCancelled || resp.UserMessageId == nil || *resp.UserMessageId != messageID {
 		t.Fatalf("cancel prompt error response = %#v err=%v", resp, err)
 	}
-	if _, err := promptErrorResponse(ctx, nil, nil, errors.New("native error")); err == nil || !strings.Contains(err.Error(), "native error") {
+	if _, err := promptErrorResponse(ctx, nil, nil, nil, errors.New("native error")); err == nil || !strings.Contains(err.Error(), "native error") {
 		t.Fatalf("native prompt error response = %v", err)
-	}
-
-	exportAgent := NewAgent(WithExecutablePath("/does/not/exist"))
-	exportAgent.options.NativeCommandTimeout = 0
-	if raw := (&agentSession{agent: exportAgent, id: "T-export"}).exportNative(ctx); raw != nil {
-		t.Fatalf("failed export returned %s", raw)
 	}
 }
 

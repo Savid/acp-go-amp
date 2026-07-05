@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -36,20 +35,19 @@ var (
 	errSessionDeleted = errors.New("session deleted")
 	errSessionClosed  = errors.New("session closed")
 	writeFile         = os.WriteFile
+	mkdirAll          = os.MkdirAll
+	mkdirTemp         = os.MkdirTemp
 )
 
 type ampManifest struct {
-	Format             string          `json:"format"`
-	ThreadID           string          `json:"threadId"`
-	Cwd                string          `json:"cwd"`
-	Title              string          `json:"title,omitempty"`
-	Mode               string          `json:"mode,omitempty"`
-	Effort             string          `json:"effort,omitempty"`
-	UpdatedAtUnixMilli int64           `json:"updatedAtUnixMilli"`
-	CreatedAtUnixMilli int64           `json:"createdAtUnixMilli"`
-	AdditionalDirs     []string        `json:"additionalDirectories,omitempty"`
-	Meta               map[string]any  `json:"meta,omitempty"`
-	NativeExport       json.RawMessage `json:"nativeExport,omitempty"`
+	Format             string `json:"format"`
+	ThreadID           string `json:"threadId"`
+	Cwd                string `json:"cwd"`
+	Title              string `json:"title,omitempty"`
+	Mode               string `json:"mode,omitempty"`
+	Effort             string `json:"effort,omitempty"`
+	UpdatedAtUnixMilli int64  `json:"updatedAtUnixMilli"`
+	CreatedAtUnixMilli int64  `json:"createdAtUnixMilli"`
 }
 
 type parsedSessionMeta struct {
@@ -74,19 +72,86 @@ type agentSession struct {
 	settingsFile          string
 	closed                bool
 	poisonCause           string
+	nativeMissingCause    string
 	turn                  chan struct{}
 	cancelMu              sync.Mutex
-	activeTurn            *amp.Turn
+	activePrompt          *promptTurnState
 	mu                    sync.Mutex
+}
+
+type promptTurnState struct {
+	mu        sync.Mutex
+	turn      *amp.Turn
+	cancelCtx context.CancelFunc
+	cancelled chan struct{}
+	once      sync.Once
+}
+
+func newPromptTurnState() *promptTurnState {
+	return &promptTurnState{cancelled: make(chan struct{})}
+}
+
+func (s *promptTurnState) setTurn(turn *amp.Turn) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.turn = turn
+}
+
+func (s *promptTurnState) setCancelFunc(cancel context.CancelFunc) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cancelCtx = cancel
+}
+
+func (s *promptTurnState) currentTurn() *amp.Turn {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.turn
+}
+
+func (s *promptTurnState) cancel() {
+	var cancel context.CancelFunc
+	s.mu.Lock()
+	cancel = s.cancelCtx
+	s.mu.Unlock()
+	s.once.Do(func() { close(s.cancelled) })
+	if cancel != nil {
+		cancel()
+	}
+}
+
+func (s *promptTurnState) isCancelled() bool {
+	select {
+	case <-s.cancelled:
+		return true
+	default:
+		return false
+	}
 }
 
 func newAgentSession(agent *Agent, id acp.SessionId, cwd string, meta parsedSessionMeta, mcpConfigJSON string, additionalDirs []string) (*agentSession, error) {
 	now := time.Now().UnixMilli()
-	dir, err := os.MkdirTemp(agent.settingsParent(), "acp-go-amp-settings-*")
+	if parent := agent.settingsParent(); parent != "" {
+		if err := mkdirAll(parent, 0o700); err != nil {
+			return nil, fmt.Errorf("create amp home parent: %w", err)
+		}
+	}
+	dir, err := mkdirTemp(agent.settingsParent(), "acp-go-amp-session-*")
 	if err != nil {
 		return nil, fmt.Errorf("create amp settings dir: %w", err)
 	}
-	settingsFile := filepath.Join(dir, "settings.json")
+	homeDir := filepath.Join(dir, "home")
+	configDir := filepath.Join(dir, "xdg-config")
+	cacheDir := filepath.Join(dir, "xdg-cache")
+	dataDir := filepath.Join(dir, "xdg-data")
+	stateDir := filepath.Join(dir, "xdg-state")
+	for _, path := range []string{homeDir, configDir, cacheDir, dataDir, stateDir, filepath.Join(configDir, "amp")} {
+		if err := mkdirAll(path, 0o700); err != nil {
+			_ = os.RemoveAll(dir)
+			return nil, fmt.Errorf("create amp isolated home: %w", err)
+		}
+	}
+	settingsFile := filepath.Join(configDir, "amp", "settings.json")
 	if err := writeFile(settingsFile, []byte("{}\n"), 0o600); err != nil {
 		_ = os.RemoveAll(dir)
 		return nil, fmt.Errorf("write amp settings file: %w", err)
@@ -99,6 +164,12 @@ func newAgentSession(agent *Agent, id acp.SessionId, cwd string, meta parsedSess
 	if effort == "" {
 		effort = "high"
 	}
+	env := mergeEnv(agent.options.Env, meta.options.Env)
+	env["HOME"] = homeDir
+	env["XDG_CONFIG_HOME"] = configDir
+	env["XDG_CACHE_HOME"] = cacheDir
+	env["XDG_DATA_HOME"] = dataDir
+	env["XDG_STATE_HOME"] = stateDir
 	return &agentSession{
 		agent:                 agent,
 		id:                    id,
@@ -109,7 +180,7 @@ func newAgentSession(agent *Agent, id acp.SessionId, cwd string, meta parsedSess
 		updatedUnix:           now,
 		additionalDirectories: append([]string(nil), additionalDirs...),
 		mcpConfigJSON:         mcpConfigJSON,
-		env:                   mergeEnv(agent.options.Env, meta.options.Env),
+		env:                   env,
 		rawEvents:             meta.rawEvent,
 		settingsDir:           dir,
 		settingsFile:          settingsFile,
@@ -127,7 +198,7 @@ func (s *agentSession) client() *amp.Client {
 		Mode:          s.mode,
 		Effort:        s.effort,
 		MCPConfigJSON: s.mcpConfigJSON,
-		MaxLineBytes:  s.agent.options.MaxJSONLineBytes,
+		MaxLineBytes:  s.agent.options.runtime.maxJSONLineBytes,
 	})
 }
 
@@ -157,20 +228,21 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (ac
 		return acp.PromptResponse{}, err
 	}
 
-	turn, err := s.client().Continue(ctx, string(s.id), input)
+	state := newPromptTurnState()
+	continueCtx, cancelContinue := context.WithCancel(ctx)
+	defer cancelContinue()
+	state.setCancelFunc(cancelContinue)
+	s.setActivePrompt(state)
+	defer s.clearActivePrompt(state)
+
+	turn, err := s.client().Continue(continueCtx, string(s.id), input)
 	if err != nil {
+		if state.isCancelled() {
+			return cancelledPromptResponse(nil, params.MessageId), nil
+		}
 		return acp.PromptResponse{}, classifyNativePromptError(err)
 	}
-	s.cancelMu.Lock()
-	s.activeTurn = turn
-	s.cancelMu.Unlock()
-	defer func() {
-		s.cancelMu.Lock()
-		if s.activeTurn == turn {
-			s.activeTurn = nil
-		}
-		s.cancelMu.Unlock()
-	}()
+	state.setTurn(turn)
 
 	var transcript []SessionStoreEntry
 	var promptUsage *acp.Usage
@@ -180,9 +252,12 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (ac
 		case msg, ok := <-turn.Messages():
 			if !ok {
 				if terminal == nil {
-					return streamEndedWithoutTerminal(ctx, promptUsage, params.MessageId, turn)
+					return streamEndedWithoutTerminal(ctx, state, promptUsage, params.MessageId, turn)
 				}
 				if terminal.IsError {
+					if state.isCancelled() || isNativeCancelResult(terminal) {
+						return cancelledPromptResponse(promptUsage, params.MessageId), nil
+					}
 					return acp.PromptResponse{}, acp.NewInternalError(map[string]any{jsonFieldError: terminal.Error, "subtype": terminal.Subtype})
 				}
 				if err := s.persistAfterTurn(ctx, transcript); err != nil {
@@ -193,6 +268,9 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (ac
 					Usage:         promptUsage,
 					UserMessageId: params.MessageId,
 				}, nil
+			}
+			if err := s.validateFrameSessionID(msg, state); err != nil {
+				return acp.PromptResponse{}, err
 			}
 			if raw := msg.RawJSON(); raw != "" {
 				transcript = append(transcript, SessionStoreEntry(raw))
@@ -218,26 +296,79 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (ac
 			if !ok {
 				continue
 			}
-			return promptErrorResponse(ctx, promptUsage, params.MessageId, err)
+			return promptErrorResponse(ctx, state, promptUsage, params.MessageId, err)
+		case <-state.cancelled:
+			_ = s.interruptState(context.Background(), state)
+			return cancelledPromptResponse(promptUsage, params.MessageId), nil
 		case <-ctx.Done():
-			_ = s.interrupt(context.Background())
-			return acp.PromptResponse{StopReason: acp.StopReasonCancelled, Usage: promptUsage, UserMessageId: params.MessageId}, nil
+			state.cancel()
+			_ = s.interruptState(context.Background(), state)
+			return cancelledPromptResponse(promptUsage, params.MessageId), nil
 		}
 	}
 }
 
 func (s *agentSession) Cancel(ctx context.Context) error {
-	return s.interrupt(ctx)
+	_ = ctx
+	state := s.activePromptState()
+	if state == nil {
+		return nil
+	}
+	if state.isCancelled() {
+		return nil
+	}
+	state.cancel()
+	return s.interruptState(context.Background(), state)
 }
 
 func (s *agentSession) interrupt(ctx context.Context) error {
-	s.cancelMu.Lock()
-	turn := s.activeTurn
-	s.cancelMu.Unlock()
+	state := s.activePromptState()
+	if state == nil {
+		return nil
+	}
+	return s.interruptState(ctx, state)
+}
+
+func (s *agentSession) interruptState(ctx context.Context, state *promptTurnState) error {
+	_ = ctx
+	if state == nil {
+		return nil
+	}
+	turn := state.currentTurn()
 	if turn == nil {
 		return nil
 	}
-	return turn.Interrupt(ctx, s.agent.options.NativeCancelTimeout)
+	timeout := s.agent.options.runtime.nativeCancelTimeout
+	cancelCtx, cancel := context.WithTimeout(context.Background(), timeout+s.agent.options.runtime.nativeCloseTurnWait)
+	defer cancel()
+	return turn.Interrupt(cancelCtx, timeout)
+}
+
+func (s *agentSession) setActivePrompt(state *promptTurnState) {
+	s.cancelMu.Lock()
+	defer s.cancelMu.Unlock()
+	s.activePrompt = state
+}
+
+func (s *agentSession) activePromptState() *promptTurnState {
+	s.cancelMu.Lock()
+	defer s.cancelMu.Unlock()
+	return s.activePrompt
+}
+
+func (s *agentSession) clearActivePrompt(state *promptTurnState) {
+	s.cancelMu.Lock()
+	defer s.cancelMu.Unlock()
+	if s.activePrompt == state {
+		s.activePrompt = nil
+	}
+}
+
+func (s *agentSession) poison(cause string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.poisonCause = cause
+	return acp.NewInternalError(map[string]any{jsonFieldError: cause})
 }
 
 func (s *agentSession) Close(ctx context.Context) error {
@@ -263,11 +394,30 @@ func (s *agentSession) Delete(ctx context.Context) error {
 	return err
 }
 
+func (s *agentSession) verifyContinuable(ctx context.Context) error {
+	timeout := s.agent.options.runtime.nativeCommandTimeout
+	probeCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	if _, err := s.client().ExportThread(probeCtx, string(s.id)); err != nil {
+		if isNativeMissingError(err) {
+			s.mu.Lock()
+			s.nativeMissingCause = err.Error()
+			s.mu.Unlock()
+			return nil
+		}
+		return acp.NewInternalError(map[string]any{jsonFieldError: err.Error()})
+	}
+	return nil
+}
+
 func (s *agentSession) ready() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.poisonCause != "" {
 		return acp.NewInternalError(map[string]any{jsonFieldError: s.poisonCause})
+	}
+	if s.nativeMissingCause != "" {
+		return acp.NewInternalError(map[string]any{jsonFieldError: "native_state_missing", "detail": s.nativeMissingCause})
 	}
 	if s.closed {
 		return errSessionClosed
@@ -275,7 +425,7 @@ func (s *agentSession) ready() error {
 	return nil
 }
 
-func (s *agentSession) manifest(ctx context.Context) ampManifest {
+func (s *agentSession) manifest() ampManifest {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return ampManifest{
@@ -287,9 +437,6 @@ func (s *agentSession) manifest(ctx context.Context) ampManifest {
 		Effort:             s.effort,
 		UpdatedAtUnixMilli: s.updatedUnix,
 		CreatedAtUnixMilli: s.createdUnix,
-		AdditionalDirs:     append([]string(nil), s.additionalDirectories...),
-		Meta:               map[string]any{"amp": map[string]any{"mode": s.mode, "effort": s.effort}},
-		NativeExport:       s.exportNative(ctx),
 	}
 }
 
@@ -302,38 +449,18 @@ func (s *agentSession) persistAfterTurn(ctx context.Context, transcript []Sessio
 	if s.agent.store == nil {
 		return nil
 	}
-	if len(transcript) > 0 {
-		if err := s.agent.store.Append(ctx, SessionKey{SessionID: string(s.id), Subpath: transcriptSubpath}, transcript); err != nil {
-			return err
-		}
-	}
 	fullTranscript, err := s.agent.store.Load(ctx, SessionKey{SessionID: string(s.id), Subpath: transcriptSubpath})
 	if err != nil {
 		return err
 	}
-	main, err := json.Marshal(s.manifest(ctx))
-	if err != nil {
-		return err
+	if len(transcript) > 0 {
+		fullTranscript = append(cloneEntries(fullTranscript), cloneEntries(transcript)...)
 	}
+	main, _ := json.Marshal(s.manifest())
 	return s.agent.store.Replace(ctx, SessionKey{SessionID: string(s.id), Subpath: SessionStoreMainSubpath}, []SessionStoreReplacement{
 		{Key: SessionKey{SessionID: string(s.id), Subpath: SessionStoreMainSubpath}, Entries: []SessionStoreEntry{main}},
 		{Key: SessionKey{SessionID: string(s.id), Subpath: transcriptSubpath}, Entries: fullTranscript},
 	})
-}
-
-func (s *agentSession) exportNative(ctx context.Context) json.RawMessage {
-	timeout := s.agent.options.NativeCommandTimeout
-	if timeout <= 0 {
-		timeout = defaultNativeCommandTimeout
-	}
-	exportCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	raw, err := s.client().ExportThread(exportCtx, string(s.id))
-	if err != nil {
-		s.agent.log.DebugContext(ctx, "amp threads export failed", slog.String(jsonFieldError, err.Error()))
-		return nil
-	}
-	return raw
 }
 
 func (s *agentSession) emitMessage(ctx context.Context, msg amp.Message) error {
@@ -413,6 +540,11 @@ func (s *agentSession) emitUpdate(ctx context.Context, update acp.SessionUpdate)
 	if conn == nil {
 		return nil
 	}
+	release, err := s.agent.acquireClientCall(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
 	return conn.SessionUpdate(ctx, acp.SessionNotification{SessionId: s.id, Update: update})
 }
 
@@ -441,7 +573,39 @@ func (s *agentSession) emitRawEvent(ctx context.Context, source string, msg amp.
 	if conn == nil {
 		return nil
 	}
+	release, err := s.agent.acquireClientCall(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
 	return conn.NotifyExtension(ctx, RawEventMethod, payload)
+}
+
+func (s *agentSession) validateFrameSessionID(msg amp.Message, state *promptTurnState) error {
+	got := frameSessionID(msg)
+	if got == "" || got == string(s.id) {
+		return nil
+	}
+	if state != nil {
+		state.cancel()
+		_ = s.interruptState(context.Background(), state)
+	}
+	return s.poison(fmt.Sprintf("native session_id drift: got %q, want %q", got, s.id))
+}
+
+func frameSessionID(msg amp.Message) string {
+	switch typed := msg.(type) {
+	case *amp.SystemMessage:
+		return typed.SessionID
+	case *amp.UserMessage:
+		return typed.SessionID
+	case *amp.AssistantMessage:
+		return typed.SessionID
+	case *amp.ResultMessage:
+		return typed.SessionID
+	default:
+		return ""
+	}
 }
 
 func promptInput(blocks []acp.ContentBlock) (map[string]any, error) {
@@ -565,22 +729,29 @@ func receiveTurnError(turn turnErrorReader) error {
 	}
 }
 
-func streamEndedWithoutTerminal(ctx context.Context, usage *acp.Usage, messageID *string, turn turnErrorReader) (acp.PromptResponse, error) {
+func streamEndedWithoutTerminal(ctx context.Context, state *promptTurnState, usage *acp.Usage, messageID *string, turn turnErrorReader) (acp.PromptResponse, error) {
 	if err := receiveTurnError(turn); err != nil {
-		return promptErrorResponse(ctx, usage, messageID, err)
+		return promptErrorResponse(ctx, state, usage, messageID, err)
+	}
+	if state != nil && state.isCancelled() {
+		return cancelledPromptResponse(usage, messageID), nil
 	}
 	return acp.PromptResponse{}, acp.NewInternalError(map[string]any{jsonFieldError: "amp stream ended without result"})
 }
 
-func promptErrorResponse(ctx context.Context, usage *acp.Usage, messageID *string, err error) (acp.PromptResponse, error) {
-	if ctx.Err() != nil {
+func promptErrorResponse(ctx context.Context, state *promptTurnState, usage *acp.Usage, messageID *string, err error) (acp.PromptResponse, error) {
+	if ctx.Err() != nil || (state != nil && state.isCancelled()) || isNativeCancelError(err) {
 		// Native process cancellation can surface as a process error; ACP callers
 		// should receive the cancellation result once their context is done.
 		_ = err
 		//nolint:nilerr // The native error is intentionally suppressed for caller cancellation.
-		return acp.PromptResponse{StopReason: acp.StopReasonCancelled, Usage: usage, UserMessageId: messageID}, nil
+		return cancelledPromptResponse(usage, messageID), nil
 	}
 	return acp.PromptResponse{}, classifyNativePromptError(err)
+}
+
+func cancelledPromptResponse(usage *acp.Usage, messageID *string) acp.PromptResponse {
+	return acp.PromptResponse{StopReason: acp.StopReasonCancelled, Usage: usage, UserMessageId: messageID}
 }
 
 func classifyNativePromptError(err error) error {
@@ -588,10 +759,33 @@ func classifyNativePromptError(err error) error {
 		return nil
 	}
 	msg := err.Error()
-	if strings.Contains(msg, "does not exist") || strings.Contains(msg, "Thread not found") {
+	if isNativeMissingError(err) {
 		return acp.NewInternalError(map[string]any{jsonFieldError: "native_state_missing", "detail": msg})
 	}
 	return acp.NewInternalError(map[string]any{jsonFieldError: msg})
+}
+
+func isNativeMissingError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "does not exist") || strings.Contains(msg, "Thread not found")
+}
+
+func isNativeCancelResult(result *amp.ResultMessage) bool {
+	return result != nil && isNativeCancelString(result.Error)
+}
+
+func isNativeCancelError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return isNativeCancelString(err.Error())
+}
+
+func isNativeCancelString(value string) bool {
+	return strings.Contains(value, "User cancelled (SIGINT/SIGTERM)") || strings.Contains(value, "SIGINT") || strings.Contains(value, "SIGTERM")
 }
 
 func mergeEnv(base, session map[string]string) map[string]string {

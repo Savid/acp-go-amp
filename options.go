@@ -53,11 +53,14 @@ type Options struct {
 	SessionStore            SessionStore
 	SessionStoreLoadTimeout time.Duration
 	ConcurrencyLimits       ConcurrencyLimits
+	runtime                 runtimeOptions
+}
 
-	NativeCancelTimeout  time.Duration
-	NativeCloseTurnWait  time.Duration
-	NativeCommandTimeout time.Duration
-	MaxJSONLineBytes     int
+type runtimeOptions struct {
+	nativeCancelTimeout  time.Duration
+	nativeCloseTurnWait  time.Duration
+	nativeCommandTimeout time.Duration
+	maxJSONLineBytes     int
 }
 
 func applyOptions(opts []Option) Options {
@@ -66,10 +69,12 @@ func applyOptions(opts []Option) Options {
 		AgentTitle:              defaultAgentTitle,
 		AgentVersion:            defaultAgentVersion,
 		SessionStoreLoadTimeout: defaultSessionStoreTimeout,
-		NativeCancelTimeout:     defaultNativeCancelTimeout,
-		NativeCloseTurnWait:     defaultNativeCloseTurnWait,
-		NativeCommandTimeout:    defaultNativeCommandTimeout,
-		MaxJSONLineBytes:        defaultNativePromptLineLimit,
+		runtime: runtimeOptions{
+			nativeCancelTimeout:  defaultNativeCancelTimeout,
+			nativeCloseTurnWait:  defaultNativeCloseTurnWait,
+			nativeCommandTimeout: defaultNativeCommandTimeout,
+			maxJSONLineBytes:     defaultNativePromptLineLimit,
+		},
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -197,7 +202,7 @@ func (options AmpOptions) Meta() map[string]any {
 	if len(options.Env) > 0 {
 		payload["env"] = cloneStringMap(options.Env)
 	}
-	if len(options.OutputSchema) > 0 {
+	if options.OutputSchema != nil {
 		payload["outputSchema"] = cloneAnyMap(options.OutputSchema)
 	}
 	if options.Mode != "" {

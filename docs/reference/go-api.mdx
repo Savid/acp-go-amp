@@ -14,7 +14,8 @@ Primary entry points:
 Common options:
 
 - `WithExecutablePath`
-- `WithHome`
+- `WithHome`, which is a parent for isolated per-session native `HOME` and XDG
+  directories
 - `WithDefaultModel`
 - `WithEnv`
 - `WithSessionStore`
@@ -27,7 +28,7 @@ Amp per-session options:
 - `AmpOptions.Mode`
 - `AmpOptions.Effort`
 - `AmpOptions.Model` and `AmpOptions.OutputSchema`, which are accepted in the
-  struct for API symmetry but rejected at session start when non-empty.
+  struct for API symmetry but rejected when supplied.
 
 Request helpers include builders for new/load/resume/delete, text prompts,
 config-option updates, stdio MCP servers, and HTTP MCP servers.

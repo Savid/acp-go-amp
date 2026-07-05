@@ -20,10 +20,12 @@ Lifecycle requests accept only this Amp-owned metadata:
 ```
 
 Accepted option fields are `env`, `mode`, `effort`, `model`, and
-`outputSchema`. `model` and `outputSchema` exist for API symmetry but fail at
-session start with the uniform unsupported error. Unknown keys under
-`_meta.amp` or `_meta.amp.options` fail closed. Foreign metadata namespaces are
-ignored.
+`outputSchema`. `mode` accepts only `smart`, `deep`, or `rush`; `effort`
+accepts only `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`.
+`model` and any `outputSchema` presence exist for API symmetry but fail with
+the uniform unsupported error. Unknown keys under `_meta.amp`,
+`_meta.amp.rawEvent`, or `_meta.amp.options` fail closed. Foreign metadata
+namespaces are ignored.
 
 Initialize advertises `_meta.amp.rawEvent` and `_meta.amp.sessionStore`. It
 omits fork and elicitation capability metadata.

@@ -241,6 +241,5 @@ func summaryFromStoreEntry(entry json.RawMessage) (SessionSummary, bool) {
 		UpdatedAtUnixMilli: manifest.UpdatedAtUnixMilli,
 		Cwd:                manifest.Cwd,
 		Title:              manifest.Title,
-		Meta:               cloneAnyMap(manifest.Meta),
 	}, true
 }

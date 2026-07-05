@@ -219,7 +219,7 @@ func ampOptionsPayload(options AmpOptions) map[string]any {
 	if len(options.Env) > 0 {
 		payload["env"] = cloneStringMap(options.Env)
 	}
-	if len(options.OutputSchema) > 0 {
+	if options.OutputSchema != nil {
 		payload["outputSchema"] = cloneAnyMap(options.OutputSchema)
 	}
 	if options.Mode != "" {

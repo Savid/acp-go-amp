@@ -1,13 +1,15 @@
 # Security
 
-The wrapper creates an isolated Amp settings file for each ACP session. The file
-starts as an empty JSON object and is passed to Amp with `--settings-file`.
+The wrapper creates an isolated native home for each ACP session. Native `HOME`,
+`XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, `XDG_DATA_HOME`, and `XDG_STATE_HOME` point
+inside that directory, and the Amp settings file starts as an empty JSON object
+inside the isolated config tree before being passed with `--settings-file`.
 
 Auth material is live process state:
 
 - `AMP_API_KEY` may be supplied through `WithEnv` or the process environment.
 - `AMP_URL` may be supplied the same way.
-- Neither value is written to `SessionStore`.
+- Neither value is written to the settings file or `SessionStore`.
 
 The session store contains only the manifest and captured stream-json frames.
 It does not contain settings, auth files, API keys, or other secrets.

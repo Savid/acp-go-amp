@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"path/filepath"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -22,13 +23,15 @@ type Agent struct {
 	log     *slog.Logger
 	store   SessionStore
 
-	mu       sync.Mutex
-	closed   bool
-	conn     *acp.AgentSideConnection
-	sessions map[acp.SessionId]*agentSession
-	deleted  map[acp.SessionId]struct{}
-	pending  int
-	rawSeq   atomic.Int64
+	mu                   sync.Mutex
+	closed               bool
+	conn                 *acp.AgentSideConnection
+	sessions             map[acp.SessionId]*agentSession
+	deleted              map[acp.SessionId]struct{}
+	pendingNativeDeletes map[acp.SessionId]struct{}
+	pending              int
+	rawSeq               atomic.Int64
+	clientCalls          chan struct{}
 
 	activeLimitErr error
 }
@@ -50,12 +53,14 @@ func NewAgent(opts ...Option) *Agent {
 		store = NewInMemorySessionStore()
 	}
 	return &Agent{
-		options:        options,
-		log:            log,
-		store:          store,
-		sessions:       make(map[acp.SessionId]*agentSession),
-		deleted:        make(map[acp.SessionId]struct{}),
-		activeLimitErr: validateConcurrencyLimits(options.ConcurrencyLimits),
+		options:              options,
+		log:                  log,
+		store:                store,
+		sessions:             make(map[acp.SessionId]*agentSession),
+		deleted:              make(map[acp.SessionId]struct{}),
+		pendingNativeDeletes: make(map[acp.SessionId]struct{}),
+		clientCalls:          make(chan struct{}, maxConcurrentClientCalls(options.ConcurrencyLimits)),
+		activeLimitErr:       validateConcurrencyLimits(options.ConcurrencyLimits),
 	}
 }
 
@@ -63,7 +68,6 @@ func Serve(ctx context.Context, input io.Reader, output io.Writer, opts ...Optio
 	agent := NewAgent(opts...)
 	defer func() { _ = agent.Close() }()
 	conn := acp.NewAgentSideConnection(agent, output, input)
-	conn.SetLogger(agent.log)
 	agent.setConnection(conn)
 	select {
 	case <-ctx.Done():
@@ -154,8 +158,14 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (a
 	if err := a.validateSessionStartOptions(meta.options); err != nil {
 		return acp.NewSessionResponse{}, err
 	}
+	if err := validateSessionPaths(params.Cwd, params.AdditionalDirectories); err != nil {
+		return acp.NewSessionResponse{}, err
+	}
 	mcpConfig, err := mcpConfigJSON(params.McpServers)
 	if err != nil {
+		return acp.NewSessionResponse{}, err
+	}
+	if err := a.ensureStartup(ctx, params.Cwd, meta); err != nil {
 		return acp.NewSessionResponse{}, err
 	}
 	if err := a.reserveSessionSlot(); err != nil {
@@ -207,6 +217,7 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 }
 
 func (a *Agent) ListSessions(ctx context.Context, params acp.ListSessionsRequest) (acp.ListSessionsResponse, error) {
+	a.retryPendingNativeDeletes(ctx)
 	summaries, err := a.store.ListSessions(ctx)
 	if err != nil {
 		return acp.ListSessionsResponse{}, err
@@ -267,27 +278,26 @@ func (a *Agent) CloseSession(ctx context.Context, params acp.CloseSessionRequest
 }
 
 func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDeleteSessionRequest) (acp.UnstableDeleteSessionResponse, error) {
-	a.markDeleted(params.SessionId)
+	if params.SessionId == "" {
+		return acp.UnstableDeleteSessionResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldField: jsonFieldSessionID})
+	}
+	a.retryPendingNativeDeletes(ctx)
 	if a.store != nil {
 		if err := a.store.Delete(ctx, SessionKey{SessionID: string(params.SessionId), Subpath: SessionStoreMainSubpath}); err != nil {
 			return acp.UnstableDeleteSessionResponse{}, err
 		}
 	}
+	a.markDeleted(params.SessionId)
 	a.mu.Lock()
 	session := a.sessions[params.SessionId]
 	delete(a.sessions, params.SessionId)
 	a.mu.Unlock()
-	var err error
-	if session != nil {
-		err = session.Delete(ctx)
-	} else {
-		tmp, tmpErr := newAgentSession(a, params.SessionId, "", parsedSessionMeta{}, "", nil)
-		if tmpErr == nil {
-			err = tmp.client().DeleteThread(ctx, string(params.SessionId))
-			_ = tmp.Close(context.Background())
-		}
+	if err := a.deleteNativeThread(ctx, params.SessionId, session); err != nil {
+		a.markPendingNativeDelete(params.SessionId)
+		return acp.UnstableDeleteSessionResponse{}, err
 	}
-	return acp.UnstableDeleteSessionResponse{}, err
+	a.clearPendingNativeDelete(params.SessionId)
+	return acp.UnstableDeleteSessionResponse{}, nil
 }
 
 func (a *Agent) SetSessionConfigOption(ctx context.Context, params acp.SetSessionConfigOptionRequest) (acp.SetSessionConfigOptionResponse, error) {
@@ -304,7 +314,7 @@ func (a *Agent) SetSessionConfigOption(ctx context.Context, params acp.SetSessio
 	if err := session.setConfig(ctx, params.ValueId.ConfigId, params.ValueId.Value); err != nil {
 		return acp.SetSessionConfigOptionResponse{}, err
 	}
-	return acp.SetSessionConfigOptionResponse{}, nil
+	return acp.SetSessionConfigOptionResponse{ConfigOptions: session.configOptions()}, nil
 }
 
 func (a *Agent) SetSessionMode(ctx context.Context, params acp.SetSessionModeRequest) (acp.SetSessionModeResponse, error) {
@@ -324,6 +334,7 @@ func (a *Agent) HandleExtensionMethod(ctx context.Context, method string, params
 }
 
 func (a *Agent) loadOrResume(ctx context.Context, sessionID acp.SessionId, cwd string, mcpServers []acp.McpServer, additionalDirs []string, rawMeta map[string]any) (*agentSession, error) {
+	a.retryPendingNativeDeletes(ctx)
 	if _, deleted := a.isDeleted(sessionID); deleted {
 		return nil, errSessionDeleted
 	}
@@ -345,14 +356,14 @@ func (a *Agent) loadOrResume(ctx context.Context, sessionID acp.SessionId, cwd s
 	if err := a.validateSessionStartOptions(meta.options); err != nil {
 		return nil, err
 	}
-	if cwd == "" {
-		cwd = manifest.Cwd
-	}
-	if len(additionalDirs) == 0 {
-		additionalDirs = manifest.AdditionalDirs
+	if err := validateSessionPaths(cwd, additionalDirs); err != nil {
+		return nil, err
 	}
 	mcpConfig, err := mcpConfigJSON(mcpServers)
 	if err != nil {
+		return nil, err
+	}
+	if err := a.ensureStartup(ctx, cwd, meta); err != nil {
 		return nil, err
 	}
 	if meta.options.Mode == "" {
@@ -368,6 +379,10 @@ func (a *Agent) loadOrResume(ctx context.Context, sessionID acp.SessionId, cwd s
 	session.title = manifest.Title
 	session.createdUnix = manifest.CreatedAtUnixMilli
 	session.updatedUnix = manifest.UpdatedAtUnixMilli
+	if err := session.verifyContinuable(ctx); err != nil {
+		_ = session.Close(context.Background())
+		return nil, err
+	}
 
 	a.mu.Lock()
 	if len(a.sessions) >= a.maxActiveSessions() {
@@ -400,13 +415,19 @@ func (a *Agent) loadManifest(ctx context.Context, sessionID acp.SessionId) (ampM
 
 func (a *Agent) validateSessionStartOptions(options AmpOptions) error {
 	if a.options.DefaultModel != "" {
-		return acp.NewInvalidParams(map[string]any{jsonFieldError: "unsupported", jsonFieldField: "model"})
+		return unsupportedField("model")
 	}
 	if options.Model != "" {
-		return acp.NewInvalidParams(map[string]any{jsonFieldError: "unsupported", jsonFieldField: "model"})
+		return unsupportedField("model")
 	}
-	if len(options.OutputSchema) > 0 {
-		return acp.NewInvalidParams(map[string]any{jsonFieldError: "unsupported", jsonFieldField: "outputSchema"})
+	if options.OutputSchema != nil {
+		return unsupportedField("outputSchema")
+	}
+	if options.Mode != "" && !slices.Contains(validModes(), options.Mode) {
+		return acp.NewInvalidParams(map[string]any{jsonFieldField: "_meta.amp.options.mode"})
+	}
+	if options.Effort != "" && !slices.Contains(validEfforts(), options.Effort) {
+		return acp.NewInvalidParams(map[string]any{jsonFieldField: "_meta.amp.options.effort"})
 	}
 	return nil
 }
@@ -458,6 +479,50 @@ func (a *Agent) isDeleted(id acp.SessionId) (struct{}, bool) {
 	return value, ok
 }
 
+func (a *Agent) markPendingNativeDelete(id acp.SessionId) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.pendingNativeDeletes[id] = struct{}{}
+}
+
+func (a *Agent) clearPendingNativeDelete(id acp.SessionId) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	delete(a.pendingNativeDeletes, id)
+}
+
+func (a *Agent) pendingNativeDeleteIDs() []acp.SessionId {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	ids := make([]acp.SessionId, 0, len(a.pendingNativeDeletes))
+	for id := range a.pendingNativeDeletes {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+func (a *Agent) retryPendingNativeDeletes(ctx context.Context) {
+	for _, id := range a.pendingNativeDeleteIDs() {
+		if err := a.deleteNativeThread(ctx, id, nil); err != nil {
+			a.log.DebugContext(ctx, "retry amp native delete failed", slog.String(jsonFieldSessionID, string(id)), slog.String(jsonFieldError, err.Error()))
+			continue
+		}
+		a.clearPendingNativeDelete(id)
+	}
+}
+
+func (a *Agent) deleteNativeThread(ctx context.Context, id acp.SessionId, session *agentSession) error {
+	if session != nil {
+		return session.Delete(ctx)
+	}
+	tmp, err := newAgentSession(a, id, "", parsedSessionMeta{}, "", nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tmp.Close(context.Background()) }()
+	return tmp.client().DeleteThread(ctx, string(id))
+}
+
 func (a *Agent) setConnection(conn *acp.AgentSideConnection) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -470,6 +535,17 @@ func (a *Agent) connection() *acp.AgentSideConnection {
 	return a.conn
 }
 
+func (a *Agent) acquireClientCall(ctx context.Context) (func(), error) {
+	select {
+	case a.clientCalls <- struct{}{}:
+		return func() { <-a.clientCalls }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+		return nil, backpressureError("client_calls")
+	}
+}
+
 func (a *Agent) nextRawEventSequence() int64 {
 	return a.rawSeq.Add(1)
 }
@@ -479,6 +555,20 @@ func (a *Agent) settingsParent() string {
 		return a.options.Home
 	}
 	return ""
+}
+
+func (a *Agent) ensureStartup(ctx context.Context, cwd string, meta parsedSessionMeta) error {
+	env := mergeEnv(a.options.Env, meta.options.Env)
+	client := amp.NewClient(a.log, amp.Options{
+		CLIPath:      a.options.ExecutablePath,
+		Cwd:          cwd,
+		Env:          env,
+		MaxLineBytes: a.options.runtime.maxJSONLineBytes,
+	})
+	if err := client.StartupProbe(ctx); err != nil {
+		return acp.NewInternalError(map[string]any{jsonFieldError: err.Error()})
+	}
+	return nil
 }
 
 func (a *Agent) maxActiveSessions() int {
@@ -495,6 +585,13 @@ func (a *Agent) maxConcurrentPrompts() int {
 	return defaultMaxConcurrentPrompts
 }
 
+func maxConcurrentClientCalls(limits ConcurrencyLimits) int {
+	if limits.MaxConcurrentClientCalls > 0 {
+		return limits.MaxConcurrentClientCalls
+	}
+	return defaultMaxConcurrentCalls
+}
+
 func parseSessionMeta(meta map[string]any) (parsedSessionMeta, error) {
 	result := parsedSessionMeta{}
 	for key, value := range meta {
@@ -502,7 +599,7 @@ func parseSessionMeta(meta map[string]any) (parsedSessionMeta, error) {
 		case ampMetaKey:
 			ampMeta, ok := value.(map[string]any)
 			if !ok {
-				return result, acp.NewInvalidParams(map[string]any{jsonFieldField: "_meta.amp"})
+				return result, unsupportedField("_meta.amp")
 			}
 			for ampKey, ampValue := range ampMeta {
 				switch ampKey {
@@ -513,11 +610,13 @@ func parseSessionMeta(meta map[string]any) (parsedSessionMeta, error) {
 					}
 					result.options = options
 				case "rawEvent":
-					raw, _ := ampValue.(map[string]any)
-					enabled, _ := raw["enabled"].(bool)
+					enabled, err := parseRawEventMeta(ampValue)
+					if err != nil {
+						return result, err
+					}
 					result.rawEvent = enabled
 				default:
-					return result, acp.NewInvalidParams(map[string]any{jsonFieldField: "_meta.amp." + ampKey})
+					return result, unsupportedField("_meta.amp." + ampKey)
 				}
 			}
 		case "traceparent", "tracestate", "baggage":
@@ -530,37 +629,86 @@ func parseSessionMeta(meta map[string]any) (parsedSessionMeta, error) {
 func parseAmpOptions(value any) (AmpOptions, error) {
 	raw, ok := value.(map[string]any)
 	if !ok {
-		return AmpOptions{}, acp.NewInvalidParams(map[string]any{jsonFieldField: "_meta.amp.options"})
+		return AmpOptions{}, unsupportedField("_meta.amp.options")
 	}
 	options := AmpOptions{}
 	for key, value := range raw {
 		switch key {
 		case "model":
-			options.Model, _ = value.(string)
+			model, ok := value.(string)
+			if !ok {
+				return options, unsupportedField("_meta.amp.options.model")
+			}
+			options.Model = model
 		case "env":
 			env, ok := value.(map[string]any)
 			if !ok {
-				return options, acp.NewInvalidParams(map[string]any{jsonFieldField: "_meta.amp.options.env"})
+				return options, unsupportedField("_meta.amp.options.env")
 			}
 			options.Env = map[string]string{}
 			for k, v := range env {
 				str, ok := v.(string)
 				if !ok {
-					return options, acp.NewInvalidParams(map[string]any{jsonFieldField: "_meta.amp.options.env." + k})
+					return options, unsupportedField("_meta.amp.options.env." + k)
 				}
 				options.Env[k] = str
 			}
 		case "outputSchema":
-			options.OutputSchema, _ = value.(map[string]any)
+			return options, unsupportedField("_meta.amp.options.outputSchema")
 		case "mode":
-			options.Mode, _ = value.(string)
+			mode, ok := value.(string)
+			if !ok {
+				return options, unsupportedField("_meta.amp.options.mode")
+			}
+			options.Mode = mode
 		case "effort":
-			options.Effort, _ = value.(string)
+			effort, ok := value.(string)
+			if !ok {
+				return options, unsupportedField("_meta.amp.options.effort")
+			}
+			options.Effort = effort
 		default:
-			return options, acp.NewInvalidParams(map[string]any{jsonFieldField: "_meta.amp.options." + key})
+			return options, unsupportedField("_meta.amp.options." + key)
 		}
 	}
 	return options, nil
+}
+
+func parseRawEventMeta(value any) (bool, error) {
+	raw, ok := value.(map[string]any)
+	if !ok {
+		return false, unsupportedField("_meta.amp.rawEvent")
+	}
+	enabled := false
+	for key, value := range raw {
+		switch key {
+		case "enabled":
+			parsed, ok := value.(bool)
+			if !ok {
+				return false, unsupportedField("_meta.amp.rawEvent.enabled")
+			}
+			enabled = parsed
+		default:
+			return false, unsupportedField("_meta.amp.rawEvent." + key)
+		}
+	}
+	return enabled, nil
+}
+
+func unsupportedField(path string) error {
+	return acp.NewInvalidParams(map[string]any{jsonFieldError: "unsupported", jsonFieldField: path})
+}
+
+func validateSessionPaths(cwd string, additionalDirs []string) error {
+	if cwd == "" || !filepath.IsAbs(cwd) {
+		return acp.NewInvalidParams(map[string]any{jsonFieldField: "cwd"})
+	}
+	for i, dir := range additionalDirs {
+		if dir == "" || !filepath.IsAbs(dir) {
+			return acp.NewInvalidParams(map[string]any{jsonFieldField: fmt.Sprintf("additionalDirectories[%d]", i)})
+		}
+	}
+	return nil
 }
 
 func mcpConfigJSON(servers []acp.McpServer) (string, error) {

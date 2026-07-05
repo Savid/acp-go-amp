@@ -13,18 +13,28 @@ import (
 	"os"
 	"os/exec"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
-const maxCapturedStderrBytes = 64 * 1024
+const (
+	MinimumVersion         = "0.0.1783155105"
+	maxCapturedStderrBytes = 64 * 1024
+	ampArgHelp             = "--help"
+	ampArgThreads          = "threads"
+	ampThreadContinue      = "continue"
+	ampThreadDelete        = "delete"
+	ampThreadExport        = "export"
+)
 
 var (
 	commandContext   = exec.CommandContext
 	getwd            = os.Getwd
 	lookPath         = exec.LookPath
 	closeWriteCloser = func(closer io.Closer) error { return closer.Close() }
+	probeCache       sync.Map
 )
 
 type Options struct {
@@ -55,15 +65,37 @@ func NewClient(log *slog.Logger, options Options) *Client {
 }
 
 func (c *Client) Version(ctx context.Context) (string, error) {
-	out, err := c.output(ctx, "version")
+	out, err := c.outputRaw(ctx, "version")
 	if err != nil {
 		return "", err
 	}
 	return strings.TrimSpace(string(out)), nil
 }
 
+func (c *Client) StartupProbe(ctx context.Context) error {
+	path, err := Discover(ctx, c.options.CLIPath)
+	if err != nil {
+		return err
+	}
+	if _, ok := probeCache.Load(path); ok {
+		return nil
+	}
+	version, err := c.Version(ctx)
+	if err != nil {
+		return err
+	}
+	if !versionAtLeast(version, MinimumVersion) {
+		return fmt.Errorf("amp version %q is below required %s", version, MinimumVersion)
+	}
+	if err := c.probeHelp(ctx); err != nil {
+		return err
+	}
+	probeCache.Store(path, struct{}{})
+	return nil
+}
+
 func (c *Client) NewThread(ctx context.Context) (string, error) {
-	out, err := c.output(ctx, "threads", "new")
+	out, err := c.output(ctx, ampArgThreads, "new")
 	if err != nil {
 		return "", err
 	}
@@ -75,7 +107,7 @@ func (c *Client) NewThread(ctx context.Context) (string, error) {
 }
 
 func (c *Client) ListThreads(ctx context.Context) ([]ThreadSummary, error) {
-	out, err := c.output(ctx, "threads", "list", "--json")
+	out, err := c.output(ctx, ampArgThreads, "list", "--json")
 	if err != nil {
 		return nil, err
 	}
@@ -87,7 +119,7 @@ func (c *Client) ListThreads(ctx context.Context) ([]ThreadSummary, error) {
 }
 
 func (c *Client) ExportThread(ctx context.Context, threadID string) (json.RawMessage, error) {
-	out, err := c.output(ctx, "threads", "export", threadID)
+	out, err := c.output(ctx, ampArgThreads, ampThreadExport, threadID)
 	if err != nil {
 		return nil, err
 	}
@@ -95,7 +127,7 @@ func (c *Client) ExportThread(ctx context.Context, threadID string) (json.RawMes
 }
 
 func (c *Client) DeleteThread(ctx context.Context, threadID string) error {
-	_, err := c.output(ctx, "threads", "delete", threadID)
+	_, err := c.output(ctx, ampArgThreads, ampThreadDelete, threadID)
 	if err != nil && strings.Contains(err.Error(), "does not exist") {
 		return nil
 	}
@@ -108,7 +140,7 @@ func (c *Client) Continue(ctx context.Context, threadID string, input any) (*Tur
 		return nil, err
 	}
 	args := c.globalArgs()
-	args = append(args, "threads", "continue", threadID, "--stream-json", "--stream-json-input", "-x")
+	args = append(args, ampArgThreads, ampThreadContinue, threadID, "--stream-json", "--stream-json-input", "-x")
 
 	cmd := commandContext(ctx, path, args...)
 	configureCommand(cmd)
@@ -160,11 +192,18 @@ func (c *Client) Continue(ctx context.Context, threadID string, input any) (*Tur
 }
 
 func (c *Client) output(ctx context.Context, args ...string) ([]byte, error) {
+	return c.outputWithArgs(ctx, append(c.globalArgs(), args...)...)
+}
+
+func (c *Client) outputRaw(ctx context.Context, args ...string) ([]byte, error) {
+	return c.outputWithArgs(ctx, args...)
+}
+
+func (c *Client) outputWithArgs(ctx context.Context, args ...string) ([]byte, error) {
 	path, err := Discover(ctx, c.options.CLIPath)
 	if err != nil {
 		return nil, err
 	}
-	args = append(c.globalArgs(), args...)
 	cmd := commandContext(ctx, path, args...)
 	configureCommand(cmd)
 	cmd.Dir = c.options.Cwd
@@ -183,6 +222,32 @@ func (c *Client) output(ctx context.Context, args ...string) ([]byte, error) {
 		return nil, fmt.Errorf("amp %s: %s", strings.Join(args, " "), msg)
 	}
 	return out, nil
+}
+
+func (c *Client) probeHelp(ctx context.Context) error {
+	checks := []struct {
+		args []string
+		want []string
+	}{
+		{args: []string{ampArgHelp}, want: []string{"--settings-file", "--mcp-config", "-m", "--effort"}},
+		{args: []string{ampArgThreads, "list", ampArgHelp}, want: []string{"--json"}},
+		{args: []string{ampArgThreads, ampThreadExport, ampArgHelp}, want: []string{ampThreadExport}},
+		{args: []string{ampArgThreads, ampThreadDelete, ampArgHelp}, want: []string{ampThreadDelete}},
+		{args: []string{ampArgThreads, ampThreadContinue, ampArgHelp}, want: []string{"--stream-json-input"}},
+	}
+	for _, check := range checks {
+		out, err := c.outputRaw(ctx, check.args...)
+		if err != nil {
+			return err
+		}
+		text := string(out)
+		for _, want := range check.want {
+			if !strings.Contains(text, want) {
+				return fmt.Errorf("amp %s help missing %s", strings.Join(check.args, " "), want)
+			}
+		}
+	}
+	return nil
 }
 
 func (c *Client) globalArgs() []string {
@@ -250,6 +315,44 @@ func BuildEnv(overrides map[string]string, cwd string) []string {
 		out = append(out, key+"="+values[key])
 	}
 	return out
+}
+
+func versionAtLeast(got string, floor string) bool {
+	gotParts := versionParts(got)
+	minParts := versionParts(floor)
+	for len(gotParts) < len(minParts) {
+		gotParts = append(gotParts, 0)
+	}
+	for len(minParts) < len(gotParts) {
+		minParts = append(minParts, 0)
+	}
+	for i := range gotParts {
+		switch {
+		case gotParts[i] > minParts[i]:
+			return true
+		case gotParts[i] < minParts[i]:
+			return false
+		}
+	}
+	return true
+}
+
+func versionParts(value string) []int64 {
+	head := strings.Fields(strings.TrimSpace(value))
+	if len(head) == 0 {
+		return nil
+	}
+	version, _, _ := strings.Cut(head[0], "-")
+	rawParts := strings.Split(version, ".")
+	parts := make([]int64, 0, len(rawParts))
+	for _, raw := range rawParts {
+		n, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			return nil
+		}
+		parts = append(parts, n)
+	}
+	return parts
 }
 
 type Turn struct {

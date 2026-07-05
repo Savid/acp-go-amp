@@ -29,6 +29,14 @@ func TestFakeAmpAgentHelper(t *testing.T) {
 	mode := os.Getenv("FAKE_AMP_AGENT_MODE")
 	recordHelperJSON(state, "args.jsonl", args)
 
+	if len(args) > 0 && args[0] == "version" {
+		os.Stdout.WriteString("0.0.1783155105-gfake\n")
+		os.Exit(0)
+	}
+	if len(args) > 0 && args[len(args)-1] == "--help" {
+		os.Stdout.WriteString("--settings-file --mcp-config -m --effort --json --stream-json-input threads continue threads export threads delete\n")
+		os.Exit(0)
+	}
 	threads := slices.Index(args, "threads")
 	if threads < 0 || threads+1 >= len(args) {
 		os.Stderr.WriteString("missing threads subcommand\n")
@@ -116,8 +124,8 @@ func TestServeFakeAmpLifecycleStdoutCleanStoreReplayAndDelete(t *testing.T) {
 		WithSessionAdditionalDirectories("/tmp/other"),
 		WithSessionAmpOptions(NewAmpOptions(
 			WithAmpEnv(map[string]string{"AMP_URL": "https://amp.example.test"}),
-			WithAmpMode("native-mode"),
-			WithAmpEffort("native-effort"),
+			WithAmpMode("deep"),
+			WithAmpEffort("max"),
 		)),
 		WithSessionMCPServers(
 			StdioMCPServer("stdio", "printf", []string{"ok"}, map[string]string{"A": "B"}),
@@ -209,7 +217,7 @@ func TestServeFakeAmpLifecycleStdoutCleanStoreReplayAndDelete(t *testing.T) {
 			continueArgs = args
 		}
 	}
-	for _, want := range []string{"--no-ide", "--no-color", "--no-notifications", "--settings-file", "--mcp-config", "-m", "native-mode", "--effort", "native-effort", "threads", "continue", "T-agent-thread", "--stream-json", "--stream-json-input", "-x"} {
+	for _, want := range []string{"--no-ide", "--no-color", "--no-notifications", "--settings-file", "--mcp-config", "-m", "deep", "--effort", "max", "threads", "continue", "T-agent-thread", "--stream-json", "--stream-json-input", "-x"} {
 		if !slices.Contains(continueArgs, want) {
 			t.Fatalf("continue args missing %q: %#v", want, continueArgs)
 		}
@@ -282,8 +290,14 @@ func TestAgentErrorAndConformanceBranches(t *testing.T) {
 	if err := NewAgent().validateSessionStartOptions(AmpOptions{OutputSchema: map[string]any{"type": "object"}}); err == nil {
 		t.Fatal("output schema accepted")
 	}
-	if err := NewAgent().validateSessionStartOptions(AmpOptions{Mode: "native", Effort: "native"}); err != nil {
-		t.Fatalf("mode/effort were pre-validated: %v", err)
+	if err := NewAgent().validateSessionStartOptions(AmpOptions{OutputSchema: map[string]any{}}); err == nil {
+		t.Fatal("empty output schema accepted")
+	}
+	if err := NewAgent().validateSessionStartOptions(AmpOptions{Mode: "large"}); err == nil {
+		t.Fatal("hidden mode accepted")
+	}
+	if err := NewAgent().validateSessionStartOptions(AmpOptions{Effort: "extreme"}); err == nil {
+		t.Fatal("unknown effort accepted")
 	}
 }
 
@@ -550,8 +564,10 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -563,6 +579,22 @@ func main() {
 	state := fakeState
 	mode := fakeMode
 	record(state, "args.jsonl", args)
+	if len(args) > 0 && args[0] == "version" {
+		if mode == "bad-version" {
+			os.Stdout.WriteString("0.0.1\n")
+			return
+		}
+		os.Stdout.WriteString("0.0.1783155105-gfake\n")
+		return
+	}
+	if len(args) > 0 && args[len(args)-1] == "--help" {
+		if mode == "bad-help" {
+			os.Stdout.WriteString("threads\n")
+			return
+		}
+		os.Stdout.WriteString("--settings-file --mcp-config -m --effort --json --stream-json-input threads continue threads export threads delete\n")
+		return
+	}
 	threads := index(args, "threads")
 	if threads < 0 || threads+1 >= len(args) {
 		os.Stderr.WriteString("missing threads subcommand\n")
@@ -576,18 +608,40 @@ func main() {
 		}
 		os.Stdout.WriteString("T-agent-thread\n")
 	case "export":
+		if mode == "missing-export" {
+			os.Stderr.WriteString("Thread not found\n")
+			os.Exit(1)
+		}
+		if mode == "export-fail" {
+			os.Stderr.WriteString("export failed\n")
+			os.Exit(1)
+		}
 		if mode == "bad-export-json" {
 			os.Stdout.WriteString("{")
 			return
 		}
 		os.Stdout.WriteString("{\"thread\":\"" + args[len(args)-1] + "\"}\n")
 	case "delete":
+		if mode == "delete-fail-once" {
+			marker := filepath.Join(state, "delete-failed-once")
+			if _, err := os.Stat(marker); err != nil {
+				_ = os.WriteFile(marker, []byte("1"), 0600)
+				os.Stderr.WriteString("delete failed once\n")
+				os.Exit(1)
+			}
+		}
 		if mode == "delete-fail" {
 			os.Stderr.WriteString("delete failed\n")
 			os.Exit(1)
 		}
 		os.Stdout.WriteString("deleted\n")
 	case "continue":
+		if mode == "block-stdin" {
+			record(state, "continue-started", "yes")
+			for {
+				time.Sleep(time.Hour)
+			}
+		}
 		stdin, _ := io.ReadAll(os.Stdin)
 		record(state, "stdin.jsonl", strings.TrimSpace(string(stdin)))
 		if mode == "missing" {
@@ -606,7 +660,22 @@ func main() {
 			os.Stdout.WriteString("{bad json\n")
 			return
 		}
+		if mode == "session-drift" {
+			os.Stdout.WriteString("{\"type\":\"system\",\"subtype\":\"init\",\"cwd\":\"/tmp/project\",\"session_id\":\"T-other\"}\n")
+			os.Stdout.WriteString("{\"type\":\"result\",\"subtype\":\"success\",\"duration_ms\":1,\"is_error\":false,\"num_turns\":1,\"result\":\"late\",\"session_id\":\"T-other\"}\n")
+			return
+		}
+		if mode == "sigint-result" {
+			os.Stdout.WriteString("{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"duration_ms\":1,\"is_error\":true,\"error\":\"User cancelled (SIGINT/SIGTERM)\",\"session_id\":\"T-agent-thread\"}\n")
+			return
+		}
 		if mode == "hang" {
+			for {
+				time.Sleep(time.Hour)
+			}
+		}
+		if mode == "sigint-ignore" {
+			signal.Ignore(syscall.SIGINT, syscall.SIGTERM)
 			for {
 				time.Sleep(time.Hour)
 			}

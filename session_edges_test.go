@@ -74,7 +74,7 @@ func TestLoadResumeManifestAndConfigBranches(t *testing.T) {
 	agent := NewAgent(WithExecutablePath(path), WithHome(t.TempDir()), WithSessionStore(store), WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 2}))
 	client, cleanup := attachRecordingClient(t, agent)
 	defer cleanup()
-	if _, err := agent.LoadSession(ctx, LoadSessionRequest("T-load", "", WithSessionRawEvents(true))); err != nil {
+	if _, err := agent.LoadSession(ctx, LoadSessionRequest("T-load", cwd, WithSessionRawEvents(true))); err != nil {
 		t.Fatalf("LoadSession: %v", err)
 	}
 	waitForRecorded(t, func() bool { return len(client.updatesSnapshot()) > 0 && len(client.rawSnapshot()) > 0 })
@@ -82,7 +82,7 @@ func TestLoadResumeManifestAndConfigBranches(t *testing.T) {
 		t.Fatal("load did not replay transcript/raw events")
 	}
 	before := len(client.updatesSnapshot())
-	if _, err := agent.ResumeSession(ctx, ResumeSessionRequest("T-load", "")); err != nil {
+	if _, err := agent.ResumeSession(ctx, ResumeSessionRequest("T-load", cwd)); err != nil {
 		t.Fatalf("ResumeSession active: %v", err)
 	}
 	if len(client.updatesSnapshot()) != before {
@@ -181,7 +181,7 @@ func TestRemainingAgentBranches(t *testing.T) {
 	if _, err := agent.ResumeSession(ctx, ResumeSessionRequest("T-x", "", WithSessionAmpOptions(AmpOptions{Model: "bad"}))); err == nil {
 		t.Fatal("resume bad options accepted")
 	}
-	if _, err := agent.LoadSession(ctx, LoadSessionRequest("T-x", "", WithSessionMCPServers(acp.McpServer{Acp: &acp.McpServerAcpInline{Name: "a", Id: "id"}}))); err == nil {
+	if _, err := agent.LoadSession(ctx, LoadSessionRequest("T-x", t.TempDir(), WithSessionMCPServers(acp.McpServer{Acp: &acp.McpServerAcpInline{Name: "a", Id: "id"}}))); err == nil {
 		t.Fatal("load bad mcp accepted")
 	}
 	fileHome := filepath.Join(t.TempDir(), "file")
@@ -193,12 +193,12 @@ func TestRemainingAgentBranches(t *testing.T) {
 	if err := store.Replace(ctx, SessionKey{SessionID: "T-file", Subpath: ""}, []SessionStoreReplacement{{Key: SessionKey{SessionID: "T-file", Subpath: ""}, Entries: []SessionStoreEntry{manifest}}}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := NewAgent(WithExecutablePath(path), WithHome(fileHome), WithSessionStore(store)).LoadSession(ctx, LoadSessionRequest("T-file", "")); err == nil {
+	if _, err := NewAgent(WithExecutablePath(path), WithHome(fileHome), WithSessionStore(store)).LoadSession(ctx, LoadSessionRequest("T-file", t.TempDir())); err == nil {
 		t.Fatal("load with file home accepted")
 	}
 	activeLimited := NewAgent(WithExecutablePath(path), WithHome(t.TempDir()), WithSessionStore(store), WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 0}))
 	activeLimited.options.ConcurrencyLimits.MaxActiveSessions = 0
-	if _, err := activeLimited.loadOrResume(ctx, "T-file", "", nil, nil, nil); err != nil {
+	if _, err := activeLimited.loadOrResume(ctx, "T-file", t.TempDir(), nil, nil, nil); err != nil {
 		t.Fatalf("loadOrResume direct: %v", err)
 	}
 	activeLimited.options.ConcurrencyLimits.MaxActiveSessions = 1
@@ -206,7 +206,7 @@ func TestRemainingAgentBranches(t *testing.T) {
 	if err := store.Replace(ctx, SessionKey{SessionID: "T-file-2", Subpath: ""}, []SessionStoreReplacement{{Key: SessionKey{SessionID: "T-file-2", Subpath: ""}, Entries: []SessionStoreEntry{manifest2}}}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := activeLimited.loadOrResume(ctx, "T-file-2", "", nil, nil, nil); err == nil {
+	if _, err := activeLimited.loadOrResume(ctx, "T-file-2", t.TempDir(), nil, nil, nil); err == nil {
 		t.Fatal("active load backpressure not enforced")
 	}
 	agent.markDeleted("T-deleted")
@@ -367,3 +367,36 @@ func (s *errorStore) ListSessions(context.Context) ([]SessionSummary, error) {
 	return nil, s.listErr
 }
 func (s *errorStore) ListSubkeys(context.Context, SessionKey) ([]string, error) { return nil, nil }
+
+type recordingStore struct {
+	appendCalls      int
+	replaceCalls     int
+	lastReplacements []SessionStoreReplacement
+	entries          []SessionStoreEntry
+}
+
+func (s *recordingStore) Append(context.Context, SessionKey, []SessionStoreEntry) error {
+	s.appendCalls++
+	return nil
+}
+
+func (s *recordingStore) Load(context.Context, SessionKey) ([]SessionStoreEntry, error) {
+	return cloneEntries(s.entries), nil
+}
+
+func (s *recordingStore) Replace(_ context.Context, _ SessionKey, replacements []SessionStoreReplacement) error {
+	s.replaceCalls++
+	s.lastReplacements = replacements
+	for _, replacement := range replacements {
+		if replacement.Key.Subpath == transcriptSubpath {
+			s.entries = cloneEntries(replacement.Entries)
+		}
+	}
+	return nil
+}
+
+func (s *recordingStore) Delete(context.Context, SessionKey) error { return nil }
+
+func (s *recordingStore) ListSessions(context.Context) ([]SessionSummary, error) { return nil, nil }
+
+func (s *recordingStore) ListSubkeys(context.Context, SessionKey) ([]string, error) { return nil, nil }

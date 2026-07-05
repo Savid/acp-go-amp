@@ -87,7 +87,7 @@ func TestInMemoryStoreContractEdges(t *testing.T) {
 		t.Fatal("replace without main succeeded")
 	}
 
-	manifest1, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, ThreadID: "T-1", Cwd: "/tmp/one", Title: "one", UpdatedAtUnixMilli: 10, Meta: map[string]any{"x": "y"}})
+	manifest1, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, ThreadID: "T-1", Cwd: "/tmp/one", Title: "one", UpdatedAtUnixMilli: 10})
 	manifest2, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, ThreadID: "T-2", Cwd: "/tmp/two", Title: "two", UpdatedAtUnixMilli: 10})
 	if err := store.Replace(ctx, main1, []SessionStoreReplacement{
 		{Key: main1, Entries: []SessionStoreEntry{manifest1}},
@@ -112,10 +112,8 @@ func TestInMemoryStoreContractEdges(t *testing.T) {
 	if len(summaries) != 2 || summaries[0].SessionID != "T-1" || summaries[1].SessionID != "T-2" {
 		t.Fatalf("sorted summaries = %#v", summaries)
 	}
-	summaries[0].Meta["x"] = "changed"
-	summaries, _ = store.ListSessions(ctx)
-	if summaries[0].Meta["x"] != "y" {
-		t.Fatalf("summary meta was not cloned: %#v", summaries[0].Meta)
+	if summaries[0].Meta != nil {
+		t.Fatalf("summary meta = %#v", summaries[0].Meta)
 	}
 	subkeys, err := store.ListSubkeys(ctx, main1)
 	if err != nil {

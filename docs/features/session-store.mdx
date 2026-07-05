@@ -7,12 +7,12 @@ The main subpath stores one manifest entry for the ACP session:
 - `threadId`: the native Amp thread ID, which is also the ACP session ID
 - `cwd`, `title`, selected `mode`, selected `effort`
 - Unix millisecond create/update timestamps
-- optional native `threads export` JSON for diagnostics
 
-The `transcript` subpath stores append-ordered Amp stream JSON frames captured
-from completed prompt turns. These are the frames used for ACP
-`session/load` replay and raw-event fidelity. Auth material, settings files,
-API keys, and secrets are never written to the store.
+The `transcript` subpath stores the full ordered Amp stream JSON frame mirror
+for completed prompt turns. Each completed turn publishes the manifest and full
+transcript together in one `Replace` generation. These are the frames used for
+ACP `session/load` replay and raw-event fidelity. Auth material, settings
+files, API keys, and secrets are never written to the store.
 
 local transcript restore is not native thread resurrection. The local mirror is
 the durability boundary for display replay; the ampcode.com thread is the

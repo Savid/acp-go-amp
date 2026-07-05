@@ -1,4 +1,4 @@
-//nolint:nlreturn // Fake executable harness keeps process cases in one place.
+//nolint:gocyclo,nlreturn // Fake executable harness keeps process cases in one place.
 package amp
 
 import (
@@ -29,7 +29,23 @@ func TestFakeAmpHelper(t *testing.T) {
 	recordHelperJSON(state, "args.jsonl", args)
 
 	if slices.Contains(args, "version") {
-		os.Stdout.WriteString("0.0.fake\n")
+		if mode == "bad-version" {
+			os.Stdout.WriteString("0.0.1\n")
+			os.Exit(0)
+		}
+		os.Stdout.WriteString("0.0.1783155105-gfake\n")
+		os.Exit(0)
+	}
+	if len(args) > 0 && args[len(args)-1] == "--help" {
+		if mode == "help-fail" {
+			os.Stderr.WriteString("help failed\n")
+			os.Exit(1)
+		}
+		if mode == "bad-help" {
+			os.Stdout.WriteString("threads only\n")
+			os.Exit(0)
+		}
+		os.Stdout.WriteString("--settings-file --mcp-config -m --effort --json --stream-json-input threads continue threads export threads delete\n")
 		os.Exit(0)
 	}
 	threads := slices.Index(args, "threads")
@@ -95,8 +111,14 @@ func TestClientCommandsUseGlobalArgsAndParseOutput(t *testing.T) {
 	})
 	ctx := context.Background()
 
-	if version, err := client.Version(ctx); err != nil || version != "0.0.fake" {
+	if version, err := client.Version(ctx); err != nil || version != "0.0.1783155105-gfake" {
 		t.Fatalf("Version = %q, %v", version, err)
+	}
+	if err := client.StartupProbe(ctx); err != nil {
+		t.Fatalf("StartupProbe: %v", err)
+	}
+	if err := client.StartupProbe(ctx); err != nil {
+		t.Fatalf("StartupProbe cached: %v", err)
 	}
 	if id, err := client.NewThread(ctx); err != nil || id != "T-fake-thread" {
 		t.Fatalf("NewThread = %q, %v", id, err)
@@ -125,6 +147,51 @@ func TestClientCommandsUseGlobalArgsAndParseOutput(t *testing.T) {
 		if !slices.Contains(last, want) {
 			t.Fatalf("last args missing %q: %#v", want, last)
 		}
+	}
+}
+
+func TestStartupProbeAndVersionBranches(t *testing.T) {
+	ctx := context.Background()
+	oldLookPath := lookPath
+	lookPath = func(string) (string, error) { return "", errors.New("lookpath failed") }
+	if err := NewClient(nil, Options{}).StartupProbe(ctx); err == nil {
+		t.Fatal("StartupProbe discover error ignored")
+	}
+	lookPath = oldLookPath
+
+	if err := NewClient(nil, Options{CLIPath: "/does/not/exist"}).StartupProbe(ctx); err == nil {
+		t.Fatal("StartupProbe version command error ignored")
+	}
+	badVersion, _ := fakeAmpPath(t, "bad-version")
+	if err := NewClient(nil, Options{CLIPath: badVersion, Cwd: t.TempDir()}).StartupProbe(ctx); err == nil || !strings.Contains(err.Error(), "below required") {
+		t.Fatalf("bad version probe = %v", err)
+	}
+	helpFail, _ := fakeAmpPath(t, "help-fail")
+	if err := NewClient(nil, Options{CLIPath: helpFail, Cwd: t.TempDir()}).StartupProbe(ctx); err == nil || !strings.Contains(err.Error(), "help failed") {
+		t.Fatalf("help command probe = %v", err)
+	}
+	badHelp, _ := fakeAmpPath(t, "bad-help")
+	if err := NewClient(nil, Options{CLIPath: badHelp, Cwd: t.TempDir()}).StartupProbe(ctx); err == nil || !strings.Contains(err.Error(), "help missing") {
+		t.Fatalf("bad help probe = %v", err)
+	}
+
+	if !versionAtLeast("0.0.1783155106-gx", MinimumVersion) {
+		t.Fatal("newer version rejected")
+	}
+	if versionAtLeast("0.0.1", MinimumVersion) {
+		t.Fatal("older version accepted")
+	}
+	if !versionAtLeast("1", "1.0.0.0") {
+		t.Fatal("short equal version rejected")
+	}
+	if !versionAtLeast("1.0.0.1", "1") {
+		t.Fatal("longer newer version rejected")
+	}
+	if parts := versionParts(""); parts != nil {
+		t.Fatalf("empty version parts = %#v", parts)
+	}
+	if parts := versionParts("not-a-version"); parts != nil {
+		t.Fatalf("invalid version parts = %#v", parts)
 	}
 }
 
@@ -283,6 +350,17 @@ func TestClientErrorBranches(t *testing.T) {
 	if err := (&Turn{}).Interrupt(context.Background(), time.Millisecond); err != nil {
 		t.Fatalf("nil interrupt: %v", err)
 	}
+	expectedCmd := exec.Command("/bin/sleep", "10")
+	configureCommand(expectedCmd)
+	if err := expectedCmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	expectedTurn := &Turn{cmd: expectedCmd, waitFunc: func() error { return nil }}
+	if err := expectedTurn.Interrupt(context.Background(), time.Second); err != nil {
+		t.Fatalf("expected-exit interrupt: %v", err)
+	}
+	_ = killProcess(expectedCmd)
+	_ = expectedCmd.Wait()
 	if err := (&Turn{}).Close(); err != nil {
 		t.Fatalf("nil close: %v", err)
 	}

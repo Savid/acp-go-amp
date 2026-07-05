@@ -5,7 +5,8 @@
 The package uses Amp thread IDs as ACP session IDs. `session/new` creates an
 empty server-side Amp thread with `amp threads new`; each prompt starts one
 short-lived `amp threads continue <thread> --stream-json --stream-json-input -x`
-process with an isolated settings file and dedicated stdout/stderr pipes.
+process with isolated native HOME/XDG state, an isolated settings file, and
+dedicated stdout/stderr pipes.
 
 ```go
 err := ampacp.Serve(ctx, input, output,

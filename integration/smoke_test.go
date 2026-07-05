@@ -4,11 +4,14 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/coder/acp-go-sdk"
 	ampacp "github.com/savid/acp-go-amp"
 	"github.com/savid/acp-go-amp/internal/amp"
 )
@@ -16,13 +19,53 @@ import (
 func TestSmokeAmpVersion(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	if _, err := exec.LookPath("amp"); err != nil {
+		t.Skipf("amp binary absent: %v", err)
+	}
 	client := amp.NewClient(slog.Default(), amp.Options{})
 	version, err := client.Version(ctx)
 	if err != nil {
-		t.Skipf("amp unavailable: %v", err)
+		t.Fatalf("amp binary present but version probe failed: %v", err)
 	}
 	if strings.TrimSpace(version) == "" {
 		t.Fatal("empty amp version")
+	}
+}
+
+func TestSmokeFakeACPLifecycleAndMCP(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell fake is POSIX-only")
+	}
+	path := fakeSmokeAmpPath(t)
+	agent := ampacp.NewAgent(
+		ampacp.WithExecutablePath(path),
+		ampacp.WithHome(t.TempDir()),
+		ampacp.WithSessionStore(ampacp.NewInMemorySessionStore()),
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cwd := t.TempDir()
+	resp, err := agent.NewSession(ctx, ampacp.NewSessionRequest(cwd,
+		ampacp.WithSessionMCPServers(
+			ampacp.StdioMCPServer("stdio", "true", nil, nil),
+			ampacp.HTTPMCPServer("http", "https://example.test/mcp", nil),
+		),
+	))
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	if _, sseErr := agent.NewSession(ctx, ampacp.NewSessionRequest(cwd, ampacp.WithSessionMCPServers(acp.McpServer{Sse: &acp.McpServerSseInline{Name: "sse", Url: "https://example.test/sse"}}))); sseErr == nil {
+		t.Fatal("SSE MCP accepted")
+	}
+	promptResp, err := agent.Prompt(ctx, ampacp.TextPromptRequest(resp.SessionId, "smoke"))
+	if err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	if promptResp.StopReason != "end_turn" {
+		t.Fatalf("prompt stop reason = %q", promptResp.StopReason)
+	}
+	if _, err := agent.UnstableDeleteSession(ctx, ampacp.DeleteSessionRequest(resp.SessionId)); err != nil {
+		t.Fatalf("DeleteSession: %v", err)
 	}
 }
 
@@ -161,4 +204,43 @@ func isolatedAmpEnv(t *testing.T, root string, apiKey string) (map[string]string
 	}
 
 	return paths, paths["ACP_GO_AMP_HOME"]
+}
+
+func fakeSmokeAmpPath(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "amp")
+	script := `#!/bin/sh
+if [ "$1" = "version" ]; then
+  echo "0.0.1783155105-gfake"
+  exit 0
+fi
+last=""
+for arg in "$@"; do last="$arg"; done
+if [ "$last" = "--help" ]; then
+  echo "--settings-file --mcp-config -m --effort --json --stream-json-input threads continue threads export threads delete"
+  exit 0
+fi
+prev=""
+sub=""
+for arg in "$@"; do
+  if [ "$prev" = "threads" ]; then sub="$arg"; break; fi
+  prev="$arg"
+done
+case "$sub" in
+  new) echo "T-smoke-thread" ;;
+  export) echo '{"thread":"T-smoke-thread"}' ;;
+  delete) echo "deleted" ;;
+  continue)
+    cat >/dev/null
+    echo '{"type":"assistant","message":{"content":[{"type":"text","text":"ok"}]},"session_id":"T-smoke-thread"}'
+    echo '{"type":"result","subtype":"success","is_error":false,"result":"ok","session_id":"T-smoke-thread"}'
+    ;;
+  *) echo "bad args: $*" >&2; exit 2 ;;
+esac
+`
+	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	return path
 }
