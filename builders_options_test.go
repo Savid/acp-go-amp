@@ -181,11 +181,15 @@ func TestConcurrencyValidationAllFields(t *testing.T) {
 	for _, limits := range []ConcurrencyLimits{
 		{MaxActiveSessions: -1},
 		{MaxConcurrentPrompts: -1},
+		{MaxConcurrentPrompts: 2},
 		{MaxConcurrentClientCalls: -1},
 	} {
 		if err := validateConcurrencyLimits(limits); err == nil {
 			t.Fatalf("limits accepted: %#v", limits)
 		}
+	}
+	if err := validateConcurrencyLimits(ConcurrencyLimits{MaxConcurrentPrompts: 1}); err != nil {
+		t.Fatalf("single-prompt limit rejected: %v", err)
 	}
 	if err := validateConcurrencyLimits(ConcurrencyLimits{}); err != nil {
 		t.Fatalf("zero limits: %v", err)

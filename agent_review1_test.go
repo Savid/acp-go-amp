@@ -255,9 +255,9 @@ func TestReview1PathHomeContinuabilityAndStartup(t *testing.T) {
 	if _, err := NewAgent(WithExecutablePath(badVersionPath), WithHome(t.TempDir())).NewSession(context.Background(), NewSessionRequest(t.TempDir())); err == nil || !strings.Contains(err.Error(), "below required") {
 		t.Fatalf("bad version startup error = %v", err)
 	}
-	badHelpPath, _ := fakeAgentAmpPath(t, "bad-help")
-	if _, err := NewAgent(WithExecutablePath(badHelpPath), WithHome(t.TempDir())).NewSession(context.Background(), NewSessionRequest(t.TempDir())); err == nil || !strings.Contains(err.Error(), "help missing") {
-		t.Fatalf("bad help startup error = %v", err)
+	probeListFailPath, _ := fakeAgentAmpPath(t, "probe-list-fail")
+	if _, err := NewAgent(WithExecutablePath(probeListFailPath), WithHome(t.TempDir())).NewSession(context.Background(), NewSessionRequest(t.TempDir())); err == nil || !strings.Contains(err.Error(), "threads list --json probe failed") {
+		t.Fatalf("probe list failure startup error = %v", err)
 	}
 
 	exportFailPath, _ := fakeAgentAmpPath(t, "export-fail")

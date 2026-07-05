@@ -1,3 +1,5 @@
+//go:build integration
+
 package integration
 
 import (
@@ -228,6 +230,7 @@ for arg in "$@"; do
 done
 case "$sub" in
   new) echo "T-smoke-thread" ;;
+  list) echo '[]' ;;
   export) echo '{"thread":"T-smoke-thread"}' ;;
   delete) echo "deleted" ;;
   continue)

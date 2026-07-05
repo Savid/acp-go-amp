@@ -68,7 +68,7 @@ func (s *InMemorySessionStore) Append(ctx context.Context, key SessionKey, entri
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if _, tombstoned := s.deleted[key]; tombstoned {
+	if s.isTombstonedLocked(key) {
 		return nil
 	}
 
@@ -86,10 +86,25 @@ func (s *InMemorySessionStore) Load(ctx context.Context, key SessionKey) ([]Sess
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	if _, tombstoned := s.deleted[key]; tombstoned {
+	if s.isTombstonedLocked(key) {
 		return nil, nil
 	}
 	return cloneEntries(s.entries[key]), nil
+}
+
+// isTombstonedLocked reports whether a key is hidden by a tombstone. A tombstone
+// on the main key cascades to every subpath of that session (including subpaths
+// created after the main delete), and is cleared only by a valid Replace
+// generation that re-publishes the main key.
+func (s *InMemorySessionStore) isTombstonedLocked(key SessionKey) bool {
+	if _, ok := s.deleted[key]; ok {
+		return true
+	}
+	if key.Subpath != SessionStoreMainSubpath {
+		_, ok := s.deleted[SessionKey{SessionID: key.SessionID, Subpath: SessionStoreMainSubpath}]
+		return ok
+	}
+	return false
 }
 
 func (s *InMemorySessionStore) Replace(ctx context.Context, main SessionKey, replacements []SessionStoreReplacement) error {
@@ -168,7 +183,7 @@ func (s *InMemorySessionStore) ListSessions(ctx context.Context) ([]SessionSumma
 		if key.Subpath != SessionStoreMainSubpath {
 			continue
 		}
-		if _, tombstoned := s.deleted[key]; tombstoned || len(entries) == 0 {
+		if s.isTombstonedLocked(key) || len(entries) == 0 {
 			continue
 		}
 		summary, ok := summaryFromStoreEntry(entries[len(entries)-1])
@@ -201,7 +216,7 @@ func (s *InMemorySessionStore) ListSubkeys(ctx context.Context, key SessionKey) 
 		if existing.SessionID != key.SessionID || existing.Subpath == SessionStoreMainSubpath {
 			continue
 		}
-		if _, tombstoned := s.deleted[existing]; tombstoned {
+		if s.isTombstonedLocked(existing) {
 			continue
 		}
 		subkeys = append(subkeys, existing.Subpath)

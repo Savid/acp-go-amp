@@ -587,13 +587,13 @@ func main() {
 		os.Stdout.WriteString("0.0.1783155105-gfake\n")
 		return
 	}
-	if len(args) > 0 && args[len(args)-1] == "--help" {
-		if mode == "bad-help" {
-			os.Stdout.WriteString("threads\n")
-			return
+	// Startup method-present probes use a known-missing thread id; answer with the
+	// domain missing-thread error regardless of mode so probes never hang.
+	for _, a := range args {
+		if a == "T-00000000-0000-0000-0000-000000000000" {
+			os.Stderr.WriteString("Thread not found\n")
+			os.Exit(1)
 		}
-		os.Stdout.WriteString("--settings-file --mcp-config -m --effort --json --stream-json-input threads continue threads export threads delete\n")
-		return
 	}
 	threads := index(args, "threads")
 	if threads < 0 || threads+1 >= len(args) {
@@ -607,6 +607,12 @@ func main() {
 			return
 		}
 		os.Stdout.WriteString("T-agent-thread\n")
+	case "list":
+		if mode == "probe-list-fail" {
+			os.Stdout.WriteString("{\n")
+			return
+		}
+		os.Stdout.WriteString("[]\n")
 	case "export":
 		if mode == "missing-export" {
 			os.Stderr.WriteString("Thread not found\n")

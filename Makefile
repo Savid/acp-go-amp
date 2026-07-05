@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: audit build clean coverage-check docs-audit fmt fmt-check help lint modernize-check test test/cover test-integration test-integration-cover test-integration-live test-integration-smoke tidy vuln
+.PHONY: audit build clean coverage-check docs-audit fmt fmt-check help lint modernize-check test test/cover test-integration-cover test-integration-live test-integration-smoke tidy vuln
 
 GOLANGCI_LINT_VERSION ?= v2.12.2
 GOLANGCI_LINT := go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
@@ -14,28 +14,26 @@ build:
 fmt-check:
 	@test -z "$$(gofmt -l .)"
 
-## test: run tests with race detector and coverage
+## test: run unit tests with the race detector
 test:
-	go test -race -coverprofile=coverage.out -covermode=atomic ./...
+	go test -race ./...
 
-## coverage-check: require 100% statement coverage
-coverage-check: test
+## coverage-check: require 100% statement coverage with race instrumentation
+coverage-check:
+	go test -race -coverprofile=coverage.out -covermode=atomic ./...
 	@go tool cover -func=coverage.out | awk 'BEGIN { found = 0 } /^total:/ { found = 1; if ($$3 != "100.0%") { printf "total coverage %s, want 100.0%%\n", $$3; exit 1 } printf "total coverage %s\n", $$3 } END { if (!found) { print "missing total coverage line"; exit 1 } }'
 
 ## test-integration-smoke: run integration tests that do not spend model tokens
 test-integration-smoke:
-	go test -race -count=1 -timeout=120s -run Smoke ./integration/...
+	go test -race -count=1 -tags=integration -timeout=120s -run Smoke ./integration/...
 
 ## test-integration-live: run live integration tests that spend model tokens
 test-integration-live:
-	ACP_GO_AMP_LIVE=1 go test -race -count=1 -timeout=180s -run Live -v ./integration/...
-
-## test-integration: alias for live integration tests
-test-integration: test-integration-live
+	ACP_GO_AMP_LIVE=1 go test -race -count=1 -tags=integration -timeout=180s -run Live -v ./integration/...
 
 ## test-integration-cover: run smoke integration tests with compiled binary coverage
 test-integration-cover:
-	tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT; mkdir -p "$$tmp/data"; go build -cover -coverpkg=./... -o "$$tmp/acp-go-amp" ./cmd/acp-go-amp; ACP_GO_AMP_AGENT_BINARY="$$tmp/acp-go-amp" GOCOVERDIR="$$tmp/data" go test -race -count=1 -timeout=120s -run Smoke -v ./integration/...; go tool covdata percent -i="$$tmp/data"; go tool covdata textfmt -i="$$tmp/data" -o coverage-integration.out
+	tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT; mkdir -p "$$tmp/data"; go build -cover -coverpkg=./... -o "$$tmp/acp-go-amp" ./cmd/acp-go-amp; ACP_GO_AMP_AGENT_BINARY="$$tmp/acp-go-amp" GOCOVERDIR="$$tmp/data" go test -race -count=1 -tags=integration -timeout=120s -run Smoke -v ./integration/...; go tool covdata percent -i="$$tmp/data"; go tool covdata textfmt -i="$$tmp/data" -o coverage-integration.out
 
 ## lint: run golangci-lint
 lint:
@@ -63,8 +61,11 @@ docs-audit:
 	@pattern=$$(printf '%b' '$(REMOVED_PUBLIC_TERMS)'); ! rg -n -- "$$pattern" README.md doc.go docs.json docs examples cmd/acp-go-amp/*.go AGENTS.md
 	@test -f README.md
 	@test -f doc.go
+	@test -f AGENTS.md
 	@test -f example_test.go
 	@test -f docs.json
+	@test -f docs/get-started/examples.mdx
+	@test -f docs/features/authentication.mdx
 	@test -f examples/minimal-client/main.go
 	@test -f examples/interactive-chat/main.go
 	@test -f examples/resume-from-file/main.go
@@ -114,7 +115,7 @@ clean:
 	rm -f coverage.out coverage-integration.out coverage-summary.txt acp-go-amp
 
 ## test/cover: open HTML coverage report
-test/cover: test
+test/cover: coverage-check
 	go tool cover -html=coverage.out
 
 ## help: show this help

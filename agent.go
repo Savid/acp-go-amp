@@ -338,17 +338,11 @@ func (a *Agent) loadOrResume(ctx context.Context, sessionID acp.SessionId, cwd s
 	if _, deleted := a.isDeleted(sessionID); deleted {
 		return nil, errSessionDeleted
 	}
-	a.mu.Lock()
-	if session := a.sessions[sessionID]; session != nil {
-		a.mu.Unlock()
-		return session, nil
-	}
-	a.mu.Unlock()
 
-	manifest, err := a.loadManifest(ctx, sessionID)
-	if err != nil {
-		return nil, err
-	}
+	// X1: validate the full request identically to the cold path FIRST, so an
+	// already-active session cannot bypass strict _meta, cwd/additional-dir,
+	// MCP transport, and model/mode/effort validation. Only after validation
+	// succeeds may an active session be reused.
 	meta, err := parseSessionMeta(rawMeta)
 	if err != nil {
 		return nil, err
@@ -364,6 +358,18 @@ func (a *Agent) loadOrResume(ctx context.Context, sessionID acp.SessionId, cwd s
 		return nil, err
 	}
 	if err := a.ensureStartup(ctx, cwd, meta); err != nil {
+		return nil, err
+	}
+
+	a.mu.Lock()
+	if session := a.sessions[sessionID]; session != nil {
+		a.mu.Unlock()
+		return session, nil
+	}
+	a.mu.Unlock()
+
+	manifest, err := a.loadManifest(ctx, sessionID)
+	if err != nil {
 		return nil, err
 	}
 	if meta.options.Mode == "" {
@@ -850,6 +856,8 @@ func validateConcurrencyLimits(limits ConcurrencyLimits) error {
 		return errors.New("max active sessions must be non-negative")
 	case limits.MaxConcurrentPrompts < 0:
 		return errors.New("max concurrent prompts must be non-negative")
+	case limits.MaxConcurrentPrompts > 1:
+		return errors.New("MaxConcurrentPrompts must be 1: amp thread turns are inherently serial server-side")
 	case limits.MaxConcurrentClientCalls < 0:
 		return errors.New("max concurrent client calls must be non-negative")
 	default:

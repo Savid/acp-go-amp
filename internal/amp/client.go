@@ -22,7 +22,6 @@ import (
 const (
 	MinimumVersion         = "0.0.1783155105"
 	maxCapturedStderrBytes = 64 * 1024
-	ampArgHelp             = "--help"
 	ampArgThreads          = "threads"
 	ampThreadContinue      = "continue"
 	ampThreadDelete        = "delete"
@@ -72,13 +71,18 @@ func (c *Client) Version(ctx context.Context) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
+// startupProbeThreadID is a deliberately non-existent thread id used for the
+// method-present probes. amp answers with a domain "missing thread" error when a
+// subcommand exists but the id is unknown, which lets us distinguish a present
+// subcommand from a removed one without spending tokens or touching real threads.
+const startupProbeThreadID = "T-00000000-0000-0000-0000-000000000000"
+
+const startupProbeTimeout = 30 * time.Second
+
 func (c *Client) StartupProbe(ctx context.Context) error {
 	path, err := Discover(ctx, c.options.CLIPath)
 	if err != nil {
 		return err
-	}
-	if _, ok := probeCache.Load(path); ok {
-		return nil
 	}
 	version, err := c.Version(ctx)
 	if err != nil {
@@ -87,11 +91,59 @@ func (c *Client) StartupProbe(ctx context.Context) error {
 	if !versionAtLeast(version, MinimumVersion) {
 		return fmt.Errorf("amp version %q is below required %s", version, MinimumVersion)
 	}
-	if err := c.probeHelp(ctx); err != nil {
+	cacheKey := path + "\x00" + version
+	if _, ok := probeCache.Load(cacheKey); ok {
+		return nil
+	}
+	if err := c.probeSubcommands(ctx); err != nil {
 		return err
 	}
-	probeCache.Store(path, struct{}{})
+	probeCache.Store(cacheKey, struct{}{})
 	return nil
+}
+
+// probeSubcommands executes the required Amp subcommands for real instead of
+// grepping help text: it runs `threads list --json` and issues method-present
+// probes for `threads export/continue/delete` against a missing id. The continue
+// probe relies on cmd.Output leaving stdin as /dev/null, so amp sees immediate
+// EOF and rejects the missing thread without spending tokens.
+func (c *Client) probeSubcommands(ctx context.Context) error {
+	probeCtx, cancel := context.WithTimeout(ctx, startupProbeTimeout)
+	defer cancel()
+
+	if _, err := c.ListThreads(probeCtx); err != nil {
+		return fmt.Errorf("amp threads list --json probe failed: %w", err)
+	}
+	probes := []struct {
+		name string
+		args []string
+	}{
+		{name: "threads export", args: []string{ampArgThreads, ampThreadExport, startupProbeThreadID}},
+		{name: "threads continue", args: []string{ampArgThreads, ampThreadContinue, startupProbeThreadID, "--stream-json", "--stream-json-input", "-x"}},
+		{name: "threads delete", args: []string{ampArgThreads, ampThreadDelete, startupProbeThreadID}},
+	}
+	for _, probe := range probes {
+		if _, err := c.output(probeCtx, probe.args...); err != nil {
+			if methodErr := methodProbeError(probe.name, err); methodErr != nil {
+				return methodErr
+			}
+		}
+	}
+	return nil
+}
+
+// methodProbeError classifies a method-present probe result: a domain
+// missing-thread error means the subcommand exists (probe passes, nil); any
+// other error means the subcommand is missing or broken (probe fails).
+func methodProbeError(name string, err error) error {
+	if err == nil || isMissingThreadMessage(err.Error()) {
+		return nil
+	}
+	return fmt.Errorf("amp %s probe failed: %w", name, err)
+}
+
+func isMissingThreadMessage(msg string) bool {
+	return strings.Contains(msg, "does not exist") || strings.Contains(msg, "Thread not found")
 }
 
 func (c *Client) NewThread(ctx context.Context) (string, error) {
@@ -222,32 +274,6 @@ func (c *Client) outputWithArgs(ctx context.Context, args ...string) ([]byte, er
 		return nil, fmt.Errorf("amp %s: %s", strings.Join(args, " "), msg)
 	}
 	return out, nil
-}
-
-func (c *Client) probeHelp(ctx context.Context) error {
-	checks := []struct {
-		args []string
-		want []string
-	}{
-		{args: []string{ampArgHelp}, want: []string{"--settings-file", "--mcp-config", "-m", "--effort"}},
-		{args: []string{ampArgThreads, "list", ampArgHelp}, want: []string{"--json"}},
-		{args: []string{ampArgThreads, ampThreadExport, ampArgHelp}, want: []string{ampThreadExport}},
-		{args: []string{ampArgThreads, ampThreadDelete, ampArgHelp}, want: []string{ampThreadDelete}},
-		{args: []string{ampArgThreads, ampThreadContinue, ampArgHelp}, want: []string{"--stream-json-input"}},
-	}
-	for _, check := range checks {
-		out, err := c.outputRaw(ctx, check.args...)
-		if err != nil {
-			return err
-		}
-		text := string(out)
-		for _, want := range check.want {
-			if !strings.Contains(text, want) {
-				return fmt.Errorf("amp %s help missing %s", strings.Join(check.args, " "), want)
-			}
-		}
-	}
-	return nil
 }
 
 func (c *Client) globalArgs() []string {

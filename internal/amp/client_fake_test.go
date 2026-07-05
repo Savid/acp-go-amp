@@ -72,6 +72,14 @@ func TestFakeAmpHelper(t *testing.T) {
 			os.Stderr.WriteString("export failed\n")
 			os.Exit(1)
 		}
+		if mode == "probe-export-absent" {
+			os.Stderr.WriteString("error: unknown command 'export'\n")
+			os.Exit(1)
+		}
+		if mode == "probe-export-missing" && args[len(args)-1] == "T-00000000-0000-0000-0000-000000000000" {
+			os.Stderr.WriteString("Thread not found\n")
+			os.Exit(1)
+		}
 		if mode == "bad-export-json" {
 			os.Stdout.WriteString("{")
 			os.Exit(0)
@@ -166,13 +174,17 @@ func TestStartupProbeAndVersionBranches(t *testing.T) {
 	if err := NewClient(nil, Options{CLIPath: badVersion, Cwd: t.TempDir()}).StartupProbe(ctx); err == nil || !strings.Contains(err.Error(), "below required") {
 		t.Fatalf("bad version probe = %v", err)
 	}
-	helpFail, _ := fakeAmpPath(t, "help-fail")
-	if err := NewClient(nil, Options{CLIPath: helpFail, Cwd: t.TempDir()}).StartupProbe(ctx); err == nil || !strings.Contains(err.Error(), "help failed") {
-		t.Fatalf("help command probe = %v", err)
+	badList, _ := fakeAmpPath(t, "bad-list-json")
+	if err := NewClient(nil, Options{CLIPath: badList, Cwd: t.TempDir()}).StartupProbe(ctx); err == nil || !strings.Contains(err.Error(), "threads list --json probe failed") {
+		t.Fatalf("list probe = %v", err)
 	}
-	badHelp, _ := fakeAmpPath(t, "bad-help")
-	if err := NewClient(nil, Options{CLIPath: badHelp, Cwd: t.TempDir()}).StartupProbe(ctx); err == nil || !strings.Contains(err.Error(), "help missing") {
-		t.Fatalf("bad help probe = %v", err)
+	exportAbsent, _ := fakeAmpPath(t, "probe-export-absent")
+	if err := NewClient(nil, Options{CLIPath: exportAbsent, Cwd: t.TempDir()}).StartupProbe(ctx); err == nil || !strings.Contains(err.Error(), "threads export probe failed") {
+		t.Fatalf("export method-present probe = %v", err)
+	}
+	exportMissing, _ := fakeAmpPath(t, "probe-export-missing")
+	if err := NewClient(nil, Options{CLIPath: exportMissing, Cwd: t.TempDir()}).StartupProbe(ctx); err != nil {
+		t.Fatalf("export missing-thread domain error should count as present: %v", err)
 	}
 
 	if !versionAtLeast("0.0.1783155106-gx", MinimumVersion) {

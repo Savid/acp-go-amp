@@ -73,9 +73,11 @@ type agentSession struct {
 	closed                bool
 	poisonCause           string
 	nativeMissingCause    string
+	unsyncedFrames        []SessionStoreEntry
 	turn                  chan struct{}
 	cancelMu              sync.Mutex
 	activePrompt          *promptTurnState
+	persistMu             sync.Mutex
 	mu                    sync.Mutex
 }
 
@@ -215,6 +217,9 @@ func (s *agentSession) acquireTurn(ctx context.Context) (func(), error) {
 
 func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (acp.PromptResponse, error) {
 	if err := s.ready(); err != nil {
+		return acp.PromptResponse{}, err
+	}
+	if err := s.ensureMirrorSynced(ctx); err != nil {
 		return acp.PromptResponse{}, err
 	}
 	release, err := s.acquireTurn(ctx)
@@ -440,10 +445,19 @@ func (s *agentSession) manifest() ampManifest {
 	}
 }
 
+// persistAfterTurn durably commits the manifest plus the full transcript in one
+// Replace (X4: the whole load-append-Replace path is serialized per session).
+// Per X2, any newly completed frames that fail to persist are retained in memory
+// (mirror-unsynced) and re-committed on the next attempt so a store outage after
+// a native turn success can never silently drop the turn.
 func (s *agentSession) persistAfterTurn(ctx context.Context, transcript []SessionStoreEntry) error {
+	s.persistMu.Lock()
+	defer s.persistMu.Unlock()
+
 	now := time.Now().UnixMilli()
 	s.mu.Lock()
 	s.updatedUnix = now
+	pending := append(cloneEntries(s.unsyncedFrames), cloneEntries(transcript)...)
 	s.mu.Unlock()
 
 	if s.agent.store == nil {
@@ -451,16 +465,49 @@ func (s *agentSession) persistAfterTurn(ctx context.Context, transcript []Sessio
 	}
 	fullTranscript, err := s.agent.store.Load(ctx, SessionKey{SessionID: string(s.id), Subpath: transcriptSubpath})
 	if err != nil {
+		s.retainUnsynced(pending)
 		return err
 	}
-	if len(transcript) > 0 {
-		fullTranscript = append(cloneEntries(fullTranscript), cloneEntries(transcript)...)
+	if len(pending) > 0 {
+		fullTranscript = append(cloneEntries(fullTranscript), pending...)
 	}
 	main, _ := json.Marshal(s.manifest())
-	return s.agent.store.Replace(ctx, SessionKey{SessionID: string(s.id), Subpath: SessionStoreMainSubpath}, []SessionStoreReplacement{
+	if err := s.agent.store.Replace(ctx, SessionKey{SessionID: string(s.id), Subpath: SessionStoreMainSubpath}, []SessionStoreReplacement{
 		{Key: SessionKey{SessionID: string(s.id), Subpath: SessionStoreMainSubpath}, Entries: []SessionStoreEntry{main}},
 		{Key: SessionKey{SessionID: string(s.id), Subpath: transcriptSubpath}, Entries: fullTranscript},
-	})
+	}); err != nil {
+		s.retainUnsynced(pending)
+		return err
+	}
+	s.mu.Lock()
+	s.unsyncedFrames = nil
+	s.mu.Unlock()
+	return nil
+}
+
+// retainUnsynced marks the mirror as unsynced by keeping the exact frames that
+// failed to persist so they can be retried verbatim.
+func (s *agentSession) retainUnsynced(pending []SessionStoreEntry) {
+	s.mu.Lock()
+	s.unsyncedFrames = pending
+	s.mu.Unlock()
+}
+
+// ensureMirrorSynced blocks a prompt with a loud error whenever the local mirror
+// still holds frames from a previously completed turn that failed to persist. It
+// retries the durable Replace of the exact frames on each call and only unblocks
+// once that retry succeeds (X2).
+func (s *agentSession) ensureMirrorSynced(ctx context.Context) error {
+	s.mu.Lock()
+	unsynced := len(s.unsyncedFrames) > 0
+	s.mu.Unlock()
+	if !unsynced {
+		return nil
+	}
+	if err := s.persistAfterTurn(ctx, nil); err != nil {
+		return acp.NewInternalError(map[string]any{jsonFieldError: "mirror_unsynced", "detail": err.Error()})
+	}
+	return nil
 }
 
 func (s *agentSession) emitMessage(ctx context.Context, msg amp.Message) error {
