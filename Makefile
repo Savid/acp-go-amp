@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: audit build clean coverage-check docs-audit fmt fmt-check help lint modernize-check test test/cover test-integration-cover test-integration-live test-integration-smoke tidy vuln
+.PHONY: audit build clean coverage-check docs-audit fmt fmt-check help lint modernize-check test test/cover test-cross-compile test-integration-cover test-integration-live test-integration-smoke tidy vuln
 
 GOLANGCI_LINT_VERSION ?= v2.12.2
 GOLANGCI_LINT := go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
@@ -22,6 +22,16 @@ test:
 coverage-check:
 	go test -race -coverprofile=coverage.out -covermode=atomic ./...
 	@go tool cover -func=coverage.out | awk 'BEGIN { found = 0 } /^total:/ { found = 1; if ($$3 != "100.0%") { printf "total coverage %s, want 100.0%%\n", $$3; exit 1 } printf "total coverage %s\n", $$3 } END { if (!found) { print "missing total coverage line"; exit 1 } }'
+
+## test-cross-compile: compile tests and packages for the supported platforms
+test-cross-compile:
+	rm -rf .tmp/cross
+	mkdir -p .tmp/cross
+	GOOS=linux GOARCH=amd64 go test -c -o .tmp/cross/amp-linux.test ./internal/amp
+	GOOS=darwin GOARCH=arm64 go test -c -o .tmp/cross/amp-darwin.test ./internal/amp
+	GOOS=windows GOARCH=amd64 go test -c -o .tmp/cross/amp-windows.test ./internal/amp
+	GOOS=freebsd GOARCH=amd64 go build ./...
+	GOOS=openbsd GOARCH=amd64 go build ./...
 
 ## test-integration-smoke: run integration tests that do not spend model tokens
 test-integration-smoke:
@@ -107,7 +117,7 @@ docs-audit:
 	@rg -q 'does not advertise Amp elicitation metadata' docs/features/elicitation.mdx
 
 ## audit: run local checks
-audit: fmt-check lint build test coverage-check tidy vuln modernize-check docs-audit
+audit: fmt-check lint build test test-cross-compile coverage-check tidy vuln modernize-check docs-audit
 	go mod verify
 
 ## clean: remove build artifacts

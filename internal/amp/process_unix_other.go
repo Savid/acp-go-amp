@@ -1,4 +1,4 @@
-//go:build unix && !linux && !freebsd
+//go:build unix && !linux && !freebsd && !darwin
 
 package amp
 
@@ -7,7 +7,7 @@ import (
 	"syscall"
 )
 
-// Darwin and the remaining BSDs have no Pdeathsig equivalent; parent-death
+// The remaining Unix platforms have no Pdeathsig equivalent; parent-death
 // cleanup is best-effort via process-group signalling.
 func configureCommand(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
