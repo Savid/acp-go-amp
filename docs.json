@@ -1,0 +1,26 @@
+{
+  "name": "acp-go-amp",
+  "navigation": [
+    "docs/overview.mdx",
+    "docs/get-started/quickstart.mdx",
+    "docs/get-started/install.mdx",
+    "docs/get-started/run-modes.mdx",
+    "docs/get-started/examples.mdx",
+    "docs/core/sessions.mdx",
+    "docs/core/prompt-streaming.mdx",
+    "docs/features/authentication.mdx",
+    "docs/features/mcp.mdx",
+    "docs/features/models-config.mdx",
+    "docs/features/permissions.mdx",
+    "docs/features/elicitation.mdx",
+    "docs/features/session-store.mdx",
+    "docs/features/raw-events.mdx",
+    "docs/reference/go-api.mdx",
+    "docs/reference/cli.mdx",
+    "docs/reference/acp-methods.mdx",
+    "docs/reference/meta.mdx",
+    "docs/reference/updates.mdx",
+    "docs/operations/security.mdx",
+    "docs/operations/observability.mdx"
+  ]
+}

@@ -1,0 +1,421 @@
+//nolint:wsl_v5,nlreturn // process transport keeps shutdown branches compact.
+package amp
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"os"
+	"os/exec"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+)
+
+type Options struct {
+	CLIPath       string
+	Cwd           string
+	SettingsFile  string
+	Env           map[string]string
+	ThreadID      string
+	Mode          string
+	Effort        string
+	MCPConfigJSON string
+	MaxLineBytes  int
+}
+
+type Client struct {
+	log     *slog.Logger
+	options Options
+}
+
+func NewClient(log *slog.Logger, options Options) *Client {
+	if log == nil {
+		log = slog.Default()
+	}
+	if options.MaxLineBytes <= 0 {
+		options.MaxLineBytes = defaultMaxJSONLineBytes
+	}
+	return &Client{log: log, options: options}
+}
+
+func (c *Client) Version(ctx context.Context) (string, error) {
+	out, err := c.output(ctx, "version")
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+func (c *Client) NewThread(ctx context.Context) (string, error) {
+	out, err := c.output(ctx, "threads", "new")
+	if err != nil {
+		return "", err
+	}
+	threadID := strings.TrimSpace(stripANSI(string(out)))
+	if !strings.HasPrefix(threadID, "T-") {
+		return "", fmt.Errorf("amp threads new returned unexpected id %q", threadID)
+	}
+	return threadID, nil
+}
+
+func (c *Client) ListThreads(ctx context.Context) ([]ThreadSummary, error) {
+	out, err := c.output(ctx, "threads", "list", "--json")
+	if err != nil {
+		return nil, err
+	}
+	var summaries []ThreadSummary
+	if err := json.Unmarshal(out, &summaries); err != nil {
+		return nil, fmt.Errorf("decode amp threads list: %w", err)
+	}
+	return summaries, nil
+}
+
+func (c *Client) ExportThread(ctx context.Context, threadID string) (json.RawMessage, error) {
+	out, err := c.output(ctx, "threads", "export", threadID)
+	if err != nil {
+		return nil, err
+	}
+	return json.RawMessage(bytes.TrimSpace(out)), nil
+}
+
+func (c *Client) DeleteThread(ctx context.Context, threadID string) error {
+	_, err := c.output(ctx, "threads", "delete", threadID)
+	if err != nil && strings.Contains(err.Error(), "does not exist") {
+		return nil
+	}
+	return err
+}
+
+func (c *Client) Continue(ctx context.Context, threadID string, input any) (*Turn, error) {
+	path, err := Discover(ctx, c.options.CLIPath)
+	if err != nil {
+		return nil, err
+	}
+	args := c.globalArgs()
+	args = append(args, "threads", "continue", threadID, "--stream-json", "--stream-json-input", "-x")
+
+	cmd := exec.CommandContext(ctx, path, args...)
+	configureCommand(cmd)
+	cmd.Dir = c.options.Cwd
+	if cmd.Dir == "" {
+		cmd.Dir, err = os.Getwd()
+		if err != nil {
+			return nil, fmt.Errorf("get working directory: %w", err)
+		}
+	}
+	cmd.Env = BuildEnv(c.options.Env, cmd.Dir)
+
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, fmt.Errorf("create amp stdin: %w", err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("create amp stdout: %w", err)
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return nil, fmt.Errorf("create amp stderr: %w", err)
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("start amp: %w", err)
+	}
+
+	turn := &Turn{
+		log:          c.log,
+		cmd:          cmd,
+		stdin:        stdin,
+		stdout:       stdout,
+		stderr:       stderr,
+		maxLineBytes: c.options.MaxLineBytes,
+		messages:     make(chan Message),
+		errs:         make(chan error, 4),
+	}
+	turn.start(ctx)
+	if err := turn.Send(ctx, input); err != nil {
+		_ = turn.Close()
+		return nil, err
+	}
+	if err := stdin.Close(); err != nil {
+		_ = turn.Close()
+		return nil, fmt.Errorf("close amp stdin: %w", err)
+	}
+	return turn, nil
+}
+
+func (c *Client) output(ctx context.Context, args ...string) ([]byte, error) {
+	path, err := Discover(ctx, c.options.CLIPath)
+	if err != nil {
+		return nil, err
+	}
+	args = append(c.globalArgs(), args...)
+	cmd := exec.CommandContext(ctx, path, args...)
+	configureCommand(cmd)
+	cmd.Dir = c.options.Cwd
+	if cmd.Dir == "" {
+		cmd.Dir, _ = os.Getwd()
+	}
+	cmd.Env = BuildEnv(c.options.Env, cmd.Dir)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		msg := strings.TrimSpace(stripANSI(stderr.String()))
+		if msg == "" {
+			msg = err.Error()
+		}
+		return nil, fmt.Errorf("amp %s: %s", strings.Join(args, " "), msg)
+	}
+	return out, nil
+}
+
+func (c *Client) globalArgs() []string {
+	args := []string{"--no-ide", "--no-color", "--no-notifications"}
+	if c.options.SettingsFile != "" {
+		args = append(args, "--settings-file", c.options.SettingsFile)
+	}
+	if c.options.MCPConfigJSON != "" {
+		args = append(args, "--mcp-config", c.options.MCPConfigJSON)
+	}
+	if c.options.Mode != "" {
+		args = append(args, "-m", c.options.Mode)
+	}
+	if c.options.Effort != "" {
+		args = append(args, "--effort", c.options.Effort)
+	}
+	return args
+}
+
+func Discover(ctx context.Context, cliPath string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(cliPath) != "" {
+		return cliPath, nil
+	}
+	path, err := exec.LookPath("amp")
+	if err != nil {
+		return "", fmt.Errorf("find amp in PATH: %w", err)
+	}
+	return path, nil
+}
+
+func BuildEnv(overrides map[string]string, cwd string) []string {
+	values := map[string]string{}
+	keys := make([]string, 0, len(os.Environ())+len(overrides)+1)
+	set := func(key, value string) {
+		if key == "" {
+			return
+		}
+		if _, ok := values[key]; !ok {
+			keys = append(keys, key)
+		}
+		values[key] = value
+	}
+	for _, item := range os.Environ() {
+		key, value, ok := strings.Cut(item, "=")
+		if ok {
+			set(key, value)
+		}
+	}
+	overrideKeys := make([]string, 0, len(overrides))
+	for key := range overrides {
+		overrideKeys = append(overrideKeys, key)
+	}
+	sort.Strings(overrideKeys)
+	for _, key := range overrideKeys {
+		set(key, overrides[key])
+	}
+	if cwd != "" {
+		set("PWD", cwd)
+	}
+	out := make([]string, 0, len(keys))
+	for _, key := range keys {
+		out = append(out, key+"="+values[key])
+	}
+	return out
+}
+
+type Turn struct {
+	log          *slog.Logger
+	cmd          *exec.Cmd
+	stdin        io.WriteCloser
+	stdout       io.ReadCloser
+	stderr       io.ReadCloser
+	maxLineBytes int
+	messages     chan Message
+	errs         chan error
+	waitOnce     sync.Once
+	waitErr      error
+	closeOnce    sync.Once
+}
+
+func (t *Turn) Messages() <-chan Message { return t.messages }
+func (t *Turn) Errors() <-chan error     { return t.errs }
+
+func (t *Turn) Send(ctx context.Context, payload any) error {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal amp input: %w", err)
+	}
+	if len(data)+1 > t.maxLineBytes {
+		return fmt.Errorf("amp stdin json line exceeds %d bytes", t.maxLineBytes)
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+	if _, err := t.stdin.Write(append(data, '\n')); err != nil {
+		return fmt.Errorf("write amp stdin: %w", err)
+	}
+	return nil
+}
+
+func (t *Turn) start(ctx context.Context) {
+	go t.drainStderr()
+	go t.readStdout(ctx)
+}
+
+func (t *Turn) readStdout(ctx context.Context) {
+	defer close(t.messages)
+	defer close(t.errs)
+	defer func() {
+		if err := t.wait(); err != nil && !expectedExit(err) {
+			t.sendErr(fmt.Errorf("amp process exited: %w", err))
+		}
+	}()
+
+	scanner := bufio.NewScanner(t.stdout)
+	scanner.Buffer(make([]byte, 0, 64*1024), t.maxLineBytes)
+	for scanner.Scan() {
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(line) == 0 || line[0] != '{' {
+			continue
+		}
+		msg, err := ParseJSONLine(line)
+		if err != nil {
+			t.sendErr(fmt.Errorf("decode amp json line: %w", err))
+			continue
+		}
+		select {
+		case t.messages <- msg:
+		case <-ctx.Done():
+			t.sendErr(ctx.Err())
+			return
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		t.sendErr(fmt.Errorf("read amp stdout: %w", err))
+	}
+}
+
+func (t *Turn) drainStderr() {
+	scanner := bufio.NewScanner(t.stderr)
+	for scanner.Scan() {
+		if t.log != nil {
+			t.log.Debug("amp stderr", slog.String("line", scanner.Text()))
+		}
+	}
+}
+
+func (t *Turn) Interrupt(ctx context.Context, killAfter time.Duration) error {
+	if t.cmd == nil || t.cmd.Process == nil {
+		return nil
+	}
+	if err := interruptProcess(t.cmd); err != nil {
+		return err
+	}
+	if killAfter <= 0 {
+		return nil
+	}
+	done := make(chan error, 1)
+	go func() { done <- t.wait() }()
+	timer := time.NewTimer(killAfter)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		if expectedExit(err) {
+			return nil
+		}
+		return err
+	case <-timer.C:
+		return killProcess(t.cmd)
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (t *Turn) Close() error {
+	var err error
+	t.closeOnce.Do(func() {
+		if t.stdin != nil {
+			err = errors.Join(err, t.stdin.Close())
+		}
+		if t.stdout != nil {
+			err = errors.Join(err, t.stdout.Close())
+		}
+		if t.stderr != nil {
+			err = errors.Join(err, t.stderr.Close())
+		}
+		err = errors.Join(err, killProcess(t.cmd), t.wait())
+	})
+	return err
+}
+
+func (t *Turn) wait() error {
+	t.waitOnce.Do(func() {
+		if t.cmd != nil {
+			t.waitErr = t.cmd.Wait()
+		}
+	})
+	return t.waitErr
+}
+
+func (t *Turn) sendErr(err error) {
+	if err == nil {
+		return
+	}
+	select {
+	case t.errs <- err:
+	default:
+		if t.log != nil {
+			t.log.Debug("drop amp turn error", slog.String("error", err.Error()))
+		}
+	}
+}
+
+func expectedExit(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) {
+		return true
+	}
+	var exitErr *exec.ExitError
+	return errors.As(err, &exitErr)
+}
+
+func stripANSI(s string) string {
+	var b strings.Builder
+	inEscape := false
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		if inEscape {
+			if ch >= '@' && ch <= '~' {
+				inEscape = false
+			}
+			continue
+		}
+		if ch == 0x1b {
+			inEscape = true
+			continue
+		}
+		b.WriteByte(ch)
+	}
+	return b.String()
+}
