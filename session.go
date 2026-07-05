@@ -389,14 +389,19 @@ func (s *agentSession) poison(cause string) error {
 }
 
 func (s *agentSession) Close(ctx context.Context) error {
+	_ = ctx
 	s.mu.Lock()
 	s.closed = true
 	s.mu.Unlock()
-	_ = s.interrupt(ctx)
-	if s.settingsDir != "" {
-		return os.RemoveAll(s.settingsDir)
+	state := s.activePromptState()
+	if state != nil {
+		state.cancel()
 	}
-	return nil
+	err := s.interruptState(context.Background(), state)
+	if s.settingsDir != "" {
+		err = errors.Join(err, os.RemoveAll(s.settingsDir))
+	}
+	return err
 }
 
 func (s *agentSession) Delete(ctx context.Context) error {

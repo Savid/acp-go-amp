@@ -534,15 +534,25 @@ func (t *Turn) Interrupt(ctx context.Context, killAfter time.Duration) error {
 	defer timer.Stop()
 	select {
 	case err := <-done:
-		if expectedExit(err) {
-			return nil
-		}
-		return err
+		return interruptWaitResult(err)
 	case <-timer.C:
-		return killProcess(t.cmd)
+		killErr := killProcess(t.cmd)
+		select {
+		case err := <-done:
+			return errors.Join(killErr, interruptWaitResult(err))
+		case <-ctx.Done():
+			return errors.Join(killErr, ctx.Err())
+		}
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+func interruptWaitResult(err error) error {
+	if expectedExit(err) {
+		return nil
+	}
+	return err
 }
 
 func (t *Turn) Close() error {

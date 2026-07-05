@@ -353,6 +353,64 @@ func TestInterruptSIGINTAndKillFallback(t *testing.T) {
 	}
 }
 
+func TestInterruptWaitsAfterKillFallback(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("sleep process test uses POSIX process handling")
+	}
+
+	t.Run("waits for post-kill wait", func(t *testing.T) {
+		cmd := exec.Command("sleep", "10")
+		configureCommand(cmd)
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		waitStarted := make(chan struct{})
+		releaseWait := make(chan struct{})
+		turn := &Turn{cmd: cmd, waitFunc: func() error {
+			close(waitStarted)
+			<-releaseWait
+			return nil
+		}}
+		done := make(chan error, 1)
+		go func() { done <- turn.Interrupt(context.Background(), 20*time.Millisecond) }()
+		<-waitStarted
+		select {
+		case err := <-done:
+			t.Fatalf("interrupt returned before post-kill wait completed: %v", err)
+		case <-time.After(100 * time.Millisecond):
+		}
+		close(releaseWait)
+		if err := <-done; err != nil {
+			t.Fatalf("Interrupt: %v", err)
+		}
+		_, _ = cmd.Process.Wait()
+	})
+
+	t.Run("post-kill wait obeys context", func(t *testing.T) {
+		cmd := exec.Command("sleep", "10")
+		configureCommand(cmd)
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		waitStarted := make(chan struct{})
+		releaseWait := make(chan struct{})
+		turn := &Turn{cmd: cmd, waitFunc: func() error {
+			close(waitStarted)
+			<-releaseWait
+			return nil
+		}}
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
+		defer cancel()
+		err := turn.Interrupt(ctx, 20*time.Millisecond)
+		close(releaseWait)
+		<-waitStarted
+		_, _ = cmd.Process.Wait()
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Interrupt context error = %v", err)
+		}
+	})
+}
+
 func TestClientErrorBranches(t *testing.T) {
 	if _, err := Discover(cancelledContext(), ""); err == nil {
 		t.Fatal("expected canceled Discover error")
