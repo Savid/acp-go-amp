@@ -442,7 +442,7 @@ func (s *agentSession) applyActiveRequest(meta parsedSessionMeta, cwd string, mc
 	if s.mcpConfigJSON != mcpConfig {
 		return mismatchField("mcpServers")
 	}
-	if meta.optionFields.env && !maps.Equal(activeRequestEnv(s.env), activeRequestEnv(mergeEnv(s.agent.options.Env, meta.options.Env))) {
+	if !maps.Equal(activeRequestEnv(s.env), activeRequestEnv(mergeEnv(s.agent.options.Env, meta.options.Env))) {
 		return mismatchField("env")
 	}
 	if meta.optionFields.mode && s.mode != meta.options.Mode {

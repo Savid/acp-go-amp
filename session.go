@@ -309,6 +309,10 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (ac
 			if !ok {
 				continue
 			}
+			if ctx.Err() != nil || state.isCancelled() {
+				state.cancel()
+				_ = s.interruptState(context.Background(), state)
+			}
 			return promptErrorResponse(ctx, state, promptUsage, params.MessageId, err)
 		case <-state.cancelled:
 			_ = s.interruptState(context.Background(), state)

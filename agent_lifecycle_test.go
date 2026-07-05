@@ -676,13 +676,26 @@ func main() {
 			os.Stdout.WriteString("{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"duration_ms\":1,\"is_error\":true,\"error\":\"User cancelled (SIGINT/SIGTERM)\",\"session_id\":\"T-agent-thread\"}\n")
 			return
 		}
+		if mode == "delayed-error" {
+			record(state, "continue-ready", "yes")
+			time.Sleep(100 * time.Millisecond)
+			os.Stderr.WriteString("delayed failure\n")
+			os.Exit(1)
+		}
 		if mode == "hang" {
 			for {
 				time.Sleep(time.Hour)
 			}
 		}
 		if mode == "sigint-ignore" {
-			signal.Ignore(syscall.SIGINT, syscall.SIGTERM)
+			record(state, "pid.jsonl", os.Getpid())
+			signals := make(chan os.Signal, 1)
+			signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
+			record(state, "continue-ready", "yes")
+			go func() {
+				sig := <-signals
+				record(state, "signal", sig.String())
+			}()
 			for {
 				time.Sleep(time.Hour)
 			}

@@ -23,6 +23,8 @@ import (
 const (
 	MinimumVersion         = "0.0.1783155105"
 	maxCapturedStderrBytes = 64 * 1024
+	defaultCloseKillAfter  = 100 * time.Millisecond
+	defaultCloseWait       = 5 * time.Second
 	ampArgThreads          = "threads"
 	ampThreadContinue      = "continue"
 	ampThreadDelete        = "delete"
@@ -232,7 +234,7 @@ func (c *Client) Continue(ctx context.Context, threadID string, input any) (*Tur
 	args := c.globalArgs()
 	args = append(args, ampArgThreads, ampThreadContinue, threadID, "--stream-json", "--stream-json-input", "-x")
 
-	cmd := commandContext(ctx, path, args...)
+	cmd := commandContext(context.Background(), path, args...)
 	configureCommand(cmd)
 	cmd.Dir = c.options.Cwd
 	if cmd.Dir == "" {
@@ -452,10 +454,20 @@ func (t *Turn) Send(ctx context.Context, payload any) error {
 		return ctx.Err()
 	default:
 	}
-	if _, err := t.stdin.Write(append(data, '\n')); err != nil {
-		return fmt.Errorf("write amp stdin: %w", err)
+	done := make(chan error, 1)
+	go func() {
+		if _, err := t.stdin.Write(append(data, '\n')); err != nil {
+			done <- fmt.Errorf("write amp stdin: %w", err)
+			return
+		}
+		done <- nil
+	}()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
 	}
-	return nil
 }
 
 func (t *Turn) start(ctx context.Context) {
@@ -536,6 +548,11 @@ func (t *Turn) Interrupt(ctx context.Context, killAfter time.Duration) error {
 func (t *Turn) Close() error {
 	var err error
 	t.closeOnce.Do(func() {
+		if t.cmd != nil && t.cmd.Process != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), defaultCloseKillAfter+defaultCloseWait)
+			defer cancel()
+			err = errors.Join(err, t.Interrupt(ctx, defaultCloseKillAfter))
+		}
 		if t.stdin != nil {
 			err = errors.Join(err, t.stdin.Close())
 		}
@@ -545,7 +562,7 @@ func (t *Turn) Close() error {
 		if t.stderr != nil {
 			err = errors.Join(err, t.stderr.Close())
 		}
-		err = errors.Join(err, killProcess(t.cmd), t.wait())
+		err = errors.Join(err, t.wait())
 	})
 	return err
 }

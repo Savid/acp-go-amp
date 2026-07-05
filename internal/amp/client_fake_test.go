@@ -413,6 +413,18 @@ func TestClientErrorBranches(t *testing.T) {
 	if err := (&Turn{stdin: failingWriteCloser{}, maxLineBytes: 1024}).Send(cancelledContext(), map[string]string{"ok": "yes"}); err == nil {
 		t.Fatal("expected canceled send")
 	}
+	blocking := &blockingWriteCloser{started: make(chan struct{}), release: make(chan struct{})}
+	blockCtx, blockCancel := context.WithCancel(context.Background())
+	blockErr := make(chan error, 1)
+	go func() {
+		blockErr <- (&Turn{stdin: blocking, maxLineBytes: 1024}).Send(blockCtx, map[string]string{"ok": "yes"})
+	}()
+	<-blocking.started
+	blockCancel()
+	if err := <-blockErr; !errors.Is(err, context.Canceled) {
+		t.Fatalf("blocked send cancel = %v", err)
+	}
+	close(blocking.release)
 	if err := (&Turn{}).Interrupt(context.Background(), time.Millisecond); err != nil {
 		t.Fatalf("nil interrupt: %v", err)
 	}
@@ -432,6 +444,9 @@ func TestClientErrorBranches(t *testing.T) {
 	}
 	if err := interruptProcess(nil); err != nil {
 		t.Fatalf("nil interruptProcess: %v", err)
+	}
+	if err := killProcess(nil); err != nil {
+		t.Fatalf("nil killProcess: %v", err)
 	}
 	drop := &Turn{errs: make(chan error, 1)}
 	drop.errs <- errors.New("full")
@@ -611,6 +626,19 @@ type failingReadCloser struct{}
 
 func (failingReadCloser) Read([]byte) (int, error) { return 0, errors.New("read failed") }
 func (failingReadCloser) Close() error             { return errors.New("close failed") }
+
+type blockingWriteCloser struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (b *blockingWriteCloser) Write(p []byte) (int, error) {
+	close(b.started)
+	<-b.release
+	return len(p), nil
+}
+
+func (b *blockingWriteCloser) Close() error { return nil }
 
 func cancelledContext() context.Context {
 	ctx, cancel := context.WithCancel(context.Background())
