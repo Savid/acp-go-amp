@@ -51,8 +51,16 @@ type ampManifest struct {
 }
 
 type parsedSessionMeta struct {
-	options  AmpOptions
-	rawEvent bool
+	options       AmpOptions
+	optionFields  ampOptionFields
+	rawEvent      bool
+	rawEventField bool
+}
+
+type ampOptionFields struct {
+	env    bool
+	mode   bool
+	effort bool
 }
 
 type agentSession struct {

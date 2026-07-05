@@ -53,6 +53,16 @@ func TestFakeAmpHelper(t *testing.T) {
 		os.Stderr.WriteString("missing threads subcommand\n")
 		os.Exit(2)
 	}
+	if mode == "probe-export-absent" && args[threads+1] == "export" {
+		os.Stderr.WriteString("error: unknown command 'export'\n")
+		os.Exit(1)
+	}
+	if slices.Contains(args, startupProbeThreadID) {
+		if mode != "probe-continue-success" || args[threads+1] != "continue" {
+			os.Stderr.WriteString("Thread not found\n")
+			os.Exit(1)
+		}
+	}
 
 	switch args[threads+1] {
 	case "new":
@@ -96,6 +106,9 @@ func TestFakeAmpHelper(t *testing.T) {
 		}
 		os.Stdout.WriteString("deleted\n")
 	case "continue":
+		if mode == "probe-continue-success" {
+			os.Exit(0)
+		}
 		stdin, _ := io.ReadAll(os.Stdin)
 		recordHelperJSON(state, "stdin.jsonl", strings.TrimSpace(string(stdin)))
 		helperContinue(mode, state)
@@ -125,6 +138,22 @@ func TestClientCommandsUseGlobalArgsAndParseOutput(t *testing.T) {
 	if err := client.StartupProbe(ctx); err != nil {
 		t.Fatalf("StartupProbe: %v", err)
 	}
+	records := readHelperJSON[[]string](t, filepath.Join(state, "args.jsonl"))
+	var startupContinue []string
+	for _, args := range records {
+		if slices.Contains(args, startupProbeThreadID) && slices.Contains(args, ampThreadContinue) {
+			startupContinue = args
+			break
+		}
+	}
+	if len(startupContinue) == 0 {
+		t.Fatalf("startup continue probe not recorded: %#v", records)
+	}
+	for _, want := range []string{"--settings-file", "--mcp-config", "{}", "-m", "smart", "--effort", "high", "--stream-json", "--stream-json-input", "-x"} {
+		if !slices.Contains(startupContinue, want) {
+			t.Fatalf("startup continue probe missing %q: %#v", want, startupContinue)
+		}
+	}
 	if err := client.StartupProbe(ctx); err != nil {
 		t.Fatalf("StartupProbe cached: %v", err)
 	}
@@ -146,7 +175,7 @@ func TestClientCommandsUseGlobalArgsAndParseOutput(t *testing.T) {
 		t.Fatalf("DeleteThread missing should be idempotent: %v", err)
 	}
 
-	records := readHelperJSON[[]string](t, filepath.Join(state, "args.jsonl"))
+	records = readHelperJSON[[]string](t, filepath.Join(state, "args.jsonl"))
 	if len(records) < 5 {
 		t.Fatalf("recorded args = %#v", records)
 	}
@@ -186,6 +215,31 @@ func TestStartupProbeAndVersionBranches(t *testing.T) {
 	if err := NewClient(nil, Options{CLIPath: exportMissing, Cwd: t.TempDir()}).StartupProbe(ctx); err != nil {
 		t.Fatalf("export missing-thread domain error should count as present: %v", err)
 	}
+	continueSuccess, _ := fakeAmpPath(t, "probe-continue-success")
+	if err := NewClient(nil, Options{CLIPath: continueSuccess, Cwd: t.TempDir()}).StartupProbe(ctx); err == nil || !strings.Contains(err.Error(), "unexpectedly succeeded") {
+		t.Fatalf("continue missing-thread success gate = %v", err)
+	}
+	if err := methodProbeError("threads continue", errors.New("usage"), true); err == nil || !strings.Contains(err.Error(), "did not return missing-thread") {
+		t.Fatalf("continue missing-thread usage gate = %v", err)
+	}
+	func() {
+		oldMkdirTemp := mkdirTemp
+		defer func() { mkdirTemp = oldMkdirTemp }()
+		mkdirTemp = func(string, string) (string, error) { return "", errors.New("mkdir temp failed") }
+		tempFail, _ := fakeAmpPath(t, "startup-temp-fail")
+		if err := NewClient(nil, Options{CLIPath: tempFail, Cwd: t.TempDir()}).StartupProbe(ctx); err == nil || !strings.Contains(err.Error(), "create amp startup settings dir") {
+			t.Fatalf("startup temp dir failure = %v", err)
+		}
+	}()
+	func() {
+		oldWriteFile := writeFile
+		defer func() { writeFile = oldWriteFile }()
+		writeFile = func(string, []byte, os.FileMode) error { return errors.New("write settings failed") }
+		writeFail, _ := fakeAmpPath(t, "startup-write-fail")
+		if err := NewClient(nil, Options{CLIPath: writeFail, Cwd: t.TempDir()}).StartupProbe(ctx); err == nil || !strings.Contains(err.Error(), "write amp startup settings file") {
+			t.Fatalf("startup settings write failure = %v", err)
+		}
+	}()
 
 	if !versionAtLeast("0.0.1783155106-gx", MinimumVersion) {
 		t.Fatal("newer version rejected")

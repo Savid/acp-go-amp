@@ -119,7 +119,7 @@ func TestServeFakeAmpLifecycleStdoutCleanStoreReplayAndDelete(t *testing.T) {
 	_, stableForkErr := conn.UnstableForkSession(ctx, ForkSessionRequest("T-agent-thread", cwd))
 	requireRequestErrorCode(t, stableForkErr, -32601)
 
-	newResp, err := conn.NewSession(ctx, NewSessionRequest(cwd,
+	sessionOptions := []SessionRequestOption{
 		WithSessionRawEvents(true),
 		WithSessionAdditionalDirectories("/tmp/other"),
 		WithSessionAmpOptions(NewAmpOptions(
@@ -131,7 +131,8 @@ func TestServeFakeAmpLifecycleStdoutCleanStoreReplayAndDelete(t *testing.T) {
 			StdioMCPServer("stdio", "printf", []string{"ok"}, map[string]string{"A": "B"}),
 			HTTPMCPServer("http", "https://example.com/mcp", map[string]string{"H": "V"}),
 		),
-	))
+	}
+	newResp, err := conn.NewSession(ctx, NewSessionRequest(cwd, sessionOptions...))
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
 	}
@@ -169,14 +170,14 @@ func TestServeFakeAmpLifecycleStdoutCleanStoreReplayAndDelete(t *testing.T) {
 	}
 
 	beforeLoad := len(client.updatesSnapshot())
-	if _, err := conn.LoadSession(ctx, LoadSessionRequest(newResp.SessionId, cwd, WithSessionRawEvents(true))); err != nil {
+	if _, err := conn.LoadSession(ctx, LoadSessionRequest(newResp.SessionId, cwd, sessionOptions...)); err != nil {
 		t.Fatalf("LoadSession: %v", err)
 	}
 	afterLoad := len(client.updatesSnapshot())
 	if afterLoad <= beforeLoad {
 		t.Fatalf("load did not replay transcript: before=%d after=%d", beforeLoad, afterLoad)
 	}
-	if _, err := conn.ResumeSession(ctx, ResumeSessionRequest(newResp.SessionId, cwd)); err != nil {
+	if _, err := conn.ResumeSession(ctx, ResumeSessionRequest(newResp.SessionId, cwd, sessionOptions...)); err != nil {
 		t.Fatalf("ResumeSession: %v", err)
 	}
 	if got := len(client.updatesSnapshot()); got != afterLoad {

@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -32,6 +33,9 @@ var (
 	commandContext   = exec.CommandContext
 	getwd            = os.Getwd
 	lookPath         = exec.LookPath
+	mkdirTemp        = os.MkdirTemp
+	removeAll        = os.RemoveAll
+	writeFile        = os.WriteFile
 	closeWriteCloser = func(closer io.Closer) error { return closer.Close() }
 	probeCache       sync.Map
 )
@@ -105,8 +109,8 @@ func (c *Client) StartupProbe(ctx context.Context) error {
 // probeSubcommands executes the required Amp subcommands for real instead of
 // grepping help text: it runs `threads list --json` and issues method-present
 // probes for `threads export/continue/delete` against a missing id. The continue
-// probe relies on cmd.Output leaving stdin as /dev/null, so amp sees immediate
-// EOF and rejects the missing thread without spending tokens.
+// probe uses an isolated settings file and the same real-turn flag surface; the
+// known-missing thread must fail before any model turn can start.
 func (c *Client) probeSubcommands(ctx context.Context) error {
 	probeCtx, cancel := context.WithTimeout(ctx, startupProbeTimeout)
 	defer cancel()
@@ -114,30 +118,64 @@ func (c *Client) probeSubcommands(ctx context.Context) error {
 	if _, err := c.ListThreads(probeCtx); err != nil {
 		return fmt.Errorf("amp threads list --json probe failed: %w", err)
 	}
+	settingsFile, cleanup, err := startupProbeSettingsFile()
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	continueClient := *c
+	continueClient.options.SettingsFile = settingsFile
+	continueClient.options.MCPConfigJSON = "{}"
+	continueClient.options.Mode = "smart"
+	continueClient.options.Effort = "high"
+	continueArgs := continueClient.globalArgs()
+	continueArgs = append(continueArgs, ampArgThreads, ampThreadContinue, startupProbeThreadID, "--stream-json", "--stream-json-input", "-x")
+
 	probes := []struct {
-		name string
-		args []string
+		name                 string
+		args                 []string
+		requireMissingThread bool
 	}{
 		{name: "threads export", args: []string{ampArgThreads, ampThreadExport, startupProbeThreadID}},
-		{name: "threads continue", args: []string{ampArgThreads, ampThreadContinue, startupProbeThreadID, "--stream-json", "--stream-json-input", "-x"}},
+		{name: "threads continue", args: continueArgs, requireMissingThread: true},
 		{name: "threads delete", args: []string{ampArgThreads, ampThreadDelete, startupProbeThreadID}},
 	}
 	for _, probe := range probes {
 		if _, err := c.output(probeCtx, probe.args...); err != nil {
-			if methodErr := methodProbeError(probe.name, err); methodErr != nil {
+			if methodErr := methodProbeError(probe.name, err, probe.requireMissingThread); methodErr != nil {
 				return methodErr
 			}
+		} else if probe.requireMissingThread {
+			return fmt.Errorf("amp %s probe unexpectedly succeeded for missing thread %s", probe.name, startupProbeThreadID)
 		}
 	}
 	return nil
 }
 
+func startupProbeSettingsFile() (string, func(), error) {
+	dir, err := mkdirTemp("", "acp-go-amp-startup-*")
+	if err != nil {
+		return "", nil, fmt.Errorf("create amp startup settings dir: %w", err)
+	}
+	cleanup := func() { _ = removeAll(dir) }
+	settingsFile := filepath.Join(dir, "settings.json")
+	if err := writeFile(settingsFile, []byte("{}\n"), 0o600); err != nil {
+		cleanup()
+		return "", nil, fmt.Errorf("write amp startup settings file: %w", err)
+	}
+	return settingsFile, cleanup, nil
+}
+
 // methodProbeError classifies a method-present probe result: a domain
 // missing-thread error means the subcommand exists (probe passes, nil); any
 // other error means the subcommand is missing or broken (probe fails).
-func methodProbeError(name string, err error) error {
+func methodProbeError(name string, err error, requireMissingThread bool) error {
 	if err == nil || isMissingThreadMessage(err.Error()) {
 		return nil
+	}
+	if requireMissingThread {
+		return fmt.Errorf("amp %s probe did not return missing-thread domain error: %w", name, err)
 	}
 	return fmt.Errorf("amp %s probe failed: %w", name, err)
 }

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"path/filepath"
 	"slices"
 	"sync"
@@ -364,6 +365,15 @@ func (a *Agent) loadOrResume(ctx context.Context, sessionID acp.SessionId, cwd s
 	a.mu.Lock()
 	if session := a.sessions[sessionID]; session != nil {
 		a.mu.Unlock()
+		if err := session.applyActiveRequest(meta, cwd, mcpConfig, additionalDirs); err != nil {
+			return nil, err
+		}
+		if err := session.ensureMirrorSynced(ctx); err != nil {
+			return nil, err
+		}
+		if err := session.verifyContinuable(ctx); err != nil {
+			return nil, err
+		}
 		return session, nil
 	}
 	a.mu.Unlock()
@@ -417,6 +427,46 @@ func (a *Agent) loadManifest(ctx context.Context, sessionID acp.SessionId) (ampM
 		return ampManifest{}, acp.NewInternalError(map[string]any{jsonFieldError: "invalid amp session manifest"})
 	}
 	return manifest, nil
+}
+
+func (s *agentSession) applyActiveRequest(meta parsedSessionMeta, cwd string, mcpConfig string, additionalDirs []string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.cwd != cwd {
+		return mismatchField("cwd")
+	}
+	if !slices.Equal(s.additionalDirectories, additionalDirs) {
+		return mismatchField("additionalDirectories")
+	}
+	if s.mcpConfigJSON != mcpConfig {
+		return mismatchField("mcpServers")
+	}
+	if meta.optionFields.env && !maps.Equal(activeRequestEnv(s.env), activeRequestEnv(mergeEnv(s.agent.options.Env, meta.options.Env))) {
+		return mismatchField("env")
+	}
+	if meta.optionFields.mode && s.mode != meta.options.Mode {
+		return mismatchField("mode")
+	}
+	if meta.optionFields.effort && s.effort != meta.options.Effort {
+		return mismatchField("effort")
+	}
+	if meta.rawEventField {
+		s.rawEvents = meta.rawEvent
+	}
+	return nil
+}
+
+func activeRequestEnv(env map[string]string) map[string]string {
+	out := cloneStringMap(env)
+	for _, key := range []string{"HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"} {
+		delete(out, key)
+	}
+	return out
+}
+
+func mismatchField(field string) error {
+	return acp.NewInvalidParams(map[string]any{jsonFieldError: "mismatch", jsonFieldField: field})
 }
 
 func (a *Agent) validateSessionStartOptions(options AmpOptions) error {
@@ -610,17 +660,19 @@ func parseSessionMeta(meta map[string]any) (parsedSessionMeta, error) {
 			for ampKey, ampValue := range ampMeta {
 				switch ampKey {
 				case "options":
-					options, err := parseAmpOptions(ampValue)
+					options, fields, err := parseAmpOptionsWithPresence(ampValue)
 					if err != nil {
 						return result, err
 					}
 					result.options = options
+					result.optionFields = fields
 				case "rawEvent":
 					enabled, err := parseRawEventMeta(ampValue)
 					if err != nil {
 						return result, err
 					}
 					result.rawEvent = enabled
+					result.rawEventField = true
 				default:
 					return result, unsupportedField("_meta.amp." + ampKey)
 				}
@@ -633,51 +685,63 @@ func parseSessionMeta(meta map[string]any) (parsedSessionMeta, error) {
 }
 
 func parseAmpOptions(value any) (AmpOptions, error) {
+	options, _, err := parseAmpOptionsWithPresence(value)
+	return options, err
+}
+
+func parseAmpOptionsWithPresence(value any) (AmpOptions, ampOptionFields, error) {
 	raw, ok := value.(map[string]any)
 	if !ok {
-		return AmpOptions{}, unsupportedField("_meta.amp.options")
+		return AmpOptions{}, ampOptionFields{}, unsupportedField("_meta.amp.options")
 	}
 	options := AmpOptions{}
+	fields := ampOptionFields{}
 	for key, value := range raw {
 		switch key {
 		case "model":
 			model, ok := value.(string)
 			if !ok {
-				return options, unsupportedField("_meta.amp.options.model")
+				return options, fields, unsupportedField("_meta.amp.options.model")
 			}
 			options.Model = model
 		case "env":
-			env, ok := value.(map[string]any)
-			if !ok {
-				return options, unsupportedField("_meta.amp.options.env")
-			}
-			options.Env = map[string]string{}
-			for k, v := range env {
-				str, ok := v.(string)
-				if !ok {
-					return options, unsupportedField("_meta.amp.options.env." + k)
+			fields.env = true
+			switch env := value.(type) {
+			case map[string]any:
+				options.Env = map[string]string{}
+				for k, v := range env {
+					str, ok := v.(string)
+					if !ok {
+						return options, fields, unsupportedField("_meta.amp.options.env." + k)
+					}
+					options.Env[k] = str
 				}
-				options.Env[k] = str
+			case map[string]string:
+				options.Env = cloneStringMap(env)
+			default:
+				return options, fields, unsupportedField("_meta.amp.options.env")
 			}
 		case "outputSchema":
-			return options, unsupportedField("_meta.amp.options.outputSchema")
+			return options, fields, unsupportedField("_meta.amp.options.outputSchema")
 		case "mode":
+			fields.mode = true
 			mode, ok := value.(string)
 			if !ok {
-				return options, unsupportedField("_meta.amp.options.mode")
+				return options, fields, unsupportedField("_meta.amp.options.mode")
 			}
 			options.Mode = mode
 		case "effort":
+			fields.effort = true
 			effort, ok := value.(string)
 			if !ok {
-				return options, unsupportedField("_meta.amp.options.effort")
+				return options, fields, unsupportedField("_meta.amp.options.effort")
 			}
 			options.Effort = effort
 		default:
-			return options, unsupportedField("_meta.amp.options." + key)
+			return options, fields, unsupportedField("_meta.amp.options." + key)
 		}
 	}
-	return options, nil
+	return options, fields, nil
 }
 
 func parseRawEventMeta(value any) (bool, error) {

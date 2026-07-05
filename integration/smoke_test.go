@@ -222,6 +222,12 @@ if [ "$last" = "--help" ]; then
   echo "--settings-file --mcp-config -m --effort --json --stream-json-input threads continue threads export threads delete"
   exit 0
 fi
+for arg in "$@"; do
+  if [ "$arg" = "T-00000000-0000-0000-0000-000000000000" ]; then
+    echo "Thread not found" >&2
+    exit 1
+  fi
+done
 prev=""
 sub=""
 for arg in "$@"; do
