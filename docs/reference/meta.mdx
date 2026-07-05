@@ -1,3 +1,29 @@
 # Meta
 
-Accepted owned metadata is `_meta.amp.options` and `_meta.amp.rawEvent.enabled`. Unknown owned keys fail closed.
+Lifecycle requests accept only this Amp-owned metadata:
+
+```json
+{
+  "_meta": {
+    "amp": {
+      "options": {
+        "env": {},
+        "mode": "smart",
+        "effort": "high"
+      },
+      "rawEvent": {
+        "enabled": false
+      }
+    }
+  }
+}
+```
+
+Accepted option fields are `env`, `mode`, `effort`, `model`, and
+`outputSchema`. `model` and `outputSchema` exist for API symmetry but fail at
+session start with the uniform unsupported error. Unknown keys under
+`_meta.amp` or `_meta.amp.options` fail closed. Foreign metadata namespaces are
+ignored.
+
+Initialize advertises `_meta.amp.rawEvent` and `_meta.amp.sessionStore`. It
+omits fork and elicitation capability metadata.

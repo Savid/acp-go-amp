@@ -520,14 +520,7 @@ func fakeAgentAmpPath(t *testing.T, mode string) (string, string) {
 	if runtime.GOOS == "windows" {
 		t.Skip("fake executable source is built only for local POSIX tests")
 	}
-	if err := os.MkdirAll(".tmp", 0o755); err != nil {
-		t.Fatal(err)
-	}
-	dir, err := os.MkdirTemp(".tmp", "fake-amp-*")
-	if err != nil {
-		t.Fatal(err)
-	}
-	dir, err = filepath.Abs(dir)
+	dir, err := filepath.Abs(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -559,6 +552,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 const fakeMode = ` + strconv.Quote(mode) + `
@@ -599,6 +593,23 @@ func main() {
 		if mode == "missing" {
 			os.Stderr.WriteString("Thread not found\n")
 			os.Exit(1)
+		}
+		if mode == "result-error" {
+			os.Stdout.WriteString("{\"type\":\"result\",\"subtype\":\"error\",\"duration_ms\":1,\"is_error\":true,\"error\":\"native failed\",\"session_id\":\"T-agent-thread\"}\n")
+			return
+		}
+		if mode == "no-result" {
+			os.Stdout.WriteString("{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"partial\"}]},\"session_id\":\"T-agent-thread\"}\n")
+			return
+		}
+		if mode == "malformed-only" {
+			os.Stdout.WriteString("{bad json\n")
+			return
+		}
+		if mode == "hang" {
+			for {
+				time.Sleep(time.Hour)
+			}
 		}
 		os.Stderr.WriteString("native stderr noise\n")
 		os.Stdout.WriteString("native stdout noise\n")

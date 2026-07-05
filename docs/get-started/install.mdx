@@ -1,3 +1,16 @@
 # Install
 
-Use `go get github.com/savid/acp-go-amp` for embedding or build `./cmd/acp-go-amp` for the stdio command.
+For embedded use:
+
+```text
+go get github.com/savid/acp-go-amp
+```
+
+For the stdio command:
+
+```text
+go build ./cmd/acp-go-amp
+```
+
+The Amp CLI must be installed separately. The wrapper resolves it from
+`WithExecutablePath`, `-path`, or `PATH`.

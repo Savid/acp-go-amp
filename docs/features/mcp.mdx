@@ -1,3 +1,18 @@
 # MCP
 
-ACP stdio and HTTP MCP servers are rendered to Amp's `--mcp-config` JSON. SSE and ACP MCP transports are rejected at session start.
+ACP stdio and HTTP MCP servers are rendered into Amp `--mcp-config` JSON before
+starting a prompt process.
+
+Accepted:
+
+- stdio servers with name, command, args, and env
+- HTTP servers with name, URL, and headers
+
+Rejected during session start:
+
+- SSE transports
+- ACP transports
+- entries with no transport
+- entries with an empty server name
+
+The rejection is an invalid-params error naming the server index or field.

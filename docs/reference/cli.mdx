@@ -1,3 +1,15 @@
 # CLI
 
-`acp-go-amp` is a stdio ACP command. Flags: `-path`, `-home`, `-model`, `-debug`, `-version`.
+`acp-go-amp` runs an ACP JSON-RPC server on stdio.
+
+Flags:
+
+- `-path`: Amp executable path. Defaults to `amp` on `PATH`.
+- `-home`: parent directory for isolated per-session Amp settings files.
+- `-model`: default model. Present for sibling flag parity; non-empty values
+  fail session start because Amp has no ACP model config option.
+- `-debug`: write adapter debug logs to stderr.
+- `-version`: print adapter version and exit.
+
+Stdout is reserved for ACP JSON-RPC. Native Amp stdout and stderr are captured
+through dedicated pipes.

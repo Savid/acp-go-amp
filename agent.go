@@ -27,6 +27,7 @@ type Agent struct {
 	conn     *acp.AgentSideConnection
 	sessions map[acp.SessionId]*agentSession
 	deleted  map[acp.SessionId]struct{}
+	pending  int
 	rawSeq   atomic.Int64
 
 	activeLimitErr error
@@ -181,6 +182,7 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (a
 
 	a.mu.Lock()
 	a.sessions[probeSession.id] = probeSession
+	a.pending--
 	a.mu.Unlock()
 	return acp.NewSessionResponse{SessionId: probeSession.id, ConfigOptions: probeSession.configOptions()}, nil
 }
@@ -415,13 +417,20 @@ func (a *Agent) reserveSessionSlot() error {
 	if a.closed {
 		return acp.NewInvalidRequest(map[string]any{jsonFieldError: "agent closed"})
 	}
-	if len(a.sessions) >= a.maxActiveSessions() {
+	if len(a.sessions)+a.pending >= a.maxActiveSessions() {
 		return backpressureError("active_sessions")
 	}
+	a.pending++
 	return nil
 }
 
-func (a *Agent) releaseSessionSlot(acp.SessionId) {}
+func (a *Agent) releaseSessionSlot(acp.SessionId) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.pending > 0 {
+		a.pending--
+	}
+}
 
 func (a *Agent) session(id acp.SessionId) (*agentSession, error) {
 	if _, deleted := a.isDeleted(id); deleted {
@@ -598,10 +607,7 @@ func mcpConfigJSON(servers []acp.McpServer) (string, error) {
 			return "", acp.NewInvalidParams(map[string]any{jsonFieldField: fmt.Sprintf("mcpServers[%d]", i)})
 		}
 	}
-	data, err := json.Marshal(payload)
-	if err != nil {
-		return "", err
-	}
+	data, _ := json.Marshal(payload)
 	return string(data), nil
 }
 

@@ -1,3 +1,20 @@
 # Sessions
 
-ACP session IDs are native Amp thread IDs. New sessions call `amp threads new`; prompts continue the existing thread.
+ACP session IDs are native Amp thread IDs such as `T-...`.
+
+`session/new` calls `amp threads new`, persists an initial manifest, and returns
+select config options for `mode` and `effort`. No prompt tokens are spent while
+creating the empty thread.
+
+`session/load` reads the store manifest and transcript, recreates the wrapper
+session with a fresh isolated settings file, and replays stored frames to the
+client. `session/resume` uses the same stored manifest but does not replay
+history.
+
+`session/delete` writes the store tombstone first, closes any active local
+session, then calls `amp threads delete`. A native delete failure is returned
+after the local session is already hidden from list/load/resume.
+
+`session/close` stops accepting new prompts for the local wrapper session and
+removes its isolated settings directory. It does not delete the server-side Amp
+thread.

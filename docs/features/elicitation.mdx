@@ -1,3 +1,7 @@
 # Elicitation
 
-Amp does not expose a native non-permission question surface for ACP. This package does not advertise Amp elicitation metadata.
+Amp does not expose a native non-permission question surface that can be mapped
+to ACP elicitation. This package does not advertise Amp elicitation metadata.
+
+Client elicitation capabilities are accepted during `initialize` but do not
+change Amp behavior. The wrapper never sends `elicitation/create`.

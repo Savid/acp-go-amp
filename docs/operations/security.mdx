@@ -1,3 +1,16 @@
 # Security
 
-The wrapper uses isolated Amp settings files and never persists auth, settings, or secrets to the session store.
+The wrapper creates an isolated Amp settings file for each ACP session. The file
+starts as an empty JSON object and is passed to Amp with `--settings-file`.
+
+Auth material is live process state:
+
+- `AMP_API_KEY` may be supplied through `WithEnv` or the process environment.
+- `AMP_URL` may be supplied the same way.
+- Neither value is written to `SessionStore`.
+
+The session store contains only the manifest and captured stream-json frames.
+It does not contain settings, auth files, API keys, or other secrets.
+
+Native Amp subprocesses never inherit ACP stdout. The wrapper captures native
+stdout and stderr separately so JSON-RPC output stays clean.

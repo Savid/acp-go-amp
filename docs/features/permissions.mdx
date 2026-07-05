@@ -1,3 +1,10 @@
 # Permissions
 
-Amp execute mode does not expose a native permission request and response protocol. This package never sends `session/request_permission`.
+Amp execute mode does not expose a native permission request and response
+protocol to the wrapper. The package never sends `session/request_permission`.
+
+Native Amp settings decide whether a tool action runs, is denied, or is stopped.
+The wrapper does not add a permission-mode option and does not set the native allow-all setting.
+
+Permission prompts are therefore not durable ACP state. There is no stored
+permission queue to replay on `session/load` or `session/resume`.

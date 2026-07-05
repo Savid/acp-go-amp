@@ -1,3 +1,33 @@
 # Go API
 
-Import `github.com/savid/acp-go-amp` as `ampacp`. Use `NewAgent` or `Serve` with common sibling options.
+Import the module as:
+
+```go
+import ampacp "github.com/savid/acp-go-amp"
+```
+
+Primary entry points:
+
+- `ampacp.NewAgent(opts ...Option) *Agent`
+- `ampacp.Serve(ctx, input, output, opts ...Option) error`
+
+Common options:
+
+- `WithExecutablePath`
+- `WithHome`
+- `WithDefaultModel`
+- `WithEnv`
+- `WithSessionStore`
+- `WithConcurrencyLimits`
+- OpenTelemetry provider options
+
+Amp per-session options:
+
+- `AmpOptions.Env`
+- `AmpOptions.Mode`
+- `AmpOptions.Effort`
+- `AmpOptions.Model` and `AmpOptions.OutputSchema`, which are accepted in the
+  struct for API symmetry but rejected at session start when non-empty.
+
+Request helpers include builders for new/load/resume/delete, text prompts,
+config-option updates, stdio MCP servers, and HTTP MCP servers.

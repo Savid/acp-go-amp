@@ -197,7 +197,6 @@ func (s *InMemorySessionStore) ListSubkeys(ctx context.Context, key SessionKey) 
 	defer s.mu.RUnlock()
 
 	subkeys := make([]string, 0)
-	seen := map[string]struct{}{}
 	for existing := range s.entries {
 		if existing.SessionID != key.SessionID || existing.Subpath == SessionStoreMainSubpath {
 			continue
@@ -205,10 +204,6 @@ func (s *InMemorySessionStore) ListSubkeys(ctx context.Context, key SessionKey) 
 		if _, tombstoned := s.deleted[existing]; tombstoned {
 			continue
 		}
-		if _, ok := seen[existing.Subpath]; ok {
-			continue
-		}
-		seen[existing.Subpath] = struct{}{}
 		subkeys = append(subkeys, existing.Subpath)
 	}
 	sort.Strings(subkeys)

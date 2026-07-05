@@ -1,3 +1,26 @@
 # Models And Config
 
-Amp exposes `mode` values `smart`, `deep`, and `rush`, plus effort values `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. Direct model selection is unsupported.
+Amp exposes two ACP session config options. Both are select-only.
+
+`mode` values:
+
+- `smart`
+- `deep`
+- `rush`
+
+`effort` values:
+
+- `none`
+- `minimal`
+- `low`
+- `medium`
+- `high`
+- `xhigh`
+- `max`
+
+The wrapper passes selected mode and effort values through to Amp with `-m` and
+`--effort`. It does not maintain an adapter-owned mode and effort matrix.
+
+There is no ACP model config option for Amp. A non-empty `WithDefaultModel`,
+`AmpOptions.Model`, or `_meta.amp.options.model` fails session start with the
+uniform unsupported error naming field `model`.

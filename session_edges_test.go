@@ -346,18 +346,23 @@ func newClosedAgentConnection(t *testing.T) *acp.AgentSideConnection {
 }
 
 type errorStore struct {
-	loadErr error
-	listErr error
+	appendErr  error
+	loadErr    error
+	replaceErr error
+	deleteErr  error
+	listErr    error
 }
 
-func (s *errorStore) Append(context.Context, SessionKey, []SessionStoreEntry) error { return nil }
+func (s *errorStore) Append(context.Context, SessionKey, []SessionStoreEntry) error {
+	return s.appendErr
+}
 func (s *errorStore) Load(context.Context, SessionKey) ([]SessionStoreEntry, error) {
 	return nil, s.loadErr
 }
 func (s *errorStore) Replace(context.Context, SessionKey, []SessionStoreReplacement) error {
-	return nil
+	return s.replaceErr
 }
-func (s *errorStore) Delete(context.Context, SessionKey) error { return nil }
+func (s *errorStore) Delete(context.Context, SessionKey) error { return s.deleteErr }
 func (s *errorStore) ListSessions(context.Context) ([]SessionSummary, error) {
 	return nil, s.listErr
 }

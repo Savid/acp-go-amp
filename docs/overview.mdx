@@ -1,3 +1,19 @@
 # Overview
 
-`acp-go-amp` is a Go ACP wrapper around the Amp CLI. It maps ACP sessions to Amp threads and mirrors stream JSON frames into the configured session store.
+`acp-go-amp` is a Go ACP wrapper around the Amp CLI.
+
+The wrapper maps ACP sessions directly to Amp threads:
+
+- `session/new` creates an Amp thread
+- `session/prompt` continues that thread with stream-json
+- `session/load` replays stored transcript frames for display
+- `session/resume` restores wrapper state without replay
+- `session/delete` tombstones the local store first, then deletes the Amp thread
+
+The native boundary is the Amp CLI. The wrapper does not expose an HTTP service
+or a native UI. Hosts either embed `ampacp.Serve` or run the `acp-go-amp` stdio
+command.
+
+The public contract is intentionally small: mode and effort config options,
+stdio/HTTP MCP setup, raw events, session store mirror, and Amp thread
+lifecycle.

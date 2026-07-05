@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -309,6 +310,151 @@ func TestClientErrorBranches(t *testing.T) {
 	}
 	if stripANSI("\x1b[31mred\x1b[0m") != "red" {
 		t.Fatal("stripANSI failed")
+	}
+}
+
+func TestClientProcessSeamsReaderAndInterruptEdges(t *testing.T) {
+	ctx := context.Background()
+	path, _ := fakeAmpPath(t, "")
+
+	if _, err := NewClient(nil, Options{CLIPath: "/does/not/exist", Cwd: t.TempDir()}).NewThread(ctx); err == nil {
+		t.Fatal("NewThread output error ignored")
+	}
+	if _, err := NewClient(nil, Options{CLIPath: "/does/not/exist", Cwd: t.TempDir()}).ListThreads(ctx); err == nil {
+		t.Fatal("ListThreads output error ignored")
+	}
+
+	oldLookPath := lookPath
+	lookPath = func(string) (string, error) { return "", errors.New("lookpath failed") }
+	if _, err := NewClient(nil, Options{}).Version(ctx); err == nil {
+		t.Fatal("Version discover error ignored")
+	}
+	if _, err := NewClient(nil, Options{Cwd: t.TempDir()}).Continue(ctx, "T-1", map[string]any{"type": "user"}); err == nil {
+		t.Fatal("Continue discover error ignored")
+	}
+	if _, err := Discover(ctx, ""); err == nil {
+		t.Fatal("Discover lookpath error ignored")
+	}
+	lookPath = oldLookPath
+
+	oldGetwd := getwd
+	getwd = func() (string, error) { return "", errors.New("getwd failed") }
+	if _, err := NewClient(nil, Options{CLIPath: path}).Continue(ctx, "T-1", map[string]any{"type": "user"}); err == nil {
+		t.Fatal("Continue getwd error ignored")
+	}
+	getwd = oldGetwd
+
+	oldCommandContext := commandContext
+	for _, tc := range []struct {
+		name  string
+		shape func(*exec.Cmd)
+		want  string
+	}{
+		{name: "stdin", shape: func(cmd *exec.Cmd) { cmd.Stdin = strings.NewReader("taken") }, want: "create amp stdin"},
+		{name: "stdout", shape: func(cmd *exec.Cmd) { cmd.Stdout = io.Discard }, want: "create amp stdout"},
+		{name: "stderr", shape: func(cmd *exec.Cmd) { cmd.Stderr = io.Discard }, want: "create amp stderr"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			commandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+				cmd := exec.CommandContext(ctx, name, args...)
+				tc.shape(cmd)
+				return cmd
+			}
+			_, err := NewClient(nil, Options{CLIPath: path, Cwd: t.TempDir()}).Continue(ctx, "T-1", map[string]any{"type": "user"})
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Continue pipe error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+	commandContext = oldCommandContext
+
+	if _, err := NewClient(nil, Options{CLIPath: path, Cwd: t.TempDir()}).Continue(ctx, "T-1", make(chan int)); err == nil {
+		t.Fatal("Continue send error ignored")
+	}
+
+	oldCloseWriteCloser := closeWriteCloser
+	closeWriteCloser = func(io.Closer) error { return errors.New("close stdin failed") }
+	if _, err := NewClient(nil, Options{CLIPath: path, Cwd: t.TempDir()}).Continue(ctx, "T-1", map[string]any{"type": "user"}); err == nil || !strings.Contains(err.Error(), "close amp stdin") {
+		t.Fatalf("Continue stdin close error = %v", err)
+	}
+	closeWriteCloser = oldCloseWriteCloser
+
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	cancelRead := &Turn{
+		stdout:       io.NopCloser(strings.NewReader(`{"type":"assistant","message":{"content":[{"type":"text","text":"x"}]}}` + "\n")),
+		messages:     make(chan Message),
+		errs:         make(chan error, 2),
+		maxLineBytes: 1024,
+	}
+	cancelRead.readStdout(cancelled)
+	if err := <-cancelRead.errs; !errors.Is(err, context.Canceled) {
+		t.Fatalf("readStdout canceled error = %v", err)
+	}
+
+	readErr := &Turn{stdout: failingReadCloser{}, messages: make(chan Message), errs: make(chan error, 2), maxLineBytes: 1024}
+	readErr.readStdout(ctx)
+	if err := <-readErr.errs; err == nil || !strings.Contains(err.Error(), "read amp stdout") {
+		t.Fatalf("readStdout scanner error = %v", err)
+	}
+
+	doneCmd := exec.Command("sh", "-c", "exit 0")
+	configureCommand(doneCmd)
+	if err := doneCmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	_ = doneCmd.Wait()
+	if err := (&Turn{cmd: doneCmd}).Interrupt(ctx, time.Second); err == nil {
+		t.Fatal("interrupt of exited process did not report signal error")
+	}
+
+	zeroPath, zeroState := fakeAmpPath(t, "sigint-ignore")
+	zeroTurn, err := NewClient(nil, Options{CLIPath: zeroPath, Cwd: t.TempDir()}).Continue(ctx, "T-1", map[string]any{"type": "user"})
+	if err != nil {
+		t.Fatalf("Continue zero interrupt: %v", err)
+	}
+	waitForFile(t, filepath.Join(zeroState, "stdin.jsonl"))
+	if interruptErr := zeroTurn.Interrupt(ctx, 0); interruptErr != nil {
+		t.Fatalf("zero-timeout interrupt: %v", interruptErr)
+	}
+	_ = zeroTurn.Close()
+
+	ctxPath, ctxState := fakeAmpPath(t, "sigint-ignore")
+	ctxTurn, err := NewClient(nil, Options{CLIPath: ctxPath, Cwd: t.TempDir()}).Continue(ctx, "T-1", map[string]any{"type": "user"})
+	if err != nil {
+		t.Fatalf("Continue ctx interrupt: %v", err)
+	}
+	waitForFile(t, filepath.Join(ctxState, "stdin.jsonl"))
+	interruptCtx, interruptCancel := context.WithCancel(ctx)
+	interruptCancel()
+	if interruptErr := ctxTurn.Interrupt(interruptCtx, time.Second); !errors.Is(interruptErr, context.Canceled) {
+		t.Fatalf("interrupt ctx error = %v", interruptErr)
+	}
+	_ = ctxTurn.Close()
+
+	waitPath, waitState := fakeAmpPath(t, "sigint-ignore")
+	waitTurn, err := NewClient(nil, Options{CLIPath: waitPath, Cwd: t.TempDir()}).Continue(ctx, "T-1", map[string]any{"type": "user"})
+	if err != nil {
+		t.Fatalf("Continue wait interrupt: %v", err)
+	}
+	waitForFile(t, filepath.Join(waitState, "stdin.jsonl"))
+	waitBoom := errors.New("wait boom")
+	waitTurn.waitFunc = func() error { return waitBoom }
+	if err := waitTurn.Interrupt(ctx, time.Second); !errors.Is(err, waitBoom) {
+		t.Fatalf("interrupt wait error = %v", err)
+	}
+	_ = killProcess(waitTurn.cmd)
+	_, _ = waitTurn.cmd.Process.Wait()
+
+	drop := &Turn{log: slog.Default(), errs: make(chan error, 1)}
+	drop.errs <- errors.New("full")
+	drop.sendErr(errors.New("dropped with logger"))
+
+	tail := &Turn{}
+	tail.captureStderr("first")
+	tail.captureStderr("second")
+	if got := tail.stderrText(); !strings.Contains(got, "first\nsecond") {
+		t.Fatalf("stderr newline capture = %q", got)
 	}
 }
 

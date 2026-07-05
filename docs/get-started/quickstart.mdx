@@ -1,3 +1,23 @@
 # Quickstart
 
-Install Amp, authenticate it outside ACP, then run `acp-go-amp` over stdio. Hosts can embed the package with `ampacp.Serve`.
+Install Amp and authenticate it outside ACP. Then either run the stdio command
+or embed the Go package.
+
+Command mode:
+
+```text
+acp-go-amp -path amp -home /tmp/acp-go-amp-home
+```
+
+Embedded mode:
+
+```go
+err := ampacp.Serve(ctx, input, output,
+    ampacp.WithExecutablePath("amp"),
+    ampacp.WithHome("/tmp/acp-go-amp-home"),
+    ampacp.WithSessionStore(ampacp.NewInMemorySessionStore()),
+)
+```
+
+For live continuation, pass `AMP_API_KEY` through the process environment or
+`WithEnv`.

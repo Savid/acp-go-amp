@@ -1,3 +1,27 @@
 # Raw Events
 
-Raw events are opt-in per session with `_meta.amp.rawEvent.enabled` and are emitted as `_amp/rawEvent`.
+Raw events are opt-in per session:
+
+```json
+{
+  "_meta": {
+    "amp": {
+      "rawEvent": {
+        "enabled": true
+      }
+    }
+  }
+}
+```
+
+When enabled, each captured Amp stream-json frame is emitted as `_amp/rawEvent`
+with:
+
+- `sessionId`
+- monotonic `sequence`
+- `source` (`stream-json` or `store-replay`)
+- raw `event`
+
+Payloads are capped at 64 KiB. Oversized events are replaced with a small
+truncation marker. Raw events are diagnostic and are not required for normal
+session replay.

@@ -1,3 +1,27 @@
 # ACP Methods
 
-Supported lifecycle methods include initialize, session new/load/resume/list/prompt/cancel/close/delete, and session config option updates.
+Supported stable methods:
+
+- `initialize`
+- `authenticate`
+- `logout`
+- `session/new`
+- `session/load`
+- `session/resume`
+- `session/list`
+- `session/prompt`
+- `session/cancel`
+- `session/close`
+- `session/delete`
+- `session/set_config_option`
+
+`session/set_mode` returns method-not-found and is not advertised.
+
+`_amp/session/fork` returns the package unsupported error because Amp has no
+documented native fork surface. Stable `session/fork` returns method-not-found.
+
+MCP accepts stdio and HTTP server definitions during session start. SSE and ACP
+MCP definitions are rejected with invalid params naming the server.
+
+No slash commands are advertised. Slash-prefixed text remains normal prompt
+content.

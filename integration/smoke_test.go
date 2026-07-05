@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	ampacp "github.com/savid/acp-go-amp"
 	"github.com/savid/acp-go-amp/internal/amp"
 )
 
@@ -67,4 +68,97 @@ func TestLiveThreadTurn(t *testing.T) {
 	if _, err := client.ExportThread(ctx, thread); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestLiveRestoreAfterLocalStateWipe(t *testing.T) {
+	if os.Getenv("ACP_GO_AMP_LIVE") != "1" {
+		t.Skip("set ACP_GO_AMP_LIVE=1 to run live Amp restore test")
+	}
+	apiKey := os.Getenv("AMP_API_KEY")
+	if apiKey == "" {
+		t.Skip("set AMP_API_KEY for isolated live restore test")
+	}
+
+	root := t.TempDir()
+	env, homeParent := isolatedAmpEnv(t, root, apiKey)
+	store := ampacp.NewInMemorySessionStore()
+	cwd := t.TempDir()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	agent := ampacp.NewAgent(
+		ampacp.WithHome(homeParent),
+		ampacp.WithEnv(env),
+		ampacp.WithSessionStore(store),
+	)
+	newResp, err := agent.NewSession(ctx, ampacp.NewSessionRequest(cwd))
+	if err != nil {
+		t.Fatal(err)
+	}
+	threadID := string(newResp.SessionId)
+	cleanupEnv := env
+	defer func() {
+		if threadID != "" {
+			deleteClient := amp.NewClient(slog.Default(), amp.Options{Env: cleanupEnv, Cwd: cwd})
+			_ = deleteClient.DeleteThread(context.Background(), threadID)
+		}
+	}()
+
+	if _, promptErr := agent.Prompt(ctx, ampacp.TextPromptRequest(newResp.SessionId, "Reply with exactly: acp-go-amp-restore-seed")); promptErr != nil {
+		t.Fatalf("seed prompt: %v", promptErr)
+	}
+	_ = agent.Close()
+
+	if removeErr := os.RemoveAll(root); removeErr != nil {
+		t.Fatal(removeErr)
+	}
+	env, homeParent = isolatedAmpEnv(t, root, apiKey)
+	cleanupEnv = env
+
+	restored := ampacp.NewAgent(
+		ampacp.WithHome(homeParent),
+		ampacp.WithEnv(env),
+		ampacp.WithSessionStore(store),
+	)
+	defer func() { _ = restored.Close() }()
+	if _, loadErr := restored.LoadSession(ctx, ampacp.LoadSessionRequest(newResp.SessionId, cwd)); loadErr != nil {
+		t.Fatalf("load after local wipe: %v", loadErr)
+	}
+	resp, promptErr := restored.Prompt(ctx, ampacp.TextPromptRequest(newResp.SessionId, "Reply with exactly: acp-go-amp-restore-ok"))
+	if promptErr != nil {
+		t.Fatalf("continue after local wipe: %v", promptErr)
+	}
+	if resp.StopReason != "end_turn" {
+		t.Fatalf("restore prompt stop reason = %q", resp.StopReason)
+	}
+	if _, err := restored.UnstableDeleteSession(ctx, ampacp.DeleteSessionRequest(newResp.SessionId)); err != nil {
+		t.Fatalf("delete restored thread: %v", err)
+	}
+	threadID = ""
+}
+
+func isolatedAmpEnv(t *testing.T, root string, apiKey string) (map[string]string, string) {
+	t.Helper()
+	paths := map[string]string{
+		"HOME":            filepath.Join(root, "home"),
+		"XDG_CONFIG_HOME": filepath.Join(root, "xdg-config"),
+		"XDG_CACHE_HOME":  filepath.Join(root, "xdg-cache"),
+		"XDG_DATA_HOME":   filepath.Join(root, "xdg-data"),
+		"XDG_STATE_HOME":  filepath.Join(root, "xdg-state"),
+		"ACP_GO_AMP_HOME": filepath.Join(root, "wrapper-home"),
+		"AMP_API_KEY":     apiKey,
+	}
+	if ampURL := os.Getenv("AMP_URL"); ampURL != "" {
+		paths["AMP_URL"] = ampURL
+	}
+	for _, path := range paths {
+		if strings.HasPrefix(path, root) {
+			if err := os.MkdirAll(path, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	return paths, paths["ACP_GO_AMP_HOME"]
 }

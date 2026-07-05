@@ -1,5 +1,27 @@
 # Session Store
 
-The store format is `amp-thread-mirror-v1`. The main subpath contains the latest manifest and `transcript` contains appended Amp stream JSON frames.
+`SessionStoreFormat` is `amp-thread-mirror-v1`.
 
-The mirror supports load replay for display. Native continuation still depends on the server-side Amp thread existing.
+The main subpath stores one manifest entry for the ACP session:
+
+- `threadId`: the native Amp thread ID, which is also the ACP session ID
+- `cwd`, `title`, selected `mode`, selected `effort`
+- Unix millisecond create/update timestamps
+- optional native `threads export` JSON for diagnostics
+
+The `transcript` subpath stores append-ordered Amp stream JSON frames captured
+from completed prompt turns. These are the frames used for ACP
+`session/load` replay and raw-event fidelity. Auth material, settings files,
+API keys, and secrets are never written to the store.
+
+local transcript restore is not native thread resurrection. The local mirror is
+the durability boundary for display replay; the ampcode.com thread is the
+native continuation unit. continuation requires the live server-side Amp thread and AMP_API_KEY.
+
+`session/load` hydrates the local mirror, verifies the thread can be addressed,
+and replays transcript frames to the client. `session/resume` hydrates without
+replaying history.
+
+If the server-side thread is deleted or unavailable, session/load can replay the local transcript for display. A subsequent prompt fails with one terminal
+`native_state_missing` error. The adapter does not create a replacement thread
+from transcript text because that would lose native state.

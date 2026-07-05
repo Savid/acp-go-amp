@@ -1,4 +1,4 @@
-//nolint:goconst,wsl_v5,nlreturn,govet // compact scaffold keeps protocol mapping branches local.
+//nolint:goconst,wsl_v5,nlreturn // compact scaffold keeps protocol mapping branches local.
 package ampacp
 
 import (
@@ -35,6 +35,7 @@ const (
 var (
 	errSessionDeleted = errors.New("session deleted")
 	errSessionClosed  = errors.New("session closed")
+	writeFile         = os.WriteFile
 )
 
 type ampManifest struct {
@@ -86,7 +87,7 @@ func newAgentSession(agent *Agent, id acp.SessionId, cwd string, meta parsedSess
 		return nil, fmt.Errorf("create amp settings dir: %w", err)
 	}
 	settingsFile := filepath.Join(dir, "settings.json")
-	if err := os.WriteFile(settingsFile, []byte("{}\n"), 0o600); err != nil {
+	if err := writeFile(settingsFile, []byte("{}\n"), 0o600); err != nil {
 		_ = os.RemoveAll(dir)
 		return nil, fmt.Errorf("write amp settings file: %w", err)
 	}
@@ -150,9 +151,6 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (ac
 		return acp.PromptResponse{}, err
 	}
 	defer release()
-	if err := s.ready(); err != nil {
-		return acp.PromptResponse{}, err
-	}
 
 	input, err := promptInput(params.Prompt)
 	if err != nil {
@@ -182,10 +180,7 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (ac
 		case msg, ok := <-turn.Messages():
 			if !ok {
 				if terminal == nil {
-					if err := receiveTurnError(turn); err != nil {
-						return acp.PromptResponse{}, classifyNativePromptError(err)
-					}
-					return acp.PromptResponse{}, acp.NewInternalError(map[string]any{jsonFieldError: "amp stream ended without result"})
+					return streamEndedWithoutTerminal(ctx, promptUsage, params.MessageId, turn)
 				}
 				if terminal.IsError {
 					return acp.PromptResponse{}, acp.NewInternalError(map[string]any{jsonFieldError: terminal.Error, "subtype": terminal.Subtype})
@@ -223,10 +218,7 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (ac
 			if !ok {
 				continue
 			}
-			if ctx.Err() != nil {
-				return acp.PromptResponse{StopReason: acp.StopReasonCancelled, Usage: promptUsage, UserMessageId: params.MessageId}, nil
-			}
-			return acp.PromptResponse{}, classifyNativePromptError(err)
+			return promptErrorResponse(ctx, promptUsage, params.MessageId, err)
 		case <-ctx.Done():
 			_ = s.interrupt(context.Background())
 			return acp.PromptResponse{StopReason: acp.StopReasonCancelled, Usage: promptUsage, UserMessageId: params.MessageId}, nil
@@ -560,13 +552,35 @@ func messageUsage(msg amp.Message) *acp.Usage {
 	return nil
 }
 
-func receiveTurnError(turn *amp.Turn) error {
+type turnErrorReader interface {
+	Errors() <-chan error
+}
+
+func receiveTurnError(turn turnErrorReader) error {
 	select {
 	case err := <-turn.Errors():
 		return err
 	default:
 		return nil
 	}
+}
+
+func streamEndedWithoutTerminal(ctx context.Context, usage *acp.Usage, messageID *string, turn turnErrorReader) (acp.PromptResponse, error) {
+	if err := receiveTurnError(turn); err != nil {
+		return promptErrorResponse(ctx, usage, messageID, err)
+	}
+	return acp.PromptResponse{}, acp.NewInternalError(map[string]any{jsonFieldError: "amp stream ended without result"})
+}
+
+func promptErrorResponse(ctx context.Context, usage *acp.Usage, messageID *string, err error) (acp.PromptResponse, error) {
+	if ctx.Err() != nil {
+		// Native process cancellation can surface as a process error; ACP callers
+		// should receive the cancellation result once their context is done.
+		_ = err
+		//nolint:nilerr // The native error is intentionally suppressed for caller cancellation.
+		return acp.PromptResponse{StopReason: acp.StopReasonCancelled, Usage: usage, UserMessageId: messageID}, nil
+	}
+	return acp.PromptResponse{}, classifyNativePromptError(err)
 }
 
 func classifyNativePromptError(err error) error {

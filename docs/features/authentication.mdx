@@ -1,3 +1,10 @@
 # Authentication
 
-Amp owns authentication. `initialize` advertises no ACP auth methods; use Amp's native login or `AMP_API_KEY` in the process environment.
+Amp owns authentication. `initialize` advertises no ACP auth methods, and
+`Authenticate` rejects caller-provided method IDs.
+
+Use Amp's native account setup or provide `AMP_API_KEY` to the native process.
+For embedded hosts, pass environment values with `WithEnv` or per-session
+`AmpOptions.Env`.
+
+Auth material is never stored in the session manifest or transcript.

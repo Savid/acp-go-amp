@@ -20,6 +20,13 @@ import (
 
 const maxCapturedStderrBytes = 64 * 1024
 
+var (
+	commandContext   = exec.CommandContext
+	getwd            = os.Getwd
+	lookPath         = exec.LookPath
+	closeWriteCloser = func(closer io.Closer) error { return closer.Close() }
+)
+
 type Options struct {
 	CLIPath       string
 	Cwd           string
@@ -103,11 +110,11 @@ func (c *Client) Continue(ctx context.Context, threadID string, input any) (*Tur
 	args := c.globalArgs()
 	args = append(args, "threads", "continue", threadID, "--stream-json", "--stream-json-input", "-x")
 
-	cmd := exec.CommandContext(ctx, path, args...)
+	cmd := commandContext(ctx, path, args...)
 	configureCommand(cmd)
 	cmd.Dir = c.options.Cwd
 	if cmd.Dir == "" {
-		cmd.Dir, err = os.Getwd()
+		cmd.Dir, err = getwd()
 		if err != nil {
 			return nil, fmt.Errorf("get working directory: %w", err)
 		}
@@ -145,7 +152,7 @@ func (c *Client) Continue(ctx context.Context, threadID string, input any) (*Tur
 		_ = turn.Close()
 		return nil, err
 	}
-	if err := stdin.Close(); err != nil {
+	if err := closeWriteCloser(stdin); err != nil {
 		_ = turn.Close()
 		return nil, fmt.Errorf("close amp stdin: %w", err)
 	}
@@ -158,11 +165,11 @@ func (c *Client) output(ctx context.Context, args ...string) ([]byte, error) {
 		return nil, err
 	}
 	args = append(c.globalArgs(), args...)
-	cmd := exec.CommandContext(ctx, path, args...)
+	cmd := commandContext(ctx, path, args...)
 	configureCommand(cmd)
 	cmd.Dir = c.options.Cwd
 	if cmd.Dir == "" {
-		cmd.Dir, _ = os.Getwd()
+		cmd.Dir, _ = getwd()
 	}
 	cmd.Env = BuildEnv(c.options.Env, cmd.Dir)
 	var stderr bytes.Buffer
@@ -202,7 +209,7 @@ func Discover(ctx context.Context, cliPath string) (string, error) {
 	if strings.TrimSpace(cliPath) != "" {
 		return cliPath, nil
 	}
-	path, err := exec.LookPath("amp")
+	path, err := lookPath("amp")
 	if err != nil {
 		return "", fmt.Errorf("find amp in PATH: %w", err)
 	}
@@ -258,6 +265,7 @@ type Turn struct {
 	stderrTail   bytes.Buffer
 	waitOnce     sync.Once
 	waitErr      error
+	waitFunc     func() error
 	closeOnce    sync.Once
 }
 
@@ -377,7 +385,9 @@ func (t *Turn) Close() error {
 
 func (t *Turn) wait() error {
 	t.waitOnce.Do(func() {
-		if t.cmd != nil {
+		if t.waitFunc != nil {
+			t.waitErr = t.waitFunc()
+		} else if t.cmd != nil {
 			t.waitErr = t.cmd.Wait()
 		}
 	})

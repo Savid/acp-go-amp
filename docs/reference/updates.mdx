@@ -1,3 +1,21 @@
 # Updates
 
+Amp stream-json frames produce ACP session updates during prompt turns and
+store replay.
+
+Update mapping:
+
+- user text content -> `user_message_chunk`
+- assistant text content -> `agent_message_chunk`
+- assistant tool use -> `tool_call`
+- user tool result -> `tool_call_update`
+- assistant or final usage -> `usage_update`
+- config changes -> `config_option_update`
+
+Raw Amp frames are emitted only when `_meta.amp.rawEvent.enabled` is true for
+the session. Raw events are diagnostic and capped at 64 KiB per notification.
+
+If the server-side thread is missing during continuation, the prompt returns a
+single terminal internal error with `native_state_missing` in the error data.
+
 Amp stream JSON frames map to ACP user, assistant, tool, usage, and raw-event updates.

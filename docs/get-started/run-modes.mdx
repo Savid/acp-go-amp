@@ -1,3 +1,16 @@
 # Run Modes
 
-The command supports `-path`, `-home`, `-model`, `-debug`, and `-version`. Amp mode and effort are ACP session config options.
+The command is intended to be launched by an ACP host:
+
+```text
+acp-go-amp -path amp -home /path/to/wrapper-home
+```
+
+`-home` is a parent directory. The wrapper creates an isolated settings file
+directory for each ACP session and removes it on close/delete.
+
+`-debug` writes adapter logs to stderr. ACP JSON-RPC remains on stdout only.
+
+Amp mode and effort are ACP session config options, not command flags. The
+only supported serve-mode flags are `-path`, `-home`, `-model`, `-debug`, and
+`-version`.

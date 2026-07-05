@@ -1,3 +1,26 @@
 # Prompt Streaming
 
-Each ACP prompt starts `amp threads continue <thread> --stream-json --stream-json-input -x` and maps Amp stream frames to ACP updates.
+Each ACP prompt starts one short-lived process:
+
+```text
+amp threads continue <thread> --stream-json --stream-json-input -x
+```
+
+The wrapper always adds `--no-ide`, `--no-color`, `--no-notifications`, and an
+isolated `--settings-file`. MCP configuration is supplied with `--mcp-config`
+when the ACP session includes stdio or HTTP MCP servers.
+
+Amp stream-json frames map to ACP updates:
+
+- user text frames become user message chunks
+- assistant text frames become agent message chunks
+- tool-use frames become tool-call updates
+- usage data becomes ACP `usage_update`
+- final result usage is copied to the prompt response
+
+No slash commands are advertised. Text like `/review` remains ordinary prompt
+text and is sent to Amp unchanged.
+
+`session/cancel` sends an interrupt to the active process. If Amp does not exit
+within the configured native cancel timeout, the process group is killed. Each
+prompt returns exactly one terminal result.

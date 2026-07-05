@@ -1,3 +1,16 @@
 # Observability
 
-Provide a logger with `WithLogger`. OpenTelemetry providers are accepted through the shared options surface.
+Provide a logger with `WithLogger`. The command uses stderr for logs and keeps
+stdout reserved for ACP JSON-RPC.
+
+OpenTelemetry providers are accepted through the shared options surface:
+
+- `WithTracerProvider`
+- `WithMeterProvider`
+- `WithTextMapPropagator`
+
+Native Amp stderr is captured in a bounded buffer. If a native process exits
+with an error, the tail is included in the adapter error detail when available.
+
+Raw events can be enabled per session for stream-json diagnostics, but they are
+off by default.

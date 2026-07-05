@@ -1,3 +1,10 @@
 # Examples
 
-See `examples/minimal-client`, `examples/interactive-chat`, and `examples/resume-from-file`.
+Examples are executable Go programs:
+
+- `examples/minimal-client`: starts the agent and sends one prompt.
+- `examples/interactive-chat`: keeps a session open and sends repeated prompts.
+- `examples/resume-from-file`: shows storing a session ID and resuming it later.
+
+Each example uses the public Go helpers rather than reaching into internal Amp
+process code.
