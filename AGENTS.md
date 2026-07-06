@@ -30,7 +30,7 @@ stdio or embed the agent directly in Go.
 
 ## Coding Rules
 
-- Keep the public package surface identical to the sibling contract with Amp
+- Keep the public package surface identical to the adapter contract with Amp
   names substituted.
 - Do not add permission bridging, command catalogs, model config options, or
   fork behavior without a director ruling.

@@ -168,6 +168,7 @@ func TestServeFakeAmpLifecycleStdoutCleanStoreReplayAndDelete(t *testing.T) {
 	if raw := client.rawSnapshot(); len(raw) < 4 {
 		t.Fatalf("raw events = %d", len(raw))
 	}
+	requireNoCommandUpdates(t, client.updatesSnapshot())
 
 	beforeLoad := len(client.updatesSnapshot())
 	if _, err := conn.LoadSession(ctx, LoadSessionRequest(newResp.SessionId, cwd, sessionOptions...)); err != nil {
@@ -183,6 +184,7 @@ func TestServeFakeAmpLifecycleStdoutCleanStoreReplayAndDelete(t *testing.T) {
 	if got := len(client.updatesSnapshot()); got != afterLoad {
 		t.Fatalf("resume replayed transcript: before=%d after=%d", afterLoad, got)
 	}
+	requireNoCommandUpdates(t, client.updatesSnapshot())
 
 	listResp, err := conn.ListSessions(ctx, ListSessionsRequest(WithListSessionsCwd(cwd)))
 	if err != nil {
@@ -490,6 +492,22 @@ func startTestServe(t *testing.T, opts ...Option) (*acp.ClientSideConnection, *r
 		}
 	}
 	return conn, client, cleanup
+}
+
+// requireNoCommandUpdates asserts Amp never emits an available_commands_update:
+// no notification carries one, so a host's recorded-commands slice stays empty.
+func requireNoCommandUpdates(t *testing.T, notifications []acp.SessionNotification) {
+	t.Helper()
+
+	recordedCommands := make([]acp.AvailableCommand, 0)
+	for _, notification := range notifications {
+		if update := notification.Update.AvailableCommandsUpdate; update != nil {
+			recordedCommands = append(recordedCommands, update.AvailableCommands...)
+		}
+	}
+	if len(recordedCommands) != 0 {
+		t.Fatalf("amp emitted available_commands_update: recorded commands = %#v, want empty", recordedCommands)
+	}
 }
 
 func requireUpdateKinds(t *testing.T, notifications []acp.SessionNotification, kinds ...string) {

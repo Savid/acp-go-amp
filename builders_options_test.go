@@ -162,6 +162,66 @@ func forkClientConnection(t *testing.T, agent extensionAgent) (*acp.ClientSideCo
 	return conn, cleanup
 }
 
+func TestCloneHelpersAndDeepClone(t *testing.T) {
+	if cloneMCPServers(nil) != nil {
+		t.Fatal("cloneMCPServers(nil) changed")
+	}
+	if cloneMCPServerStdio(nil) != nil {
+		t.Fatal("cloneMCPServerStdio(nil) changed")
+	}
+	if cloneHTTPHeaders(nil) != nil {
+		t.Fatal("cloneHTTPHeaders(nil) changed")
+	}
+	if cloneEnvVariables(nil) != nil {
+		t.Fatal("cloneEnvVariables(nil) changed")
+	}
+	if cloneAnySlice(nil) != nil {
+		t.Fatal("cloneAnySlice(nil) changed")
+	}
+	if got := cloneMCPServer(acp.McpServer{}); got.Http != nil || got.Sse != nil || got.Acp != nil || got.Stdio != nil {
+		t.Fatalf("cloneMCPServer(empty) = %#v", got)
+	}
+	if got := unstableMCPServerFromStable(acp.McpServer{}); got.Http != nil || got.Sse != nil || got.Acp != nil || got.Stdio != nil {
+		t.Fatalf("unstableMCPServerFromStable(empty) = %#v", got)
+	}
+
+	// A meta map with nested map and slice must be deep-cloned end to end.
+	nested := map[string]any{"list": []any{map[string]any{"deep": true}}}
+	cloned := cloneAnyMap(nested)
+	list, ok := cloned["list"].([]any)
+	if !ok || len(list) != 1 {
+		t.Fatalf("nested list not cloned: %#v", cloned["list"])
+	}
+
+	inner, ok := list[0].(map[string]any)
+	if !ok || inner["deep"] != true {
+		t.Fatalf("nested map not cloned: %#v", list[0])
+	}
+
+	origList, _ := nested["list"].([]any)
+	origInner, _ := origList[0].(map[string]any)
+	origInner["deep"] = false
+
+	clonedInner, _ := list[0].(map[string]any)
+	if clonedInner["deep"] != true {
+		t.Fatal("deep clone aliased nested map")
+	}
+
+	// Zero-arg WithSessionMCPServers yields a nil server slice, exercising the
+	// stableMCPServers nil path; the request still carries an empty slice.
+	req := NewSessionRequest("/tmp/cwd", WithSessionMCPServers())
+	if req.McpServers == nil || len(req.McpServers) != 0 {
+		t.Fatalf("empty mcp servers = %#v", req.McpServers)
+	}
+
+	// A fork with a bare (no-transport) server exercises the default branch of
+	// the unstable conversion.
+	forkReq := ForkSessionRequest("T-1", "/tmp/cwd", WithSessionMCPServers(acp.McpServer{}))
+	if len(forkReq.McpServers) != 1 {
+		t.Fatalf("fork servers = %#v", forkReq.McpServers)
+	}
+}
+
 func TestInvalidMCPShapes(t *testing.T) {
 	if _, err := mcpConfigJSON([]acp.McpServer{{Stdio: &acp.McpServerStdio{}}}); err == nil {
 		t.Fatal("empty stdio name accepted")

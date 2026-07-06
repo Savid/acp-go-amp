@@ -146,3 +146,75 @@ func TestInMemoryStoreContractEdges(t *testing.T) {
 		t.Fatalf("bad summary = %#v ok=%v", summary, ok)
 	}
 }
+
+func TestInMemoryStoreReplaceEmptyEntryKeySurvives(t *testing.T) {
+	ctx := context.Background()
+	store := NewInMemorySessionStore()
+	main := SessionKey{SessionID: "T-1", Subpath: SessionStoreMainSubpath}
+	transcript := SessionKey{SessionID: "T-1", Subpath: transcriptSubpath}
+	manifest, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, ThreadID: "T-1", Cwd: "/tmp", UpdatedAtUnixMilli: 3})
+
+	// A Replace that lists a subkey with an empty Entries slice must keep that
+	// key live (present in Load and ListSubkeys), not tombstone it.
+	if err := store.Replace(ctx, main, []SessionStoreReplacement{
+		{Key: main, Entries: []SessionStoreEntry{manifest}},
+		{Key: transcript, Entries: nil},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, err := store.Load(ctx, transcript)
+	if err != nil {
+		t.Fatalf("load empty-entry key: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("empty-entry key entries = %d, want 0", len(entries))
+	}
+
+	subkeys, err := store.ListSubkeys(ctx, main)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(subkeys, transcriptSubpath) {
+		t.Fatalf("empty-entry listed key was dropped: subkeys=%#v", subkeys)
+	}
+
+	// Appending to the surviving key must succeed (it is not tombstoned).
+	if err := store.Append(ctx, transcript, []SessionStoreEntry{json.RawMessage(`{"type":"result"}`)}); err != nil {
+		t.Fatalf("append to surviving key: %v", err)
+	}
+	entries, err = store.Load(ctx, transcript)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("append after survive: entries=%d err=%v", len(entries), err)
+	}
+}
+
+func TestInMemoryStoreZeroValueSelfHeals(t *testing.T) {
+	ctx := context.Background()
+	main := SessionKey{SessionID: "T-1", Subpath: SessionStoreMainSubpath}
+	transcript := SessionKey{SessionID: "T-1", Subpath: transcriptSubpath}
+	manifest, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, ThreadID: "T-1", Cwd: "/tmp", UpdatedAtUnixMilli: 4})
+
+	// A zero-value store has nil maps; write paths must self-heal, not panic.
+	store := &InMemorySessionStore{}
+	if err := store.Replace(ctx, main, []SessionStoreReplacement{
+		{Key: main, Entries: []SessionStoreEntry{manifest}},
+	}); err != nil {
+		t.Fatalf("zero-value replace: %v", err)
+	}
+	if err := store.Append(ctx, transcript, []SessionStoreEntry{json.RawMessage(`{"type":"result"}`)}); err != nil {
+		t.Fatalf("zero-value append: %v", err)
+	}
+	if err := store.Delete(ctx, transcript); err != nil {
+		t.Fatalf("zero-value delete: %v", err)
+	}
+
+	// A nil receiver returns an error rather than panicking.
+	var nilStore *InMemorySessionStore
+	if err := nilStore.Append(ctx, transcript, []SessionStoreEntry{json.RawMessage(`{}`)}); err == nil {
+		t.Fatal("nil-receiver Append did not error")
+	}
+	if _, err := nilStore.Load(ctx, transcript); err == nil {
+		t.Fatal("nil-receiver Load did not error")
+	}
+}

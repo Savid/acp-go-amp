@@ -530,7 +530,7 @@ func (a *Agent) validateSessionStartOptions(options AmpOptions) error {
 		return unsupportedField("model")
 	}
 	if options.OutputSchema != nil {
-		return unsupportedField("outputSchema")
+		return unsupportedField(metaOutputSchemaKey)
 	}
 	if options.Mode != "" && !slices.Contains(validModes(), options.Mode) {
 		return acp.NewInvalidParams(map[string]any{jsonFieldField: "_meta.amp.options.mode"})
@@ -785,7 +785,7 @@ func parseAmpOptionsWithPresence(value any) (AmpOptions, ampOptionFields, error)
 			default:
 				return options, fields, unsupportedField("_meta.amp.options.env")
 			}
-		case "outputSchema":
+		case metaOutputSchemaKey:
 			return options, fields, unsupportedField("_meta.amp.options.outputSchema")
 		case "mode":
 			fields.mode = true
@@ -816,7 +816,7 @@ func parseRawEventMeta(value any) (bool, error) {
 	enabled := false
 	for key, value := range raw {
 		switch key {
-		case "enabled":
+		case metaEnabledKey:
 			parsed, ok := value.(bool)
 			if !ok {
 				return false, unsupportedField("_meta.amp.rawEvent.enabled")

@@ -50,6 +50,17 @@ type InMemorySessionStore struct {
 	deleted map[SessionKey]struct{}
 }
 
+var _ SessionStore = (*InMemorySessionStore)(nil)
+
+func (s *InMemorySessionStore) ensure() {
+	if s.entries == nil {
+		s.entries = make(map[SessionKey][]SessionStoreEntry)
+	}
+	if s.deleted == nil {
+		s.deleted = make(map[SessionKey]struct{})
+	}
+}
+
 func NewInMemorySessionStore() *InMemorySessionStore {
 	return &InMemorySessionStore{
 		entries: make(map[SessionKey][]SessionStoreEntry),
@@ -61,12 +72,17 @@ func (s *InMemorySessionStore) Append(ctx context.Context, key SessionKey, entri
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if s == nil {
+		return errors.New("nil InMemorySessionStore")
+	}
 	if len(entries) == 0 {
 		return nil
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	s.ensure()
 
 	if s.isTombstonedLocked(key) {
 		return nil
@@ -81,6 +97,9 @@ func (s *InMemorySessionStore) Append(ctx context.Context, key SessionKey, entri
 func (s *InMemorySessionStore) Load(ctx context.Context, key SessionKey) ([]SessionStoreEntry, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	if s == nil {
+		return nil, errors.New("nil InMemorySessionStore")
 	}
 
 	s.mu.RLock()
@@ -133,6 +152,8 @@ func (s *InMemorySessionStore) Replace(ctx context.Context, main SessionKey, rep
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	s.ensure()
+
 	for key := range s.entries {
 		if key.SessionID == main.SessionID {
 			delete(s.entries, key)
@@ -153,6 +174,8 @@ func (s *InMemorySessionStore) Delete(ctx context.Context, key SessionKey) error
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	s.ensure()
 
 	if key.Subpath == SessionStoreMainSubpath {
 		for existing := range s.entries {
