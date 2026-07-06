@@ -11,9 +11,9 @@ import (
 	"github.com/coder/acp-go-sdk"
 )
 
-// TestIteration4ActiveLoadResumeValidation proves X1/AW1: an already-active
-// session cannot bypass cold-path validation on session/load or session/resume.
-func TestIteration4ActiveLoadResumeValidation(t *testing.T) {
+// TestActiveLoadResumeValidation proves an already-active session cannot bypass
+// cold-path validation on session/load or session/resume.
+func TestActiveLoadResumeValidation(t *testing.T) {
 	ctx := context.Background()
 	path, _ := fakeAgentAmpPath(t, "")
 	cwd := t.TempDir()
@@ -62,10 +62,10 @@ func (s *flakyReplaceStore) Replace(ctx context.Context, main SessionKey, replac
 	return s.InMemorySessionStore.Replace(ctx, main, replacements)
 }
 
-// TestIteration4MirrorUnsyncedRetention proves X2/AW2: a completed native turn
+// TestMirrorUnsyncedRetention proves a completed native turn
 // whose Replace fails is retained in memory, blocks the next prompt loudly, and
 // is durably re-committed on retry so load replay still contains the turn.
-func TestIteration4MirrorUnsyncedRetention(t *testing.T) {
+func TestMirrorUnsyncedRetention(t *testing.T) {
 	ctx := context.Background()
 	path, _ := fakeAgentAmpPath(t, "")
 	cwd := t.TempDir()
@@ -112,9 +112,9 @@ func TestIteration4MirrorUnsyncedRetention(t *testing.T) {
 	}
 }
 
-// TestIteration4ConcurrentPromptsRejected proves X4/AW3: MaxConcurrentPrompts>1
+// TestConcurrentPromptsRejected proves MaxConcurrentPrompts>1
 // is invalid at construction and Initialize names the limit.
-func TestIteration4ConcurrentPromptsRejected(t *testing.T) {
+func TestConcurrentPromptsRejected(t *testing.T) {
 	agent := NewAgent(WithConcurrencyLimits(ConcurrencyLimits{MaxConcurrentPrompts: 2}))
 	_, err := agent.Initialize(context.Background(), acp.InitializeRequest{})
 	if err == nil || !strings.Contains(err.Error(), "MaxConcurrentPrompts") {
@@ -122,9 +122,9 @@ func TestIteration4ConcurrentPromptsRejected(t *testing.T) {
 	}
 }
 
-// TestIteration4CancelAlreadyCancelledBranch deterministically covers AW5: Cancel
-// on an already-cancelled active prompt returns nil without re-interrupting.
-func TestIteration4CancelAlreadyCancelledBranch(t *testing.T) {
+// TestCancelAlreadyCancelledBranch deterministically covers Cancel
+// on an already-cancelled active prompt returning nil without re-interrupting.
+func TestCancelAlreadyCancelledBranch(t *testing.T) {
 	session := &agentSession{agent: NewAgent()}
 	state := newPromptTurnState()
 	state.cancel()
@@ -134,9 +134,9 @@ func TestIteration4CancelAlreadyCancelledBranch(t *testing.T) {
 	}
 }
 
-// TestIteration4TombstoneCascade proves AW6: a main-key tombstone hides future
+// TestTombstoneCascade proves a main-key tombstone hides future
 // subpath appends/loads/listings and is cleared only by a valid Replace.
-func TestIteration4TombstoneCascade(t *testing.T) {
+func TestTombstoneCascade(t *testing.T) {
 	ctx := context.Background()
 	store := NewInMemorySessionStore()
 	main := SessionKey{SessionID: "T-cascade", Subpath: SessionStoreMainSubpath}

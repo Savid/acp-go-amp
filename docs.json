@@ -1,26 +1,103 @@
 {
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "mint",
   "name": "acp-go-amp",
-  "navigation": [
-    "docs/overview.mdx",
-    "docs/get-started/quickstart.mdx",
-    "docs/get-started/install.mdx",
-    "docs/get-started/run-modes.mdx",
-    "docs/get-started/examples.mdx",
-    "docs/core/sessions.mdx",
-    "docs/core/prompt-streaming.mdx",
-    "docs/features/authentication.mdx",
-    "docs/features/mcp.mdx",
-    "docs/features/models-config.mdx",
-    "docs/features/permissions.mdx",
-    "docs/features/elicitation.mdx",
-    "docs/features/session-store.mdx",
-    "docs/features/raw-events.mdx",
-    "docs/reference/go-api.mdx",
-    "docs/reference/cli.mdx",
-    "docs/reference/acp-methods.mdx",
-    "docs/reference/meta.mdx",
-    "docs/reference/updates.mdx",
-    "docs/operations/security.mdx",
-    "docs/operations/observability.mdx"
-  ]
+  "colors": {
+    "primary": "#2563EB",
+    "light": "#3B82F6",
+    "dark": "#1D4ED8"
+  },
+  "icons": {
+    "library": "lucide"
+  },
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Guides",
+        "icon": "book-open",
+        "groups": [
+          {
+            "group": "Get started",
+            "icon": "rocket",
+            "pages": [
+              "docs/overview",
+              "docs/get-started/quickstart",
+              "docs/get-started/install",
+              "docs/get-started/run-modes",
+              "docs/get-started/examples"
+            ]
+          },
+          {
+            "group": "Core concepts",
+            "icon": "messages-square",
+            "pages": [
+              "docs/core/sessions",
+              "docs/core/prompt-streaming"
+            ]
+          },
+          {
+            "group": "Amp features",
+            "icon": "terminal",
+            "pages": [
+              "docs/features/authentication",
+              "docs/features/models-config",
+              "docs/features/permissions",
+              "docs/features/elicitation",
+              "docs/features/mcp",
+              "docs/features/session-store",
+              "docs/features/raw-events"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Reference",
+        "icon": "square-code",
+        "groups": [
+          {
+            "group": "API reference",
+            "icon": "code",
+            "pages": [
+              "docs/reference/go-api",
+              "docs/reference/cli",
+              "docs/reference/acp-methods",
+              "docs/reference/meta",
+              "docs/reference/updates"
+            ]
+          },
+          {
+            "group": "Operations",
+            "icon": "shield",
+            "pages": [
+              "docs/operations/observability",
+              "docs/operations/security"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "navbar": {
+    "primary": {
+      "type": "button",
+      "label": "View source",
+      "href": "https://github.com/savid/acp-go-amp"
+    }
+  },
+  "contextual": {
+    "options": [
+      "copy",
+      "view",
+      "claude",
+      "chatgpt",
+      "mcp",
+      "cursor",
+      "vscode"
+    ]
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/savid/acp-go-amp"
+    }
+  }
 }

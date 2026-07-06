@@ -10,7 +10,7 @@ import (
 	"github.com/coder/acp-go-sdk"
 )
 
-func TestIteration6ActiveOmittedEnvMeansDefaultEnv(t *testing.T) {
+func TestActiveOmittedEnvMeansDefaultEnv(t *testing.T) {
 	ctx := context.Background()
 	path, _ := fakeAgentAmpPath(t, "")
 	cwd := t.TempDir()
@@ -64,7 +64,7 @@ func TestIteration6ActiveOmittedEnvMeansDefaultEnv(t *testing.T) {
 	}
 }
 
-func TestIteration6ColdLoadOmittedEnvBuildsDefaultEnv(t *testing.T) {
+func TestColdLoadOmittedEnvBuildsDefaultEnv(t *testing.T) {
 	ctx := context.Background()
 	path, _ := fakeAgentAmpPath(t, "")
 	store := NewInMemorySessionStore()
@@ -107,7 +107,7 @@ func TestIteration6ColdLoadOmittedEnvBuildsDefaultEnv(t *testing.T) {
 	}
 }
 
-func TestIteration6PromptErrorAfterCallerContextCancelInterrupts(t *testing.T) {
+func TestPromptErrorAfterCallerContextCancelInterrupts(t *testing.T) {
 	path, state := fakeAgentAmpPath(t, "delayed-error")
 	agent := NewAgent(WithExecutablePath(path), WithHome(t.TempDir()))
 	resp, err := agent.NewSession(context.Background(), NewSessionRequest(t.TempDir()))

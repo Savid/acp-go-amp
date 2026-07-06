@@ -17,12 +17,14 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-amp/internal/amp"
+	"github.com/savid/acp-go-amp/internal/observer"
 )
 
 type Agent struct {
 	options Options
 	log     *slog.Logger
 	store   SessionStore
+	observe *observer.Observer
 
 	mu                   sync.Mutex
 	closed               bool
@@ -54,9 +56,15 @@ func NewAgent(opts ...Option) *Agent {
 		store = NewInMemorySessionStore()
 	}
 	return &Agent{
-		options:              options,
-		log:                  log,
-		store:                store,
+		options: options,
+		log:     log,
+		store:   store,
+		observe: observer.New(observer.Config{
+			TracerProvider: options.TracerProvider,
+			MeterProvider:  options.MeterProvider,
+			Propagator:     options.TextMapPropagator,
+			Version:        options.AgentVersion,
+		}),
 		sessions:             make(map[acp.SessionId]*agentSession),
 		deleted:              make(map[acp.SessionId]struct{}),
 		pendingNativeDeletes: make(map[acp.SessionId]struct{}),
@@ -93,10 +101,13 @@ func (a *Agent) Close() error {
 	for _, session := range sessions {
 		err = errors.Join(err, session.Close(context.Background()))
 	}
+	a.observe.AddActiveSession(context.Background(), -int64(len(sessions)))
 	return err
 }
 
-func (a *Agent) Initialize(ctx context.Context, params acp.InitializeRequest) (acp.InitializeResponse, error) {
+func (a *Agent) Initialize(ctx context.Context, params acp.InitializeRequest) (resp acp.InitializeResponse, err error) {
+	_, finish := a.observe.StartACPRequest(ctx, acp.AgentMethodInitialize)
+	defer func() { finish(err) }()
 	if a.activeLimitErr != nil {
 		return acp.InitializeResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldError: a.activeLimitErr.Error()})
 	}
@@ -143,15 +154,22 @@ func (a *Agent) Initialize(ctx context.Context, params acp.InitializeRequest) (a
 	}, nil
 }
 
-func (a *Agent) Authenticate(ctx context.Context, params acp.AuthenticateRequest) (acp.AuthenticateResponse, error) {
+func (a *Agent) Authenticate(ctx context.Context, params acp.AuthenticateRequest) (resp acp.AuthenticateResponse, err error) {
+	_, finish := a.observe.StartACPRequest(ctx, acp.AgentMethodAuthenticate)
+	defer func() { finish(err) }()
 	return acp.AuthenticateResponse{}, acp.NewInvalidParams(map[string]any{"methodId": params.MethodId})
 }
 
-func (a *Agent) Logout(ctx context.Context, params acp.LogoutRequest) (acp.LogoutResponse, error) {
+func (a *Agent) Logout(ctx context.Context, params acp.LogoutRequest) (resp acp.LogoutResponse, err error) {
+	_, finish := a.observe.StartACPRequest(ctx, acp.AgentMethodLogout)
+	defer func() { finish(err) }()
 	return acp.LogoutResponse{}, nil
 }
 
-func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (acp.NewSessionResponse, error) {
+func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (resp acp.NewSessionResponse, err error) {
+	ctx, finish := a.observe.StartACPRequest(ctx, acp.AgentMethodSessionNew)
+	defer func() { finish(err) }()
+	ctx = a.observe.Extract(ctx, params.Meta)
 	meta, err := parseSessionMeta(params.Meta)
 	if err != nil {
 		return acp.NewSessionResponse{}, err
@@ -195,10 +213,14 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (a
 	a.sessions[probeSession.id] = probeSession
 	a.pending--
 	a.mu.Unlock()
+	a.observe.AddActiveSession(ctx, 1)
 	return acp.NewSessionResponse{SessionId: probeSession.id, ConfigOptions: probeSession.configOptions()}, nil
 }
 
-func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) (acp.LoadSessionResponse, error) {
+func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) (resp acp.LoadSessionResponse, err error) {
+	ctx, finish := a.observe.StartACPRequest(ctx, acp.AgentMethodSessionLoad)
+	defer func() { finish(err) }()
+	ctx = a.observe.Extract(ctx, params.Meta)
 	session, err := a.loadOrResume(ctx, params.SessionId, params.Cwd, params.McpServers, params.AdditionalDirectories, params.Meta)
 	if err != nil {
 		return acp.LoadSessionResponse{}, err
@@ -209,7 +231,10 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 	return acp.LoadSessionResponse{ConfigOptions: session.configOptions()}, nil
 }
 
-func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionRequest) (acp.ResumeSessionResponse, error) {
+func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionRequest) (resp acp.ResumeSessionResponse, err error) {
+	ctx, finish := a.observe.StartACPRequest(ctx, acp.AgentMethodSessionResume)
+	defer func() { finish(err) }()
+	ctx = a.observe.Extract(ctx, params.Meta)
 	session, err := a.loadOrResume(ctx, params.SessionId, params.Cwd, params.McpServers, params.AdditionalDirectories, params.Meta)
 	if err != nil {
 		return acp.ResumeSessionResponse{}, err
@@ -217,7 +242,9 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 	return acp.ResumeSessionResponse{ConfigOptions: session.configOptions()}, nil
 }
 
-func (a *Agent) ListSessions(ctx context.Context, params acp.ListSessionsRequest) (acp.ListSessionsResponse, error) {
+func (a *Agent) ListSessions(ctx context.Context, params acp.ListSessionsRequest) (resp acp.ListSessionsResponse, err error) {
+	ctx, finish := a.observe.StartACPRequest(ctx, acp.AgentMethodSessionList)
+	defer func() { finish(err) }()
 	a.retryPendingNativeDeletes(ctx)
 	summaries, err := a.store.ListSessions(ctx)
 	if err != nil {
@@ -244,15 +271,25 @@ func (a *Agent) ListSessions(ctx context.Context, params acp.ListSessionsRequest
 	return acp.ListSessionsResponse{Sessions: infos}, nil
 }
 
-func (a *Agent) Prompt(ctx context.Context, params acp.PromptRequest) (acp.PromptResponse, error) {
+func (a *Agent) Prompt(ctx context.Context, params acp.PromptRequest) (resp acp.PromptResponse, err error) {
+	ctx, finishReq := a.observe.StartACPRequest(ctx, acp.AgentMethodSessionPrompt)
+	defer func() { finishReq(err) }()
+
 	session, err := a.session(params.SessionId)
 	if err != nil {
 		return acp.PromptResponse{}, err
 	}
-	return session.Prompt(ctx, params)
+
+	ctx, finish := a.observe.StartPrompt(ctx, params.Meta, a.options.DefaultModel)
+	defer func() { finish(promptResultForObserver(resp, err, a.options.DefaultModel)) }()
+
+	resp, err = session.Prompt(ctx, params)
+	return resp, err
 }
 
-func (a *Agent) Cancel(ctx context.Context, params acp.CancelNotification) error {
+func (a *Agent) Cancel(ctx context.Context, params acp.CancelNotification) (err error) {
+	ctx, finish := a.observe.StartACPRequest(ctx, acp.AgentMethodSessionCancel)
+	defer func() { finish(err) }()
 	session, err := a.session(params.SessionId)
 	if err != nil {
 		if errors.Is(err, errSessionDeleted) {
@@ -263,7 +300,9 @@ func (a *Agent) Cancel(ctx context.Context, params acp.CancelNotification) error
 	return session.Cancel(ctx)
 }
 
-func (a *Agent) CloseSession(ctx context.Context, params acp.CloseSessionRequest) (acp.CloseSessionResponse, error) {
+func (a *Agent) CloseSession(ctx context.Context, params acp.CloseSessionRequest) (resp acp.CloseSessionResponse, err error) {
+	ctx, finish := a.observe.StartACPRequest(ctx, acp.AgentMethodSessionClose)
+	defer func() { finish(err) }()
 	session, err := a.session(params.SessionId)
 	if err != nil {
 		if errors.Is(err, errSessionDeleted) {
@@ -275,10 +314,14 @@ func (a *Agent) CloseSession(ctx context.Context, params acp.CloseSessionRequest
 	a.mu.Lock()
 	delete(a.sessions, params.SessionId)
 	a.mu.Unlock()
+	a.observe.AddActiveSession(ctx, -1)
 	return acp.CloseSessionResponse{}, err
 }
 
-func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDeleteSessionRequest) (acp.UnstableDeleteSessionResponse, error) {
+func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDeleteSessionRequest) (resp acp.UnstableDeleteSessionResponse, err error) {
+	ctx, finish := a.observe.StartACPRequest(ctx, acp.AgentMethodSessionDelete)
+	defer func() { finish(err) }()
+	ctx = a.observe.Extract(ctx, params.Meta)
 	if params.SessionId == "" {
 		return acp.UnstableDeleteSessionResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldField: jsonFieldSessionID})
 	}
@@ -293,6 +336,9 @@ func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDe
 	session := a.sessions[params.SessionId]
 	delete(a.sessions, params.SessionId)
 	a.mu.Unlock()
+	if session != nil {
+		a.observe.AddActiveSession(ctx, -1)
+	}
 	if err := a.deleteNativeThread(ctx, params.SessionId, session); err != nil {
 		a.markPendingNativeDelete(params.SessionId)
 		return acp.UnstableDeleteSessionResponse{}, err
@@ -301,7 +347,9 @@ func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDe
 	return acp.UnstableDeleteSessionResponse{}, nil
 }
 
-func (a *Agent) SetSessionConfigOption(ctx context.Context, params acp.SetSessionConfigOptionRequest) (acp.SetSessionConfigOptionResponse, error) {
+func (a *Agent) SetSessionConfigOption(ctx context.Context, params acp.SetSessionConfigOptionRequest) (resp acp.SetSessionConfigOptionResponse, err error) {
+	ctx, finish := a.observe.StartACPRequest(ctx, acp.AgentMethodSessionSetConfigOption)
+	defer func() { finish(err) }()
 	if params.Boolean != nil {
 		return acp.SetSessionConfigOptionResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldField: "value", jsonFieldError: "boolean config options are unsupported"})
 	}
@@ -318,11 +366,15 @@ func (a *Agent) SetSessionConfigOption(ctx context.Context, params acp.SetSessio
 	return acp.SetSessionConfigOptionResponse{ConfigOptions: session.configOptions()}, nil
 }
 
-func (a *Agent) SetSessionMode(ctx context.Context, params acp.SetSessionModeRequest) (acp.SetSessionModeResponse, error) {
+func (a *Agent) SetSessionMode(ctx context.Context, params acp.SetSessionModeRequest) (resp acp.SetSessionModeResponse, err error) {
+	_, finish := a.observe.StartACPRequest(ctx, acp.AgentMethodSessionSetMode)
+	defer func() { finish(err) }()
 	return acp.SetSessionModeResponse{}, acp.NewMethodNotFound(acp.AgentMethodSessionSetMode)
 }
 
-func (a *Agent) HandleExtensionMethod(ctx context.Context, method string, params json.RawMessage) (any, error) {
+func (a *Agent) HandleExtensionMethod(ctx context.Context, method string, params json.RawMessage) (result any, err error) {
+	_, finish := a.observe.StartACPRequest(ctx, method)
+	defer func() { finish(err) }()
 	switch method {
 	case ForkSessionMethod:
 		return acp.UnstableForkSessionResponse{}, acp.NewInvalidParams(map[string]any{
@@ -408,6 +460,7 @@ func (a *Agent) loadOrResume(ctx context.Context, sessionID acp.SessionId, cwd s
 	}
 	a.sessions[sessionID] = session
 	a.mu.Unlock()
+	a.observe.AddActiveSession(ctx, 1)
 	return session, nil
 }
 

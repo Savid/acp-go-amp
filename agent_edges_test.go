@@ -14,7 +14,7 @@ import (
 	"github.com/savid/acp-go-amp/internal/amp"
 )
 
-func TestIteration2SessionSlotFilesystemServeAndCloseEdges(t *testing.T) {
+func TestSessionSlotFilesystemServeAndCloseEdges(t *testing.T) {
 	ctx := context.Background()
 
 	previousWriteFile := writeFile
@@ -59,7 +59,7 @@ func TestIteration2SessionSlotFilesystemServeAndCloseEdges(t *testing.T) {
 	}
 }
 
-func TestIteration2LoadReplayDeleteAndConfigEdges(t *testing.T) {
+func TestLoadReplayDeleteAndConfigEdges(t *testing.T) {
 	ctx := context.Background()
 	path, _ := fakeAgentAmpPath(t, "")
 	cwd := t.TempDir()
@@ -152,7 +152,7 @@ func TestIteration2LoadReplayDeleteAndConfigEdges(t *testing.T) {
 	}
 }
 
-func TestIteration2PromptAndPersistenceEdges(t *testing.T) {
+func TestPromptAndPersistenceEdges(t *testing.T) {
 	ctx := context.Background()
 	path, _ := fakeAgentAmpPath(t, "")
 
@@ -276,7 +276,7 @@ func TestIteration2PromptAndPersistenceEdges(t *testing.T) {
 	}
 }
 
-func TestIteration2EmitAndRawEventEdges(t *testing.T) {
+func TestEmitAndRawEventEdges(t *testing.T) {
 	ctx := context.Background()
 	agent := NewAgent()
 	session := &agentSession{agent: agent, id: "T-emit", rawEvents: true}
@@ -328,7 +328,7 @@ func TestIteration2EmitAndRawEventEdges(t *testing.T) {
 	}
 }
 
-func TestIteration2StoreSortingAndTombstoneEdges(t *testing.T) {
+func TestStoreSortingAndTombstoneEdges(t *testing.T) {
 	ctx := context.Background()
 	store := NewInMemorySessionStore()
 	putStoredSession(t, store, "T-b", "/b", nil)

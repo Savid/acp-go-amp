@@ -14,7 +14,7 @@ import (
 	"github.com/coder/acp-go-sdk"
 )
 
-func TestIteration7CloseSessionCancelsActiveTurnAfterProcessExit(t *testing.T) {
+func TestCloseSessionCancelsActiveTurnAfterProcessExit(t *testing.T) {
 	path, state := fakeAgentAmpPath(t, "sigint-ignore")
 	agent := NewAgent(WithExecutablePath(path), WithHome(t.TempDir()))
 	agent.options.runtime.nativeCancelTimeout = 100 * time.Millisecond

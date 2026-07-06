@@ -39,11 +39,11 @@ test-integration-smoke:
 
 ## test-integration-live: run live integration tests that spend model tokens
 test-integration-live:
-	ACP_GO_AMP_LIVE=1 go test -race -count=1 -tags=integration -timeout=180s -run Live -v ./integration/...
+	ACP_GO_AMP_RUN_INTEGRATION=1 ACP_GO_AMP_RUN_LIVE_TOKENS=1 go test -race -count=1 -tags=integration -timeout=180s -run Live -v ./integration/...
 
 ## test-integration-cover: run smoke integration tests with compiled binary coverage
 test-integration-cover:
-	tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT; mkdir -p "$$tmp/data"; go build -cover -coverpkg=./... -o "$$tmp/acp-go-amp" ./cmd/acp-go-amp; ACP_GO_AMP_AGENT_BINARY="$$tmp/acp-go-amp" GOCOVERDIR="$$tmp/data" go test -race -count=1 -tags=integration -timeout=120s -run Smoke -v ./integration/...; go tool covdata percent -i="$$tmp/data"; go tool covdata textfmt -i="$$tmp/data" -o coverage-integration.out
+	tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT; mkdir -p "$$tmp/data"; go build -cover -coverpkg=./... -o "$$tmp/acp-go-amp" ./cmd/acp-go-amp; ACP_GO_AMP_RUN_INTEGRATION=1 ACP_GO_AMP_AGENT_BINARY="$$tmp/acp-go-amp" GOCOVERDIR="$$tmp/data" go test -race -count=1 -tags=integration -timeout=120s -run Smoke -v ./integration/...; go tool covdata percent -i="$$tmp/data"; go tool covdata textfmt -i="$$tmp/data" -o coverage-integration.out
 
 ## lint: run golangci-lint
 lint:
@@ -58,9 +58,11 @@ fmt:
 tidy:
 	go mod tidy -diff
 
-## vuln: run govulncheck
+## vuln: run govulncheck from the go.mod tool directive
+# golang.org/x/vuln v1.4.0 panics in x/tools SSA on Go 1.26 generics;
+# keep the tool directive pinned at v1.5.0 or newer.
 vuln:
-	go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+	go tool govulncheck ./...
 
 ## modernize-check: check Go modernizations without changing files
 modernize-check:
@@ -117,7 +119,7 @@ docs-audit:
 	@rg -q 'does not advertise Amp elicitation metadata' docs/features/elicitation.mdx
 
 ## audit: run local checks
-audit: fmt-check lint build test test-cross-compile coverage-check tidy vuln modernize-check docs-audit
+audit: fmt-check lint build test coverage-check test-cross-compile tidy vuln modernize-check docs-audit
 	go mod verify
 
 ## clean: remove build artifacts

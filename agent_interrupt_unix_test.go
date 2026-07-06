@@ -13,7 +13,7 @@ import (
 	"github.com/coder/acp-go-sdk"
 )
 
-func TestIteration6PromptContextCancelUsesInterruptLadder(t *testing.T) {
+func TestPromptContextCancelUsesInterruptLadder(t *testing.T) {
 	path, state := fakeAgentAmpPath(t, "sigint-ignore")
 	agent := NewAgent(WithExecutablePath(path), WithHome(t.TempDir()))
 	agent.options.runtime.nativeCancelTimeout = 50 * time.Millisecond

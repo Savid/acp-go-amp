@@ -1,0 +1,4 @@
+{"type":"system","subtype":"init","cwd":"/tmp/acp-go-amp-example","session_id":"T-019a8b6e-3f4d-7c21-9e5a-resume-example","tools":["Read","edit_file"],"mcp_servers":[],"agent_mode":"smart","reasoning_effort":"high"}
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Say hello in one short sentence."}]},"session_id":"T-019a8b6e-3f4d-7c21-9e5a-resume-example"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Hello from the saved Amp thread."}],"stop_reason":"end_turn","usage":{"input_tokens":12,"output_tokens":9,"max_tokens":200000}},"session_id":"T-019a8b6e-3f4d-7c21-9e5a-resume-example"}
+{"type":"result","subtype":"success","is_error":false,"duration_ms":1512,"num_turns":1,"result":"Hello from the saved Amp thread.","session_id":"T-019a8b6e-3f4d-7c21-9e5a-resume-example","usage":{"input_tokens":12,"output_tokens":9,"max_tokens":200000}}

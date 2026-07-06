@@ -6,7 +6,6 @@ import (
 	"context"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -19,11 +18,10 @@ import (
 )
 
 func TestSmokeAmpVersion(t *testing.T) {
+	integrationAmpPath(t)
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if _, err := exec.LookPath("amp"); err != nil {
-		t.Skipf("amp binary absent: %v", err)
-	}
 	client := amp.NewClient(slog.Default(), amp.Options{})
 	version, err := client.Version(ctx)
 	if err != nil {
@@ -35,10 +33,11 @@ func TestSmokeAmpVersion(t *testing.T) {
 }
 
 func TestSmokeFakeACPLifecycleAndMCP(t *testing.T) {
+	requireIntegration(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("shell fake is POSIX-only")
 	}
-	path := fakeSmokeAmpPath(t)
+	path := fakeAmpBinary(t)
 	agent := ampacp.NewAgent(
 		ampacp.WithExecutablePath(path),
 		ampacp.WithHome(t.TempDir()),
@@ -71,10 +70,42 @@ func TestSmokeFakeACPLifecycleAndMCP(t *testing.T) {
 	}
 }
 
-func TestLiveThreadTurn(t *testing.T) {
-	if os.Getenv("ACP_GO_AMP_LIVE") != "1" {
-		t.Skip("set ACP_GO_AMP_LIVE=1 to run live Amp prompt test")
+func TestLiveACPPromptTurn(t *testing.T) {
+	requireLiveTokens(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	client := &recordingClient{}
+	conn := serveLiveAgentForTest(t, ctx, client)
+	if _, err := conn.Initialize(ctx, acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber}); err != nil {
+		t.Fatalf("Initialize: %v", err)
 	}
+
+	session, err := conn.NewSession(ctx, acp.NewSessionRequest{Cwd: t.TempDir(), McpServers: []acp.McpServer{}})
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	resp, err := conn.Prompt(ctx, acp.PromptRequest{
+		SessionId: session.SessionId,
+		Prompt:    []acp.ContentBlock{acp.TextBlock("Reply with exactly: acp-go-amp-acp-ok")},
+	})
+	if err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	if resp.StopReason != acp.StopReasonEndTurn {
+		t.Fatalf("stop reason = %q", resp.StopReason)
+	}
+	if !strings.Contains(client.text(), "acp-go-amp-acp-ok") {
+		t.Fatalf("client text = %q", client.text())
+	}
+	if _, err := conn.CloseSession(ctx, acp.CloseSessionRequest{SessionId: session.SessionId}); err != nil {
+		t.Fatalf("CloseSession: %v", err)
+	}
+}
+
+func TestLiveThreadTurn(t *testing.T) {
+	requireLiveTokens(t)
 	dir := t.TempDir()
 	settings := filepath.Join(dir, "settings.json")
 	if err := os.WriteFile(settings, []byte("{}\n"), 0o600); err != nil {
@@ -116,13 +147,8 @@ func TestLiveThreadTurn(t *testing.T) {
 }
 
 func TestLiveRestoreAfterLocalStateWipe(t *testing.T) {
-	if os.Getenv("ACP_GO_AMP_LIVE") != "1" {
-		t.Skip("set ACP_GO_AMP_LIVE=1 to run live Amp restore test")
-	}
-	apiKey := os.Getenv("AMP_API_KEY")
-	if apiKey == "" {
-		t.Skip("set AMP_API_KEY for isolated live restore test")
-	}
+	requireLiveTokens(t)
+	apiKey := requireAmpAPIKey(t)
 
 	root := t.TempDir()
 	env, homeParent := isolatedAmpEnv(t, root, apiKey)
@@ -181,75 +207,4 @@ func TestLiveRestoreAfterLocalStateWipe(t *testing.T) {
 		t.Fatalf("delete restored thread: %v", err)
 	}
 	threadID = ""
-}
-
-func isolatedAmpEnv(t *testing.T, root string, apiKey string) (map[string]string, string) {
-	t.Helper()
-	paths := map[string]string{
-		"HOME":            filepath.Join(root, "home"),
-		"XDG_CONFIG_HOME": filepath.Join(root, "xdg-config"),
-		"XDG_CACHE_HOME":  filepath.Join(root, "xdg-cache"),
-		"XDG_DATA_HOME":   filepath.Join(root, "xdg-data"),
-		"XDG_STATE_HOME":  filepath.Join(root, "xdg-state"),
-		"ACP_GO_AMP_HOME": filepath.Join(root, "wrapper-home"),
-		"AMP_API_KEY":     apiKey,
-	}
-	if ampURL := os.Getenv("AMP_URL"); ampURL != "" {
-		paths["AMP_URL"] = ampURL
-	}
-	for _, path := range paths {
-		if strings.HasPrefix(path, root) {
-			if err := os.MkdirAll(path, 0o700); err != nil {
-				t.Fatal(err)
-			}
-		}
-	}
-
-	return paths, paths["ACP_GO_AMP_HOME"]
-}
-
-func fakeSmokeAmpPath(t *testing.T) string {
-	t.Helper()
-	path := filepath.Join(t.TempDir(), "amp")
-	script := `#!/bin/sh
-if [ "$1" = "version" ]; then
-  echo "0.0.1783155105-gfake"
-  exit 0
-fi
-last=""
-for arg in "$@"; do last="$arg"; done
-if [ "$last" = "--help" ]; then
-  echo "--settings-file --mcp-config -m --effort --json --stream-json-input threads continue threads export threads delete"
-  exit 0
-fi
-for arg in "$@"; do
-  if [ "$arg" = "T-00000000-0000-0000-0000-000000000000" ]; then
-    echo "Thread not found" >&2
-    exit 1
-  fi
-done
-prev=""
-sub=""
-for arg in "$@"; do
-  if [ "$prev" = "threads" ]; then sub="$arg"; break; fi
-  prev="$arg"
-done
-case "$sub" in
-  new) echo "T-smoke-thread" ;;
-  list) echo '[]' ;;
-  export) echo '{"thread":"T-smoke-thread"}' ;;
-  delete) echo "deleted" ;;
-  continue)
-    cat >/dev/null
-    echo '{"type":"assistant","message":{"content":[{"type":"text","text":"ok"}]},"session_id":"T-smoke-thread"}'
-    echo '{"type":"result","subtype":"success","is_error":false,"result":"ok","session_id":"T-smoke-thread"}'
-    ;;
-  *) echo "bad args: $*" >&2; exit 2 ;;
-esac
-`
-	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
-		t.Fatal(err)
-	}
-
-	return path
 }

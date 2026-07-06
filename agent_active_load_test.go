@@ -9,7 +9,7 @@ import (
 	"github.com/coder/acp-go-sdk"
 )
 
-func TestIteration5ActiveLoadResumeY1Semantics(t *testing.T) {
+func TestActiveLoadResumeSemantics(t *testing.T) {
 	ctx := context.Background()
 	path, _ := fakeAgentAmpPath(t, "")
 	cwd := t.TempDir()
@@ -88,7 +88,7 @@ func TestIteration5ActiveLoadResumeY1Semantics(t *testing.T) {
 	}
 }
 
-func TestIteration5ActiveLoadRetriesMirrorBeforeReplay(t *testing.T) {
+func TestActiveLoadRetriesMirrorBeforeReplay(t *testing.T) {
 	ctx := context.Background()
 	path, _ := fakeAgentAmpPath(t, "")
 	cwd := t.TempDir()
@@ -120,7 +120,7 @@ func TestIteration5ActiveLoadRetriesMirrorBeforeReplay(t *testing.T) {
 	}
 }
 
-func TestIteration5ActiveLoadVerifiesContinuability(t *testing.T) {
+func TestActiveLoadVerifiesContinuability(t *testing.T) {
 	ctx := context.Background()
 	path, _ := fakeAgentAmpPath(t, "missing-export")
 	cwd := t.TempDir()
@@ -137,7 +137,7 @@ func TestIteration5ActiveLoadVerifiesContinuability(t *testing.T) {
 	}
 }
 
-func TestIteration5ActiveLoadPropagatesContinuabilityFailure(t *testing.T) {
+func TestActiveLoadPropagatesContinuabilityFailure(t *testing.T) {
 	ctx := context.Background()
 	path, _ := fakeAgentAmpPath(t, "export-fail")
 	cwd := t.TempDir()

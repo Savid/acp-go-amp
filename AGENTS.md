@@ -2,8 +2,9 @@
 
 ## Purpose
 
-This module exposes the Amp CLI as a Go ACP agent. Keep it aligned with
-`/home/savid/ai/siblings/CONTRACT.md` and the HA Amp rulings.
+This module exposes the Amp CLI as a Go ACP agent. It wraps a local `amp`
+harness behind the Agent Client Protocol so hosts can drive Amp threads over
+stdio or embed the agent directly in Go.
 
 ## Project Map
 
@@ -25,7 +26,7 @@ This module exposes the Amp CLI as a Go ACP agent. Keep it aligned with
 - `make docs-audit`: public-doc forbidden-term and Amp semantics audit.
 - `make audit`: local release gate.
 - `make test-integration-live`: live Amp prompt tests gated by
-  `ACP_GO_AMP_LIVE=1`.
+  `ACP_GO_AMP_RUN_INTEGRATION=1` and `ACP_GO_AMP_RUN_LIVE_TOKENS=1`.
 
 ## Coding Rules
 

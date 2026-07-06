@@ -12,54 +12,149 @@ import (
 	ampacp "github.com/savid/acp-go-amp"
 )
 
-func TestMainUsesExitCode(t *testing.T) {
-	origExit := exit
-	origArgs := os.Args
+func TestRunPassesContractFlags(t *testing.T) {
+	originalServe := serve
+	originalAgentVersion := agentVersion
 	t.Cleanup(func() {
-		exit = origExit
-		os.Args = origArgs
+		serve = originalServe
+		agentVersion = originalAgentVersion
 	})
-	var code int
-	exit = func(got int) { code = got }
-	os.Args = []string{"acp-go-amp", "-version"}
-	main()
+
+	var got ampacp.Options
+	serve = func(_ context.Context, _ io.Reader, _ io.Writer, opts ...ampacp.Option) error {
+		for _, opt := range opts {
+			opt(&got)
+		}
+
+		return nil
+	}
+	agentVersion = func() string { return "v1.2.3" }
+
+	code := run(context.Background(), []string{
+		"-path", "/bin/amp",
+		"-home", "/tmp/amp",
+		"-model", "ignored",
+		"-debug",
+	}, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil))
+
 	if code != 0 {
-		t.Fatalf("exit code = %d", code)
+		t.Fatalf("code = %d, want 0", code)
+	}
+	if got.AgentVersion != "v1.2.3" {
+		t.Fatalf("AgentVersion = %q", got.AgentVersion)
+	}
+	if got.ExecutablePath != "/bin/amp" {
+		t.Fatalf("ExecutablePath = %q", got.ExecutablePath)
+	}
+	if got.Home != "/tmp/amp" {
+		t.Fatalf("Home = %q", got.Home)
+	}
+	if got.DefaultModel != "ignored" {
+		t.Fatalf("DefaultModel = %q", got.DefaultModel)
+	}
+	if got.Logger == nil {
+		t.Fatal("Logger is nil")
+	}
+	if got.TextMapPropagator == nil {
+		t.Fatal("TextMapPropagator is nil")
 	}
 }
 
-func TestRunCLI(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	if code := runCLI([]string{"-version"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
-		t.Fatalf("version exit = %d", code)
+func TestRunVersion(t *testing.T) {
+	originalAgentVersion := agentVersion
+	t.Cleanup(func() { agentVersion = originalAgentVersion })
+	agentVersion = func() string { return "v9.9.9" }
+
+	var stdout bytes.Buffer
+	code := run(context.Background(), []string{"-version"}, bytes.NewBuffer(nil), &stdout, bytes.NewBuffer(nil))
+
+	if code != 0 {
+		t.Fatalf("code = %d, want 0", code)
 	}
-	if strings.TrimSpace(stdout.String()) != version {
+	if stdout.String() != "v9.9.9\n" {
 		t.Fatalf("stdout = %q", stdout.String())
 	}
-	if code := runCLI([]string{"-bad"}, strings.NewReader(""), &stdout, &stderr); code != 1 {
-		t.Fatalf("bad flag exit = %d", code)
+}
+
+func TestRunErrorBranches(t *testing.T) {
+	originalServe := serve
+	originalShutdown := shutdownOpenTelemetry
+	originalAgentVersion := agentVersion
+	t.Cleanup(func() {
+		serve = originalServe
+		shutdownOpenTelemetry = originalShutdown
+		agentVersion = originalAgentVersion
+	})
+	agentVersion = func() string { return "v1.2.3" }
+
+	if code := run(context.Background(), []string{"-bad"}, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil)); code != 2 {
+		t.Fatalf("bad flag code = %d, want 2", code)
+	}
+
+	serve = func(context.Context, io.Reader, io.Writer, ...ampacp.Option) error {
+		return errors.New("serve failed")
+	}
+	shutdownOpenTelemetry = func(context.Context, func(context.Context) error) error { return nil }
+	var stderr bytes.Buffer
+	code := run(context.Background(), nil, bytes.NewBuffer(nil), bytes.NewBuffer(nil), &stderr)
+	if code != 1 {
+		t.Fatalf("serve error code = %d, want 1", code)
 	}
 	if !strings.Contains(stderr.String(), "serve failed") {
 		t.Fatalf("stderr = %q", stderr.String())
 	}
+
+	serve = func(ctx context.Context, _ io.Reader, _ io.Writer, _ ...ampacp.Option) error {
+		return ctx.Err()
+	}
+	shutdownOpenTelemetry = func(context.Context, func(context.Context) error) error { return errors.New("shutdown failed") }
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	stderr.Reset()
+	code = run(ctx, nil, bytes.NewBuffer(nil), bytes.NewBuffer(nil), &stderr)
+	if code != 1 {
+		t.Fatalf("shutdown error code = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "shutdown OpenTelemetry") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
 }
 
-func TestRunServeEOFAndDebug(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	err := run([]string{"-debug", "-path", "/tmp/amp", "-home", t.TempDir(), "-model", "ignored"}, strings.NewReader(""), &stdout, &stderr)
-	if err != nil {
-		t.Fatalf("run: %v", err)
+func TestPendingSignalAndSignalCode(t *testing.T) {
+	signals := make(chan os.Signal, 1)
+	if pendingSignal(signals) != nil {
+		t.Fatal("empty channel returned a signal")
+	}
+	if got := signalCode(fakeSignal("fake")); got != 1 {
+		t.Fatalf("signalCode(fake) = %d, want 1", got)
 	}
 }
 
-func TestRunReturnsServeError(t *testing.T) {
-	orig := serveACP
-	t.Cleanup(func() { serveACP = orig })
-	serveACP = func(context.Context, io.Reader, io.Writer, ...ampacp.Option) error {
-		return errors.New("serve boom")
+func TestMainExitBranch(t *testing.T) {
+	originalServe := serve
+	originalExit := exit
+	originalArgs := os.Args
+	t.Cleanup(func() {
+		serve = originalServe
+		exit = originalExit
+		os.Args = originalArgs
+	})
+
+	serve = func(context.Context, io.Reader, io.Writer, ...ampacp.Option) error {
+		return errors.New("serve failed")
 	}
-	var stdout, stderr bytes.Buffer
-	if err := run(nil, strings.NewReader(""), &stdout, &stderr); err == nil || err.Error() != "serve boom" {
-		t.Fatalf("run error = %v", err)
+	os.Args = []string{"acp-go-amp"}
+	exitCode := -1
+	exit = func(code int) { exitCode = code }
+
+	main()
+	if exitCode != 1 {
+		t.Fatalf("exit code = %d, want 1", exitCode)
 	}
 }
+
+type fakeSignal string
+
+func (s fakeSignal) String() string { return string(s) }
+
+func (s fakeSignal) Signal() {}

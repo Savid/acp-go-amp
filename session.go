@@ -14,6 +14,7 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-amp/internal/amp"
+	"github.com/savid/acp-go-amp/internal/observer"
 )
 
 const (
@@ -199,11 +200,15 @@ func newAgentSession(agent *Agent, id acp.SessionId, cwd string, meta parsedSess
 }
 
 func (s *agentSession) client() *amp.Client {
+	return s.clientWithEnv(s.env)
+}
+
+func (s *agentSession) clientWithEnv(env map[string]string) *amp.Client {
 	return amp.NewClient(s.agent.log, amp.Options{
 		CLIPath:       s.agent.options.ExecutablePath,
 		Cwd:           s.cwd,
 		SettingsFile:  s.settingsFile,
-		Env:           s.env,
+		Env:           env,
 		ThreadID:      string(s.id),
 		Mode:          s.mode,
 		Effort:        s.effort,
@@ -248,7 +253,9 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (ac
 	s.setActivePrompt(state)
 	defer s.clearActivePrompt(state)
 
-	turn, err := s.client().Continue(continueCtx, string(s.id), input)
+	s.agent.observe.RecordAmpProcessStart(continueCtx)
+	promptClient := s.clientWithEnv(s.agent.observe.InjectTraceEnv(continueCtx, s.env))
+	turn, err := promptClient.Continue(continueCtx, string(s.id), input)
 	if err != nil {
 		if state.isCancelled() {
 			return cancelledPromptResponse(nil, params.MessageId), nil
@@ -600,6 +607,7 @@ func (s *agentSession) emitUsage(ctx context.Context, usage *amp.Usage) error {
 }
 
 func (s *agentSession) emitUpdate(ctx context.Context, update acp.SessionUpdate) error {
+	s.agent.observe.ObserveFirstPromptUpdate(ctx)
 	conn := s.agent.connection()
 	if conn == nil {
 		return nil
@@ -778,6 +786,30 @@ func messageUsage(msg amp.Message) *acp.Usage {
 		return usageFromAmp(assistant.Usage)
 	}
 	return nil
+}
+
+func promptResultForObserver(resp acp.PromptResponse, err error, model string) observer.PromptResult {
+	result := observer.PromptResult{
+		Err:        err,
+		Model:      model,
+		StopReason: string(resp.StopReason),
+	}
+	if resp.Usage == nil {
+		return result
+	}
+	result.InputTokens = resp.Usage.InputTokens
+	result.OutputTokens = resp.Usage.OutputTokens
+	result.TotalTokens = resp.Usage.TotalTokens
+	if resp.Usage.CachedReadTokens != nil {
+		result.CachedReadTokens = *resp.Usage.CachedReadTokens
+	}
+	if resp.Usage.CachedWriteTokens != nil {
+		result.CachedWriteTokens = *resp.Usage.CachedWriteTokens
+	}
+	if resp.Usage.ThoughtTokens != nil {
+		result.ThoughtTokens = *resp.Usage.ThoughtTokens
+	}
+	return result
 }
 
 type turnErrorReader interface {

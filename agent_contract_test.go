@@ -13,7 +13,7 @@ import (
 	"github.com/coder/acp-go-sdk"
 )
 
-func TestReview1CancelDeterminismAndNativeCancelResult(t *testing.T) {
+func TestCancelDeterminismAndNativeCancelResult(t *testing.T) {
 	ctx := context.Background()
 	idlePath, _ := fakeAgentAmpPath(t, "")
 	idleAgent := NewAgent(WithExecutablePath(idlePath), WithHome(t.TempDir()))
@@ -72,7 +72,7 @@ func TestReview1CancelDeterminismAndNativeCancelResult(t *testing.T) {
 	}
 }
 
-func TestReview1StrictMetaAndConfigResponse(t *testing.T) {
+func TestStrictMetaAndConfigResponse(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		meta  map[string]any
@@ -109,7 +109,7 @@ func TestReview1StrictMetaAndConfigResponse(t *testing.T) {
 	}
 }
 
-func TestReview1ClientBackpressureAndSessionIDDrift(t *testing.T) {
+func TestClientBackpressureAndSessionIDDrift(t *testing.T) {
 	agent := NewAgent(WithConcurrencyLimits(ConcurrencyLimits{MaxConcurrentClientCalls: 1}))
 	client, cleanup := attachRecordingClient(t, agent)
 	defer cleanup()
@@ -137,7 +137,7 @@ func TestReview1ClientBackpressureAndSessionIDDrift(t *testing.T) {
 	}
 }
 
-func TestReview1DeleteOrderingRetryAndManifestShape(t *testing.T) {
+func TestDeleteOrderingRetryAndManifestShape(t *testing.T) {
 	ctx := context.Background()
 	path, _ := fakeAgentAmpPath(t, "")
 	storeErr := errors.New("delete store failed")
@@ -198,7 +198,7 @@ func TestReview1DeleteOrderingRetryAndManifestShape(t *testing.T) {
 	}
 }
 
-func TestReview1PathHomeContinuabilityAndStartup(t *testing.T) {
+func TestPathHomeContinuabilityAndStartup(t *testing.T) {
 	if _, err := NewAgent(WithExecutablePath("/does/not/exist")).NewSession(context.Background(), NewSessionRequest("relative")); err == nil {
 		t.Fatal("relative new cwd accepted")
 	}
@@ -272,7 +272,7 @@ func TestReview1PathHomeContinuabilityAndStartup(t *testing.T) {
 	}
 }
 
-func TestReview1RemainingBranches(t *testing.T) {
+func TestRemainingBranches(t *testing.T) {
 	ctx := context.Background()
 	if _, err := NewAgent().UnstableDeleteSession(ctx, DeleteSessionRequest("")); err == nil {
 		t.Fatal("empty delete id accepted")
@@ -383,7 +383,7 @@ func TestReview1RemainingBranches(t *testing.T) {
 	}
 }
 
-func TestReview1CancelWhileContinueIsStarting(t *testing.T) {
+func TestCancelWhileContinueIsStarting(t *testing.T) {
 	path, state := fakeAgentAmpPath(t, "block-stdin")
 	agent := NewAgent(WithExecutablePath(path), WithHome(t.TempDir()))
 	agent.options.runtime.nativeCancelTimeout = 50 * time.Millisecond
@@ -437,7 +437,7 @@ func ctxWithTimeout(t *testing.T) context.Context {
 	return ctx
 }
 
-func TestReview1WithHomeCreatesDirectories(t *testing.T) {
+func TestWithHomeCreatesDirectories(t *testing.T) {
 	parent := t.TempDir()
 	session, err := newAgentSession(NewAgent(WithHome(parent)), "T-dirs", t.TempDir(), parsedSessionMeta{}, "", nil)
 	if err != nil {
