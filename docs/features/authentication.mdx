@@ -3,8 +3,12 @@
 Amp owns authentication. `initialize` advertises no ACP auth methods, and
 `Authenticate` rejects caller-provided method IDs.
 
-Use Amp's native account setup or provide `AMP_API_KEY` to the native process.
-For embedded hosts, pass environment values with `WithEnv` or per-session
-`AmpOptions.Env`.
+Provide `AMP_API_KEY` to the native process: set it in the host process
+environment, with `WithEnv`, or per-session via `AmpOptions.Env`. Session
+commands run inside an isolated per-session home, so credentials saved by
+Amp's native account setup on the host are not visible to them. Session
+startup fails fast with a descriptive error when no `AMP_API_KEY` is
+available, instead of leaving the native process waiting on its interactive
+login flow.
 
 Auth material is never stored in the session manifest or transcript.

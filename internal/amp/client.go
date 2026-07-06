@@ -347,6 +347,17 @@ func Discover(ctx context.Context, cliPath string) (string, error) {
 	return path, nil
 }
 
+// HasAPIKey reports whether the amp CLI would see a non-empty AMP_API_KEY
+// under BuildEnv semantics: an explicit override wins even when empty,
+// otherwise the live process environment supplies the value.
+func HasAPIKey(overrides map[string]string) bool {
+	value, ok := overrides["AMP_API_KEY"]
+	if !ok {
+		value = os.Getenv("AMP_API_KEY")
+	}
+	return strings.TrimSpace(value) != ""
+}
+
 func BuildEnv(overrides map[string]string, cwd string) []string {
 	values := map[string]string{}
 	keys := make([]string, 0, len(os.Environ())+len(overrides)+1)

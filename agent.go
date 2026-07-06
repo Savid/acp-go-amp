@@ -613,8 +613,19 @@ func (a *Agent) settingsParent() string {
 	return ""
 }
 
+// missingAPIKeyMessage explains the session-start fail-fast: session commands
+// run inside an isolated home, so `amp login` credentials on the host are
+// invisible and the amp CLI would otherwise block forever on its interactive
+// login flow.
+const missingAPIKeyMessage = "AMP_API_KEY is not set: amp sessions run in an " +
+	"isolated home where amp login credentials are unavailable; set AMP_API_KEY " +
+	"in the process environment, WithEnv, or session env options"
+
 func (a *Agent) ensureStartup(ctx context.Context, cwd string, meta parsedSessionMeta) error {
 	env := mergeEnv(a.options.Env, meta.options.Env)
+	if !amp.HasAPIKey(env) {
+		return acp.NewInternalError(map[string]any{jsonFieldError: missingAPIKeyMessage})
+	}
 	client := amp.NewClient(a.log, amp.Options{
 		CLIPath:      a.options.ExecutablePath,
 		Cwd:          cwd,
