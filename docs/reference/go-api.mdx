@@ -20,6 +20,11 @@ Common options:
 - `WithEnv`
 - `WithSessionStore`
 - `WithConcurrencyLimits`
+- `WithSeedFiles`, which maps relative paths to file contents written into each
+  session's isolated native `HOME` before amp launches. See
+  [Seed files](/features/models-config#seed-files). Amp is locked to its hosted
+  backend, so this common option exists for family symmetry and cannot repoint
+  Amp at a custom LLM endpoint.
 - OpenTelemetry provider options
 
 Amp per-session options:

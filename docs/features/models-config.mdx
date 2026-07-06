@@ -24,3 +24,29 @@ The wrapper passes selected mode and effort values through to Amp with `-m` and
 There is no ACP model config option for Amp. A non-empty `WithDefaultModel`,
 `AmpOptions.Model`, or `_meta.amp.options.model` fails session start with the
 uniform unsupported error naming field `model`.
+
+## Seed Files
+
+`WithSeedFiles(map[string]string)` is a common option shared by every sibling
+adapter. It maps relative paths to file contents that the wrapper writes into a
+session's resolved native root before the short-lived `amp threads` process
+launches, so the native CLI can read them as its own on-disk state.
+
+- Anchor: the per-session isolated `HOME` that amp runs with. The wrapper always
+  creates a fresh isolated `HOME`/XDG root per session (a child of the temp dir
+  from `mkdirTemp`, which falls back to the OS temp dir when `-home`/`WithHome`
+  is unset), so this is the always-isolated case. Seeds never land in the
+  operator's real `HOME` or `~/.config/amp`, so there is no `WithHome` guard.
+- Seeds are written under `$HOME/<relpath>`. The wrapper's managed
+  `settings.json` lives under `XDG_CONFIG_HOME` (a sibling of `HOME`), so seeds
+  are written verbatim and can never overwrite the wrapper's required settings.
+- Paths are confined to that root: absolute paths, `..` escapes, and empty keys
+  fail closed at session start with the uniform unsupported error naming field
+  `seedFiles[...]`. Parent directories are created `0o700` and files `0o600`.
+
+Amp does **not** support bring-your-own-model or custom LLM endpoints: it is
+locked to its hosted backend. Seed files therefore cannot point Amp at a LiteLLM
+gateway or any alternate provider the way a seeded `config.toml` can for codex or
+a seeded `config.yaml` can for hermes. `WithSeedFiles` exists on the Amp adapter
+purely for family symmetry, and secrets still belong in `WithEnv`, never in a
+seeded file.

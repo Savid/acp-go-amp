@@ -9,6 +9,11 @@ Flags:
   Amp settings files.
 - `-model`: default model. Present for sibling flag parity; non-empty values
   fail session start because Amp has no ACP model config option.
+- `-seed-file`: repeatable `<relpath>=<hostpath>`. Reads the host file and writes
+  its contents to `<relpath>` inside each session's isolated native `HOME` before
+  amp launches (see [Seed files](/features/models-config#seed-files)). Present for
+  sibling parity; Amp is locked to its hosted backend, so seeds cannot repoint it
+  at a custom LLM endpoint.
 - `-debug`: write adapter debug logs to stderr.
 - `-version`: print adapter version and exit.
 

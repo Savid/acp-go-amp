@@ -53,6 +53,7 @@ type Options struct {
 	SessionStore            SessionStore
 	SessionStoreLoadTimeout time.Duration
 	ConcurrencyLimits       ConcurrencyLimits
+	SeedFiles               map[string]string
 	runtime                 runtimeOptions
 }
 
@@ -153,6 +154,15 @@ func WithSessionStoreLoadTimeout(timeout time.Duration) Option {
 
 func WithConcurrencyLimits(limits ConcurrencyLimits) Option {
 	return func(options *Options) { options.ConcurrencyLimits = limits }
+}
+
+// WithSeedFiles registers relative-path file contents that the wrapper writes
+// into each session's resolved native root before the amp CLI launches, so the
+// short-lived amp process reads them as its own on-disk state. See
+// writeSeedFiles for the chosen anchor and path-confinement rules. The map is
+// cloned like WithEnv so later caller mutation cannot change agent state.
+func WithSeedFiles(files map[string]string) Option {
+	return func(options *Options) { options.SeedFiles = cloneStringMap(files) }
 }
 
 func cloneStringMap(in map[string]string) map[string]string {

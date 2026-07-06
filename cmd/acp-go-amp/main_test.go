@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -57,6 +58,70 @@ func TestRunPassesContractFlags(t *testing.T) {
 	}
 	if got.TextMapPropagator == nil {
 		t.Fatal("TextMapPropagator is nil")
+	}
+}
+
+func TestRunSeedFiles(t *testing.T) {
+	originalServe := serve
+	originalAgentVersion := agentVersion
+	t.Cleanup(func() {
+		serve = originalServe
+		agentVersion = originalAgentVersion
+	})
+
+	var got ampacp.Options
+	serve = func(_ context.Context, _ io.Reader, _ io.Writer, opts ...ampacp.Option) error {
+		for _, opt := range opts {
+			opt(&got)
+		}
+
+		return nil
+	}
+	agentVersion = func() string { return "v1.2.3" }
+
+	hostFile := filepath.Join(t.TempDir(), "settings.json")
+	if err := os.WriteFile(hostFile, []byte(`{"seed":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	code := run(context.Background(), []string{
+		"-seed-file", "custom/settings.json=" + hostFile,
+		"-seed-file", "custom/settings.json=" + hostFile,
+	}, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil))
+
+	if code != 0 {
+		t.Fatalf("code = %d, want 0", code)
+	}
+	if got.SeedFiles["custom/settings.json"] != `{"seed":true}` {
+		t.Fatalf("SeedFiles = %#v", got.SeedFiles)
+	}
+}
+
+func TestRunSeedFilesErrors(t *testing.T) {
+	if code := run(context.Background(), []string{"-seed-file", "noequalsign"}, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil)); code != 2 {
+		t.Fatalf("bad seed-file format code = %d, want 2", code)
+	}
+
+	var stderr bytes.Buffer
+	code := run(context.Background(), []string{"-seed-file", "rel=" + filepath.Join(t.TempDir(), "missing")}, bytes.NewBuffer(nil), bytes.NewBuffer(nil), &stderr)
+	if code != 2 {
+		t.Fatalf("missing host file code = %d, want 2", code)
+	}
+	if !strings.Contains(stderr.String(), "read -seed-file") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
+func TestSeedFileFlagString(t *testing.T) {
+	f := seedFileFlag{}
+	if err := f.Set("a=host1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Set("b=host2"); err != nil {
+		t.Fatal(err)
+	}
+	if f.String() != "a,b" {
+		t.Fatalf("String = %q, want \"a,b\"", f.String())
 	}
 }
 
