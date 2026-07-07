@@ -35,12 +35,11 @@ const (
 )
 
 var (
-	errSessionDeleted = errors.New("session deleted")
-	errSessionClosed  = errors.New("session closed")
-	writeFile         = os.WriteFile
-	readFile          = os.ReadFile
-	mkdirAll          = os.MkdirAll
-	mkdirTemp         = os.MkdirTemp
+	errSessionClosed = errors.New("session closed")
+	writeFile        = os.WriteFile
+	readFile         = os.ReadFile
+	mkdirAll         = os.MkdirAll
+	mkdirTemp        = os.MkdirTemp
 )
 
 const (
@@ -213,7 +212,7 @@ func newAgentSession(agent *Agent, id acp.SessionId, cwd string, meta parsedSess
 		rawEvents:             meta.rawEvent,
 		settingsDir:           dir,
 		settingsFile:          settingsFile,
-		turn:                  make(chan struct{}, agent.maxConcurrentPrompts()),
+		turn:                  make(chan struct{}, 1),
 	}, nil
 }
 

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"slices"
 	"strconv"
@@ -273,16 +274,35 @@ func TestAgentErrorAndConformanceBranches(t *testing.T) {
 	_, err = agent.HandleExtensionMethod(ctx, ForkSessionMethod, json.RawMessage(`{}`))
 	requireRequestErrorCode(t, err, -32602)
 
-	for _, meta := range []map[string]any{
-		{"amp": "bad"},
-		{"amp": map[string]any{"rawEvent": "bad"}},
-		{"amp": map[string]any{"options": "bad"}},
-		{"amp": map[string]any{"options": map[string]any{"env": "bad"}}},
-		{"amp": map[string]any{"options": map[string]any{"env": map[string]any{"A": 1}}}},
-		{"amp": map[string]any{"options": map[string]any{"deleted": true}}},
-		{"traceparent": "00-test", "tracestate": "state", "baggage": "bag", "foreign": map[string]any{"ok": true}},
+	for _, tc := range []struct {
+		name    string
+		meta    map[string]any
+		wantErr bool
+	}{
+		{name: "amp not object", meta: map[string]any{"amp": "bad"}, wantErr: true},
+		{name: "rawEvent not object", meta: map[string]any{"amp": map[string]any{"rawEvent": "bad"}}, wantErr: true},
+		{name: "options not object", meta: map[string]any{"amp": map[string]any{"options": "bad"}}, wantErr: true},
+		{name: "env not object", meta: map[string]any{"amp": map[string]any{"options": map[string]any{"env": "bad"}}}, wantErr: true},
+		{name: "env value not string", meta: map[string]any{"amp": map[string]any{"options": map[string]any{"env": map[string]any{"A": 1}}}}, wantErr: true},
+		{name: "unknown option", meta: map[string]any{"amp": map[string]any{"options": map[string]any{"deleted": true}}}, wantErr: true},
+		// Foreign namespaces (including trace context and the full module path
+		// look-alike) MUST be ignored, never rejected: no error, no options applied.
+		{name: "trace and foreign ignored", meta: map[string]any{"traceparent": "00-test", "tracestate": "state", "baggage": "bag", "foreign": map[string]any{"ok": true}}},
+		{name: "full module path ignored", meta: map[string]any{"github.com/savid/acp-go-amp": map[string]any{"options": map[string]any{"model": "trap"}}}},
 	} {
-		_, _ = parseSessionMeta(meta)
+		parsed, err := parseSessionMeta(tc.meta)
+		if tc.wantErr {
+			if err == nil {
+				t.Fatalf("%s: parseSessionMeta accepted invalid meta", tc.name)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatalf("%s: parseSessionMeta rejected foreign meta: %v", tc.name, err)
+		}
+		if !reflect.DeepEqual(parsed, parsedSessionMeta{}) {
+			t.Fatalf("%s: foreign meta applied options: %#v", tc.name, parsed)
+		}
 	}
 	if err := NewAgent(WithDefaultModel("gpt")).validateSessionStartOptions(AmpOptions{}); err == nil {
 		t.Fatal("default model accepted")
@@ -301,6 +321,83 @@ func TestAgentErrorAndConformanceBranches(t *testing.T) {
 	}
 	if err := NewAgent().validateSessionStartOptions(AmpOptions{Effort: "extreme"}); err == nil {
 		t.Fatal("unknown effort accepted")
+	}
+}
+
+// requireUnknownSessionError pins the family-canonical unknown-session error:
+// JSON-RPC -32602 (invalid params) with data
+// {"error":"unknown session","field":"sessionId"} so the shape cannot drift.
+func requireUnknownSessionError(t *testing.T, err error) {
+	t.Helper()
+	var reqErr *acp.RequestError
+	if !errors.As(err, &reqErr) {
+		t.Fatalf("error = %T %v, want RequestError", err, err)
+	}
+	if reqErr.Code != -32602 {
+		t.Fatalf("code = %d, want -32602 (%v)", reqErr.Code, err)
+	}
+	data, ok := reqErr.Data.(map[string]any)
+	if !ok {
+		t.Fatalf("data = %#v, want map", reqErr.Data)
+	}
+	if len(data) != 2 || data[jsonFieldError] != "unknown session" || data[jsonFieldField] != jsonFieldSessionID {
+		t.Fatalf("data = %#v, want {error:unknown session, field:sessionId}", data)
+	}
+	encoded, marshalErr := json.Marshal(data)
+	if marshalErr != nil {
+		t.Fatalf("marshal data: %v", marshalErr)
+	}
+	if got := string(encoded); got != `{"error":"unknown session","field":"sessionId"}` {
+		t.Fatalf("data JSON = %s", got)
+	}
+}
+
+// TestUnknownSessionErrorShape pins the canonical unknown-session error across
+// prompt, load, and resume for both never-existed and tombstoned ids: a host
+// must not be able to distinguish "deleted" from "never existed".
+func TestUnknownSessionErrorShape(t *testing.T) {
+	ctx := context.Background()
+
+	// prompt resolves the session synchronously via a.session().
+	_, err := NewAgent().Prompt(ctx, TextPromptRequest("T-missing", "x"))
+	requireUnknownSessionError(t, err)
+
+	// load/resume against an id absent from the store hit the manifest lookup
+	// and MUST emit the identical shape (no -32002, no divergent data).
+	path, _ := fakeAgentAmpPath(t, "")
+	cwd := t.TempDir()
+	agent := NewAgent(WithExecutablePath(path), WithHome(t.TempDir()), WithSessionStore(NewInMemorySessionStore()))
+	_, err = agent.LoadSession(ctx, LoadSessionRequest("T-missing", cwd))
+	requireUnknownSessionError(t, err)
+	_, err = agent.ResumeSession(ctx, ResumeSessionRequest("T-missing", cwd))
+	requireUnknownSessionError(t, err)
+
+	// a tombstoned id is wire-indistinguishable from one that never existed.
+	agent.markDeleted("T-missing")
+	_, err = agent.Prompt(ctx, TextPromptRequest("T-missing", "x"))
+	requireUnknownSessionError(t, err)
+	_, err = agent.LoadSession(ctx, LoadSessionRequest("T-missing", cwd))
+	requireUnknownSessionError(t, err)
+	_, err = agent.ResumeSession(ctx, ResumeSessionRequest("T-missing", cwd))
+	requireUnknownSessionError(t, err)
+}
+
+// TestSelectPositionEncoding pins the fixed rule: prefer utf8, else utf16,
+// never utf32; when the client offers neither utf8 nor utf16 the default is utf16.
+func TestSelectPositionEncoding(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		offer []acp.PositionEncodingKind
+		want  acp.PositionEncodingKind
+	}{
+		{name: "utf8 preferred", offer: []acp.PositionEncodingKind{acp.PositionEncodingKindUtf8, acp.PositionEncodingKindUtf16}, want: acp.PositionEncodingKindUtf8},
+		{name: "utf16 fallback", offer: []acp.PositionEncodingKind{acp.PositionEncodingKindUtf16}, want: acp.PositionEncodingKindUtf16},
+		{name: "never utf32", offer: []acp.PositionEncodingKind{acp.PositionEncodingKindUtf32}, want: acp.PositionEncodingKindUtf16},
+		{name: "neither defaults utf16", offer: nil, want: acp.PositionEncodingKindUtf16},
+	} {
+		if got := selectPositionEncoding(tc.offer); got != tc.want {
+			t.Fatalf("%s: selectPositionEncoding(%#v) = %q, want %q", tc.name, tc.offer, got, tc.want)
+		}
 	}
 }
 
@@ -332,9 +429,8 @@ func TestNativeMissingThreadAndDeleteFailureTombstone(t *testing.T) {
 	if entries, loadErr := deleteStore.Load(ctx, SessionKey{SessionID: string(deleteResp.SessionId), Subpath: SessionStoreMainSubpath}); loadErr != nil || len(entries) != 0 {
 		t.Fatalf("tombstone not durable before native delete failure: entries=%d err=%v", len(entries), loadErr)
 	}
-	if _, err := deleteAgent.LoadSession(ctx, LoadSessionRequest(deleteResp.SessionId, "")); !errors.Is(err, errSessionDeleted) {
-		t.Fatalf("deleted load error = %v", err)
-	}
+	_, deletedLoadErr := deleteAgent.LoadSession(ctx, LoadSessionRequest(deleteResp.SessionId, ""))
+	requireUnknownSessionError(t, deletedLoadErr)
 }
 
 func TestSessionDirectBranches(t *testing.T) {
@@ -348,7 +444,7 @@ func TestSessionDirectBranches(t *testing.T) {
 	}
 
 	path, _ := fakeAgentAmpPath(t, "")
-	agent := NewAgent(WithExecutablePath(path), WithHome(t.TempDir()), WithConcurrencyLimits(ConcurrencyLimits{MaxConcurrentPrompts: 1}))
+	agent := NewAgent(WithExecutablePath(path), WithHome(t.TempDir()))
 	session, err := newAgentSession(agent, "T-1", t.TempDir(), parsedSessionMeta{rawEvent: true}, "", nil)
 	if err != nil {
 		t.Fatal(err)

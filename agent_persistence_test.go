@@ -112,16 +112,6 @@ func TestMirrorUnsyncedRetention(t *testing.T) {
 	}
 }
 
-// TestConcurrentPromptsRejected proves MaxConcurrentPrompts>1
-// is invalid at construction and Initialize names the limit.
-func TestConcurrentPromptsRejected(t *testing.T) {
-	agent := NewAgent(WithConcurrencyLimits(ConcurrencyLimits{MaxConcurrentPrompts: 2}))
-	_, err := agent.Initialize(context.Background(), acp.InitializeRequest{})
-	if err == nil || !strings.Contains(err.Error(), "MaxConcurrentPrompts") {
-		t.Fatalf("Initialize accepted MaxConcurrentPrompts>1: %v", err)
-	}
-}
-
 // TestCancelAlreadyCancelledBranch deterministically covers Cancel
 // on an already-cancelled active prompt returning nil without re-interrupting.
 func TestCancelAlreadyCancelledBranch(t *testing.T) {

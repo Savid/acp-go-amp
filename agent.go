@@ -292,9 +292,6 @@ func (a *Agent) Cancel(ctx context.Context, params acp.CancelNotification) (err 
 	defer func() { finish(err) }()
 	session, err := a.session(params.SessionId)
 	if err != nil {
-		if errors.Is(err, errSessionDeleted) {
-			return nil
-		}
 		return err
 	}
 	return session.Cancel(ctx)
@@ -305,9 +302,6 @@ func (a *Agent) CloseSession(ctx context.Context, params acp.CloseSessionRequest
 	defer func() { finish(err) }()
 	session, err := a.session(params.SessionId)
 	if err != nil {
-		if errors.Is(err, errSessionDeleted) {
-			return acp.CloseSessionResponse{}, nil
-		}
 		return acp.CloseSessionResponse{}, err
 	}
 	err = session.Close(ctx)
@@ -389,7 +383,7 @@ func (a *Agent) HandleExtensionMethod(ctx context.Context, method string, params
 func (a *Agent) loadOrResume(ctx context.Context, sessionID acp.SessionId, cwd string, mcpServers []acp.McpServer, additionalDirs []string, rawMeta map[string]any) (*agentSession, error) {
 	a.retryPendingNativeDeletes(ctx)
 	if _, deleted := a.isDeleted(sessionID); deleted {
-		return nil, errSessionDeleted
+		return nil, unknownSessionError()
 	}
 
 	// X1: validate the full request identically to the cold path FIRST, so an
@@ -470,7 +464,7 @@ func (a *Agent) loadManifest(ctx context.Context, sessionID acp.SessionId) (ampM
 		return ampManifest{}, err
 	}
 	if len(entries) == 0 {
-		return ampManifest{}, acp.NewInvalidParams(map[string]any{jsonFieldField: jsonFieldSessionID, jsonFieldError: "unknown session"})
+		return ampManifest{}, unknownSessionError()
 	}
 	var manifest ampManifest
 	if err := json.Unmarshal(entries[len(entries)-1], &manifest); err != nil {
@@ -563,16 +557,25 @@ func (a *Agent) releaseSessionSlot(acp.SessionId) {
 }
 
 func (a *Agent) session(id acp.SessionId) (*agentSession, error) {
+	// A tombstoned session is wire-indistinguishable from one that never
+	// existed: both resolve to the uniform unknown-session error.
 	if _, deleted := a.isDeleted(id); deleted {
-		return nil, errSessionDeleted
+		return nil, unknownSessionError()
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	session := a.sessions[id]
 	if session == nil {
-		return nil, acp.NewInvalidParams(map[string]any{jsonFieldField: jsonFieldSessionID, jsonFieldError: "unknown session"})
+		return nil, unknownSessionError()
 	}
 	return session, nil
+}
+
+// unknownSessionError is the single canonical error for any session id that
+// cannot be resolved — unknown, absent from the store, or tombstoned. Keeping
+// one constructor guarantees the wire shape cannot drift between call sites.
+func unknownSessionError() error {
+	return acp.NewInvalidParams(map[string]any{jsonFieldField: jsonFieldSessionID, jsonFieldError: "unknown session"})
 }
 
 func (a *Agent) markDeleted(id acp.SessionId) {
@@ -696,13 +699,6 @@ func (a *Agent) maxActiveSessions() int {
 		return a.options.ConcurrencyLimits.MaxActiveSessions
 	}
 	return defaultMaxActiveSessions
-}
-
-func (a *Agent) maxConcurrentPrompts() int {
-	if a.options.ConcurrencyLimits.MaxConcurrentPrompts > 0 {
-		return a.options.ConcurrencyLimits.MaxConcurrentPrompts
-	}
-	return defaultMaxConcurrentPrompts
 }
 
 func maxConcurrentClientCalls(limits ConcurrencyLimits) int {
@@ -982,10 +978,6 @@ func validateConcurrencyLimits(limits ConcurrencyLimits) error {
 	switch {
 	case limits.MaxActiveSessions < 0:
 		return errors.New("max active sessions must be non-negative")
-	case limits.MaxConcurrentPrompts < 0:
-		return errors.New("max concurrent prompts must be non-negative")
-	case limits.MaxConcurrentPrompts > 1:
-		return errors.New("MaxConcurrentPrompts must be 1: amp thread turns are inherently serial server-side")
 	case limits.MaxConcurrentClientCalls < 0:
 		return errors.New("max concurrent client calls must be non-negative")
 	default:

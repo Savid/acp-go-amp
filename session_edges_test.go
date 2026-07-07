@@ -210,23 +210,14 @@ func TestRemainingAgentBranches(t *testing.T) {
 		t.Fatal("active load backpressure not enforced")
 	}
 	agent.markDeleted("T-deleted")
-	if _, err := agent.Prompt(ctx, TextPromptRequest("T-deleted", "x")); !errors.Is(err, errSessionDeleted) {
-		t.Fatalf("deleted prompt = %v", err)
-	}
-	if err := agent.Cancel(ctx, acp.CancelNotification{SessionId: "T-deleted"}); err != nil {
-		t.Fatalf("deleted cancel: %v", err)
-	}
-	if _, err := agent.CloseSession(ctx, acp.CloseSessionRequest{SessionId: "T-deleted"}); err != nil {
-		t.Fatalf("deleted close: %v", err)
-	}
-	if _, err := agent.Prompt(ctx, TextPromptRequest("T-missing", "x")); err == nil {
-		t.Fatal("missing prompt accepted")
-	}
-	if err := agent.Cancel(ctx, acp.CancelNotification{SessionId: "T-missing"}); err == nil {
-		t.Fatal("missing cancel accepted")
-	}
-	if _, err := agent.CloseSession(ctx, acp.CloseSessionRequest{SessionId: "T-missing"}); err == nil {
-		t.Fatal("missing close accepted")
+	// A tombstoned session is wire-indistinguishable from one that never
+	// existed: prompt/cancel/close all yield the uniform unknown-session shape.
+	for _, id := range []acp.SessionId{"T-deleted", "T-missing"} {
+		_, promptErr := agent.Prompt(ctx, TextPromptRequest(id, "x"))
+		requireUnknownSessionError(t, promptErr)
+		requireUnknownSessionError(t, agent.Cancel(ctx, acp.CancelNotification{SessionId: id}))
+		_, closeErr := agent.CloseSession(ctx, acp.CloseSessionRequest{SessionId: id})
+		requireUnknownSessionError(t, closeErr)
 	}
 	options := ampOptionsPayload(AmpOptions{Model: "m", OutputSchema: map[string]any{"type": "object"}})
 	if options["model"] != "m" || options["outputSchema"] == nil {

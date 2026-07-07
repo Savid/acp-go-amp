@@ -34,7 +34,7 @@ func TestOptionsAndAmpOptions(t *testing.T) {
 		WithTextMapPropagator(propagation.TraceContext{}),
 		WithSessionStore(store),
 		WithSessionStoreLoadTimeout(time.Second),
-		WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 2, MaxConcurrentPrompts: 3, MaxConcurrentClientCalls: 4}),
+		WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 2, MaxConcurrentClientCalls: 4}),
 		nil,
 	})
 	if options.AgentName != "name" || options.AgentTitle != "title" || options.AgentVersion != "version" {
@@ -240,18 +240,19 @@ func TestInvalidMCPShapes(t *testing.T) {
 func TestConcurrencyValidationAllFields(t *testing.T) {
 	for _, limits := range []ConcurrencyLimits{
 		{MaxActiveSessions: -1},
-		{MaxConcurrentPrompts: -1},
-		{MaxConcurrentPrompts: 2},
 		{MaxConcurrentClientCalls: -1},
 	} {
 		if err := validateConcurrencyLimits(limits); err == nil {
 			t.Fatalf("limits accepted: %#v", limits)
 		}
 	}
-	if err := validateConcurrencyLimits(ConcurrencyLimits{MaxConcurrentPrompts: 1}); err != nil {
-		t.Fatalf("single-prompt limit rejected: %v", err)
-	}
-	if err := validateConcurrencyLimits(ConcurrencyLimits{}); err != nil {
-		t.Fatalf("zero limits: %v", err)
+	// Zero means "use the default"; positive values may raise either limit.
+	for _, limits := range []ConcurrencyLimits{
+		{},
+		{MaxActiveSessions: 64, MaxConcurrentClientCalls: 32},
+	} {
+		if err := validateConcurrencyLimits(limits); err != nil {
+			t.Fatalf("valid limits rejected: %#v: %v", limits, err)
+		}
 	}
 }

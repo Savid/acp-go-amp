@@ -15,7 +15,6 @@ const (
 	defaultAgentVersion          = "0.1.0"
 	defaultSessionStoreTimeout   = 10 * time.Second
 	defaultMaxActiveSessions     = 32
-	defaultMaxConcurrentPrompts  = 1
 	defaultMaxConcurrentCalls    = 16
 	defaultNativeCancelTimeout   = 5 * time.Second
 	defaultNativeCloseTurnWait   = 5 * time.Second
@@ -29,7 +28,6 @@ type Option func(*Options)
 // ConcurrencyLimits configures ACP backpressure limits.
 type ConcurrencyLimits struct {
 	MaxActiveSessions        int
-	MaxConcurrentPrompts     int
 	MaxConcurrentClientCalls int
 }
 
