@@ -51,6 +51,7 @@ type Options struct {
 	SessionStoreLoadTimeout time.Duration
 	ConcurrencyLimits       ConcurrencyLimits
 	SeedFiles               map[string]string
+	TurnTimeout             time.Duration
 	runtime                 runtimeOptions
 }
 
@@ -189,6 +190,16 @@ func WithSessionStoreLoadTimeout(timeout time.Duration) Option {
 func WithConcurrencyLimits(limits ConcurrencyLimits) Option {
 	return func(options *Options) {
 		options.ConcurrencyLimits = limits
+	}
+}
+
+// WithTurnTimeout sets a per-turn native deadline. The default of 0 means no
+// deadline. When positive, a prompt turn that has not completed within the
+// duration aborts the native turn and returns the uniform turn-failure error
+// with cause "timeout" — a timeout is a failure, never a cancellation.
+func WithTurnTimeout(timeout time.Duration) Option {
+	return func(options *Options) {
+		options.TurnTimeout = timeout
 	}
 }
 

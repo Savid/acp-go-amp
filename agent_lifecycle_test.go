@@ -363,7 +363,7 @@ func TestUnknownSessionErrorShape(t *testing.T) {
 	requireUnknownSessionError(t, err)
 
 	// load/resume against an id absent from the store hit the manifest lookup
-	// and MUST emit the identical shape (no -32002, no divergent data).
+	// and MUST emit the identical uniform unknown-session shape.
 	path, _ := fakeAgentAmpPath(t, "")
 	cwd := t.TempDir()
 	agent := NewAgent(WithExecutablePath(path), WithHome(t.TempDir()), WithSessionStore(NewInMemorySessionStore()))
@@ -774,6 +774,23 @@ func main() {
 		}
 		if mode == "result-error" {
 			os.Stdout.WriteString("{\"type\":\"result\",\"subtype\":\"error\",\"duration_ms\":1,\"is_error\":true,\"error\":\"native failed\",\"session_id\":\"T-agent-thread\"}\n")
+			return
+		}
+		if mode == "provider-auth-error" {
+			os.Stdout.WriteString("{\"type\":\"result\",\"subtype\":\"error\",\"duration_ms\":1,\"is_error\":true,\"error\":\"authentication_error: invalid API key\",\"session_id\":\"T-agent-thread\"}\n")
+			return
+		}
+		if mode == "provider-rate-error" {
+			os.Stdout.WriteString("{\"type\":\"result\",\"subtype\":\"error\",\"duration_ms\":1,\"is_error\":true,\"error\":\"rate_limit_error: 429 too many requests\",\"session_id\":\"T-agent-thread\"}\n")
+			return
+		}
+		if mode == "result-only-in-result" {
+			os.Stdout.WriteString("{\"type\":\"result\",\"subtype\":\"error\",\"duration_ms\":1,\"is_error\":true,\"result\":\"failure carried in result field\",\"session_id\":\"T-agent-thread\"}\n")
+			return
+		}
+		if mode == "system-then-result" {
+			os.Stdout.WriteString("{\"type\":\"system\",\"subtype\":\"init\",\"cwd\":\"/tmp/project\",\"session_id\":\"T-agent-thread\"}\n")
+			os.Stdout.WriteString("{\"type\":\"result\",\"subtype\":\"success\",\"duration_ms\":1,\"is_error\":false,\"num_turns\":1,\"result\":\"done\",\"session_id\":\"T-agent-thread\"}\n")
 			return
 		}
 		if mode == "no-result" {

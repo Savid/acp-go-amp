@@ -22,5 +22,27 @@ No slash commands are advertised. Text like `/review` remains ordinary prompt
 text and is sent to Amp unchanged.
 
 `session/cancel` sends an interrupt to the active process. If Amp does not exit
-within the configured native cancel timeout, the process group is killed. Each
-prompt returns exactly one terminal result.
+within the configured native cancel timeout, the process group is killed. A
+successful prompt returns exactly one terminal result with a valid stop reason
+(`end_turn`, `max_tokens`, `max_turn_requests`, `refusal`, or `cancelled`).
+
+A native turn failure is never reported as a stop reason. It terminates
+`session/prompt` with a JSON-RPC error (`-32603`) carrying
+
+```json
+{
+  "error": "amp_turn_failed",
+  "cause": "process_exit" | "transport" | "provider" | "timeout",
+  "message": "<real native cause>"
+}
+```
+
+`message` always carries the real native cause (exit status and stderr tail for
+a process exit, the decode/read error for a transport fault, or `result.error`
+falling back to `result.result` for a provider error) — never a fixed
+placeholder. The session stays addressable and retriable after such a failure; a
+follow-up `session/prompt` re-drives the turn.
+
+`WithTurnTimeout(d)` sets an optional per-turn deadline (default `0`, no
+deadline). On expiry the wrapper aborts the native turn and returns the failure
+error with `cause: "timeout"` — a timeout is a failure, not a cancellation.

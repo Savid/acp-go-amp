@@ -115,16 +115,6 @@ func TestLoadReplayDeleteAndConfigEdges(t *testing.T) {
 		t.Fatal("replay update failure was ignored")
 	}
 
-	rawErrStore := NewInMemorySessionStore()
-	putStoredSession(t, rawErrStore, "T-raw-error", cwd, []SessionStoreEntry{
-		json.RawMessage(`{"type":"system","subtype":"init","session_id":"T-raw-error"}`),
-	})
-	rawAgent := NewAgent(WithSessionStore(rawErrStore))
-	rawAgent.setConnection(newClosedAgentConnection(t))
-	if replayErr := (&agentSession{agent: rawAgent, id: "T-raw-error", rawEvents: true}).replayTranscript(ctx); replayErr == nil {
-		t.Fatal("replay raw-event failure was ignored")
-	}
-
 	validStore := NewInMemorySessionStore()
 	putStoredSession(t, validStore, "T-meta", cwd, nil)
 	if _, loadErr := NewAgent(WithSessionStore(validStore)).LoadSession(ctx, LoadSessionRequest("T-meta", cwd, WithSessionMeta(map[string]any{"amp": "bad"}))); loadErr == nil {
@@ -198,16 +188,6 @@ func TestPromptAndPersistenceEdges(t *testing.T) {
 				t.Fatalf("Prompt error = %v, want %q", err, tc.want)
 			}
 		})
-	}
-
-	rawAgent := NewAgent(WithExecutablePath(path), WithHome(t.TempDir()))
-	rawResp, err := rawAgent.NewSession(ctx, NewSessionRequest(t.TempDir(), WithSessionRawEvents(true)))
-	if err != nil {
-		t.Fatalf("NewSession raw: %v", err)
-	}
-	rawAgent.setConnection(newClosedAgentConnection(t))
-	if _, rawErr := rawAgent.Prompt(ctx, TextPromptRequest(rawResp.SessionId, "x")); rawErr == nil {
-		t.Fatal("raw event notify failure was ignored")
 	}
 
 	updateAgent := NewAgent(WithExecutablePath(path), WithHome(t.TempDir()))

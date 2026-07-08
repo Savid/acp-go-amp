@@ -77,9 +77,15 @@ func TestLoadResumeManifestAndConfigBranches(t *testing.T) {
 	if _, err := agent.LoadSession(ctx, LoadSessionRequest("T-load", cwd, WithSessionRawEvents(true))); err != nil {
 		t.Fatalf("LoadSession: %v", err)
 	}
-	waitForRecorded(t, func() bool { return len(client.updatesSnapshot()) > 0 && len(client.rawSnapshot()) > 0 })
-	if len(client.updatesSnapshot()) == 0 || len(client.rawSnapshot()) == 0 {
-		t.Fatal("load did not replay transcript/raw events")
+	// Authoritative load replay emits session/update frames only. Raw events are
+	// live-turn only and are never replayed from the store, even with raw events
+	// enabled on the load request.
+	waitForRecorded(t, func() bool { return len(client.updatesSnapshot()) > 0 })
+	if len(client.updatesSnapshot()) == 0 {
+		t.Fatal("load did not replay transcript")
+	}
+	if len(client.rawSnapshot()) != 0 {
+		t.Fatalf("load replayed raw events: %d", len(client.rawSnapshot()))
 	}
 	before := len(client.updatesSnapshot())
 	if _, err := agent.ResumeSession(ctx, ResumeSessionRequest("T-load", cwd)); err != nil {

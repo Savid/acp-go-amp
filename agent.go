@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"slices"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/coder/acp-go-sdk"
@@ -33,7 +32,6 @@ type Agent struct {
 	deleted              map[acp.SessionId]struct{}
 	pendingNativeDeletes map[acp.SessionId]struct{}
 	pending              int
-	rawSeq               atomic.Int64
 	clientCalls          chan struct{}
 
 	activeLimitErr error
@@ -658,10 +656,6 @@ func (a *Agent) acquireClientCall(ctx context.Context) (func(), error) {
 	}
 }
 
-func (a *Agent) nextRawEventSequence() int64 {
-	return a.rawSeq.Add(1)
-}
-
 func (a *Agent) settingsParent() string {
 	if a.options.Home != "" {
 		return a.options.Home
@@ -897,15 +891,14 @@ func (s *agentSession) replayTranscript(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// Authoritative session/load replay emits session/update frames only. Raw
+	// events are live-turn only and are never replayed from the store.
 	for _, entry := range entries {
 		msg, err := amp.ParseJSONLine(entry)
 		if err != nil {
 			return err
 		}
 		if err := s.emitMessage(ctx, msg); err != nil {
-			return err
-		}
-		if err := s.emitRawEvent(ctx, "store-replay", msg); err != nil {
 			return err
 		}
 	}

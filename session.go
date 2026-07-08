@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/acp-go-sdk"
@@ -32,7 +33,38 @@ const (
 	jsonFieldField     = "field"
 	jsonFieldMethod    = "method"
 	jsonFieldSessionID = "sessionId"
+
+	// turnFailedError is the fixed data.error tag for a native turn failure.
+	// A native turn failure is a JSON-RPC error, never a stop reason.
+	turnFailedError = "amp_turn_failed"
+
+	// Native-failure cause vocabulary (machine-readable class). data.message
+	// carries the real native cause text.
+	causeProcessExit = "process_exit"
+	causeTransport   = "transport"
+	causeProvider    = "provider"
+	causeTimeout     = "timeout"
 )
+
+// firstNonEmpty returns the first argument whose trimmed value is non-empty.
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+// turnFailure builds the uniform native-turn-failure error: JSON-RPC -32603 with
+// data {error:"amp_turn_failed", cause:<class>, message:<real native cause>}.
+func turnFailure(cause, message string) error {
+	return acp.NewInternalError(map[string]any{
+		jsonFieldError: turnFailedError,
+		"cause":        cause,
+		"message":      message,
+	})
+}
 
 var (
 	errSessionClosed = errors.New("session closed")
@@ -90,6 +122,7 @@ type agentSession struct {
 	mcpConfigJSON         string
 	env                   map[string]string
 	rawEvents             bool
+	rawEventSeq           atomic.Int64
 	settingsDir           string
 	settingsFile          string
 	closed                bool
@@ -439,6 +472,13 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (ac
 	}
 	state.setTurn(turn)
 
+	var timeoutCh <-chan time.Time
+	if d := s.agent.options.TurnTimeout; d > 0 {
+		timer := time.NewTimer(d)
+		defer timer.Stop()
+		timeoutCh = timer.C
+	}
+
 	var transcript []SessionStoreEntry
 	var promptUsage *acp.Usage
 	var terminal *amp.ResultMessage
@@ -450,10 +490,14 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (ac
 					return streamEndedWithoutTerminal(ctx, state, promptUsage, params.MessageId, turn)
 				}
 				if terminal.IsError {
+					// Cancel guard runs before all failure mapping.
 					if state.isCancelled() || isNativeCancelResult(terminal) {
 						return cancelledPromptResponse(promptUsage, params.MessageId), nil
 					}
-					return acp.PromptResponse{}, acp.NewInternalError(map[string]any{jsonFieldError: terminal.Error, "subtype": terminal.Subtype})
+					// L1: fall back to result.result when result.error is empty so
+					// the real provider cause is never lost.
+					cause := firstNonEmpty(terminal.Error, terminal.Result)
+					return acp.PromptResponse{}, turnFailure(causeProvider, cause)
 				}
 				if err := s.persistAfterTurn(ctx, transcript); err != nil {
 					return acp.PromptResponse{}, err
@@ -470,9 +514,11 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (ac
 			if raw := msg.RawJSON(); raw != "" {
 				transcript = append(transcript, SessionStoreEntry(raw))
 			}
+			// Raw events are non-authoritative debug output: an emit failure is
+			// recorded on the observer hook and the turn continues. It never
+			// aborts the prompt turn nor interrupts the harness.
 			if err := s.emitRawEvent(ctx, "stream-json", msg); err != nil {
-				_ = s.interrupt(context.Background())
-				return acp.PromptResponse{}, err
+				s.agent.observe.RecordRawEventEmitFailure(ctx, err)
 			}
 			if err := s.emitMessage(ctx, msg); err != nil {
 				_ = s.interrupt(context.Background())
@@ -496,6 +542,11 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (ac
 				_ = s.interruptState(context.Background(), state)
 			}
 			return promptErrorResponse(ctx, state, promptUsage, params.MessageId, err)
+		case <-timeoutCh:
+			// A turn deadline is a failure, not a cancellation: abort the native
+			// turn and surface the uniform failure with cause "timeout".
+			_ = s.interruptState(context.Background(), state)
+			return acp.PromptResponse{}, turnFailure(causeTimeout, fmt.Sprintf("amp turn exceeded WithTurnTimeout of %s", s.agent.options.TurnTimeout))
 		case <-state.cancelled:
 			_ = s.interruptState(context.Background(), state)
 			return cancelledPromptResponse(promptUsage, params.MessageId), nil
@@ -769,6 +820,11 @@ func (s *agentSession) emitUsage(ctx context.Context, usage *amp.Usage) error {
 		return nil
 	}
 	used := usage.InputTokens + usage.OutputTokens + usage.CacheCreationInputTokens + usage.CacheReadInputTokens
+	// Size is the true model context window. Amp's stream-json usage.max_tokens
+	// is a context-window field (verified against amp docs: it reports
+	// model-scale values such as 224000/968000 that vary by model, distinct from
+	// the Anthropic API max_tokens output cap). It is never derived from `used`;
+	// when amp omits it the field decodes to 0 (unknown), which is emitted as-is.
 	return s.emitUpdate(ctx, acp.SessionUpdate{UsageUpdate: &acp.SessionUsageUpdate{
 		SessionUpdate: "usage_update",
 		Used:          used,
@@ -795,25 +851,37 @@ func (s *agentSession) emitUpdate(ctx context.Context, update acp.SessionUpdate)
 	return conn.SessionUpdate(ctx, acp.SessionNotification{SessionId: s.id, Update: update})
 }
 
+// emitRawEvent emits one non-authoritative raw-event notification for a live
+// native message. The sequence is per-session, starts at 1, and is strictly
+// monotonic and contiguous: every event consumes exactly one sequence and
+// carries exactly one notification. An event whose marshalled payload cannot be
+// built or exceeds the 64 KiB cap is never dropped and never emits nothing — its
+// `event` is replaced by the fixed truncation marker so the payload is always
+// valid JSON. The returned error signals only that delivery to the client
+// failed; the caller records it and continues (a debug toggle never fails the
+// turn).
 func (s *agentSession) emitRawEvent(ctx context.Context, source string, msg amp.Message) error {
 	if !s.rawEvents {
 		return nil
 	}
-	raw := msg.RawMessage()
 	payload := map[string]any{
 		"sessionId": s.id,
-		"sequence":  s.agent.nextRawEventSequence(),
+		"sequence":  s.nextRawEventSequence(),
 		"source":    source,
-		"event":     raw,
+		"event":     msg.RawMessage(),
 	}
-	data, err := json.Marshal(payload)
-	if err != nil {
-		return err
-	}
-	if len(data) > rawEventMaxBytes {
+	if data, err := json.Marshal(payload); err != nil {
 		payload["event"] = map[string]any{
 			"truncated": true,
-			"type":      msg.AmpType(),
+			"reason":    "unserializable",
+			"maxBytes":  rawEventMaxBytes,
+		}
+	} else if len(data) > rawEventMaxBytes {
+		payload["event"] = map[string]any{
+			"truncated": true,
+			"reason":    "oversize",
+			"maxBytes":  rawEventMaxBytes,
+			"sizeBytes": len(data),
 		}
 	}
 	conn := s.agent.connection()
@@ -826,6 +894,13 @@ func (s *agentSession) emitRawEvent(ctx context.Context, source string, msg amp.
 	}
 	defer release()
 	return conn.NotifyExtension(ctx, RawEventMethod, payload)
+}
+
+// nextRawEventSequence returns the next per-session raw-event sequence, starting
+// at 1. Each session owns its counter so concurrent sessions each see a
+// contiguous 1..N stream.
+func (s *agentSession) nextRawEventSequence() int64 {
+	return s.rawEventSeq.Add(1)
 }
 
 func (s *agentSession) validateFrameSessionID(msg amp.Message, state *promptTurnState) error {
@@ -1007,7 +1082,7 @@ func streamEndedWithoutTerminal(ctx context.Context, state *promptTurnState, usa
 	if state != nil && state.isCancelled() {
 		return cancelledPromptResponse(usage, messageID), nil
 	}
-	return acp.PromptResponse{}, acp.NewInternalError(map[string]any{jsonFieldError: "amp stream ended without result"})
+	return acp.PromptResponse{}, turnFailure(causeTransport, "amp stream ended without result")
 }
 
 func promptErrorResponse(ctx context.Context, state *promptTurnState, usage *acp.Usage, messageID *string, err error) (acp.PromptResponse, error) {
@@ -1030,10 +1105,23 @@ func classifyNativePromptError(err error) error {
 		return nil
 	}
 	msg := err.Error()
+	// A missing native thread is a wrapper-invariant condition (the server-side
+	// thread no longer exists), not a turn failure, and keeps its own shape.
 	if isNativeMissingError(err) {
 		return acp.NewInternalError(map[string]any{jsonFieldError: "native_state_missing", "detail": msg})
 	}
-	return acp.NewInternalError(map[string]any{jsonFieldError: msg})
+	return turnFailure(nativeFailureCause(msg), msg)
+}
+
+// nativeFailureCause classifies a native turn error into the family cause
+// vocabulary: a process-exit cause when the amp process died, otherwise a
+// transport cause (decode/read/early-EOF). The real cause text is preserved in
+// data.message either way — never a fixed placeholder.
+func nativeFailureCause(msg string) string {
+	if strings.Contains(msg, "amp process exited") {
+		return causeProcessExit
+	}
+	return causeTransport
 }
 
 func isNativeMissingError(err error) bool {

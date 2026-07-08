@@ -118,6 +118,8 @@ func TestObserverRecordsACPRequestsAndProcessStarts(t *testing.T) {
 	finishPrompt(PromptResult{Err: context.Canceled, StopReason: "cancelled"})
 	observer.AddActiveSession(ctx, 1)
 	observer.AddActiveSession(ctx, -1)
+	observer.RecordRawEventEmitFailure(ctx, errors.New("emit failed"))
+	observer.RecordRawEventEmitFailure(ctx, nil)
 
 	var metrics metricdata.ResourceMetrics
 	if err := reader.Collect(context.Background(), &metrics); err != nil {
@@ -137,6 +139,9 @@ func TestObserverRecordsACPRequestsAndProcessStarts(t *testing.T) {
 	}
 	if got := int64MetricSum(metrics, "acp_go_amp.session.cancel.count"); got != 1 {
 		t.Fatalf("prompt cancel count = %d, want 1", got)
+	}
+	if got := int64MetricSum(metrics, "acp_go_amp.raw_event.emit.failure.count"); got != 1 {
+		t.Fatalf("raw emit failure count = %d, want 1", got)
 	}
 	if got := int64MetricSum(metrics, "acp_go_amp.session.active"); got != 0 {
 		t.Fatalf("active session sum = %d, want 0", got)

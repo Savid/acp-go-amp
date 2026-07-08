@@ -35,6 +35,7 @@ func TestOptionsAndAmpOptions(t *testing.T) {
 		WithSessionStore(store),
 		WithSessionStoreLoadTimeout(time.Second),
 		WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 2, MaxConcurrentClientCalls: 4}),
+		WithTurnTimeout(90 * time.Second),
 		nil,
 	})
 	if options.AgentName != "name" || options.AgentTitle != "title" || options.AgentVersion != "version" {
@@ -42,6 +43,9 @@ func TestOptionsAndAmpOptions(t *testing.T) {
 	}
 	if options.Env["A"] != "B" || options.SessionStore != store || options.SessionStoreLoadTimeout != time.Second {
 		t.Fatalf("common options = %#v", options)
+	}
+	if options.TurnTimeout != 90*time.Second {
+		t.Fatalf("turn timeout = %s", options.TurnTimeout)
 	}
 	env := map[string]string{"A": "B"}
 	ampOptions := NewAmpOptions(

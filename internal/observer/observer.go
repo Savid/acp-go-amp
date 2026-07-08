@@ -75,6 +75,7 @@ type Observer struct {
 	promptCount        metric.Int64Counter
 	promptDuration     metric.Float64Histogram
 	processStartCount  metric.Int64Counter
+	rawEmitFailure     metric.Int64Counter
 	sessionActive      metric.Int64UpDownCounter
 }
 
@@ -143,6 +144,7 @@ func New(config Config) *Observer {
 	observer.promptCount = mustInt64Counter(meter, "acp_go_amp.session.prompt.count", "Prompt turns.")
 	observer.promptDuration = mustFloat64Histogram(meter, "acp_go_amp.session.prompt.duration", "Prompt turn duration.")
 	observer.processStartCount = mustInt64Counter(meter, "acp_go_amp.amp.process.start.count", "Amp thread process starts.")
+	observer.rawEmitFailure = mustInt64Counter(meter, "acp_go_amp.raw_event.emit.failure.count", "Raw event emit failures.")
 	observer.sessionActive = mustInt64UpDownCounter(meter, "acp_go_amp.session.active", "Active Amp sessions.")
 
 	return observer
@@ -332,6 +334,17 @@ func (o *Observer) RecordAmpProcessStart(ctx context.Context) {
 	}
 
 	o.processStartCount.Add(ctx, 1, metric.WithAttributes(attribute.String(attrAmpProcessKind, "thread")))
+}
+
+// RecordRawEventEmitFailure records that a non-authoritative raw-event
+// notification failed to reach the client. Raw events are debug-only, so an
+// emit failure never fails the prompt turn: it is counted here and dropped.
+func (o *Observer) RecordRawEventEmitFailure(ctx context.Context, err error) {
+	if o == nil || err == nil {
+		return
+	}
+
+	o.rawEmitFailure.Add(ctx, 1)
 }
 
 func (o *Observer) AddActiveSession(ctx context.Context, delta int64) {

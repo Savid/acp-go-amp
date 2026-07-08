@@ -25,6 +25,8 @@ Common options:
   [Seed files](/features/models-config#seed-files). Amp is locked to its hosted
   backend, so this common option exists for family symmetry and cannot repoint
   Amp at a custom LLM endpoint.
+- `WithTurnTimeout`, an optional per-turn native deadline (default `0`, no
+  deadline); on expiry the turn fails with `cause: "timeout"`
 - OpenTelemetry provider options
 
 Amp per-session options:
