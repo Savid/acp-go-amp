@@ -14,9 +14,9 @@ build:
 fmt-check:
 	@test -z "$$(gofmt -l .)"
 
-## test: run unit tests with the race detector
+## test: run unit tests with race detector and shuffled order
 test:
-	go test -race ./...
+	go test -race -shuffle=on ./...
 
 ## coverage-check: require 100% statement coverage with race instrumentation
 coverage-check:
@@ -32,6 +32,7 @@ test-cross-compile:
 	GOOS=windows GOARCH=amd64 go test -c -o .tmp/cross/amp-windows.test ./internal/amp
 	GOOS=freebsd GOARCH=amd64 go build ./...
 	GOOS=openbsd GOARCH=amd64 go build ./...
+	GOOS=windows GOARCH=amd64 go build ./...
 
 ## test-integration-smoke: run integration tests that do not spend model tokens
 test-integration-smoke:
@@ -66,7 +67,7 @@ vuln:
 
 ## modernize-check: check Go modernizations without changing files
 modernize-check:
-	@tmp=$$(mktemp); if ! go fix -n ./... >"$$tmp" 2>&1; then cat "$$tmp"; rm -f "$$tmp"; exit 1; fi; rm -f "$$tmp"
+	go fix -n ./...
 
 ## docs-audit: check public docs, examples, flags, and removed terms
 docs-audit:
@@ -124,7 +125,7 @@ audit: fmt-check lint build test coverage-check test-cross-compile tidy vuln mod
 
 ## clean: remove build artifacts
 clean:
-	rm -f coverage.out coverage-integration.out coverage-summary.txt acp-go-amp
+	rm -rf .tmp coverage.out coverage-integration.out coverage-summary.txt
 
 ## test/cover: open HTML coverage report
 test/cover: coverage-check
