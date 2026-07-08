@@ -16,9 +16,9 @@ across restarts implements the `SessionStore` interface over its own backend.
 
 ```go
 err := ampacp.Serve(ctx, input, output,
-    ampacp.WithExecutablePath("amp"),
-    ampacp.WithSessionStore(ampacp.NewInMemorySessionStore()),
-    ampacp.WithSessionStoreLoadTimeout(10*time.Second),
+	ampacp.WithExecutablePath("amp"),
+	ampacp.WithSessionStore(ampacp.NewInMemorySessionStore()),
+	ampacp.WithSessionStoreLoadTimeout(10*time.Second),
 )
 ```
 

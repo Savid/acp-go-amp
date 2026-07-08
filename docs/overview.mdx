@@ -23,15 +23,23 @@ Each ACP method resolves to a concrete Amp operation:
 | `session/resume` | Restores adapter state without replaying history. |
 | `session/delete` | Tombstones the local store first, then deletes the Amp thread. |
 
-## Ownership boundary
+## What the adapter owns
+
+The adapter is a thin translation layer between ACP and the local `amp` CLI. It
+owns the ACP surface:
+
+- ACP session lifecycle and prompt streaming into ACP session updates.
+- The local transcript mirror, MCP forwarding, and raw-event diagnostics.
+- The intentionally small public contract: `mode` and `effort` config options,
+  stdio/HTTP MCP setup, raw events, a session-store mirror, and Amp thread
+  lifecycle.
+
+## What the adapter does not own
 
 Amp owns authentication, the model backend, and durable thread state on the
-server side. The adapter owns the ACP surface: session lifecycle, prompt
-streaming, the local transcript mirror, MCP forwarding, and raw-event
-diagnostics. The public contract is intentionally small — `mode` and `effort`
-config options, stdio/HTTP MCP setup, raw events, a session-store mirror, and
-Amp thread lifecycle. There is no permission bridging, no adapter-owned model
-matrix, and no fork surface.
+server side. The adapter never logs in and never persists credentials, and it
+exposes no permission bridging, no adapter-owned model matrix, and no fork
+surface.
 
 ## Where to go next
 

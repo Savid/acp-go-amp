@@ -48,6 +48,14 @@ import ampacp "github.com/savid/acp-go-amp"
 
 ## Request builders
 
-Helpers construct ACP requests for new/load/resume/delete, text prompts,
-config-option updates, and stdio and HTTP MCP servers. See
-[ACP methods](/docs/reference/acp-methods) for the method surface they target.
+Helpers construct ACP requests for the session lifecycle, prompts, config
+options, and MCP server declarations. See [ACP methods](/docs/reference/acp-methods)
+for the method surface they target and [MCP](/docs/features/mcp) for a wiring
+example.
+
+| Builder | Purpose |
+|---|---|
+| `NewSessionRequest` / `LoadSessionRequest` / `ResumeSessionRequest` | Session lifecycle requests (plus a delete request). |
+| `TextPromptRequest` / `PromptRequest` | Prompt requests from text or content blocks. |
+| `SetConfigOptionRequest` / `SetModelRequest` | Config-option updates. |
+| `StdioMCPServer` / `HTTPMCPServer` | Accepted MCP server declarations, attached with `WithSessionMCPServers`. |

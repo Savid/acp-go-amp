@@ -7,7 +7,7 @@ The adapter runs in two shapes with the same behavior: a standalone stdio
 command that an ACP host launches as a subprocess, and an embedded `Serve` call
 inside your own Go program.
 
-## Standalone command
+## Standalone
 
 An ACP host launches the command and speaks JSON-RPC over its stdio:
 
@@ -26,16 +26,16 @@ The directory is removed on close/delete.
 serve-mode flags are `-path`, `-home`, `-model`, `-seed-file`, `-debug`, and
 `-version` — see the [CLI reference](/docs/reference/cli) for each.
 
-## Embedded Serve
+## Embedded
 
 To drive Amp from inside your own host process, call `ampacp.Serve` with the
 ACP input/output streams:
 
 ```go
 err := ampacp.Serve(ctx, input, output,
-    ampacp.WithExecutablePath("amp"),
-    ampacp.WithHome("/path/to/adapter-home"),
-    ampacp.WithSessionStore(ampacp.NewInMemorySessionStore()),
+	ampacp.WithExecutablePath("amp"),
+	ampacp.WithHome("/path/to/adapter-home"),
+	ampacp.WithSessionStore(ampacp.NewInMemorySessionStore()),
 )
 ```
 

@@ -5,24 +5,28 @@ description: Go from a clean machine to your first successful ACP turn against A
 
 This tutorial drives the adapter end to end using the runnable
 `examples/minimal-client` program: it launches the agent, opens a session,
-sends one prompt, and prints Amp's reply.
+sends one prompt, and prints Amp's reply. The example programs are
+repo-relative, so you run them from a checkout.
+
+## Prerequisites
+
+- Go matching the module's `go` directive (see `go.mod`).
+- The `amp` executable on your `PATH`.
+- An Amp API key exported before you run anything — Amp owns authentication and
+  session start fails fast without it:
+
+  ```sh
+  export AMP_API_KEY=<your-amp-api-key>
+  ```
+
+  See [Authentication](/docs/features/authentication) for how the key reaches
+  the native process.
+
+## Steps
 
 <Steps>
-  <Step title="Install and authenticate the Amp CLI">
-    Install the `amp` executable and make sure it is on your `PATH`. Amp owns
-    authentication, so export a key before running anything — session start
-    fails fast without it.
-
-    ```sh
-    export AMP_API_KEY=<your-amp-api-key>
-    ```
-
-    See [Authentication](/docs/features/authentication) for how the key reaches
-    the native process.
-  </Step>
   <Step title="Clone this repository">
-    The example programs are repo-relative (`go run ./examples/...`), so clone
-    the checkout before running them.
+    The example commands run from inside the checkout:
 
     ```sh
     git clone https://github.com/savid/acp-go-amp && cd acp-go-amp
@@ -30,24 +34,28 @@ sends one prompt, and prints Amp's reply.
   </Step>
   <Step title="Run the minimal client">
     This launches the agent, creates an Amp thread, and sends one prompt (the
-    prompt argument is optional).
+    prompt argument is optional):
 
     ```sh
     go run ./examples/minimal-client "Reply with hello from ACP"
     ```
   </Step>
-  <Step title="Embed the agent in your own host (optional)">
-    To drive Amp from your own Go program, call `ampacp.Serve` over the ACP
-    transport instead of shelling out to the command.
-
-    ```go
-    err := ampacp.Serve(ctx, input, output,
-        ampacp.WithExecutablePath("amp"),
-        ampacp.WithSessionStore(ampacp.NewInMemorySessionStore()),
-    )
-    ```
-  </Step>
 </Steps>
+
+## Verify
+
+The example prints Amp's streamed reply to stdout and exits `0`. A greeting
+derived from your prompt confirms the whole path worked: session creation, the
+native `amp threads continue` launch, the prompt turn, and stream-JSON mapping
+back through ACP.
+
+If you instead launch the raw command for an ACP host to drive, it blocks on
+stdin waiting for JSON-RPC frames and writes ACP frames only to stdout; add
+`-debug` to send diagnostics to stderr:
+
+```sh
+go run ./cmd/acp-go-amp -path "$(command -v amp)" -home /tmp/acp-amp -debug
+```
 
 ## Next steps
 

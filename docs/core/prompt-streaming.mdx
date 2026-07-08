@@ -37,8 +37,11 @@ text and is sent to Amp unchanged.
 
 `session/cancel` sends an interrupt to the active process. If Amp does not exit
 within the configured native cancel timeout, the process group is killed. A
-successful prompt returns exactly one terminal result with a valid stop reason
-(`end_turn`, `max_tokens`, `max_turn_requests`, `refusal`, or `cancelled`).
+successful prompt returns exactly one terminal result, and this adapter emits
+only two of the ACP stop reasons: `end_turn` for a completed turn and
+`cancelled` for a cancelled one. The other reasons in the ACP enum
+(`max_tokens`, `max_turn_requests`, `refusal`) exist but this adapter never
+produces them, so a host must not wait for them.
 
 ## Turn failures and timeouts
 

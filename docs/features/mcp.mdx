@@ -26,6 +26,19 @@ field, raised during session start rather than mid-turn.
 
 Attach the MCP servers to the session when you open it; the adapter only builds
 `--mcp-config` from the servers the ACP session provides, so a prompt process
-sees exactly the host-supplied set and nothing more. Use the
-`StdioMCPServer` and `HTTPMCPServer` request builders (see the
-[Go API](/docs/reference/go-api)) to construct the accepted shapes.
+sees exactly the host-supplied set and nothing more. Build the accepted shapes
+with the `StdioMCPServer` and `HTTPMCPServer` request builders and pass them on
+the session request with `WithSessionMCPServers`:
+
+```go
+req := ampacp.NewSessionRequest(cwd,
+	ampacp.WithSessionMCPServers(
+		ampacp.StdioMCPServer("tools", "node", []string{"server.js"}, nil),
+		ampacp.HTTPMCPServer("remote", "https://example.test/mcp", nil),
+	),
+)
+```
+
+The adapter renders those two servers into one `--mcp-config` JSON document for
+that session's prompt process. See the [Go API](/docs/reference/go-api) for the
+builder signatures.
