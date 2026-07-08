@@ -60,6 +60,18 @@ type runtimeOptions struct {
 	nativeCloseTurnWait  time.Duration
 	nativeCommandTimeout time.Duration
 	maxJSONLineBytes     int
+	// newTurnTimer builds the per-turn deadline channel. It is a seam so tests
+	// can drive the timeout branch deterministically against a coincident
+	// cancel; production always uses a real time.Timer.
+	newTurnTimer func(d time.Duration) (<-chan time.Time, func())
+}
+
+// newRealTurnTimer is the production turn-deadline source: a real time.Timer
+// whose channel fires after d, paired with a stop func for the caller to defer.
+func newRealTurnTimer(d time.Duration) (<-chan time.Time, func()) {
+	timer := time.NewTimer(d)
+
+	return timer.C, func() { timer.Stop() }
 }
 
 func applyOptions(opts []Option) Options {
@@ -73,6 +85,7 @@ func applyOptions(opts []Option) Options {
 			nativeCloseTurnWait:  defaultNativeCloseTurnWait,
 			nativeCommandTimeout: defaultNativeCommandTimeout,
 			maxJSONLineBytes:     defaultNativePromptLineLimit,
+			newTurnTimer:         newRealTurnTimer,
 		},
 	}
 

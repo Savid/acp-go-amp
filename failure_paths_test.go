@@ -218,6 +218,79 @@ func TestTurnFailureTimeout(t *testing.T) {
 	}
 }
 
+// R5-2: when a session/cancel and the WithTurnTimeout deadline land in the same
+// scheduling quantum, the cancel guard wins deterministically: the turn always
+// resolves as a cancelled PromptResponse with a nil error, never the cause
+// "timeout" failure, and it resolves exactly once (no double-send). The turn
+// deadline is driven through the newTurnTimer seam so both the cancel signal and
+// the fired timeout are guaranteed ready before the prompt loop's select
+// observes either one, forcing the random select tie-break over many iterations.
+func TestTurnFailureCancelWinsOnTimeoutCoincidence(t *testing.T) {
+	ctx := context.Background()
+	path, _ := fakeAgentAmpPath(t, "hang")
+	agent := NewAgent(WithExecutablePath(path), WithHome(t.TempDir()), WithTurnTimeout(time.Hour))
+	agent.options.runtime.nativeCancelTimeout = 50 * time.Millisecond
+	resp, err := agent.NewSession(ctx, NewSessionRequest(t.TempDir()))
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	session := agent.sessions[resp.SessionId]
+	if session == nil {
+		t.Fatal("session not tracked")
+	}
+
+	const iterations = 40
+	for i := 0; i < iterations; i++ {
+		timeoutC := make(chan time.Time, 1)
+		created := make(chan struct{})
+		release := make(chan struct{})
+		agent.options.runtime.newTurnTimer = func(time.Duration) (<-chan time.Time, func()) {
+			close(created)
+			<-release
+
+			return timeoutC, func() {}
+		}
+
+		resultCh := make(chan acp.PromptResponse, 1)
+		errCh := make(chan error, 1)
+		go func() {
+			promptResp, promptErr := agent.Prompt(ctx, TextPromptRequest(resp.SessionId, "x"))
+			resultCh <- promptResp
+			errCh <- promptErr
+		}()
+
+		// The prompt goroutine is parked in the timer seam, past setup but before
+		// the loop's select. Arm both signals, then release it so the select sees
+		// the cancel and the fired deadline ready at once.
+		<-created
+		state := session.activePromptState()
+		if state == nil {
+			t.Fatalf("iter %d: no active prompt state", i)
+		}
+		state.cancel()
+		timeoutC <- time.Now()
+		close(release)
+
+		select {
+		case promptErr := <-errCh:
+			promptResp := <-resultCh
+			if promptErr != nil {
+				t.Fatalf("iter %d: coincident cancel+timeout returned failure error: %v", i, promptErr)
+			}
+			if promptResp.StopReason != acp.StopReasonCancelled {
+				t.Fatalf("iter %d: stop reason = %q, want cancelled", i, promptResp.StopReason)
+			}
+			// Exactly one resolution reached the channels; a stray second send
+			// would block the goroutine and leave these non-empty.
+			if len(errCh) != 0 || len(resultCh) != 0 {
+				t.Fatalf("iter %d: turn resolved more than once", i)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatalf("iter %d: coincident cancel+timeout did not return", i)
+		}
+	}
+}
+
 // TestFirstNonEmpty covers the local cause-selection helper, including the
 // all-empty fallthrough.
 func TestFirstNonEmpty(t *testing.T) {

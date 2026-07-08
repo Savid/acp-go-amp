@@ -474,9 +474,9 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (ac
 
 	var timeoutCh <-chan time.Time
 	if d := s.agent.options.TurnTimeout; d > 0 {
-		timer := time.NewTimer(d)
-		defer timer.Stop()
-		timeoutCh = timer.C
+		ch, stop := s.agent.options.runtime.newTurnTimer(d)
+		defer stop()
+		timeoutCh = ch
 	}
 
 	var transcript []SessionStoreEntry
@@ -543,10 +543,7 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (ac
 			}
 			return promptErrorResponse(ctx, state, promptUsage, params.MessageId, err)
 		case <-timeoutCh:
-			// A turn deadline is a failure, not a cancellation: abort the native
-			// turn and surface the uniform failure with cause "timeout".
-			_ = s.interruptState(context.Background(), state)
-			return acp.PromptResponse{}, turnFailure(causeTimeout, fmt.Sprintf("amp turn exceeded WithTurnTimeout of %s", s.agent.options.TurnTimeout))
+			return s.resolveTurnDeadline(ctx, state, promptUsage, params.MessageId)
 		case <-state.cancelled:
 			_ = s.interruptState(context.Background(), state)
 			return cancelledPromptResponse(promptUsage, params.MessageId), nil
@@ -556,6 +553,31 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (ac
 			return cancelledPromptResponse(promptUsage, params.MessageId), nil
 		}
 	}
+}
+
+// resolveTurnDeadline maps a fired WithTurnTimeout deadline to a terminal
+// response. The cancel guard runs before all failure mapping, including timeout
+// expiry: when a cancel and the deadline land in the same scheduling quantum the
+// loop's select tie-break is random, so re-check the cancel condition here. A
+// coincident cancel deterministically wins and yields the cancelled response,
+// never the cause "timeout" failure. Otherwise a turn deadline is a failure, not
+// a cancellation: abort the native turn and surface the uniform timeout failure.
+func (s *agentSession) resolveTurnDeadline(ctx context.Context, state *promptTurnState, promptUsage *acp.Usage, messageID *string) (acp.PromptResponse, error) {
+	if cancelPending(ctx, state) {
+		state.cancel()
+		_ = s.interruptState(context.Background(), state)
+
+		return cancelledPromptResponse(promptUsage, messageID), nil
+	}
+	_ = s.interruptState(context.Background(), state)
+
+	return acp.PromptResponse{}, turnFailure(causeTimeout, fmt.Sprintf("amp turn exceeded WithTurnTimeout of %s", s.agent.options.TurnTimeout))
+}
+
+// cancelPending reports whether the turn has an in-flight cancel: either the
+// host context is done or a session/cancel closed the prompt-state signal.
+func cancelPending(ctx context.Context, state *promptTurnState) bool {
+	return ctx.Err() != nil || state.isCancelled()
 }
 
 func (s *agentSession) Cancel(ctx context.Context) error {
