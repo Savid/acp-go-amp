@@ -7,13 +7,13 @@ Flags:
 - `-path`: Amp executable path. Defaults to `amp` on `PATH`.
 - `-home`: parent directory for isolated per-session native HOME/XDG state and
   Amp settings files.
-- `-model`: default model. Present for sibling flag parity; non-empty values
+- `-model`: default model. Accepted on the adapter surface; non-empty values
   fail session start because Amp has no ACP model config option.
 - `-seed-file`: repeatable `<relpath>=<hostpath>`. Reads the host file and writes
   its contents to `<relpath>` inside each session's isolated native `HOME` before
-  amp launches (see [Seed files](/features/models-config#seed-files)). Present for
-  sibling parity; Amp is locked to its hosted backend, so seeds cannot repoint it
-  at a custom LLM endpoint.
+  amp launches (see [Seed files](/features/models-config#seed-files)). Accepted on
+  the adapter surface; Amp is locked to its hosted backend, so seeds cannot repoint
+  it at a custom LLM endpoint.
 - `-debug`: write adapter debug logs to stderr.
 - `-version`: print adapter version and exit.
 

@@ -27,8 +27,8 @@ uniform unsupported error naming field `model`.
 
 ## Seed Files
 
-`WithSeedFiles(map[string]string)` is a common option shared by every sibling
-adapter. It maps relative paths to file contents that the wrapper writes into a
+`WithSeedFiles(map[string]string)` is an adapter option. It maps relative paths
+to file contents that the wrapper writes into a
 session's resolved native root before the short-lived `amp threads` process
 launches, so the native CLI can read them as its own on-disk state.
 
@@ -38,7 +38,7 @@ launches, so the native CLI can read them as its own on-disk state.
   is unset), so this is the always-isolated case. Seeds never land in the
   operator's real `HOME` or `~/.config/amp`, so there is no `WithHome` guard.
 - Seeds are written under `$HOME/<relpath>`. The wrapper's managed
-  `settings.json` lives under `XDG_CONFIG_HOME` (a sibling of `HOME`), so seeds
+  `settings.json` lives under `XDG_CONFIG_HOME` (alongside `HOME`), so seeds
   are written verbatim and can never overwrite the wrapper's required settings.
 - Paths are confined to that root: absolute paths, `..` escapes, and empty keys
   fail closed at session start with the uniform unsupported error naming field
@@ -46,7 +46,6 @@ launches, so the native CLI can read them as its own on-disk state.
 
 Amp does **not** support bring-your-own-model or custom LLM endpoints: it is
 locked to its hosted backend. Seed files therefore cannot point Amp at a LiteLLM
-gateway or any alternate provider the way a seeded `config.toml` can for codex or
-a seeded `config.yaml` can for hermes. `WithSeedFiles` exists on the Amp adapter
-purely for family symmetry, and secrets still belong in `WithEnv`, never in a
-seeded file.
+gateway or any alternate provider, and they have no effect on model routing.
+`WithSeedFiles` is accepted on the Amp adapter, but secrets still belong in
+`WithEnv`, never in a seeded file.
