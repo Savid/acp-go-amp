@@ -835,23 +835,39 @@ func validateSessionPaths(cwd string, additionalDirs []string) error {
 	return nil
 }
 
+// reserveMCPName enforces the family MCP-name contract for the declaration at
+// index i: every accepted server carries a non-empty name that is unique within
+// the request. Names are never fabricated, rewritten, or deduplicated.
+func reserveMCPName(seen map[string]struct{}, name string, i int) error {
+	field := fmt.Sprintf("mcpServers[%d].name", i)
+	if name == "" {
+		return acp.NewInvalidParams(map[string]any{field: "required"})
+	}
+	if _, dup := seen[name]; dup {
+		return acp.NewInvalidParams(map[string]any{field: "duplicate"})
+	}
+	seen[name] = struct{}{}
+	return nil
+}
+
 func mcpConfigJSON(servers []acp.McpServer) (string, error) {
 	if len(servers) == 0 {
 		return "", nil
 	}
-	payload := map[string]any{}
+	payload := make(map[string]any, len(servers))
+	seen := make(map[string]struct{}, len(servers))
 	for i, server := range servers {
 		switch {
 		case server.Stdio != nil:
-			if server.Stdio.Name == "" {
-				return "", acp.NewInvalidParams(map[string]any{jsonFieldField: fmt.Sprintf("mcpServers[%d].name", i)})
+			if err := reserveMCPName(seen, server.Stdio.Name, i); err != nil {
+				return "", err
 			}
 			spec := map[string]any{"command": server.Stdio.Command}
 			if len(server.Stdio.Args) > 0 {
 				spec["args"] = server.Stdio.Args
 			}
 			if len(server.Stdio.Env) > 0 {
-				env := map[string]string{}
+				env := make(map[string]string, len(server.Stdio.Env))
 				for _, item := range server.Stdio.Env {
 					env[item.Name] = item.Value
 				}
@@ -859,12 +875,12 @@ func mcpConfigJSON(servers []acp.McpServer) (string, error) {
 			}
 			payload[server.Stdio.Name] = spec
 		case server.Http != nil:
-			if server.Http.Name == "" {
-				return "", acp.NewInvalidParams(map[string]any{jsonFieldField: fmt.Sprintf("mcpServers[%d].name", i)})
+			if err := reserveMCPName(seen, server.Http.Name, i); err != nil {
+				return "", err
 			}
 			spec := map[string]any{"url": server.Http.Url}
 			if len(server.Http.Headers) > 0 {
-				headers := map[string]string{}
+				headers := make(map[string]string, len(server.Http.Headers))
 				for _, item := range server.Http.Headers {
 					headers[item.Name] = item.Value
 				}

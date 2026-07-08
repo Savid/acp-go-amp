@@ -67,10 +67,87 @@ func TestMCPConfig(t *testing.T) {
 	if cfg == "" {
 		t.Fatal("empty config")
 	}
+	// Valid named servers forward verbatim into the --mcp-config JSON map keyed
+	// by their declared names — never fabricated, rewritten, or deduplicated.
+	var payload map[string]any
+	if uerr := json.Unmarshal([]byte(cfg), &payload); uerr != nil {
+		t.Fatalf("config not JSON: %v", uerr)
+	}
+	stdio, ok := payload["stdio"].(map[string]any)
+	if !ok {
+		t.Fatalf("stdio entry missing: %#v", payload)
+	}
+	if stdio["command"] != "printf" {
+		t.Fatalf("stdio command = %#v", stdio["command"])
+	}
+	httpEntry, ok := payload["http"].(map[string]any)
+	if !ok {
+		t.Fatalf("http entry missing: %#v", payload)
+	}
+	if httpEntry["url"] != "https://example.com/mcp" {
+		t.Fatalf("http url = %#v", httpEntry["url"])
+	}
+	if len(payload) != 2 {
+		t.Fatalf("payload entries = %d, want 2", len(payload))
+	}
+
 	_, err = mcpConfigJSON([]acp.McpServer{{Sse: &acp.McpServerSseInline{Name: "s", Url: "https://example.com/sse"}}})
 	if err == nil {
 		t.Fatal("expected sse rejection")
 	}
+}
+
+// requireInvalidParamsData asserts err is a -32602 RequestError whose data
+// map exactly equals want.
+func requireInvalidParamsData(t *testing.T, err error, want map[string]any) {
+	t.Helper()
+	var reqErr *acp.RequestError
+	if !errors.As(err, &reqErr) {
+		t.Fatalf("error = %T %v, want RequestError", err, err)
+	}
+	if reqErr.Code != -32602 {
+		t.Fatalf("code = %d, want -32602 (%v)", reqErr.Code, err)
+	}
+	data, ok := reqErr.Data.(map[string]any)
+	if !ok {
+		t.Fatalf("data = %#v, want map", reqErr.Data)
+	}
+	if len(data) != len(want) {
+		t.Fatalf("data = %#v, want %#v", data, want)
+	}
+	for k, v := range want {
+		if data[k] != v {
+			t.Fatalf("data = %#v, want %#v", data, want)
+		}
+	}
+}
+
+func TestMCPNameContract(t *testing.T) {
+	// Empty stdio name at index 0.
+	_, err := mcpConfigJSON([]acp.McpServer{{Stdio: &acp.McpServerStdio{Command: "c"}}})
+	requireInvalidParamsData(t, err, map[string]any{"mcpServers[0].name": "required"})
+
+	// Empty http name at index 1 reports its own index.
+	_, err = mcpConfigJSON([]acp.McpServer{
+		StdioMCPServer("keep", "c", nil, nil),
+		{Http: &acp.McpServerHttpInline{Type: "http", Url: "https://example.com/mcp"}},
+	})
+	requireInvalidParamsData(t, err, map[string]any{"mcpServers[1].name": "required"})
+
+	// Duplicate name reports the LATER offending index.
+	_, err = mcpConfigJSON([]acp.McpServer{
+		StdioMCPServer("dup", "c", nil, nil),
+		HTTPMCPServer("dup", "https://example.com/mcp", nil),
+	})
+	requireInvalidParamsData(t, err, map[string]any{"mcpServers[1].name": "duplicate"})
+
+	// Duplicate across three entries pins the second occurrence's index.
+	_, err = mcpConfigJSON([]acp.McpServer{
+		StdioMCPServer("a", "c", nil, nil),
+		StdioMCPServer("b", "c", nil, nil),
+		StdioMCPServer("a", "c", nil, nil),
+	})
+	requireInvalidParamsData(t, err, map[string]any{"mcpServers[2].name": "duplicate"})
 }
 
 func TestConfigOptions(t *testing.T) {
