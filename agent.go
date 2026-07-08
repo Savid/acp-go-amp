@@ -898,7 +898,7 @@ func (s *agentSession) replayTranscript(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		if err := s.emitMessage(ctx, msg); err != nil {
+		if err := s.emitMessage(ctx, msg, false); err != nil {
 			return err
 		}
 	}
@@ -938,10 +938,41 @@ func (s *agentSession) setConfig(ctx context.Context, id acp.SessionConfigId, va
 	if err := s.persistAfterTurn(ctx, nil); err != nil {
 		return err
 	}
-	return s.emitUpdate(ctx, acp.SessionUpdate{ConfigOptionUpdate: &acp.SessionConfigOptionUpdate{
+	return s.emitUpdate(ctx, s.configUpdate())
+}
+
+// reconcileNativeConfig aligns the session's advertised mode/effort with the
+// values amp actually used, as reported in the stream-json init frame. A
+// native-reported value wins over the host-requested one once observed; a field
+// amp does not report leaves the host-requested value in place. When the
+// reconciled state differs from what was last advertised, a config_option_update
+// is emitted so the host reads back amp's truth rather than its own request. The
+// reconciled state is persisted with the transcript at turn end.
+func (s *agentSession) reconcileNativeConfig(ctx context.Context, sys *amp.SystemMessage) error {
+	s.mu.Lock()
+	changed := false
+	if sys.AgentMode != "" && sys.AgentMode != s.mode {
+		s.mode = sys.AgentMode
+		changed = true
+	}
+	if sys.ReasoningEffort != "" && sys.ReasoningEffort != s.effort {
+		s.effort = sys.ReasoningEffort
+		changed = true
+	}
+	s.mu.Unlock()
+	if !changed {
+		return nil
+	}
+	return s.emitUpdate(ctx, s.configUpdate())
+}
+
+// configUpdate builds the config_option_update notification carrying the
+// session's current mode/effort adverts.
+func (s *agentSession) configUpdate() acp.SessionUpdate {
+	return acp.SessionUpdate{ConfigOptionUpdate: &acp.SessionConfigOptionUpdate{
 		SessionUpdate: "config_option_update",
 		ConfigOptions: s.configOptions(),
-	}})
+	}}
 }
 
 func selectConfig(id acp.SessionConfigId, name string, category acp.SessionConfigOptionCategory, current string, values []string) acp.SessionConfigOption {

@@ -266,16 +266,16 @@ func TestEmitAndRawEventEdges(t *testing.T) {
 	}
 
 	agent.setConnection(newClosedAgentConnection(t))
-	if err := session.emitMessage(ctx, &amp.UserMessage{Content: []amp.ContentBlock{amp.TextBlock{Text: "user"}}}); err == nil {
+	if err := session.emitMessage(ctx, &amp.UserMessage{Content: []amp.ContentBlock{amp.TextBlock{Text: "user"}}}, true); err == nil {
 		t.Fatal("user text update failure ignored")
 	}
-	if err := session.emitMessage(ctx, &amp.UserMessage{Content: []amp.ContentBlock{amp.ToolResultBlock{ToolUseID: "TU", Content: "out"}}}); err == nil {
+	if err := session.emitMessage(ctx, &amp.UserMessage{Content: []amp.ContentBlock{amp.ToolResultBlock{ToolUseID: "TU", Content: "out"}}}, true); err == nil {
 		t.Fatal("tool result update failure ignored")
 	}
-	if err := session.emitMessage(ctx, &amp.AssistantMessage{Content: []amp.ContentBlock{amp.TextBlock{Text: "assistant"}}}); err == nil {
+	if err := session.emitMessage(ctx, &amp.AssistantMessage{Content: []amp.ContentBlock{amp.TextBlock{Text: "assistant"}}}, true); err == nil {
 		t.Fatal("assistant text update failure ignored")
 	}
-	if err := session.emitMessage(ctx, &amp.AssistantMessage{Content: []amp.ContentBlock{amp.ToolUseBlock{ID: "TU", Name: "Read"}}}); err == nil {
+	if err := session.emitMessage(ctx, &amp.AssistantMessage{Content: []amp.ContentBlock{amp.ToolUseBlock{ID: "TU", Name: "Read"}}}, true); err == nil {
 		t.Fatal("tool use update failure ignored")
 	}
 

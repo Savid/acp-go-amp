@@ -221,10 +221,11 @@ func newAgentSession(agent *Agent, id acp.SessionId, cwd string, meta parsedSess
 	if mode == "" {
 		mode = "smart"
 	}
+	// Effort has no wrapper-imposed default: --effort is passed to amp only when
+	// the host explicitly set it (per-request option or session config). When it
+	// is unset the flag is omitted and amp chooses its own default, which is then
+	// surfaced back via reconcileNativeConfig once the init frame reports it.
 	effort := meta.options.Effort
-	if effort == "" {
-		effort = "high"
-	}
 	env := mergeEnv(agent.options.Env, meta.options.Env)
 	env["HOME"] = homeDir
 	env["XDG_CONFIG_HOME"] = configDir
@@ -520,7 +521,7 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (ac
 			if err := s.emitRawEvent(ctx, "stream-json", msg); err != nil {
 				s.agent.observe.RecordRawEventEmitFailure(ctx, err)
 			}
-			if err := s.emitMessage(ctx, msg); err != nil {
+			if err := s.emitMessage(ctx, msg, true); err != nil {
 				_ = s.interrupt(context.Background())
 				return acp.PromptResponse{}, err
 			}
@@ -782,8 +783,16 @@ func (s *agentSession) ensureMirrorSynced(ctx context.Context) error {
 	return nil
 }
 
-func (s *agentSession) emitMessage(ctx context.Context, msg amp.Message) error {
+// emitMessage translates one native message into session/update notifications.
+// live is true for a running prompt turn and false for session/load replay; only
+// a live turn reconciles the session's advertised mode/effort from a native init
+// frame, because replay restores state from the persisted manifest.
+func (s *agentSession) emitMessage(ctx context.Context, msg amp.Message, live bool) error {
 	switch typed := msg.(type) {
+	case *amp.SystemMessage:
+		if live {
+			return s.reconcileNativeConfig(ctx, typed)
+		}
 	case *amp.UserMessage:
 		for _, block := range typed.Content {
 			if text, ok := block.(amp.TextBlock); ok {
