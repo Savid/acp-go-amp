@@ -1,10 +1,26 @@
-# Permissions
+---
+title: Permissions
+description: Why the adapter never bridges tool permissions, and where Amp makes those decisions instead.
+---
 
-Amp execute mode does not expose a native permission request and response
-protocol to the wrapper. The package never sends `session/request_permission`.
+<Note>
+This page is **not applicable** to `acp-go-amp` as an ACP permission feature.
+Amp's execute mode exposes no native permission request/response protocol to
+the adapter, so there is nothing to bridge to ACP. This is a recorded deviation
+for this adapter: it advertises no permission mode and never sends
+`session/request_permission`.
+</Note>
 
-Native Amp settings decide whether a tool action runs, is denied, or is stopped.
-The wrapper does not add a permission-mode option and does not set the native allow-all setting.
+## Where permission decisions happen
 
-Permission prompts are therefore not durable ACP state. There is no stored
-permission queue to replay on `session/load` or `session/resume`.
+Amp execute mode does not surface an interactive permission prompt to the
+adapter, so the package never sends `session/request_permission` and never adds
+a permission-mode config option. Native Amp settings decide whether a tool
+action runs, is denied, or is stopped, and the adapter
+does not set the native allow-all setting on the host's behalf.
+
+## No durable permission state
+
+Because there is no permission protocol, there is no stored permission queue to
+replay on `session/load` or `session/resume`. Nothing about permissions is
+persisted in the session store.

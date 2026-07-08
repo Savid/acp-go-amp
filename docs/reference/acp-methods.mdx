@@ -1,27 +1,37 @@
-# ACP Methods
+---
+title: ACP Methods
+description: The exact ACP method surface the adapter supports, and what unsupported calls return.
+---
 
-Supported stable methods:
+The adapter implements a fixed ACP method surface. Methods outside it return
+method-not-found rather than partial behavior.
 
-- `initialize`
-- `authenticate`
-- `logout`
-- `session/new`
-- `session/load`
-- `session/resume`
-- `session/list`
-- `session/prompt`
-- `session/cancel`
-- `session/close`
-- `session/delete`
-- `session/set_config_option`
+## Supported methods
 
-`session/set_mode` returns method-not-found and is not advertised.
+| Method | Notes |
+|---|---|
+| `initialize` | Advertises `_meta.amp.rawEvent` and `_meta.amp.sessionStore`. |
+| `authenticate` | Rejects caller method IDs; Amp owns auth. |
+| `logout` | Present. |
+| `session/new` | Creates an Amp thread. |
+| `session/load` | Replays stored transcript frames. |
+| `session/resume` | Restores state without replay. |
+| `session/list` | Lists mirrored sessions. |
+| `session/prompt` | Continues the thread with one streamed turn. |
+| `session/cancel` | Interrupts the active prompt process. |
+| `session/close` | Closes the local session. |
+| `session/delete` | Tombstones locally, then deletes the Amp thread. |
+| `session/set_config_option` | Updates `mode` / `effort`. |
 
-`_amp/session/fork` returns the package unsupported error because Amp has no
-documented native fork surface. Stable `session/fork` returns method-not-found.
+## Unsupported and rejected
 
-MCP accepts stdio and HTTP server definitions during session start. SSE and ACP
-MCP definitions are rejected with invalid params naming the server.
+- `session/set_mode` returns method-not-found and is not advertised.
+- `_amp/session/fork` returns the package unsupported error — Amp has no
+  documented native fork surface. Stable `session/fork` returns
+  method-not-found.
+- MCP accepts stdio and HTTP server definitions during session start; SSE and
+  ACP definitions are rejected with invalid params naming the server. See
+  [MCP](/docs/features/mcp).
 
 No slash commands are advertised. Slash-prefixed text remains normal prompt
 content.

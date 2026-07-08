@@ -1,19 +1,45 @@
-# Run Modes
+---
+title: Run Modes
+description: Choose between the standalone stdio command and embedding the agent with Serve.
+---
 
-The command is intended to be launched by an ACP host:
+The adapter runs in two shapes with the same behavior: a standalone stdio
+command that an ACP host launches as a subprocess, and an embedded `Serve` call
+inside your own Go program.
 
-```text
-acp-go-amp -path amp -home /path/to/wrapper-home
+## Standalone command
+
+An ACP host launches the command and speaks JSON-RPC over its stdio:
+
+```sh
+acp-go-amp -path amp -home /path/to/adapter-home
 ```
 
-`-home` is a parent directory. The wrapper creates one isolated directory per
+`-home` is a parent directory. The adapter creates one isolated directory per
 ACP session under it, sets native `HOME` plus `XDG_CONFIG_HOME`,
 `XDG_CACHE_HOME`, `XDG_DATA_HOME`, and `XDG_STATE_HOME` inside that directory,
 and writes the per-session Amp settings file inside the isolated config tree.
 The directory is removed on close/delete.
 
-`-debug` writes adapter logs to stderr. ACP JSON-RPC remains on stdout only.
+`-debug` writes adapter logs to stderr; ACP JSON-RPC stays on stdout only. Amp
+`mode` and `effort` are ACP session config options, not command flags. The
+serve-mode flags are `-path`, `-home`, `-model`, `-seed-file`, `-debug`, and
+`-version` — see the [CLI reference](/docs/reference/cli) for each.
 
-Amp mode and effort are ACP session config options, not command flags. The
-only supported serve-mode flags are `-path`, `-home`, `-model`, `-debug`, and
-`-version`.
+## Embedded Serve
+
+To drive Amp from inside your own host process, call `ampacp.Serve` with the
+ACP input/output streams:
+
+```go
+err := ampacp.Serve(ctx, input, output,
+    ampacp.WithExecutablePath("amp"),
+    ampacp.WithHome("/path/to/adapter-home"),
+    ampacp.WithSessionStore(ampacp.NewInMemorySessionStore()),
+)
+```
+
+Every command flag has an option equivalent (`-path` ↔ `WithExecutablePath`,
+`-home` ↔ `WithHome`, `-seed-file` ↔ `WithSeedFiles`), plus embed-only options
+such as `WithSessionStore` and the OpenTelemetry providers. See the
+[Go API](/docs/reference/go-api) for the full set.

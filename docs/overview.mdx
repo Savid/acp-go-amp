@@ -1,19 +1,51 @@
-# Overview
+---
+title: Overview
+description: How this adapter turns the local Amp CLI into an ACP agent, and where each concept is documented.
+---
 
-`acp-go-amp` is a Go ACP wrapper around the Amp CLI.
+`acp-go-amp` is a Go ACP adapter around the Amp CLI. It maps Agent Client
+Protocol sessions directly onto Amp threads so an ACP host can drive Amp over
+stdio or embed the agent in a Go program with `ampacp.Serve`.
 
-The wrapper maps ACP sessions directly to Amp threads:
+The native boundary is the `amp` executable. The adapter does not run an HTTP
+service or a native UI; it launches one short-lived `amp threads` process per
+prompt and streams the result back as ACP updates.
 
-- `session/new` creates an Amp thread
-- `session/prompt` continues that thread with stream-json
-- `session/load` replays stored transcript frames for display
-- `session/resume` restores wrapper state without replay
-- `session/delete` tombstones the local store first, then deletes the Amp thread
+## What it maps
 
-The native boundary is the Amp CLI. The wrapper does not expose an HTTP service
-or a native UI. Hosts either embed `ampacp.Serve` or run the `acp-go-amp` stdio
-command.
+Each ACP method resolves to a concrete Amp operation:
 
-The public contract is intentionally small: mode and effort config options,
-stdio/HTTP MCP setup, raw events, session store mirror, and Amp thread
-lifecycle.
+| ACP method | Amp behavior |
+|---|---|
+| `session/new` | Creates an Amp thread (`amp threads new`); spends no prompt tokens. |
+| `session/prompt` | Continues that thread with `amp threads continue --stream-json`. |
+| `session/load` | Replays stored transcript frames for display. |
+| `session/resume` | Restores adapter state without replaying history. |
+| `session/delete` | Tombstones the local store first, then deletes the Amp thread. |
+
+## Ownership boundary
+
+Amp owns authentication, the model backend, and durable thread state on the
+server side. The adapter owns the ACP surface: session lifecycle, prompt
+streaming, the local transcript mirror, MCP forwarding, and raw-event
+diagnostics. The public contract is intentionally small — `mode` and `effort`
+config options, stdio/HTTP MCP setup, raw events, a session-store mirror, and
+Amp thread lifecycle. There is no permission bridging, no adapter-owned model
+matrix, and no fork surface.
+
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" href="/docs/get-started/quickstart">
+    Run your first ACP turn against Amp in a few steps.
+  </Card>
+  <Card title="Run modes" href="/docs/get-started/run-modes">
+    Standalone stdio command versus embedded `Serve`.
+  </Card>
+  <Card title="Sessions" href="/docs/core/sessions">
+    How ACP sessions map to Amp threads and their lifecycle.
+  </Card>
+  <Card title="Go API" href="/docs/reference/go-api">
+    Entry points, options, and request builders.
+  </Card>
+</CardGroup>

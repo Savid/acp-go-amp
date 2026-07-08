@@ -1,23 +1,58 @@
-# Quickstart
+---
+title: Quickstart
+description: Go from a clean machine to your first successful ACP turn against Amp.
+---
 
-Install Amp and authenticate it outside ACP. Then either run the stdio command
-or embed the Go package.
+This tutorial drives the adapter end to end using the runnable
+`examples/minimal-client` program: it launches the agent, opens a session,
+sends one prompt, and prints Amp's reply.
 
-Command mode:
+<Steps>
+  <Step title="Install and authenticate the Amp CLI">
+    Install the `amp` executable and make sure it is on your `PATH`. Amp owns
+    authentication, so export a key before running anything — session start
+    fails fast without it.
 
-```text
-acp-go-amp -path amp -home /tmp/acp-go-amp-home
-```
+    ```sh
+    export AMP_API_KEY=<your-amp-api-key>
+    ```
 
-Embedded mode:
+    See [Authentication](/docs/features/authentication) for how the key reaches
+    the native process.
+  </Step>
+  <Step title="Clone this repository">
+    The example programs are repo-relative (`go run ./examples/...`), so clone
+    the checkout before running them.
 
-```go
-err := ampacp.Serve(ctx, input, output,
-    ampacp.WithExecutablePath("amp"),
-    ampacp.WithHome("/tmp/acp-go-amp-home"),
-    ampacp.WithSessionStore(ampacp.NewInMemorySessionStore()),
-)
-```
+    ```sh
+    git clone https://github.com/savid/acp-go-amp && cd acp-go-amp
+    ```
+  </Step>
+  <Step title="Run the minimal client">
+    This launches the agent, creates an Amp thread, and sends one prompt (the
+    prompt argument is optional).
 
-For live continuation, pass `AMP_API_KEY` through the process environment or
-`WithEnv`.
+    ```sh
+    go run ./examples/minimal-client "Reply with hello from ACP"
+    ```
+  </Step>
+  <Step title="Embed the agent in your own host (optional)">
+    To drive Amp from your own Go program, call `ampacp.Serve` over the ACP
+    transport instead of shelling out to the command.
+
+    ```go
+    err := ampacp.Serve(ctx, input, output,
+        ampacp.WithExecutablePath("amp"),
+        ampacp.WithSessionStore(ampacp.NewInMemorySessionStore()),
+    )
+    ```
+  </Step>
+</Steps>
+
+## Next steps
+
+- [Run modes](/docs/get-started/run-modes) — standalone stdio command versus
+  embedded `Serve`.
+- [Examples](/docs/get-started/examples) — the three runnable reference
+  clients, including resuming a stored transcript.
+- [Sessions](/docs/core/sessions) — how ACP sessions map to Amp threads.

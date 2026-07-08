@@ -1,16 +1,43 @@
-# Observability
+---
+title: Observability
+description: Wire logging and OpenTelemetry, and read the failure signals when a turn goes wrong.
+---
 
-Provide a logger with `WithLogger`. The command uses stderr for logs and keeps
-stdout reserved for ACP JSON-RPC.
+The adapter emits structured logs and OpenTelemetry signals through the options
+surface, and it captures native output so operators can diagnose failures
+without corrupting the ACP stream.
+
+## Logging and telemetry
+
+Provide a logger with `WithLogger`. The command writes logs to stderr and keeps
+stdout reserved for ACP JSON-RPC; `-debug` raises the command's log level.
 
 OpenTelemetry providers are accepted through the shared options surface:
 
-- `WithTracerProvider`
-- `WithMeterProvider`
-- `WithTextMapPropagator`
+| Option | Signal |
+|---|---|
+| `WithTracerProvider` | Traces. |
+| `WithMeterProvider` | Metrics. |
+| `WithTextMapPropagator` | Context propagation. |
 
 Native Amp stderr is captured in a bounded buffer. If a native process exits
 with an error, the tail is included in the adapter error detail when available.
+Raw events can be enabled per session for stream-JSON diagnostics but are off by
+default — see [Raw events](/docs/features/raw-events).
 
-Raw events can be enabled per session for stream-json diagnostics, but they are
-off by default.
+## Troubleshooting
+
+| Symptom | Likely cause | Where to look |
+|---|---|---|
+| Session start fails immediately | No `AMP_API_KEY` in the environment | [Authentication](/docs/features/authentication) |
+| Prompt fails with `amp_turn_failed` (`cause: "process_exit"`) | Native `amp` exited non-zero | `message` carries the exit status and stderr tail |
+| Prompt fails with `cause: "timeout"` | `WithTurnTimeout` deadline elapsed | Raise or unset the deadline; a timeout is a failure, not a cancel |
+| Prompt fails with `native_state_missing` | Server-side Amp thread is gone | Start a fresh session with `session/new`; a mirror cannot resurrect it |
+| Prompt blocked with `mirror_unsynced` | A prior store write failed | Restore the [session store](/docs/features/session-store) backend so the mirror can commit |
+| Session start rejects an MCP server | Unsupported transport or bad field | [MCP](/docs/features/mcp) — only stdio and HTTP are accepted |
+
+<Note>
+`native_state_missing` is terminal for that session: the native thread no longer
+exists, so continuation is impossible. Recovery is a fresh bootstrap — open a new
+session with `session/new` — not a retry of the same session.
+</Note>

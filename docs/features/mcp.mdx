@@ -1,18 +1,31 @@
-# MCP
+---
+title: MCP
+description: Forward stdio and streamable HTTP MCP servers to Amp, and know which transports are rejected.
+---
 
-ACP stdio and HTTP MCP servers are rendered into Amp `--mcp-config` JSON before
-starting a prompt process.
+An ACP session can carry MCP server definitions. The adapter renders the
+supported ones into Amp `--mcp-config` JSON and passes them to the prompt
+process; the rest are rejected at session start so a host learns immediately
+which servers Amp can use.
 
-Accepted:
+## Supported and rejected transports
 
-- stdio servers with name, command, args, and env
-- HTTP servers with name, URL, and headers
+| Transport | Result |
+|---|---|
+| stdio (name, command, args, env) | Accepted — forwarded via `--mcp-config`. |
+| HTTP (name, URL, headers) | Accepted — forwarded via `--mcp-config`. |
+| SSE | Rejected. |
+| ACP | Rejected. |
+| entry with no transport | Rejected. |
+| entry with an empty server name | Rejected. |
 
-Rejected during session start:
+A rejection is an invalid-params error naming the offending server index or
+field, raised during session start rather than mid-turn.
 
-- SSE transports
-- ACP transports
-- entries with no transport
-- entries with an empty server name
+## Wiring servers
 
-The rejection is an invalid-params error naming the server index or field.
+Attach the MCP servers to the session when you open it; the adapter only builds
+`--mcp-config` from the servers the ACP session provides, so a prompt process
+sees exactly the host-supplied set and nothing more. Use the
+`StdioMCPServer` and `HTTPMCPServer` request builders (see the
+[Go API](/docs/reference/go-api)) to construct the accepted shapes.

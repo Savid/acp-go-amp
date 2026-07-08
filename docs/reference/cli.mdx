@@ -1,21 +1,28 @@
-# CLI
+---
+title: CLI
+description: Every flag the acp-go-amp stdio command accepts, and how stdout is reserved.
+---
 
-`acp-go-amp` runs an ACP JSON-RPC server on stdio.
+`acp-go-amp` runs an ACP JSON-RPC server on stdio. An ACP host launches it as a
+subprocess; stdout is reserved for JSON-RPC and diagnostics go to stderr.
 
-Flags:
+## Flags
 
-- `-path`: Amp executable path. Defaults to `amp` on `PATH`.
-- `-home`: parent directory for isolated per-session native HOME/XDG state and
-  Amp settings files.
-- `-model`: default model. Accepted on the adapter surface; non-empty values
-  fail session start because Amp has no ACP model config option.
-- `-seed-file`: repeatable `<relpath>=<hostpath>`. Reads the host file and writes
-  its contents to `<relpath>` inside each session's isolated native `HOME` before
-  amp launches (see [Seed files](/features/models-config#seed-files)). Accepted on
-  the adapter surface; Amp is locked to its hosted backend, so seeds cannot repoint
-  it at a custom LLM endpoint.
-- `-debug`: write adapter debug logs to stderr.
-- `-version`: print adapter version and exit.
+| Flag | Meaning |
+|---|---|
+| `-path` | Amp executable path. Defaults to `amp` on `PATH`. |
+| `-home` | Parent directory for isolated per-session native HOME/XDG state and Amp settings files. |
+| `-model` | Default model. Accepted on the adapter surface; non-empty values fail session start because Amp has no ACP model config option. |
+| `-seed-file` | Repeatable `<relpath>=<hostpath>`. Reads the host file and writes its contents to `<relpath>` inside each session's isolated native `HOME` before `amp` launches. See [Seed files](/docs/features/models-config#seed-files). |
+| `-debug` | Write adapter debug logs to stderr. |
+| `-version` | Print adapter version and exit. |
+
+`-seed-file` is accepted on the adapter surface, but Amp is locked to its hosted
+backend, so seeds cannot repoint it at a custom LLM endpoint. Amp `mode` and
+`effort` are session config options, not flags — see
+[Models and config](/docs/features/models-config).
+
+## Stream handling
 
 Stdout is reserved for ACP JSON-RPC. Native Amp stdout and stderr are captured
-through dedicated pipes.
+through dedicated pipes so native output never corrupts the JSON-RPC stream.

@@ -1,27 +1,61 @@
-# Session Store
+---
+title: Session Store
+description: Wire a durable mirror of Amp threads for display replay, and understand its limits.
+---
 
-`SessionStoreFormat` is `amp-thread-mirror-v1`.
+The session store is a host-provided durability layer that mirrors Amp thread
+frames for display replay. It is not a substitute for the server-side Amp
+thread — it exists so a host can reload and show past turns, not resurrect
+native state.
 
-The main subpath stores one manifest entry for the ACP session:
+## Wiring a store
 
-- `threadId`: the native Amp thread ID, which is also the ACP session ID
-- `cwd`, `title`, selected `mode`, selected `effort`
-- Unix millisecond create/update timestamps
+Pass a store with `WithSessionStore`. The adapter ships an in-memory
+implementation for tests and single-process hosts; a host that needs durability
+across restarts implements the `SessionStore` interface over its own backend.
 
-The `transcript` subpath stores the full ordered Amp stream JSON frame mirror
-for completed prompt turns. Each completed turn publishes the manifest and full
-transcript together in one `Replace` generation. These are the frames used for
-ACP `session/load` replay and raw-event fidelity. Auth material, settings
-files, API keys, and secrets are never written to the store.
+```go
+err := ampacp.Serve(ctx, input, output,
+    ampacp.WithExecutablePath("amp"),
+    ampacp.WithSessionStore(ampacp.NewInMemorySessionStore()),
+    ampacp.WithSessionStoreLoadTimeout(10*time.Second),
+)
+```
 
-local transcript restore is not native thread resurrection. The local mirror is
-the durability boundary for display replay; the ampcode.com thread is the
-native continuation unit. continuation requires the live server-side Amp thread and AMP_API_KEY.
+`WithSessionStoreLoadTimeout` bounds how long a load may block on the store
+(default `10s`). Store reads that exceed it are cut off so a slow or hung
+backend never stalls `session/load`.
 
-`session/load` hydrates the local mirror, verifies the thread can be addressed,
-and replays transcript frames to the client. `session/resume` hydrates without
-replaying history.
+## Format and layout
 
-If the server-side thread is deleted or unavailable, session/load can replay the local transcript for display. A subsequent prompt fails with one terminal
-`native_state_missing` error. The adapter does not create a replacement thread
-from transcript text because that would lose native state.
+`SessionStoreFormat` is `amp-thread-mirror-v1`. Records live under two subpaths:
+
+| Subpath | Contents |
+|---|---|
+| main | Manifest: `threadId` (also the ACP session ID), `cwd`, `title`, selected `mode` and `effort`, and Unix-millisecond create/update timestamps. |
+| `transcript` | The full ordered Amp stream-JSON frame mirror for completed prompt turns. |
+
+Each completed turn publishes the manifest and full transcript together in
+one `Replace` generation. These frames back `session/load` replay and raw-event
+fidelity. Auth material, settings files, API keys, and secrets are never
+written to the store.
+
+## Restore is display-only
+
+`session/load` hydrates the local mirror, verifies the thread can still be
+addressed, and replays transcript frames to the client. `session/resume`
+hydrates without replaying history.
+
+<Warning>
+A local transcript restore is not native thread resurrection. The mirror is the
+durability boundary for display replay; the server-side Amp thread is the native
+continuation unit.
+
+Native continuation requires the live server-side Amp thread and AMP_API_KEY, so the mirror alone cannot continue a turn.
+
+If the thread is deleted or unavailable, session/load can replay the local transcript for display, but a subsequent prompt fails with one terminal `native_state_missing` error — the adapter does not rebuild a thread from transcript text, because that would lose native state.
+</Warning>
+
+If a store write fails after a clean turn, the adapter keeps the frames in
+memory and blocks the next prompt with a `mirror_unsynced` error until the write
+succeeds, so the mirror never silently diverges from what Amp produced.

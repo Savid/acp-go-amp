@@ -1,16 +1,37 @@
-# Install
+---
+title: Install
+description: Get the adapter as a library or a standalone stdio command, and point it at the Amp CLI.
+---
 
-For embedded use:
+The adapter ships as a Go library and a command binary. Install whichever
+matches how your host consumes it.
 
-```text
+## Install the adapter
+
+<CodeGroup>
+```sh Library
 go get github.com/savid/acp-go-amp
 ```
 
-For the stdio command:
-
-```text
-go build ./cmd/acp-go-amp
+```sh CLI (published)
+go install github.com/savid/acp-go-amp/cmd/acp-go-amp@latest
 ```
 
-The Amp CLI must be installed separately. The wrapper resolves it from
-`WithExecutablePath`, `-path`, or `PATH`.
+```sh CLI (from a checkout)
+go build ./cmd/acp-go-amp
+```
+</CodeGroup>
+
+The published `@latest` install is the idiomatic way to get the standalone
+command. Build from a checkout when you are developing against the examples.
+
+## Provide the Amp CLI
+
+The `amp` executable is a separate dependency and is not vendored. The adapter
+resolves it, in order, from:
+
+- `WithExecutablePath("...")` (embedded) or `-path` (command)
+- the `amp` binary on `PATH`
+
+Amp also owns authentication: export `AMP_API_KEY` before starting a session.
+See [Authentication](/docs/features/authentication).

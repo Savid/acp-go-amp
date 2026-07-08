@@ -1,6 +1,13 @@
-# Raw Events
+---
+title: Raw Events
+description: Opt into verbatim Amp stream-JSON notifications for diagnostics, with safe truncation guarantees.
+---
 
-Raw events are opt-in per session:
+Raw events surface every live-turn Amp stream-JSON frame as an
+`_amp/rawEvent` notification, for diagnostics and deep debugging. They are
+opt-in per session and never required for normal replay.
+
+## Enable per session
 
 ```json
 {
@@ -14,29 +21,38 @@ Raw events are opt-in per session:
 }
 ```
 
-When enabled, each captured live-turn Amp stream-json frame is emitted as
-`_amp/rawEvent` with:
+When enabled, each captured live-turn frame is emitted as `_amp/rawEvent` with:
 
 - `sessionId`
-- `sequence`, which is per session, starts at `1`, and is strictly monotonic
-  and contiguous (every event consumes exactly one sequence)
+- `sequence` — per session, starts at `1`, strictly monotonic and contiguous
+  (every event consumes exactly one sequence)
 - `source` (`stream-json`)
 - raw `event`
 
-Raw events are live-turn only. They are never replayed from the session store on
-`session/load`; authoritative load replay uses `session/update` frames.
+Raw events are live-turn only. They are never replayed from the session store
+on `session/load`; authoritative load replay uses `session/update` frames.
+
+## Truncation and delivery guarantees
 
 Payloads are capped at 64 KiB (65536 bytes) measured on the full notification
-payload. An event is never dropped and never fails the turn: an oversized event
-still consumes its sequence and is emitted with `event` replaced by the fixed
-marker
+payload. An event is never dropped and never fails the turn.
+
+An oversized event still consumes its sequence and is emitted with `event`
+replaced by the fixed marker, where `sizeBytes` is the byte length of the
+original marshalled payload:
 
 ```json
 { "truncated": true, "reason": "oversize", "maxBytes": 65536, "sizeBytes": 0 }
 ```
 
-where `sizeBytes` is the byte length of the original marshalled payload. An event
-that cannot be marshalled is emitted with `{ "truncated": true, "reason":
-"unserializable", "maxBytes": 65536 }` (no `sizeBytes`). A raw-event delivery
-failure is recorded internally and never aborts the prompt turn. Raw events are
-diagnostic and are not required for normal session replay.
+An event that cannot be marshalled is emitted with (no `sizeBytes`):
+
+```json
+{ "truncated": true, "reason": "unserializable", "maxBytes": 65536 }
+```
+
+<Note>
+A raw-event delivery failure is recorded internally and never aborts the prompt
+turn. Raw events are a diagnostic channel — treat them as advisory, not as a
+replacement for `session/update` replay.
+</Note>

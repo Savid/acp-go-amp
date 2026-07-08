@@ -1,16 +1,25 @@
-# Prompt Streaming
+---
+title: Prompt Streaming
+description: How one short-lived Amp process per prompt turns stream-JSON frames into ACP updates and results.
+---
 
-Each ACP prompt starts one short-lived process:
+Each ACP prompt starts exactly one short-lived native process and streams its
+output back as ACP `session/update` notifications, ending with a single
+terminal result.
+
+## The prompt process
 
 ```text
 amp threads continue <thread> --stream-json --stream-json-input -x
 ```
 
-The wrapper always adds `--no-ide`, `--no-color`, `--no-notifications`, and an
+The adapter always adds `--no-ide`, `--no-color`, `--no-notifications`, and an
 isolated `--settings-file`. MCP configuration is supplied with `--mcp-config`
 when the ACP session includes stdio or HTTP MCP servers.
 
-Amp stream-json frames map to ACP updates:
+## Frame mapping
+
+Amp stream-JSON frames map to ACP updates:
 
 - user text frames become user message chunks
 - assistant text frames become agent message chunks
@@ -18,16 +27,23 @@ Amp stream-json frames map to ACP updates:
 - usage data becomes ACP `usage_update`
 - final result usage is copied to the prompt response
 
+The `usage_update` `size` field carries Amp's native `usage.max_tokens`
+verbatim (a model-scale value Amp reports), or `0` when absent.
+
 No slash commands are advertised. Text like `/review` remains ordinary prompt
 text and is sent to Amp unchanged.
+
+## Cancel and stop reasons
 
 `session/cancel` sends an interrupt to the active process. If Amp does not exit
 within the configured native cancel timeout, the process group is killed. A
 successful prompt returns exactly one terminal result with a valid stop reason
 (`end_turn`, `max_tokens`, `max_turn_requests`, `refusal`, or `cancelled`).
 
+## Turn failures and timeouts
+
 A native turn failure is never reported as a stop reason. It terminates
-`session/prompt` with a JSON-RPC error (`-32603`) carrying
+`session/prompt` with a JSON-RPC error (`-32603`) carrying:
 
 ```json
 {
@@ -43,6 +59,9 @@ falling back to `result.result` for a provider error) — never a fixed
 placeholder. The session stays addressable and retriable after such a failure; a
 follow-up `session/prompt` re-drives the turn.
 
+<Note>
 `WithTurnTimeout(d)` sets an optional per-turn deadline (default `0`, no
-deadline). On expiry the wrapper aborts the native turn and returns the failure
-error with `cause: "timeout"` — a timeout is a failure, not a cancellation.
+deadline). On expiry the adapter aborts the native turn and returns the failure
+error with `cause: "timeout"` — a timeout is a failure, not a cancellation, so
+it never produces a `cancelled` stop reason.
+</Note>

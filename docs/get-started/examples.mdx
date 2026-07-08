@@ -1,10 +1,34 @@
-# Examples
+---
+title: Examples
+description: Run the three reference clients that exercise prompting, interactive chat, and transcript resume.
+---
 
-Examples are executable Go programs:
+The `examples/` directory ships three executable Go programs. Each is a real,
+runnable ACP client that uses only the public `ampacp` helpers — none reach into
+internal Amp process code. They all run from a checkout of this repository, so
+clone it first:
 
-- `examples/minimal-client`: starts the agent and sends one prompt.
-- `examples/interactive-chat`: keeps a session open and sends repeated prompts.
-- `examples/resume-from-file`: shows storing a session ID and resuming it later.
+```sh
+git clone https://github.com/savid/acp-go-amp && cd acp-go-amp
+```
 
-Each example uses the public Go helpers rather than reaching into internal Amp
-process code.
+## The three clients
+
+| Example | What it does | Run |
+|---|---|---|
+| `minimal-client` | Launches the agent, opens a session, sends one prompt, prints the reply. | `go run ./examples/minimal-client "Reply with hello from ACP"` |
+| `interactive-chat` | Keeps one session open and sends repeated prompts from stdin. | `go run ./examples/interactive-chat` |
+| `resume-from-file` | Loads a stored Amp transcript, replays it, then sends one follow-up prompt. | `go run ./examples/resume-from-file -file ./examples/resume-from-file/session.jsonl` |
+
+## Resuming a transcript
+
+`resume-from-file` reads a stream-JSON transcript into a `SessionStore` and
+calls `session/load` so the stored frames are replayed for display.
+
+<Warning>
+Loading replays the local transcript for display only — it does not resurrect
+the Amp thread. The follow-up prompt continues the *original server-side* Amp
+thread, so that thread must still exist and `AMP_API_KEY` must be set. If the
+server-side thread is gone, the prompt returns a terminal
+`native_state_missing` error. See [Session store](/docs/features/session-store).
+</Warning>

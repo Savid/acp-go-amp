@@ -1,7 +1,18 @@
-# Elicitation
+---
+title: Elicitation
+description: Why the adapter advertises no elicitation surface, and how client capabilities are handled.
+---
 
-Amp does not expose a native non-permission question surface that can be mapped
-to ACP elicitation. This package does not advertise Amp elicitation metadata.
+<Note>
+This page is **not applicable** to `acp-go-amp` as an ACP elicitation feature.
+Amp exposes no native non-permission question surface that could map to ACP
+elicitation, so the adapter advertises none. This is a recorded deviation for
+this adapter: it never sends `elicitation/create`.
+</Note>
 
-Client elicitation capabilities are accepted during `initialize` but do not
-change Amp behavior. The wrapper never sends `elicitation/create`.
+## Client capabilities are accepted but inert
+
+Client elicitation capabilities are accepted during `initialize` as part of the
+ACP handshake, but they do not change Amp behavior. There is no native surface
+for the adapter to translate into an elicitation request, so it never sends
+`elicitation/create` and does not advertise Amp elicitation metadata.

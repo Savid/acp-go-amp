@@ -1,41 +1,53 @@
-# Go API
+---
+title: Go API
+description: Entry points, options, and request builders for embedding the adapter, indexed to pkg.go.dev.
+---
 
-Import the module as:
+Import the module and drive it with `Serve` or `NewAgent`. The authoritative,
+always-current signatures live on
+[pkg.go.dev](https://pkg.go.dev/github.com/savid/acp-go-amp); this page indexes
+the surface rather than repeating godoc.
 
 ```go
 import ampacp "github.com/savid/acp-go-amp"
 ```
 
-Primary entry points:
+## Entry points
 
-- `ampacp.NewAgent(opts ...Option) *Agent`
-- `ampacp.Serve(ctx, input, output, opts ...Option) error`
+| Symbol | Purpose |
+|---|---|
+| `ampacp.NewAgent(opts ...Option) *Agent` | Construct an agent you drive directly. |
+| `ampacp.Serve(ctx, input, output, opts ...Option) error` | Serve ACP over the given streams. |
 
-Common options:
+## Common options
 
-- `WithExecutablePath`
-- `WithHome`, which is a parent for isolated per-session native `HOME` and XDG
-  directories
-- `WithDefaultModel`
-- `WithEnv`
-- `WithSessionStore`
-- `WithConcurrencyLimits`
-- `WithSeedFiles`, which maps relative paths to file contents written into each
-  session's isolated native `HOME` before amp launches. See
-  [Seed files](/features/models-config#seed-files). Amp is locked to its hosted
-  backend, so this option is accepted but inert and cannot repoint Amp at a
-  custom LLM endpoint.
-- `WithTurnTimeout`, an optional per-turn native deadline (default `0`, no
-  deadline); on expiry the turn fails with `cause: "timeout"`
-- OpenTelemetry provider options
+| Option | Purpose |
+|---|---|
+| `WithExecutablePath` | Native `amp` executable path. |
+| `WithHome` | Parent for isolated per-session native `HOME`/XDG directories. |
+| `WithDefaultModel` | Accepted for symmetry; non-empty values reject at session start. |
+| `WithEnv` | Environment injected into native processes (e.g. `AMP_API_KEY`). |
+| `WithSessionStore` | Durable mirror; see [Session store](/docs/features/session-store). |
+| `WithSessionStoreLoadTimeout` | Bound on store load (default `10s`). |
+| `WithConcurrencyLimits` | Caps on concurrent native work. |
+| `WithSeedFiles` | Relative-path → contents written into each session's isolated native `HOME` before `amp` launches. See [Seed files](/docs/features/models-config#seed-files). Accepted but inert for model routing — Amp is locked to its hosted backend. |
+| `WithTurnTimeout` | Optional per-turn deadline (default `0`, no deadline); on expiry the turn fails with `cause: "timeout"`. |
+| `WithTracerProvider`, `WithMeterProvider`, `WithTextMapPropagator`, `WithLogger` | Observability providers. |
 
-Amp per-session options:
+## Amp per-session options
 
-- `AmpOptions.Env`
-- `AmpOptions.Mode`
-- `AmpOptions.Effort`
-- `AmpOptions.Model` and `AmpOptions.OutputSchema`, which are accepted in the
-  struct for API symmetry but rejected when supplied.
+`AmpOptions` carries per-session Amp settings (also expressible as
+`_meta.amp.options`):
 
-Request helpers include builders for new/load/resume/delete, text prompts,
-config-option updates, stdio MCP servers, and HTTP MCP servers.
+| Field | Behavior |
+|---|---|
+| `Env` | Per-session environment overrides. |
+| `Mode` | `smart`, `deep`, or `rush`. |
+| `Effort` | `none` … `max`. |
+| `Model`, `OutputSchema` | Present for API symmetry; rejected when supplied. |
+
+## Request builders
+
+Helpers construct ACP requests for new/load/resume/delete, text prompts,
+config-option updates, and stdio and HTTP MCP servers. See
+[ACP methods](/docs/reference/acp-methods) for the method surface they target.

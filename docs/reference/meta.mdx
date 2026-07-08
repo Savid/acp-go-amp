@@ -1,6 +1,12 @@
-# Meta
+---
+title: Meta
+description: The _meta.amp metadata the adapter accepts on requests and advertises on initialize.
+---
 
-Lifecycle requests accept only this Amp-owned metadata:
+Lifecycle requests carry Amp-owned settings under the `_meta.amp` namespace.
+Unknown keys fail closed; foreign namespaces are ignored.
+
+## Request metadata
 
 ```json
 {
@@ -19,13 +25,22 @@ Lifecycle requests accept only this Amp-owned metadata:
 }
 ```
 
-Accepted option fields are `env`, `mode`, `effort`, `model`, and
-`outputSchema`. `mode` accepts only `smart`, `deep`, or `rush`; `effort`
-accepts only `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`.
-`model` and any `outputSchema` presence exist for API symmetry but fail with
-the uniform unsupported error. Unknown keys under `_meta.amp`,
-`_meta.amp.rawEvent`, or `_meta.amp.options` fail closed. Foreign metadata
-namespaces are ignored.
+## Accepted fields
 
-Initialize advertises `_meta.amp.rawEvent` and `_meta.amp.sessionStore`. It
-omits fork and elicitation capability metadata.
+| Field | Accepted values |
+|---|---|
+| `options.env` | Map of environment overrides. |
+| `options.mode` | `smart`, `deep`, `rush`. |
+| `options.effort` | `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. |
+| `options.model` | Present for symmetry; any value fails with the uniform unsupported error. |
+| `options.outputSchema` | Present for symmetry; any presence fails with the uniform unsupported error. |
+| `rawEvent.enabled` | `true` to stream `_amp/rawEvent` for the session. |
+
+Unknown keys under `_meta.amp`, `_meta.amp.rawEvent`, or `_meta.amp.options`
+fail closed. Foreign metadata namespaces are ignored.
+
+## Advertised capabilities
+
+`initialize` advertises `_meta.amp.rawEvent` and `_meta.amp.sessionStore`. It
+omits fork and elicitation capability metadata, because the adapter supports
+neither.

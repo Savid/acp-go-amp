@@ -1,14 +1,36 @@
-# Authentication
+---
+title: Authentication
+description: Supply Amp credentials through the environment; the adapter advertises no ACP auth methods.
+---
 
-Amp owns authentication. `initialize` advertises no ACP auth methods, and
-`Authenticate` rejects caller-provided method IDs.
+Amp owns authentication end to end. The adapter advertises no ACP auth methods
+in `initialize`, and `Authenticate` rejects any caller-provided method ID.
+There is no login flow to bridge — you provide a key and the native process
+uses it.
 
-Provide `AMP_API_KEY` to the native process: set it in the host process
-environment, with `WithEnv`, or per-session via `AmpOptions.Env`. Session
-commands run inside an isolated per-session home, so credentials saved by
-Amp's native account setup on the host are not visible to them. Session
-startup fails fast with a descriptive error when no `AMP_API_KEY` is
-available, instead of leaving the native process waiting on its interactive
-login flow.
+## Provide a key
 
-Auth material is never stored in the session manifest or transcript.
+Set `AMP_API_KEY` so the native process can reach Amp's backend. You can supply
+it three ways:
+
+| Source | Scope |
+|---|---|
+| Host process environment (`AMP_API_KEY=...`) | All sessions. |
+| `WithEnv(map[string]string{...})` | All sessions started by the adapter. |
+| `AmpOptions.Env` (`_meta.amp.options.env`) | A single session. |
+
+Sessions run inside an isolated per-session home, so credentials saved by Amp's
+native account setup on the host are not visible to them — the key must come
+through one of the sources above.
+
+<Warning>
+Session startup fails fast with a descriptive error when no `AMP_API_KEY` is
+available, rather than leaving the native process blocked on its interactive
+login flow. Export the key before opening a session.
+</Warning>
+
+## What is never stored
+
+Auth material is live process state only. `AMP_API_KEY` (and `AMP_URL`) are
+never written to the session manifest, the transcript, or the settings file.
+See [Security](/docs/operations/security).

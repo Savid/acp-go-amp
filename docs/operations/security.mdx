@@ -1,18 +1,42 @@
-# Security
+---
+title: Security
+description: How per-session isolation and strict secret handling keep credentials out of durable state.
+---
 
-The wrapper creates an isolated native home for each ACP session. Native `HOME`,
+The adapter isolates each session's native state and keeps credentials out of
+anything durable. Operators can reason about the blast radius of a single
+session and about exactly what the session store may contain.
+
+## Per-session isolation
+
+The adapter creates an isolated native home for each ACP session. Native `HOME`,
 `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, `XDG_DATA_HOME`, and `XDG_STATE_HOME` point
 inside that directory, and the Amp settings file starts as an empty JSON object
-inside the isolated config tree before being passed with `--settings-file`.
+inside the isolated config tree before being passed with `--settings-file`. The
+directory is removed on close/delete, so one session cannot read another's
+native state or the operator's real `~/.config/amp`.
 
-Auth material is live process state:
+## Secret handling
 
-- `AMP_API_KEY` may be supplied through `WithEnv` or the process environment.
-- `AMP_URL` may be supplied the same way.
-- Neither value is written to the settings file or `SessionStore`.
+Auth material is live process state only:
 
-The session store contains only the manifest and captured stream-json frames.
-It does not contain settings, auth files, API keys, or other secrets.
+| Value | Supplied via | Persisted? |
+|---|---|---|
+| `AMP_API_KEY` | `WithEnv` or the process environment | Never |
+| `AMP_URL` | `WithEnv` or the process environment | Never |
 
-Native Amp subprocesses never inherit ACP stdout. The wrapper captures native
-stdout and stderr separately so JSON-RPC output stays clean.
+Neither value is written to the settings file or the `SessionStore`. The store
+contains only the manifest and captured stream-JSON frames — no settings, auth
+files, API keys, or other secrets.
+
+<Warning>
+Seed files (`WithSeedFiles` / `-seed-file`) are written verbatim into the
+isolated native home. Never seed secrets through them; put credentials in
+`WithEnv` so they stay in live process state and out of durable files.
+</Warning>
+
+## Stream isolation
+
+Native Amp subprocesses never inherit ACP stdout. The adapter captures native
+stdout and stderr through dedicated pipes so JSON-RPC output stays clean and
+native diagnostics cannot leak into the protocol stream.

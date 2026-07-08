@@ -1,22 +1,45 @@
-# Sessions
+---
+title: Sessions
+description: The mental model for how ACP sessions map onto Amp threads and move through their lifecycle.
+---
 
-ACP session IDs are native Amp thread IDs such as `T-...`.
+An ACP session in this adapter *is* an Amp thread. ACP session IDs are native
+Amp thread IDs such as `T-...`, so there is no separate identifier space to
+reconcile. Durable state lives on the Amp server side; the adapter keeps only a
+local mirror for display and continuity.
 
-`session/new` calls `amp threads new`, persists an initial manifest, and returns
-select config options for `mode` and `effort`. No prompt tokens are spent while
-creating the empty thread.
+## Lifecycle
 
-`session/load` reads the store manifest and transcript, verifies that the
-server-side Amp thread can still be addressed, recreates the wrapper session
-with a fresh isolated native home, and replays stored frames to the client.
-`session/resume` performs the same continuability check without replaying
-history.
+- `session/new` calls `amp threads new`, persists an initial manifest, and
+  returns select config options for `mode` and `effort`. No prompt tokens are
+  spent creating the empty thread.
+- `session/load` reads the store manifest and transcript, verifies that the
+  server-side Amp thread can still be addressed, recreates the adapter session
+  with a fresh isolated native home, and replays stored frames to the client.
+- `session/resume` performs the same continuability check without replaying
+  history.
+- `session/delete` writes the store tombstone first, closes any active local
+  session, then calls `amp threads delete`. A native delete failure is returned
+  after the local session is already hidden from list/load/resume, and cleanup
+  is retried by later list/load/resume/delete calls.
+- `session/close` stops accepting new prompts for the local session and removes
+  its isolated native home. It does not delete the server-side Amp thread.
 
-`session/delete` writes the store tombstone first, closes any active local
-session, then calls `amp threads delete`. A native delete failure is returned
-after the local session is already hidden from list/load/resume, and cleanup is
-retried by later list/load/resume/delete calls.
+## Server-side state and the local mirror
 
-`session/close` stops accepting new prompts for the local wrapper session and
-removes its isolated native home. It does not delete the server-side Amp
-thread.
+Because state is server-side, the adapter cannot rebuild a thread from local
+history. The transcript mirror exists to replay display frames on load and to
+back raw-event fidelity — not to recreate native state. Continuation always
+requires the live server-side Amp thread and `AMP_API_KEY`; if the thread is
+gone, load still replays local history but the next prompt returns a terminal
+`native_state_missing` error. See
+[Session store](/docs/features/session-store) for the durability boundary.
+
+## Mirror commit ordering
+
+Only a clean `end_turn` publishes its frames to the store; cancelled or errored
+turns are never mirrored locally, even though the server-side thread advances
+regardless. If a store write fails after a completed turn, the adapter keeps the
+exact frames in memory and blocks the next prompt with a `mirror_unsynced`
+error until the mirror is reconciled, so the local record never silently drifts
+from what Amp produced.
