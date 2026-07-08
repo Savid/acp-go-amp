@@ -11,6 +11,7 @@ import (
 	"maps"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -836,11 +837,12 @@ func validateSessionPaths(cwd string, additionalDirs []string) error {
 }
 
 // reserveMCPName enforces the family MCP-name contract for the declaration at
-// index i: every accepted server carries a non-empty name that is unique within
-// the request. Names are never fabricated, rewritten, or deduplicated.
+// index i: every accepted server carries a name that is not empty or
+// whitespace-only and is unique within the request. The raw name is stored and
+// forwarded verbatim; names are never fabricated, rewritten, or deduplicated.
 func reserveMCPName(seen map[string]struct{}, name string, i int) error {
 	field := fmt.Sprintf("mcpServers[%d].name", i)
-	if name == "" {
+	if strings.TrimSpace(name) == "" {
 		return acp.NewInvalidParams(map[string]any{field: "required"})
 	}
 	if _, dup := seen[name]; dup {

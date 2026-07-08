@@ -127,6 +127,10 @@ func TestMCPNameContract(t *testing.T) {
 	_, err := mcpConfigJSON([]acp.McpServer{{Stdio: &acp.McpServerStdio{Command: "c"}}})
 	requireInvalidParamsData(t, err, map[string]any{"mcpServers[0].name": "required"})
 
+	// Whitespace-only stdio name at index 0 is rejected, not forwarded.
+	_, err = mcpConfigJSON([]acp.McpServer{{Stdio: &acp.McpServerStdio{Name: "   ", Command: "c"}}})
+	requireInvalidParamsData(t, err, map[string]any{"mcpServers[0].name": "required"})
+
 	// Empty http name at index 1 reports its own index.
 	_, err = mcpConfigJSON([]acp.McpServer{
 		StdioMCPServer("keep", "c", nil, nil),
