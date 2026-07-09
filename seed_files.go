@@ -12,14 +12,14 @@ import (
 )
 
 const (
-	// seedManifestName is the wagie-owned ownership manifest, a JSON array of the
+	// seedManifestName is the seed-owned ownership manifest, a JSON array of the
 	// relative seed paths the wrapper has written into a seed root. It lets a
-	// later seed pass tell a wagie-managed file (safe to overwrite) apart from an
+	// later seed pass tell a seed-managed file (safe to overwrite) apart from an
 	// operator-authored file (must never be clobbered).
-	seedManifestName = ".wagie-seed-manifest.json"
+	seedManifestName = ".seed-manifest.json"
 	// seedBackupSuffix names the sidecar that holds the prior on-disk bytes of a
 	// managed seed target before the wrapper overwrites it with changed content.
-	seedBackupSuffix = ".wagie.bak"
+	seedBackupSuffix = ".seed.bak"
 )
 
 // writeSeedFiles materializes WithSeedFiles contents under the session's
@@ -41,11 +41,11 @@ const (
 // WithHome, seeding needs no WithHome guard and cannot leak into a shared home.
 //
 // Provenance guard: writes are routed through an ownership manifest
-// (.wagie-seed-manifest.json, kept in the seed root — $HOME, the sibling of the
+// (.seed-manifest.json, kept in the seed root — $HOME, the sibling of the
 // XDG settings.json) so a seed can never clobber a file the wrapper did not
 // write. Per relpath: if the target is absent it is written and recorded; if it
 // exists and the manifest already owns it, changed bytes are backed up to
-// <relpath>.wagie.bak before the rewrite (identical bytes are a no-op); if it
+// <relpath>.seed.bak before the rewrite (identical bytes are a no-op); if it
 // exists but the manifest does not own it (an operator-authored file), the whole
 // pass fails closed with the uniform unsupported error and nothing is written.
 // The wrapper's fresh per-session HOME means the manifest is normally absent, so
@@ -115,7 +115,7 @@ type seedPlan struct {
 
 // applySeedPlan writes one planned seed. A managed target whose bytes are
 // unchanged is a no-op; a managed target whose bytes differ is first backed up
-// to <target>.wagie.bak; an absent target has its parent directory created.
+// to <target>.seed.bak; an absent target has its parent directory created.
 func applySeedPlan(plan seedPlan) error {
 	if plan.exists {
 		if bytes.Equal(plan.current, plan.contents) {
