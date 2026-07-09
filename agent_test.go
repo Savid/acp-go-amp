@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
+	"github.com/stretchr/testify/require"
 )
 
 func TestInitializeShape(t *testing.T) {
@@ -91,10 +92,21 @@ func TestMCPConfig(t *testing.T) {
 		t.Fatalf("payload entries = %d, want 2", len(payload))
 	}
 
-	_, err = mcpConfigJSON([]acp.McpServer{{Sse: &acp.McpServerSseInline{Name: "s", Url: "https://example.com/sse"}}})
-	if err == nil {
-		t.Fatal("expected sse rejection")
-	}
+	// SSE and ACP transports are rejected fail-closed with the uniform
+	// -32602 shape {error:"unsupported", field:"mcpServers[N]", server:<name>}.
+	_, sseErr := mcpConfigJSON([]acp.McpServer{{Sse: &acp.McpServerSseInline{Name: "s", Url: "https://example.com/sse"}}})
+	requireInvalidParamsData(t, sseErr, map[string]any{
+		jsonFieldError:  valUnsupported,
+		jsonFieldField:  "mcpServers[0]",
+		jsonFieldServer: "s",
+	})
+
+	_, acpErr := mcpConfigJSON([]acp.McpServer{{Acp: &acp.McpServerAcpInline{Name: "a", Id: "id"}}})
+	requireInvalidParamsData(t, acpErr, map[string]any{
+		jsonFieldError:  valUnsupported,
+		jsonFieldField:  "mcpServers[0]",
+		jsonFieldServer: "a",
+	})
 }
 
 // requireInvalidParamsData asserts err is a -32602 RequestError whose data
@@ -102,23 +114,13 @@ func TestMCPConfig(t *testing.T) {
 func requireInvalidParamsData(t *testing.T, err error, want map[string]any) {
 	t.Helper()
 	var reqErr *acp.RequestError
-	if !errors.As(err, &reqErr) {
-		t.Fatalf("error = %T %v, want RequestError", err, err)
-	}
-	if reqErr.Code != -32602 {
-		t.Fatalf("code = %d, want -32602 (%v)", reqErr.Code, err)
-	}
+	require.ErrorAs(t, err, &reqErr)
+	require.Equal(t, -32602, reqErr.Code, "want -32602")
 	data, ok := reqErr.Data.(map[string]any)
-	if !ok {
-		t.Fatalf("data = %#v, want map", reqErr.Data)
-	}
-	if len(data) != len(want) {
-		t.Fatalf("data = %#v, want %#v", data, want)
-	}
+	require.True(t, ok, "data must be a map")
+	require.Len(t, data, len(want))
 	for k, v := range want {
-		if data[k] != v {
-			t.Fatalf("data = %#v, want %#v", data, want)
-		}
+		require.Equal(t, v, data[k])
 	}
 }
 

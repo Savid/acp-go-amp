@@ -150,7 +150,10 @@ func WithHome(path string) Option {
 	}
 }
 
-// WithDefaultModel sets the default model advertised at initialize.
+// WithDefaultModel records a default model, but Amp does not support model
+// selection. Amp advertises no default model at initialize; instead, when a
+// default model is set every session start is rejected fail-closed with the
+// uniform unsupported "model" field error.
 func WithDefaultModel(model string) Option {
 	return func(options *Options) {
 		options.DefaultModel = model

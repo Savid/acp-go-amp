@@ -1,3 +1,11 @@
 package main
 
-var version = "0.0.0"
+var buildVersion = "dev"
+
+func version() string {
+	if buildVersion == "" {
+		return "dev"
+	}
+
+	return buildVersion
+}

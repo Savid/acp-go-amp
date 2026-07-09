@@ -255,13 +255,16 @@ func TestPromptInputAndEmitBranches(t *testing.T) {
 	if len(content) != 6 {
 		t.Fatalf("content len = %d", len(content))
 	}
-	for _, blocks := range [][]acp.ContentBlock{
-		{acp.AudioBlock("audio", "audio/wav")},
-		{acp.ResourceBlock(acp.EmbeddedResourceResource{})},
-	} {
-		if _, err := promptInput(blocks); err == nil {
-			t.Fatalf("blocks accepted: %#v", blocks)
-		}
+	// An unsupported content block (e.g. audio) is rejected fail-closed with the
+	// uniform -32602 shape {error:"unsupported", field:"prompt"}.
+	_, audioErr := promptInput([]acp.ContentBlock{acp.AudioBlock("audio", "audio/wav")})
+	requireInvalidParamsData(t, audioErr, map[string]any{
+		jsonFieldError: valUnsupported,
+		jsonFieldField: "prompt",
+	})
+
+	if _, err := promptInput([]acp.ContentBlock{acp.ResourceBlock(acp.EmbeddedResourceResource{})}); err == nil {
+		t.Fatal("empty embedded resource accepted")
 	}
 	session := &agentSession{agent: NewAgent(), id: "T-emit", rawEvents: true}
 	if err := session.emitUsage(context.Background(), nil); err != nil {

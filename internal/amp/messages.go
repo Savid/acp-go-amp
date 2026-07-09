@@ -1,4 +1,3 @@
-//nolint:wsl_v5,nlreturn // decoder mirrors upstream stream-json field names.
 package amp
 
 import "encoding/json"
@@ -176,7 +175,9 @@ func ParseJSONLine(line []byte) (Message, error) {
 	if err := json.Unmarshal(line, &raw); err != nil {
 		return nil, err
 	}
+
 	raw[rawJSONInternalKey] = string(line)
+
 	return ParseMessage(raw)
 }
 
@@ -185,12 +186,14 @@ func splitRawJSON(raw map[string]any) (map[string]any, string) {
 	if rawJSON == "" {
 		return raw, ""
 	}
+
 	clean := make(map[string]any, len(raw)-1)
 	for key, value := range raw {
 		if key != rawJSONInternalKey {
 			clean[key] = value
 		}
 	}
+
 	return clean, rawJSON
 }
 
@@ -199,6 +202,7 @@ func parseSystem(raw map[string]any, rawJSON string) *SystemMessage {
 	if data, err := json.Marshal(raw["mcp_servers"]); err == nil {
 		_ = json.Unmarshal(data, &servers)
 	}
+
 	return &SystemMessage{
 		Subtype:         stringValue(raw["subtype"]),
 		Cwd:             stringValue(raw["cwd"]),
@@ -214,6 +218,7 @@ func parseSystem(raw map[string]any, rawJSON string) *SystemMessage {
 
 func parseUser(raw map[string]any, rawJSON string) *UserMessage {
 	message, _ := raw["message"].(map[string]any)
+
 	return &UserMessage{
 		Content:         parseBlocks(message["content"]),
 		ParentToolUseID: stringValue(raw["parent_tool_use_id"]),
@@ -225,6 +230,7 @@ func parseUser(raw map[string]any, rawJSON string) *UserMessage {
 
 func parseAssistant(raw map[string]any, rawJSON string) *AssistantMessage {
 	message, _ := raw["message"].(map[string]any)
+
 	return &AssistantMessage{
 		Content:         parseBlocks(message["content"]),
 		StopReason:      stringValue(message["stop_reason"]),
@@ -254,12 +260,14 @@ func parseResult(raw map[string]any, rawJSON string) *ResultMessage {
 
 func parseBlocks(value any) []ContentBlock {
 	values, _ := value.([]any)
+
 	blocks := make([]ContentBlock, 0, len(values))
 	for _, value := range values {
 		raw, _ := value.(map[string]any)
 		if raw == nil {
 			continue
 		}
+
 		switch typ := stringValue(raw["type"]); typ {
 		case BlockTypeText:
 			blocks = append(blocks, TextBlock{Text: stringValue(raw["text"])})
@@ -271,6 +279,7 @@ func parseBlocks(value any) []ContentBlock {
 			blocks = append(blocks, UnknownBlock{Type: typ, Raw: raw})
 		}
 	}
+
 	return blocks
 }
 
@@ -279,6 +288,7 @@ func parseUsage(value any) *Usage {
 	if raw == nil {
 		return nil
 	}
+
 	return &Usage{
 		InputTokens:              intValue(raw["input_tokens"]),
 		OutputTokens:             intValue(raw["output_tokens"]),
@@ -293,6 +303,7 @@ func stringValue(value any) string {
 	if typed, ok := value.(string); ok {
 		return typed
 	}
+
 	return ""
 }
 
@@ -300,6 +311,7 @@ func boolValue(value any) bool {
 	if typed, ok := value.(bool); ok {
 		return typed
 	}
+
 	return false
 }
 
@@ -313,6 +325,7 @@ func intValue(value any) int {
 		return int(typed)
 	case json.Number:
 		n, _ := typed.Int64()
+
 		return int(n)
 	default:
 		return 0
@@ -323,16 +336,19 @@ func mapValue(value any) map[string]any {
 	if typed, ok := value.(map[string]any); ok {
 		return typed
 	}
+
 	return nil
 }
 
 func stringSlice(value any) []string {
 	values, _ := value.([]any)
+
 	out := make([]string, 0, len(values))
 	for _, value := range values {
 		if typed, ok := value.(string); ok {
 			out = append(out, typed)
 		}
 	}
+
 	return out
 }

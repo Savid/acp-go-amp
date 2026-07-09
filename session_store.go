@@ -1,4 +1,3 @@
-//nolint:wsl_v5,nlreturn // in-memory store favors compact table-like branches.
 package ampacp
 
 import (
@@ -56,6 +55,7 @@ func (s *InMemorySessionStore) ensure() {
 	if s.entries == nil {
 		s.entries = make(map[SessionKey][]SessionStoreEntry)
 	}
+
 	if s.deleted == nil {
 		s.deleted = make(map[SessionKey]struct{})
 	}
@@ -72,9 +72,11 @@ func (s *InMemorySessionStore) Append(ctx context.Context, key SessionKey, entri
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+
 	if s == nil {
 		return errors.New("nil InMemorySessionStore")
 	}
+
 	if len(entries) == 0 {
 		return nil
 	}
@@ -91,6 +93,7 @@ func (s *InMemorySessionStore) Append(ctx context.Context, key SessionKey, entri
 	for _, entry := range entries {
 		s.entries[key] = append(s.entries[key], cloneRaw(entry))
 	}
+
 	return nil
 }
 
@@ -98,6 +101,7 @@ func (s *InMemorySessionStore) Load(ctx context.Context, key SessionKey) ([]Sess
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+
 	if s == nil {
 		return nil, errors.New("nil InMemorySessionStore")
 	}
@@ -108,6 +112,7 @@ func (s *InMemorySessionStore) Load(ctx context.Context, key SessionKey) ([]Sess
 	if s.isTombstonedLocked(key) {
 		return nil, nil
 	}
+
 	return cloneEntries(s.entries[key]), nil
 }
 
@@ -119,10 +124,13 @@ func (s *InMemorySessionStore) isTombstonedLocked(key SessionKey) bool {
 	if _, ok := s.deleted[key]; ok {
 		return true
 	}
+
 	if key.Subpath != SessionStoreMainSubpath {
 		_, ok := s.deleted[SessionKey{SessionID: key.SessionID, Subpath: SessionStoreMainSubpath}]
+
 		return ok
 	}
+
 	return false
 }
 
@@ -130,21 +138,26 @@ func (s *InMemorySessionStore) Replace(ctx context.Context, main SessionKey, rep
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+
 	if main.Subpath != SessionStoreMainSubpath {
 		return errors.New("main subpath must be empty")
 	}
 
 	mainCount := 0
+
 	next := make(map[SessionKey][]SessionStoreEntry, len(replacements))
 	for _, replacement := range replacements {
 		if replacement.Key.SessionID != main.SessionID {
 			return errors.New("replacement session id mismatch")
 		}
+
 		if replacement.Key == main {
 			mainCount++
 		}
+
 		next[replacement.Key] = cloneEntries(replacement.Entries)
 	}
+
 	if mainCount != 1 {
 		return errors.New("replacement must include main exactly once")
 	}
@@ -160,10 +173,12 @@ func (s *InMemorySessionStore) Replace(ctx context.Context, main SessionKey, rep
 			s.deleted[key] = struct{}{}
 		}
 	}
+
 	for key, entries := range next {
 		s.entries[key] = entries
 		delete(s.deleted, key)
 	}
+
 	return nil
 }
 
@@ -184,12 +199,15 @@ func (s *InMemorySessionStore) Delete(ctx context.Context, key SessionKey) error
 				s.deleted[existing] = struct{}{}
 			}
 		}
+
 		s.deleted[key] = struct{}{}
+
 		return nil
 	}
 
 	delete(s.entries, key)
 	s.deleted[key] = struct{}{}
+
 	return nil
 }
 
@@ -202,17 +220,21 @@ func (s *InMemorySessionStore) ListSessions(ctx context.Context) ([]SessionSumma
 	defer s.mu.RUnlock()
 
 	summaries := make([]SessionSummary, 0)
+
 	for key, entries := range s.entries {
 		if key.Subpath != SessionStoreMainSubpath {
 			continue
 		}
+
 		if s.isTombstonedLocked(key) || len(entries) == 0 {
 			continue
 		}
+
 		summary, ok := summaryFromStoreEntry(entries[len(entries)-1])
 		if !ok {
 			continue
 		}
+
 		summaries = append(summaries, summary)
 	}
 
@@ -220,6 +242,7 @@ func (s *InMemorySessionStore) ListSessions(ctx context.Context) ([]SessionSumma
 		if summaries[i].UpdatedAtUnixMilli == summaries[j].UpdatedAtUnixMilli {
 			return summaries[i].SessionID < summaries[j].SessionID
 		}
+
 		return summaries[i].UpdatedAtUnixMilli > summaries[j].UpdatedAtUnixMilli
 	})
 
@@ -235,16 +258,21 @@ func (s *InMemorySessionStore) ListSubkeys(ctx context.Context, key SessionKey) 
 	defer s.mu.RUnlock()
 
 	subkeys := make([]string, 0)
+
 	for existing := range s.entries {
 		if existing.SessionID != key.SessionID || existing.Subpath == SessionStoreMainSubpath {
 			continue
 		}
+
 		if s.isTombstonedLocked(existing) {
 			continue
 		}
+
 		subkeys = append(subkeys, existing.Subpath)
 	}
+
 	sort.Strings(subkeys)
+
 	return subkeys, nil
 }
 
@@ -252,6 +280,7 @@ func cloneRaw(in json.RawMessage) json.RawMessage {
 	if in == nil {
 		return nil
 	}
+
 	return append(json.RawMessage(nil), in...)
 }
 
@@ -259,10 +288,12 @@ func cloneEntries(entries []SessionStoreEntry) []SessionStoreEntry {
 	if len(entries) == 0 {
 		return nil
 	}
+
 	out := make([]SessionStoreEntry, 0, len(entries))
 	for _, entry := range entries {
 		out = append(out, cloneRaw(entry))
 	}
+
 	return out
 }
 
@@ -271,9 +302,11 @@ func summaryFromStoreEntry(entry json.RawMessage) (SessionSummary, bool) {
 	if err := json.Unmarshal(entry, &manifest); err != nil {
 		return SessionSummary{}, false
 	}
+
 	if manifest.ThreadID == "" || manifest.Format != SessionStoreFormat {
 		return SessionSummary{}, false
 	}
+
 	return SessionSummary{
 		SessionID:          manifest.ThreadID,
 		UpdatedAtUnixMilli: manifest.UpdatedAtUnixMilli,

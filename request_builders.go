@@ -138,7 +138,7 @@ func WithSessionOutputSchema(schema map[string]any) SessionRequestOption {
 func WithSessionRawEvents(enabled bool) SessionRequestOption {
 	return func(cfg *sessionRequestConfig) {
 		ampMeta := ensureAmpMeta(cfg)
-		ampMeta["rawEvent"] = map[string]any{metaEnabledKey: enabled}
+		ampMeta[metaRawEventKey] = map[string]any{metaEnabledKey: enabled}
 	}
 }
 
@@ -210,7 +210,7 @@ func SetConfigOptionRequest(sessionID acp.SessionId, configID acp.SessionConfigI
 
 // SetModelRequest constructs a model selector update request.
 func SetModelRequest(sessionID acp.SessionId, model string) acp.SetSessionConfigOptionRequest {
-	return SetConfigOptionRequest(sessionID, "model", acp.SessionConfigValueId(model))
+	return SetConfigOptionRequest(sessionID, optionModelKey, acp.SessionConfigValueId(model))
 }
 
 // ListSessionsRequestOption configures embedded-Go session/list requests.
@@ -311,11 +311,11 @@ func mergeAmpOptionsMeta(cfg *sessionRequestConfig, values map[string]any) {
 func ampOptionsPayload(options AmpOptions) map[string]any {
 	payload := map[string]any{}
 	if options.Model != "" {
-		payload["model"] = options.Model
+		payload[optionModelKey] = options.Model
 	}
 
 	if len(options.Env) > 0 {
-		payload["env"] = cloneStringMap(options.Env)
+		payload[optionEnvKey] = cloneStringMap(options.Env)
 	}
 
 	if options.OutputSchema != nil {
@@ -323,11 +323,11 @@ func ampOptionsPayload(options AmpOptions) map[string]any {
 	}
 
 	if options.Mode != "" {
-		payload["mode"] = options.Mode
+		payload[optionModeKey] = options.Mode
 	}
 
 	if options.Effort != "" {
-		payload["effort"] = options.Effort
+		payload[optionEffortKey] = options.Effort
 	}
 
 	return payload

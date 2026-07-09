@@ -16,7 +16,7 @@ import (
 var serve = ampacp.Serve
 var exit = os.Exit
 var shutdownOpenTelemetry = shutdownTelemetry
-var agentVersion = func() string { return version }
+var agentVersion = version
 
 func main() {
 	if code := run(context.Background(), os.Args[1:], os.Stdin, os.Stdout, os.Stderr); code != 0 {
