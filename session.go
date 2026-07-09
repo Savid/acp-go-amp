@@ -33,10 +33,16 @@ const (
 	// surface. Centralized so the exact tokens sent to and read from amp cannot
 	// drift between call sites.
 	metaRawEventKey = "rawEvent"
-	optionModelKey  = "model"
-	optionModeKey   = "mode"
-	optionEffortKey = "effort"
-	optionEnvKey    = "env"
+	// metaParentToolUseIDKey is the _meta.amp key that carries delegated-agent
+	// provenance. Amp delivers subagent, oracle, and Task activity as ordinary
+	// stream-json frames whose parent_tool_use_id points at the spawning tool_use
+	// block; every session/update derived from such a frame is stamped with this
+	// key so hosts can attribute the activity to its parent tool call.
+	metaParentToolUseIDKey = "parentToolUseId"
+	optionModelKey         = "model"
+	optionModeKey          = "mode"
+	optionEffortKey        = "effort"
+	optionEnvKey           = "env"
 
 	fieldValue  = "value"
 	fieldPrompt = "prompt"

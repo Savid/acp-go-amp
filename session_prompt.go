@@ -285,9 +285,11 @@ func (s *agentSession) emitMessage(ctx context.Context, msg amp.Message, live bo
 			return s.reconcileNativeConfig(ctx, typed)
 		}
 	case *amp.UserMessage:
+		parent := parentToolUseTag(typed.ParentToolUseID, live)
+
 		for _, block := range typed.Content {
 			if text, ok := block.(amp.TextBlock); ok {
-				if err := s.emitUpdate(ctx, acp.UpdateUserMessageText(text.Text)); err != nil {
+				if err := s.emitUpdate(ctx, tagParentToolUse(acp.UpdateUserMessageText(text.Text), parent)); err != nil {
 					return err
 				}
 			}
@@ -299,31 +301,33 @@ func (s *agentSession) emitMessage(ctx context.Context, msg amp.Message, live bo
 				}
 
 				raw := result.Content
-				if err := s.emitUpdate(ctx, acp.SessionUpdate{ToolCallUpdate: &acp.SessionToolCallUpdate{
+				if err := s.emitUpdate(ctx, tagParentToolUse(acp.SessionUpdate{ToolCallUpdate: &acp.SessionToolCallUpdate{
 					SessionUpdate: "tool_call_update",
 					ToolCallId:    acp.ToolCallId(result.ToolUseID),
 					Status:        &status,
 					RawOutput:     raw,
-				}}); err != nil {
+				}}, parent)); err != nil {
 					return err
 				}
 			}
 		}
 	case *amp.AssistantMessage:
+		parent := parentToolUseTag(typed.ParentToolUseID, live)
+
 		for _, block := range typed.Content {
 			switch block := block.(type) {
 			case amp.TextBlock:
-				if err := s.emitUpdate(ctx, acp.UpdateAgentMessageText(block.Text)); err != nil {
+				if err := s.emitUpdate(ctx, tagParentToolUse(acp.UpdateAgentMessageText(block.Text), parent)); err != nil {
 					return err
 				}
 			case amp.ToolUseBlock:
-				if err := s.emitUpdate(ctx, acp.SessionUpdate{ToolCall: &acp.SessionUpdateToolCall{
+				if err := s.emitUpdate(ctx, tagParentToolUse(acp.SessionUpdate{ToolCall: &acp.SessionUpdateToolCall{
 					SessionUpdate: "tool_call",
 					ToolCallId:    acp.ToolCallId(block.ID),
 					Title:         block.Name,
 					Status:        acp.ToolCallStatusPending,
 					RawInput:      block.Input,
-				}}); err != nil {
+				}}, parent)); err != nil {
 					return err
 				}
 			}
@@ -339,6 +343,64 @@ func (s *agentSession) emitMessage(ctx context.Context, msg amp.Message, live bo
 	}
 
 	return nil
+}
+
+// parentToolUseTag returns the delegated-agent provenance id to stamp on
+// frame-derived updates. Provenance tagging is a live-turn concern only:
+// session/load replay restores updates verbatim from the stored transcript and
+// must never re-tag, so the id is dropped (returned empty) unless the update
+// originates from a live turn. An empty frame id (main-agent activity) likewise
+// yields no tag.
+func parentToolUseTag(frameID string, live bool) string {
+	if !live {
+		return ""
+	}
+
+	return frameID
+}
+
+// tagParentToolUse stamps _meta.amp.parentToolUseId onto a frame-derived
+// session/update when the source frame carried a non-empty parent_tool_use_id.
+// An empty id leaves the update untouched so main-agent activity stays untagged.
+// Only the populated update variant is tagged, and the tag is merged into any
+// existing _meta.amp block without disturbing sibling keys.
+func tagParentToolUse(update acp.SessionUpdate, parentToolUseID string) acp.SessionUpdate {
+	if parentToolUseID == "" {
+		return update
+	}
+
+	switch {
+	case update.UserMessageChunk != nil:
+		update.UserMessageChunk.Meta = withParentToolUseMeta(update.UserMessageChunk.Meta, parentToolUseID)
+	case update.AgentMessageChunk != nil:
+		update.AgentMessageChunk.Meta = withParentToolUseMeta(update.AgentMessageChunk.Meta, parentToolUseID)
+	case update.AgentThoughtChunk != nil:
+		update.AgentThoughtChunk.Meta = withParentToolUseMeta(update.AgentThoughtChunk.Meta, parentToolUseID)
+	case update.ToolCall != nil:
+		update.ToolCall.Meta = withParentToolUseMeta(update.ToolCall.Meta, parentToolUseID)
+	case update.ToolCallUpdate != nil:
+		update.ToolCallUpdate.Meta = withParentToolUseMeta(update.ToolCallUpdate.Meta, parentToolUseID)
+	}
+
+	return update
+}
+
+// withParentToolUseMeta merges parentToolUseId into an update's _meta.amp block,
+// preserving any existing _meta and _meta.amp keys.
+func withParentToolUseMeta(meta map[string]any, parentToolUseID string) map[string]any {
+	if meta == nil {
+		meta = make(map[string]any, 1)
+	}
+
+	ampMeta, _ := meta[ampMetaKey].(map[string]any)
+	if ampMeta == nil {
+		ampMeta = make(map[string]any, 1)
+	}
+
+	ampMeta[metaParentToolUseIDKey] = parentToolUseID
+	meta[ampMetaKey] = ampMeta
+
+	return meta
 }
 
 func (s *agentSession) emitUsage(ctx context.Context, usage *amp.Usage) error {

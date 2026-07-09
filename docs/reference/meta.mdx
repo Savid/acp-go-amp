@@ -1,6 +1,6 @@
 ---
 title: Meta
-description: The _meta.amp metadata the adapter accepts on requests and advertises on initialize.
+description: The _meta.amp metadata the adapter accepts on requests, emits on updates, and advertises on initialize.
 ---
 
 Lifecycle requests carry Amp-owned settings under the `_meta.amp` namespace.
@@ -38,6 +38,13 @@ Unknown keys fail closed; foreign namespaces are ignored.
 
 Unknown keys under `_meta.amp`, `_meta.amp.rawEvent`, or `_meta.amp.options`
 fail closed. Foreign metadata namespaces are ignored.
+
+## Emitted metadata
+
+`session/update` notifications derived from delegated-agent frames — subagents,
+the oracle, and the Task tool — carry `_meta.amp.parentToolUseId`, the id of the
+`tool_use` block that spawned the delegated agent. Main-agent updates omit the
+key. See [Updates](/docs/reference/updates) for the tagged update kinds.
 
 ## Advertised capabilities
 
