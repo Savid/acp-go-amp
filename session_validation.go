@@ -34,6 +34,20 @@ func (a *Agent) validateSessionStartOptions(options AmpOptions) error {
 	return nil
 }
 
+// validateOptionalAbsolutePath rejects a present-but-relative filter path with
+// the uniform invalid-params shape; an absent or empty filter is valid.
+func validateOptionalAbsolutePath(field string, path *string) error {
+	if path == nil || *path == "" {
+		return nil
+	}
+
+	if !filepath.IsAbs(*path) {
+		return acp.NewInvalidParams(map[string]any{jsonFieldField: field})
+	}
+
+	return nil
+}
+
 func validateSessionPaths(cwd string, additionalDirs []string) error {
 	if cwd == "" || !filepath.IsAbs(cwd) {
 		return acp.NewInvalidParams(map[string]any{jsonFieldField: "cwd"})
@@ -130,7 +144,10 @@ func mcpConfigJSON(servers []acp.McpServer) (string, error) {
 				jsonFieldServer: server.Acp.Name,
 			})
 		default:
-			return "", acp.NewInvalidParams(map[string]any{jsonFieldField: fmt.Sprintf("mcpServers[%d]", i)})
+			return "", acp.NewInvalidParams(map[string]any{
+				jsonFieldError: valNoTransport,
+				jsonFieldField: fmt.Sprintf("mcpServers[%d]", i),
+			})
 		}
 	}
 

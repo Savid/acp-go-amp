@@ -46,6 +46,7 @@ const (
 
 	fieldValue  = "value"
 	fieldPrompt = "prompt"
+	fieldCursor = "cursor"
 	keyType     = "type"
 	keyDetail   = "detail"
 	keyMaxBytes = "maxBytes"
@@ -53,6 +54,7 @@ const (
 	envHome     = "HOME"
 
 	valUnsupported       = "unsupported"
+	valNoTransport       = "no_transport"
 	valText              = "text"
 	valUser              = "user"
 	valRequired          = "required"
@@ -199,15 +201,16 @@ func (s *agentSession) client() *amp.Client {
 
 func (s *agentSession) clientWithEnv(env map[string]string) *amp.Client {
 	return amp.NewClient(s.agent.log, amp.Options{
-		CLIPath:       s.agent.options.ExecutablePath,
-		Cwd:           s.cwd,
-		SettingsFile:  s.settingsFile,
-		Env:           env,
-		ThreadID:      string(s.id),
-		Mode:          s.mode,
-		Effort:        s.effort,
-		MCPConfigJSON: s.mcpConfigJSON,
-		MaxLineBytes:  s.agent.options.runtime.maxJSONLineBytes,
+		CLIPath:          s.agent.options.ExecutablePath,
+		Cwd:              s.cwd,
+		SettingsFile:     s.settingsFile,
+		Env:              env,
+		ThreadID:         string(s.id),
+		Mode:             s.mode,
+		Effort:           s.effort,
+		MCPConfigJSON:    s.mcpConfigJSON,
+		MaxLineBytes:     s.agent.options.runtime.maxJSONLineBytes,
+		OnGoroutinePanic: s.agent.onNativeGoroutinePanic,
 	})
 }
 
@@ -410,7 +413,11 @@ func (s *agentSession) persistAfterTurn(ctx context.Context, transcript []Sessio
 		return nil
 	}
 
-	fullTranscript, err := s.agent.store.Load(ctx, SessionKey{SessionID: string(s.id), Subpath: transcriptSubpath})
+	loadCtx, cancelLoad := s.agent.sessionStoreLoadContext(ctx)
+	fullTranscript, err := s.agent.store.Load(loadCtx, SessionKey{SessionID: string(s.id), Subpath: transcriptSubpath})
+
+	cancelLoad()
+
 	if err != nil {
 		s.retainUnsynced(pending)
 
@@ -422,7 +429,11 @@ func (s *agentSession) persistAfterTurn(ctx context.Context, transcript []Sessio
 	}
 
 	main, _ := json.Marshal(s.manifest())
-	if err := s.agent.store.Replace(ctx, SessionKey{SessionID: string(s.id), Subpath: SessionStoreMainSubpath}, []SessionStoreReplacement{
+
+	replaceCtx, cancelReplace := s.agent.sessionStoreWriteContext(ctx)
+	defer cancelReplace()
+
+	if err := s.agent.store.Replace(replaceCtx, SessionKey{SessionID: string(s.id), Subpath: SessionStoreMainSubpath}, []SessionStoreReplacement{
 		{Key: SessionKey{SessionID: string(s.id), Subpath: SessionStoreMainSubpath}, Entries: []SessionStoreEntry{main}},
 		{Key: SessionKey{SessionID: string(s.id), Subpath: transcriptSubpath}, Entries: fullTranscript},
 	}); err != nil {

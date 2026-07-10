@@ -14,6 +14,7 @@ const (
 	defaultAgentTitle            = "acp-go-amp"
 	defaultAgentVersion          = "0.1.0"
 	defaultSessionStoreTimeout   = 10 * time.Second
+	sessionStoreWriteTimeout     = 60 * time.Second
 	defaultMaxActiveSessions     = 32
 	defaultMaxConcurrentCalls    = 16
 	defaultNativeCancelTimeout   = 5 * time.Second

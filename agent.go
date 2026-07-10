@@ -21,7 +21,7 @@ type Agent struct {
 
 	mu                   sync.Mutex
 	closed               bool
-	conn                 *acp.AgentSideConnection
+	conn                 agentClient
 	sessions             map[acp.SessionId]*agentSession
 	deleted              map[acp.SessionId]struct{}
 	pendingNativeDeletes map[acp.SessionId]struct{}
@@ -72,8 +72,12 @@ func Serve(ctx context.Context, input io.Reader, output io.Writer, opts ...Optio
 	agent := NewAgent(opts...)
 	defer func() { _ = agent.Close() }()
 
-	conn := acp.NewAgentSideConnection(agent, output, input)
+	conn := newLocalAgentConnection(agent, output, input)
 	agent.setConnection(conn)
+
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	select {
 	case <-ctx.Done():
@@ -176,6 +180,12 @@ func (a *Agent) HandleExtensionMethod(ctx context.Context, method string, params
 	_, finish := a.observe.StartACPRequest(ctx, method)
 	defer func() { finish(err) }()
 
+	// A closed agent rejects every call before dispatch: -32600 first, then
+	// -32601 for unknown methods, then parameter validation.
+	if err := a.ensureOpen(); err != nil {
+		return nil, err
+	}
+
 	switch method {
 	case ForkSessionMethod:
 		return acp.UnstableForkSessionResponse{}, acp.NewInvalidParams(map[string]any{
@@ -185,6 +195,19 @@ func (a *Agent) HandleExtensionMethod(ctx context.Context, method string, params
 	default:
 		return nil, acp.NewMethodNotFound(method)
 	}
+}
+
+// ensureOpen rejects any call on a closed agent with the uniform -32600
+// "agent closed" error before dispatch or parameter validation runs.
+func (a *Agent) ensureOpen() error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if a.closed {
+		return acp.NewInvalidRequest(map[string]any{jsonFieldError: "agent closed"})
+	}
+
+	return nil
 }
 
 func maxConcurrentClientCalls(limits ConcurrencyLimits) int {

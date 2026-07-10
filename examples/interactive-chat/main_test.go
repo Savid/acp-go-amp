@@ -237,8 +237,12 @@ func TestChatClientFilePermissionAndTerminalMethods(t *testing.T) {
 	})
 	mustNoError(t, err)
 
-	if resp.Outcome.Cancelled == nil {
-		t.Fatal("expected cancelled permission outcome for request with options")
+	if resp.Outcome.Selected == nil || resp.Outcome.Selected.OptionId != "allow" {
+		t.Fatalf("permission outcome = %#v, want selected allow", resp.Outcome)
+	}
+
+	if !strings.Contains(output.String(), "permission> Run tool") {
+		t.Fatalf("permission notice missing: %q", output.String())
 	}
 
 	resp, err = c.RequestPermission(context.Background(), acp.RequestPermissionRequest{})

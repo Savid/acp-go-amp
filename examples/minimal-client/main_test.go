@@ -113,8 +113,8 @@ func TestClientPermissionMethods(t *testing.T) {
 		t.Fatalf("RequestPermission: %v", err)
 	}
 
-	if resp.Outcome.Cancelled == nil {
-		t.Fatal("permission outcome is not cancelled")
+	if resp.Outcome.Selected == nil || resp.Outcome.Selected.OptionId != "allow" {
+		t.Fatalf("permission outcome = %#v, want selected allow", resp.Outcome)
 	}
 
 	resp, err = c.RequestPermission(context.Background(), acp.RequestPermissionRequest{})

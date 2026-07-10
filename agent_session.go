@@ -2,10 +2,13 @@ package ampacp
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"log/slog"
 	"maps"
 	"slices"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/coder/acp-go-sdk"
@@ -17,6 +20,10 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (r
 	defer func() { finish(err) }()
 
 	ctx = a.observe.Extract(ctx, params.Meta)
+
+	if openErr := a.ensureOpen(); openErr != nil {
+		return acp.NewSessionResponse{}, openErr
+	}
 
 	meta, err := parseSessionMeta(params.Meta)
 	if err != nil {
@@ -84,6 +91,10 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 
 	ctx = a.observe.Extract(ctx, params.Meta)
 
+	if openErr := a.ensureOpen(); openErr != nil {
+		return acp.LoadSessionResponse{}, openErr
+	}
+
 	session, err := a.loadOrResume(ctx, params.SessionId, params.Cwd, params.McpServers, params.AdditionalDirectories, params.Meta)
 	if err != nil {
 		return acp.LoadSessionResponse{}, err
@@ -102,6 +113,10 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 
 	ctx = a.observe.Extract(ctx, params.Meta)
 
+	if openErr := a.ensureOpen(); openErr != nil {
+		return acp.ResumeSessionResponse{}, openErr
+	}
+
 	session, err := a.loadOrResume(ctx, params.SessionId, params.Cwd, params.McpServers, params.AdditionalDirectories, params.Meta)
 	if err != nil {
 		return acp.ResumeSessionResponse{}, err
@@ -114,35 +129,150 @@ func (a *Agent) ListSessions(ctx context.Context, params acp.ListSessionsRequest
 	ctx, finish := a.observe.StartACPRequest(ctx, acp.AgentMethodSessionList)
 	defer func() { finish(err) }()
 
+	if openErr := a.ensureOpen(); openErr != nil {
+		return acp.ListSessionsResponse{}, openErr
+	}
+
+	if pathErr := validateOptionalAbsolutePath("cwd", params.Cwd); pathErr != nil {
+		return acp.ListSessionsResponse{}, pathErr
+	}
+
 	a.retryPendingNativeDeletes(ctx)
 
-	summaries, err := a.store.ListSessions(ctx)
+	a.mu.Lock()
+
+	active := make([]*agentSession, 0, len(a.sessions))
+	for _, session := range a.sessions {
+		if params.Cwd != nil && *params.Cwd != "" && session.cwd != *params.Cwd {
+			continue
+		}
+
+		active = append(active, session)
+	}
+	a.mu.Unlock()
+
+	infos := make([]acp.SessionInfo, 0, len(active))
+	seen := make(map[acp.SessionId]struct{}, len(active))
+
+	for _, session := range active {
+		info := session.sessionInfo()
+		infos = append(infos, info)
+		seen[info.SessionId] = struct{}{}
+	}
+
+	listCtx, cancelList := a.sessionStoreLoadContext(ctx)
+	summaries, err := a.store.ListSessions(listCtx)
+
+	cancelList()
+
 	if err != nil {
 		return acp.ListSessionsResponse{}, err
 	}
 
-	infos := make([]acp.SessionInfo, 0, len(summaries))
 	for _, summary := range summaries {
-		if _, deleted := a.isDeleted(acp.SessionId(summary.SessionID)); deleted {
+		id := acp.SessionId(summary.SessionID)
+		if _, ok := seen[id]; ok {
 			continue
 		}
 
-		if params.Cwd != nil && *params.Cwd != "" && summary.Cwd != *params.Cwd {
+		if _, deleted := a.isDeleted(id); deleted {
+			continue
+		}
+		// A summary without a recorded cwd survives the cwd filter: dropping it
+		// would hide restorable sessions from hosts that always filter.
+		if params.Cwd != nil && *params.Cwd != "" && summary.Cwd != "" && summary.Cwd != *params.Cwd {
 			continue
 		}
 
 		updated := millisToRFC3339(summary.UpdatedAtUnixMilli)
 		title := summary.Title
 		infos = append(infos, acp.SessionInfo{
-			SessionId: acp.SessionId(summary.SessionID),
+			SessionId: id,
 			Cwd:       summary.Cwd,
 			Title:     &title,
 			UpdatedAt: &updated,
 			Meta:      summary.Meta,
 		})
+		seen[id] = struct{}{}
 	}
 
-	return acp.ListSessionsResponse{Sessions: infos}, nil
+	slices.SortStableFunc(infos, compareSessionInfos)
+
+	paged, next, pageErr := paginateSessionInfos(infos, params.Cursor)
+	if pageErr != nil {
+		return acp.ListSessionsResponse{}, pageErr
+	}
+
+	return acp.ListSessionsResponse{Sessions: paged, NextCursor: next}, nil
+}
+
+// compareSessionInfos orders merged session infos newest UpdatedAt first, then
+// by SessionId, so cursor pagination walks a deterministic sequence.
+func compareSessionInfos(left, right acp.SessionInfo) int {
+	l := ""
+	if left.UpdatedAt != nil {
+		l = *left.UpdatedAt
+	}
+
+	r := ""
+	if right.UpdatedAt != nil {
+		r = *right.UpdatedAt
+	}
+
+	if byTime := strings.Compare(r, l); byTime != 0 {
+		return byTime
+	}
+
+	return strings.Compare(string(left.SessionId), string(right.SessionId))
+}
+
+// listSessionsPageSize is the fixed session/list page size; a page that fills
+// completely emits a NextCursor for the next offset.
+const listSessionsPageSize = 50
+
+// paginateSessionInfos applies the opaque offset cursor: an undecodable cursor
+// or one pointing past the end is invalid params, and a full page emits the
+// next offset as a base64 RawURL cursor.
+func paginateSessionInfos(sessions []acp.SessionInfo, cursor *string) ([]acp.SessionInfo, *string, error) {
+	offset, err := decodeListCursor(cursor)
+	if err != nil {
+		return nil, nil, acp.NewInvalidParams(map[string]any{fieldCursor: "invalid cursor"})
+	}
+
+	if offset > len(sessions) {
+		return nil, nil, acp.NewInvalidParams(map[string]any{fieldCursor: "cursor is past end"})
+	}
+
+	end := offset + listSessionsPageSize
+	if end >= len(sessions) {
+		return sessions[offset:], nil, nil
+	}
+
+	next := encodeListCursor(end)
+
+	return sessions[offset:end], &next, nil
+}
+
+func decodeListCursor(cursor *string) (int, error) {
+	if cursor == nil || *cursor == "" {
+		return 0, nil
+	}
+
+	data, err := base64.RawURLEncoding.DecodeString(*cursor)
+	if err != nil {
+		return 0, err
+	}
+
+	offset, err := strconv.Atoi(string(data))
+	if err != nil || offset < 0 {
+		return 0, strconv.ErrSyntax
+	}
+
+	return offset, nil
+}
+
+func encodeListCursor(offset int) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(strconv.Itoa(offset)))
 }
 
 func (a *Agent) Prompt(ctx context.Context, params acp.PromptRequest) (resp acp.PromptResponse, err error) {
@@ -205,8 +335,13 @@ func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDe
 	a.retryPendingNativeDeletes(ctx)
 
 	if a.store != nil {
-		if err := a.store.Delete(ctx, SessionKey{SessionID: string(params.SessionId), Subpath: SessionStoreMainSubpath}); err != nil {
-			return acp.UnstableDeleteSessionResponse{}, err
+		deleteCtx, cancelDelete := a.sessionStoreWriteContext(ctx)
+		deleteErr := a.store.Delete(deleteCtx, SessionKey{SessionID: string(params.SessionId), Subpath: SessionStoreMainSubpath})
+
+		cancelDelete()
+
+		if deleteErr != nil {
+			return acp.UnstableDeleteSessionResponse{}, deleteErr
 		}
 	}
 
@@ -359,8 +494,33 @@ func (a *Agent) loadOrResume(ctx context.Context, sessionID acp.SessionId, cwd s
 	return session, nil
 }
 
+// sessionStoreLoadTimeout resolves the WithSessionStoreLoadTimeout bound for
+// store reads, falling back to the package default.
+func (a *Agent) sessionStoreLoadTimeout() time.Duration {
+	if a.options.SessionStoreLoadTimeout > 0 {
+		return a.options.SessionStoreLoadTimeout
+	}
+
+	return defaultSessionStoreTimeout
+}
+
+// sessionStoreLoadContext bounds a store READ (Load, ListSessions, ListSubkeys)
+// with WithSessionStoreLoadTimeout so a stalled store cannot hang the request.
+func (a *Agent) sessionStoreLoadContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, a.sessionStoreLoadTimeout())
+}
+
+// sessionStoreWriteContext bounds a store WRITE (Replace, Delete) with the
+// fixed write bound; WithSessionStoreLoadTimeout never governs writes.
+func (a *Agent) sessionStoreWriteContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, sessionStoreWriteTimeout)
+}
+
 func (a *Agent) loadManifest(ctx context.Context, sessionID acp.SessionId) (ampManifest, error) {
-	entries, err := a.store.Load(ctx, SessionKey{SessionID: string(sessionID), Subpath: SessionStoreMainSubpath})
+	loadCtx, cancel := a.sessionStoreLoadContext(ctx)
+	defer cancel()
+
+	entries, err := a.store.Load(loadCtx, SessionKey{SessionID: string(sessionID), Subpath: SessionStoreMainSubpath})
 	if err != nil {
 		return ampManifest{}, err
 	}
@@ -552,10 +712,11 @@ func (a *Agent) ensureStartup(ctx context.Context, cwd string, meta parsedSessio
 	}
 
 	client := amp.NewClient(a.log, amp.Options{
-		CLIPath:      a.options.ExecutablePath,
-		Cwd:          cwd,
-		Env:          env,
-		MaxLineBytes: a.options.runtime.maxJSONLineBytes,
+		CLIPath:          a.options.ExecutablePath,
+		Cwd:              cwd,
+		Env:              env,
+		MaxLineBytes:     a.options.runtime.maxJSONLineBytes,
+		OnGoroutinePanic: a.onNativeGoroutinePanic,
 	})
 	if err := client.StartupProbe(ctx); err != nil {
 		return acp.NewInternalError(map[string]any{jsonFieldError: err.Error()})
@@ -580,12 +741,31 @@ func millisToRFC3339(ms int64) string {
 	return time.UnixMilli(ms).UTC().Format(time.RFC3339Nano)
 }
 
+// sessionInfo renders the live session's current identity for session/list.
+func (s *agentSession) sessionInfo() acp.SessionInfo {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	title := s.title
+	updated := millisToRFC3339(s.updatedUnix)
+
+	return acp.SessionInfo{
+		SessionId: s.id,
+		Cwd:       s.cwd,
+		Title:     &title,
+		UpdatedAt: &updated,
+	}
+}
+
 func (s *agentSession) replayTranscript(ctx context.Context) error {
 	if s.agent.store == nil {
 		return nil
 	}
 
-	entries, err := s.agent.store.Load(ctx, SessionKey{SessionID: string(s.id), Subpath: transcriptSubpath})
+	loadCtx, cancel := s.agent.sessionStoreLoadContext(ctx)
+	defer cancel()
+
+	entries, err := s.agent.store.Load(loadCtx, SessionKey{SessionID: string(s.id), Subpath: transcriptSubpath})
 	if err != nil {
 		return err
 	}

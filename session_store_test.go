@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"slices"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestInMemoryStoreReplaceAppendDelete(t *testing.T) {
@@ -109,11 +111,33 @@ func TestInMemoryStoreContractEdges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(summaries) != 2 || summaries[0].SessionID != "T-1" || summaries[1].SessionID != "T-2" {
-		t.Fatalf("sorted summaries = %#v", summaries)
+	ids := make([]string, 0, len(summaries))
+	for _, summary := range summaries {
+		ids = append(ids, summary.SessionID)
 	}
-	if summaries[0].Meta != nil {
-		t.Fatalf("summary meta = %#v", summaries[0].Meta)
+	slices.Sort(ids)
+	// Committed main keys always list; rows that are not valid amp manifests
+	// still yield key-based summaries without cwd/title enrichment.
+	if !slices.Equal(ids, []string{"T-1", "T-2", "bad-format", "bad-json"}) {
+		t.Fatalf("summaries = %#v", summaries)
+	}
+	for _, summary := range summaries {
+		if summary.UpdatedAtUnixMilli <= 0 {
+			t.Fatalf("summary %q missing tracked updatedAt: %#v", summary.SessionID, summary)
+		}
+		if summary.Meta != nil {
+			t.Fatalf("summary meta = %#v", summary.Meta)
+		}
+		switch summary.SessionID {
+		case "T-1":
+			if summary.Cwd != "/tmp/one" || summary.Title != "one" {
+				t.Fatalf("manifest summary = %#v", summary)
+			}
+		case "bad-json", "bad-format":
+			if summary.Cwd != "" || summary.Title != "" {
+				t.Fatalf("key-based summary enriched: %#v", summary)
+			}
+		}
 	}
 	subkeys, err := store.ListSubkeys(ctx, main1)
 	if err != nil {
@@ -142,8 +166,95 @@ func TestInMemoryStoreContractEdges(t *testing.T) {
 	if cloneRaw(nil) != nil {
 		t.Fatal("nil raw clone changed")
 	}
-	if summary, ok := summaryFromStoreEntry(json.RawMessage(`{"format":"wrong"}`)); ok || summary.SessionID != "" {
-		t.Fatalf("bad summary = %#v ok=%v", summary, ok)
+	if manifest, ok := manifestFromStoreEntry(json.RawMessage(`{"format":"wrong"}`)); ok || manifest.ThreadID != "" {
+		t.Fatalf("bad manifest = %#v ok=%v", manifest, ok)
+	}
+	if _, ok := manifestFromStoreEntry(json.RawMessage(`{`)); ok {
+		t.Fatal("malformed manifest accepted")
+	}
+}
+
+func TestInMemoryStoreEmptySessionIDSemantics(t *testing.T) {
+	ctx := context.Background()
+	store := NewInMemorySessionStore()
+	main := SessionKey{SessionID: "T-1", Subpath: SessionStoreMainSubpath}
+	manifest, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, ThreadID: "T-1", Cwd: "/tmp", UpdatedAtUnixMilli: 2})
+	if err := store.Replace(ctx, main, []SessionStoreReplacement{{Key: main, Entries: []SessionStoreEntry{manifest}}}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Append and Replace require a session id.
+	if err := store.Append(ctx, SessionKey{}, []SessionStoreEntry{json.RawMessage(`{}`)}); err == nil || !strings.Contains(err.Error(), "session id is required") {
+		t.Fatalf("empty-id append = %v", err)
+	}
+	if err := store.Replace(ctx, SessionKey{}, []SessionStoreReplacement{{Key: SessionKey{}, Entries: nil}}); err == nil || !strings.Contains(err.Error(), "session id is required") {
+		t.Fatalf("empty-id replace = %v", err)
+	}
+
+	// Delete of an empty-id key is a pure no-op: no error, no tombstone.
+	if err := store.Delete(ctx, SessionKey{}); err != nil {
+		t.Fatalf("empty-id delete = %v", err)
+	}
+	summaries, err := store.ListSessions(ctx)
+	if err != nil || len(summaries) != 1 {
+		t.Fatalf("summaries after empty-id delete = %#v err=%v", summaries, err)
+	}
+}
+
+func TestInMemoryStoreZeroEntryMainListsAndAppendBumpsOrder(t *testing.T) {
+	ctx := context.Background()
+	store := NewInMemorySessionStore()
+	mainEmpty := SessionKey{SessionID: "T-empty", Subpath: SessionStoreMainSubpath}
+	mainOther := SessionKey{SessionID: "T-other", Subpath: SessionStoreMainSubpath}
+
+	// A Replace-listed main key with zero entries stays visible in ListSessions.
+	if err := store.Replace(ctx, mainEmpty, []SessionStoreReplacement{{Key: mainEmpty, Entries: nil}}); err != nil {
+		t.Fatal(err)
+	}
+	summaries, err := store.ListSessions(ctx)
+	if err != nil || len(summaries) != 1 || summaries[0].SessionID != "T-empty" {
+		t.Fatalf("zero-entry main not listed: %#v err=%v", summaries, err)
+	}
+
+	// Append bumps the tracked updatedAt so ordering between sessions changes.
+	if err := store.Replace(ctx, mainOther, []SessionStoreReplacement{{Key: mainOther, Entries: nil}}); err != nil {
+		t.Fatal(err)
+	}
+	store.mu.Lock()
+	store.updatedAt[mainEmpty] = 10
+	store.updatedAt[mainOther] = 20
+	store.mu.Unlock()
+
+	summaries, _ = store.ListSessions(ctx)
+	if len(summaries) != 2 || summaries[0].SessionID != "T-other" {
+		t.Fatalf("pre-append order = %#v", summaries)
+	}
+
+	before := time.Now().UnixMilli()
+	if err := store.Append(ctx, mainEmpty, []SessionStoreEntry{json.RawMessage(`{}`)}); err != nil {
+		t.Fatal(err)
+	}
+	summaries, _ = store.ListSessions(ctx)
+	if len(summaries) != 2 || summaries[0].SessionID != "T-empty" || summaries[0].UpdatedAtUnixMilli < before {
+		t.Fatalf("append did not bump order: %#v", summaries)
+	}
+}
+
+func TestInMemoryStoreNilReceiverGuards(t *testing.T) {
+	ctx := context.Background()
+
+	var nilStore *InMemorySessionStore
+	if err := nilStore.Replace(ctx, SessionKey{SessionID: "T-1"}, nil); err == nil {
+		t.Fatal("nil-receiver Replace did not error")
+	}
+	if err := nilStore.Delete(ctx, SessionKey{SessionID: "T-1"}); err == nil {
+		t.Fatal("nil-receiver Delete did not error")
+	}
+	if _, err := nilStore.ListSessions(ctx); err == nil {
+		t.Fatal("nil-receiver ListSessions did not error")
+	}
+	if _, err := nilStore.ListSubkeys(ctx, SessionKey{SessionID: "T-1"}); err == nil {
+		t.Fatal("nil-receiver ListSubkeys did not error")
 	}
 }
 

@@ -1,9 +1,6 @@
 # acp-go-amp
 
-Go ACP agent for the local Amp CLI. It wraps `amp threads continue`, speaks
-[Agent Client Protocol](https://agentclientprotocol.com/) over JSON-RPC
-streams, and is built on
-[`github.com/coder/acp-go-sdk`](https://github.com/coder/acp-go-sdk).
+Go ACP agent that exposes the Amp CLI as an [Agent Client Protocol](https://agentclientprotocol.com/) agent.
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/savid/acp-go-amp.svg)](https://pkg.go.dev/github.com/savid/acp-go-amp)
 [![CI](https://github.com/savid/acp-go-amp/actions/workflows/go-test.yml/badge.svg)](https://github.com/savid/acp-go-amp/actions/workflows/go-test.yml)

@@ -28,7 +28,7 @@ import ampacp "github.com/savid/acp-go-amp"
 | `WithDefaultModel` | Accepted for symmetry; non-empty values reject at session start. |
 | `WithEnv` | Environment injected into native processes (e.g. `AMP_API_KEY`). |
 | `WithSessionStore` | Durable mirror; see [Session store](/docs/features/session-store). |
-| `WithSessionStoreLoadTimeout` | Bound on store load (default `10s`). |
+| `WithSessionStoreLoadTimeout` | Bound on every store read (default `10s`); writes use a fixed `60s` bound. |
 | `WithConcurrencyLimits` | Caps on concurrent native work. |
 | `WithSeedFiles` | Relative-path → contents written into each session's isolated native `HOME` before `amp` launches. See [Seed files](/docs/features/models-config#seed-files). Accepted but inert for model routing — Amp is locked to its hosted backend. |
 | `WithTurnTimeout` | Optional per-turn deadline (default `0`, no deadline); on expiry the turn fails with `cause: "timeout"`. |

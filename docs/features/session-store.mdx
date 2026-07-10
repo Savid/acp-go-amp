@@ -22,9 +22,10 @@ err := ampacp.Serve(ctx, input, output,
 )
 ```
 
-`WithSessionStoreLoadTimeout` bounds how long a load may block on the store
-(default `10s`). Store reads that exceed it are cut off so a slow or hung
-backend never stalls `session/load`.
+`WithSessionStoreLoadTimeout` bounds every store read — manifest and
+transcript loads plus `session/list` — with a default of `10s`, so a slow or
+hung backend never stalls a request. Store writes (`Replace`, `Delete`) run
+under a separate fixed `60s` bound.
 
 ## Format and layout
 

@@ -36,7 +36,7 @@ test-cross-compile:
 
 ## test-integration-smoke: run integration tests that do not spend model tokens
 test-integration-smoke:
-	go test -race -count=1 -tags=integration -timeout=120s -run Smoke ./integration/...
+	ACP_GO_AMP_RUN_INTEGRATION=1 go test -race -count=1 -tags=integration -timeout=120s -run Smoke ./integration/...
 
 ## test-integration-live: run live integration tests that spend model tokens
 test-integration-live:
@@ -44,7 +44,12 @@ test-integration-live:
 
 ## test-integration-cover: run smoke integration tests with compiled binary coverage
 test-integration-cover:
-	tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT; mkdir -p "$$tmp/data"; go build -cover -coverpkg=./... -o "$$tmp/acp-go-amp" ./cmd/acp-go-amp; ACP_GO_AMP_RUN_INTEGRATION=1 ACP_GO_AMP_AGENT_BINARY="$$tmp/acp-go-amp" GOCOVERDIR="$$tmp/data" go test -race -count=1 -tags=integration -timeout=120s -run Smoke -v ./integration/...; go tool covdata percent -i="$$tmp/data"; go tool covdata textfmt -i="$$tmp/data" -o coverage-integration.out
+	rm -rf .tmp/integration-cover coverage-integration.out
+	mkdir -p .tmp/integration-cover/data
+	go build -cover -coverpkg=./... -o .tmp/integration-cover/acp-go-amp ./cmd/acp-go-amp
+	ACP_GO_AMP_RUN_INTEGRATION=1 ACP_GO_AMP_AGENT_BINARY=$$(pwd)/.tmp/integration-cover/acp-go-amp GOCOVERDIR=$$(pwd)/.tmp/integration-cover/data go test -race -count=1 -tags=integration -timeout=120s -run Smoke -v ./integration/...
+	go tool covdata percent -i=.tmp/integration-cover/data
+	go tool covdata textfmt -i=.tmp/integration-cover/data -o coverage-integration.out
 
 ## lint: run golangci-lint
 lint:

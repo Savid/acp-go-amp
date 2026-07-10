@@ -51,6 +51,10 @@ type Options struct {
 	Effort        string
 	MCPConfigJSON string
 	MaxLineBytes  int
+	// OnGoroutinePanic is invoked with the recovered value when a turn-owned
+	// goroutine panics, so the embedding agent can log the panic instead of
+	// crashing the process. A nil handler leaves the panic to propagate.
+	OnGoroutinePanic func(ctx context.Context, name string, recovered any)
 }
 
 type Client struct {
@@ -298,6 +302,7 @@ func (c *Client) Continue(ctx context.Context, threadID string, input any) (*Tur
 		maxLineBytes: c.options.MaxLineBytes,
 		messages:     make(chan Message),
 		errs:         make(chan error, 4),
+		onPanic:      c.options.OnGoroutinePanic,
 	}
 	turn.start(ctx)
 
@@ -513,6 +518,20 @@ type Turn struct {
 	waitErr      error
 	waitFunc     func() error
 	closeOnce    sync.Once
+	onPanic      func(ctx context.Context, name string, recovered any)
+}
+
+// recoverGoroutine is deferred at the top of every turn-owned goroutine. It
+// must be the deferred function itself so recover() observes the goroutine's
+// panic; without a handler the panic propagates unchanged.
+func (t *Turn) recoverGoroutine(ctx context.Context, name string) {
+	if t.onPanic == nil {
+		return
+	}
+
+	if recovered := recover(); recovered != nil {
+		t.onPanic(ctx, name, recovered)
+	}
 }
 
 func (t *Turn) Messages() <-chan Message { return t.messages }
@@ -537,6 +556,8 @@ func (t *Turn) Send(ctx context.Context, payload any) error {
 	done := make(chan error, 1)
 
 	go func() {
+		defer t.recoverGoroutine(ctx, "amp stdin writer")
+
 		if _, err := t.stdin.Write(append(data, '\n')); err != nil {
 			done <- fmt.Errorf("write amp stdin: %w", err)
 
@@ -555,11 +576,12 @@ func (t *Turn) Send(ctx context.Context, payload any) error {
 }
 
 func (t *Turn) start(ctx context.Context) {
-	go t.drainStderr()
+	go t.drainStderr(ctx)
 	go t.readStdout(ctx)
 }
 
 func (t *Turn) readStdout(ctx context.Context) {
+	defer t.recoverGoroutine(ctx, "amp stdout reader")
 	defer close(t.messages)
 	defer close(t.errs)
 	defer func() {
@@ -598,13 +620,15 @@ func (t *Turn) readStdout(ctx context.Context) {
 	}
 }
 
-func (t *Turn) drainStderr() {
+func (t *Turn) drainStderr(ctx context.Context) {
+	defer t.recoverGoroutine(ctx, "amp stderr drain")
+
 	scanner := bufio.NewScanner(t.stderr)
 	for scanner.Scan() {
 		t.captureStderr(scanner.Text())
 
 		if t.log != nil {
-			t.log.Debug("amp stderr", slog.String("line", scanner.Text()))
+			t.log.DebugContext(ctx, "amp stderr", slog.String("line", scanner.Text()))
 		}
 	}
 }
@@ -623,7 +647,12 @@ func (t *Turn) Interrupt(ctx context.Context, killAfter time.Duration) error {
 	}
 
 	done := make(chan error, 1)
-	go func() { done <- t.wait() }()
+
+	go func() {
+		defer t.recoverGoroutine(ctx, "amp interrupt waiter")
+
+		done <- t.wait()
+	}()
 
 	timer := time.NewTimer(killAfter)
 	defer timer.Stop()

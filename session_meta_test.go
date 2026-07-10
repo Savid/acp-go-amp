@@ -10,6 +10,26 @@ import (
 	"github.com/coder/acp-go-sdk"
 )
 
+func TestSessionMetaStrictness(t *testing.T) {
+	_, err := parseSessionMeta(map[string]any{"amp": map[string]any{"bad": true}})
+	if err == nil {
+		t.Fatal("expected unknown own namespace error")
+	}
+	meta, err := parseSessionMeta(map[string]any{
+		"other": map[string]any{"ignored": true},
+		"amp": map[string]any{
+			"options":  map[string]any{"mode": "rush", "effort": "low"},
+			"rawEvent": map[string]any{"enabled": true},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta.options.Mode != "rush" || meta.options.Effort != "low" || !meta.rawEvent {
+		t.Fatalf("bad meta: %+v", meta)
+	}
+}
+
 func TestActiveOmittedEnvMeansDefaultEnv(t *testing.T) {
 	ctx := context.Background()
 	path, _ := fakeAgentAmpPath(t, "")
@@ -143,7 +163,9 @@ type manualErrContext struct {
 }
 
 func (c *manualErrContext) Deadline() (time.Time, bool) { return time.Time{}, false }
-func (c *manualErrContext) Done() <-chan struct{}       { return nil }
+
+func (c *manualErrContext) Done() <-chan struct{} { return nil }
+
 func (c *manualErrContext) Err() error {
 	if c.cancelled.Load() {
 		return context.Canceled
@@ -151,5 +173,7 @@ func (c *manualErrContext) Err() error {
 
 	return nil
 }
+
 func (c *manualErrContext) Value(any) any { return nil }
-func (c *manualErrContext) cancel()       { c.cancelled.Store(true) }
+
+func (c *manualErrContext) cancel() { c.cancelled.Store(true) }

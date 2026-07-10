@@ -13,7 +13,7 @@ stdio or embed the agent directly in Go.
 - `internal/amp`: Amp process boundary, stream-json parsing, environment
   construction, and interrupt handling.
 - `cmd/acp-go-amp`: stdio ACP command with only `-path`, `-home`, `-model`,
-  `-debug`, and `-version` flags.
+  `-debug`, `-version`, and repeatable `-seed-file` flags.
 - `examples`: embeddable host examples that must stay covered by tests.
 - `integration`: smoke and live tests for installed Amp binaries.
 - `docs`: public documentation mirrored by `docs.json` navigation.

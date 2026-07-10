@@ -25,7 +25,8 @@ When enabled, each captured live-turn frame is emitted as `_amp/rawEvent` with:
 
 - `sessionId`
 - `sequence` — per session, starts at `1`, strictly monotonic and contiguous
-  (every event consumes exactly one sequence)
+  over emitted notifications (a sequence is consumed only when a notification
+  is actually sent; a frame with no native payload is skipped)
 - `source` (`stream-json`)
 - raw `event`
 

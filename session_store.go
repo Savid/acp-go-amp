@@ -6,6 +6,7 @@ import (
 	"errors"
 	"sort"
 	"sync"
+	"time"
 )
 
 const (
@@ -44,9 +45,10 @@ type SessionStore interface {
 }
 
 type InMemorySessionStore struct {
-	mu      sync.RWMutex
-	entries map[SessionKey][]SessionStoreEntry
-	deleted map[SessionKey]struct{}
+	mu        sync.RWMutex
+	entries   map[SessionKey][]SessionStoreEntry
+	updatedAt map[SessionKey]int64
+	deleted   map[SessionKey]struct{}
 }
 
 var _ SessionStore = (*InMemorySessionStore)(nil)
@@ -56,6 +58,10 @@ func (s *InMemorySessionStore) ensure() {
 		s.entries = make(map[SessionKey][]SessionStoreEntry)
 	}
 
+	if s.updatedAt == nil {
+		s.updatedAt = make(map[SessionKey]int64)
+	}
+
 	if s.deleted == nil {
 		s.deleted = make(map[SessionKey]struct{})
 	}
@@ -63,8 +69,9 @@ func (s *InMemorySessionStore) ensure() {
 
 func NewInMemorySessionStore() *InMemorySessionStore {
 	return &InMemorySessionStore{
-		entries: make(map[SessionKey][]SessionStoreEntry),
-		deleted: make(map[SessionKey]struct{}),
+		entries:   make(map[SessionKey][]SessionStoreEntry),
+		updatedAt: make(map[SessionKey]int64),
+		deleted:   make(map[SessionKey]struct{}),
 	}
 }
 
@@ -81,6 +88,10 @@ func (s *InMemorySessionStore) Append(ctx context.Context, key SessionKey, entri
 		return nil
 	}
 
+	if key.SessionID == "" {
+		return errors.New("session id is required")
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -93,6 +104,8 @@ func (s *InMemorySessionStore) Append(ctx context.Context, key SessionKey, entri
 	for _, entry := range entries {
 		s.entries[key] = append(s.entries[key], cloneRaw(entry))
 	}
+
+	s.updatedAt[key] = time.Now().UnixMilli()
 
 	return nil
 }
@@ -139,6 +152,14 @@ func (s *InMemorySessionStore) Replace(ctx context.Context, main SessionKey, rep
 		return err
 	}
 
+	if s == nil {
+		return errors.New("nil InMemorySessionStore")
+	}
+
+	if main.SessionID == "" {
+		return errors.New("session id is required")
+	}
+
 	if main.Subpath != SessionStoreMainSubpath {
 		return errors.New("main subpath must be empty")
 	}
@@ -162,6 +183,8 @@ func (s *InMemorySessionStore) Replace(ctx context.Context, main SessionKey, rep
 		return errors.New("replacement must include main exactly once")
 	}
 
+	now := time.Now().UnixMilli()
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -170,12 +193,14 @@ func (s *InMemorySessionStore) Replace(ctx context.Context, main SessionKey, rep
 	for key := range s.entries {
 		if key.SessionID == main.SessionID {
 			delete(s.entries, key)
+			delete(s.updatedAt, key)
 			s.deleted[key] = struct{}{}
 		}
 	}
 
 	for key, entries := range next {
 		s.entries[key] = entries
+		s.updatedAt[key] = now
 		delete(s.deleted, key)
 	}
 
@@ -187,6 +212,16 @@ func (s *InMemorySessionStore) Delete(ctx context.Context, key SessionKey) error
 		return err
 	}
 
+	if s == nil {
+		return errors.New("nil InMemorySessionStore")
+	}
+
+	// Deleting a key with no session id is a pure no-op: nothing can be
+	// addressed by it and no tombstone is written.
+	if key.SessionID == "" {
+		return nil
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -196,6 +231,7 @@ func (s *InMemorySessionStore) Delete(ctx context.Context, key SessionKey) error
 		for existing := range s.entries {
 			if existing.SessionID == key.SessionID {
 				delete(s.entries, existing)
+				delete(s.updatedAt, existing)
 				s.deleted[existing] = struct{}{}
 			}
 		}
@@ -206,6 +242,7 @@ func (s *InMemorySessionStore) Delete(ctx context.Context, key SessionKey) error
 	}
 
 	delete(s.entries, key)
+	delete(s.updatedAt, key)
 	s.deleted[key] = struct{}{}
 
 	return nil
@@ -216,23 +253,32 @@ func (s *InMemorySessionStore) ListSessions(ctx context.Context) ([]SessionSumma
 		return nil, err
 	}
 
+	if s == nil {
+		return nil, errors.New("nil InMemorySessionStore")
+	}
+
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	summaries := make([]SessionSummary, 0)
 
 	for key, entries := range s.entries {
-		if key.Subpath != SessionStoreMainSubpath {
+		if key.Subpath != SessionStoreMainSubpath || s.isTombstonedLocked(key) {
 			continue
 		}
 
-		if s.isTombstonedLocked(key) || len(entries) == 0 {
-			continue
+		summary := SessionSummary{
+			SessionID:          key.SessionID,
+			UpdatedAtUnixMilli: s.updatedAt[key],
 		}
-
-		summary, ok := summaryFromStoreEntry(entries[len(entries)-1])
-		if !ok {
-			continue
+		// A committed key always lists, even with zero entries or a last row
+		// that is not a valid amp manifest; a valid manifest only enriches the
+		// summary with its recorded cwd and title.
+		if len(entries) > 0 {
+			if manifest, ok := manifestFromStoreEntry(entries[len(entries)-1]); ok {
+				summary.Cwd = manifest.Cwd
+				summary.Title = manifest.Title
+			}
 		}
 
 		summaries = append(summaries, summary)
@@ -252,6 +298,10 @@ func (s *InMemorySessionStore) ListSessions(ctx context.Context) ([]SessionSumma
 func (s *InMemorySessionStore) ListSubkeys(ctx context.Context, key SessionKey) ([]string, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+
+	if s == nil {
+		return nil, errors.New("nil InMemorySessionStore")
 	}
 
 	s.mu.RLock()
@@ -297,20 +347,17 @@ func cloneEntries(entries []SessionStoreEntry) []SessionStoreEntry {
 	return out
 }
 
-func summaryFromStoreEntry(entry json.RawMessage) (SessionSummary, bool) {
+// manifestFromStoreEntry parses a main-key row as an amp manifest, reporting
+// whether it is a valid manifest for this store format.
+func manifestFromStoreEntry(entry json.RawMessage) (ampManifest, bool) {
 	var manifest ampManifest
 	if err := json.Unmarshal(entry, &manifest); err != nil {
-		return SessionSummary{}, false
+		return ampManifest{}, false
 	}
 
 	if manifest.ThreadID == "" || manifest.Format != SessionStoreFormat {
-		return SessionSummary{}, false
+		return ampManifest{}, false
 	}
 
-	return SessionSummary{
-		SessionID:          manifest.ThreadID,
-		UpdatedAtUnixMilli: manifest.UpdatedAtUnixMilli,
-		Cwd:                manifest.Cwd,
-		Title:              manifest.Title,
-	}, true
+	return manifest, true
 }

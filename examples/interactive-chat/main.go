@@ -126,10 +126,18 @@ func (*chatClient) WriteTextFile(_ context.Context, params acp.WriteTextFileRequ
 	return acp.WriteTextFileResponse{}, os.WriteFile(params.Path, []byte(params.Content), 0o600)
 }
 
-func (*chatClient) RequestPermission(
+func (c *chatClient) RequestPermission(
 	_ context.Context,
-	_ acp.RequestPermissionRequest,
+	params acp.RequestPermissionRequest,
 ) (acp.RequestPermissionResponse, error) {
+	c.ui.writeNotice("permission", permissionTitle(params))
+
+	for _, option := range params.Options {
+		if option.Kind == acp.PermissionOptionKindAllowOnce || option.Kind == acp.PermissionOptionKindAllowAlways {
+			return acp.RequestPermissionResponse{Outcome: acp.NewRequestPermissionOutcomeSelected(option.OptionId)}, nil
+		}
+	}
+
 	return acp.RequestPermissionResponse{Outcome: acp.NewRequestPermissionOutcomeCancelled()}, nil
 }
 
@@ -1742,6 +1750,14 @@ func quitCommand(prompt string) bool {
 	default:
 		return false
 	}
+}
+
+func permissionTitle(params acp.RequestPermissionRequest) string {
+	if params.ToolCall.Title != nil && strings.TrimSpace(*params.ToolCall.Title) != "" {
+		return *params.ToolCall.Title
+	}
+
+	return "auto-allowing request"
 }
 
 func printError(stderr io.Writer, err error) {

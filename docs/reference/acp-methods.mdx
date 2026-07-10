@@ -16,7 +16,7 @@ method-not-found rather than partial behavior.
 | `session/new` | Creates an Amp thread. |
 | `session/load` | Replays stored transcript frames. |
 | `session/resume` | Restores state without replay. |
-| `session/list` | Lists mirrored sessions. |
+| `session/list` | Lists active and mirrored sessions, paginated by an opaque `cursor` with pages of 50 and `nextCursor`. |
 | `session/prompt` | Continues the thread with one streamed turn. |
 | `session/cancel` | Interrupts the active prompt process. |
 | `session/close` | Closes the local session. |

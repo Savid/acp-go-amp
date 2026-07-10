@@ -80,8 +80,14 @@ func (*client) WriteTextFile(_ context.Context, params acp.WriteTextFileRequest)
 
 func (*client) RequestPermission(
 	_ context.Context,
-	_ acp.RequestPermissionRequest,
+	params acp.RequestPermissionRequest,
 ) (acp.RequestPermissionResponse, error) {
+	for _, option := range params.Options {
+		if option.Kind == acp.PermissionOptionKindAllowOnce || option.Kind == acp.PermissionOptionKindAllowAlways {
+			return acp.RequestPermissionResponse{Outcome: acp.NewRequestPermissionOutcomeSelected(option.OptionId)}, nil
+		}
+	}
+
 	return acp.RequestPermissionResponse{Outcome: acp.NewRequestPermissionOutcomeCancelled()}, nil
 }
 
@@ -294,6 +300,9 @@ func runConversation(
 	if err != nil {
 		return err
 	}
+	defer func() {
+		_, _ = conn.CloseSession(context.Background(), acp.CloseSessionRequest{SessionId: session.SessionId})
+	}()
 
 	resp, err := conn.Prompt(ctx, ampacp.TextPromptRequest(session.SessionId, prompt))
 	if err != nil {
@@ -301,8 +310,6 @@ func runConversation(
 	}
 
 	fmt.Fprintf(stdout, "\n\nstop reason: %s\n", resp.StopReason)
-
-	_, _ = conn.CloseSession(ctx, acp.CloseSessionRequest{SessionId: session.SessionId})
 
 	return nil
 }

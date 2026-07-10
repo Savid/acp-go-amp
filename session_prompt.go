@@ -434,26 +434,31 @@ func (s *agentSession) emitUpdate(ctx context.Context, update acp.SessionUpdate)
 		return nil
 	}
 
-	release, err := s.agent.acquireClientCall(ctx)
-	if err != nil {
-		return err
-	}
-	defer release()
-
 	return conn.SessionUpdate(ctx, acp.SessionNotification{SessionId: s.id, Update: update})
 }
 
 // emitRawEvent emits one non-authoritative raw-event notification for a live
 // native message. The sequence is per-session, starts at 1, and is strictly
-// monotonic and contiguous: every event consumes exactly one sequence and
-// carries exactly one notification. An event whose marshalled payload cannot be
-// built or exceeds the 64 KiB cap is never dropped and never emits nothing — its
-// `event` is replaced by the fixed truncation marker so the payload is always
-// valid JSON. The returned error signals only that delivery to the client
-// failed; the caller records it and continues (a debug toggle never fails the
-// turn).
+// monotonic and contiguous over emitted notifications: a sequence is consumed
+// only when a notification is actually sent, never on a skipped frame or a
+// suppressed (connection-less) send. A frame with a nil native payload is
+// skipped entirely — `event` is never null. An event whose marshalled payload
+// cannot be built or exceeds the 64 KiB cap is never dropped — its `event` is
+// replaced by the fixed truncation marker so the payload is always valid JSON.
+// The returned error signals only that delivery to the client failed; the
+// caller records it and continues (a debug toggle never fails the turn).
 func (s *agentSession) emitRawEvent(ctx context.Context, source string, msg amp.Message) error {
 	if !s.rawEvents {
+		return nil
+	}
+
+	raw := msg.RawMessage()
+	if raw == nil {
+		return nil
+	}
+
+	conn := s.agent.connection()
+	if conn == nil {
 		return nil
 	}
 
@@ -461,7 +466,7 @@ func (s *agentSession) emitRawEvent(ctx context.Context, source string, msg amp.
 		"sessionId": s.id,
 		"sequence":  s.nextRawEventSequence(),
 		keySource:   source,
-		"event":     msg.RawMessage(),
+		"event":     raw,
 	}
 	if data, err := json.Marshal(payload); err != nil {
 		payload["event"] = map[string]any{
@@ -477,17 +482,6 @@ func (s *agentSession) emitRawEvent(ctx context.Context, source string, msg amp.
 			"sizeBytes": len(data),
 		}
 	}
-
-	conn := s.agent.connection()
-	if conn == nil {
-		return nil
-	}
-
-	release, err := s.agent.acquireClientCall(ctx)
-	if err != nil {
-		return err
-	}
-	defer release()
 
 	return conn.NotifyExtension(ctx, RawEventMethod, payload)
 }
@@ -514,12 +508,24 @@ func (s *agentSession) validateFrameSessionID(msg amp.Message, state *promptTurn
 }
 
 func promptInput(blocks []acp.ContentBlock) (map[string]any, error) {
+	// An empty prompt is rejected fail-closed: there is nothing to send to the
+	// native harness, so accepting it would spend a turn on silence.
+	if len(blocks) == 0 {
+		return nil, acp.NewInvalidParams(map[string]any{jsonFieldError: valUnsupported, jsonFieldField: fieldPrompt})
+	}
+
 	content := make([]map[string]any, 0, len(blocks))
 	for _, block := range blocks {
 		switch {
 		case block.Text != nil:
 			content = append(content, map[string]any{keyType: valText, valText: block.Text.Text})
 		case block.Image != nil:
+			// Amp accepts only embedded base64 image data; a data-less image
+			// block is rejected fail-closed instead of forwarding empty base64.
+			if block.Image.Data == "" {
+				return nil, acp.NewInvalidParams(map[string]any{jsonFieldField: "prompt.image", jsonFieldError: "missing image data or uri"})
+			}
+
 			image := map[string]any{
 				keyType: "image",
 				keySource: map[string]any{

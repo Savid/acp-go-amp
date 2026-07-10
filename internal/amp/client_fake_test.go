@@ -810,3 +810,43 @@ func waitForFile(t *testing.T, path string) {
 func shellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
 }
+
+func TestTurnRecoverGoroutine(t *testing.T) {
+	// Without a handler the panic propagates unchanged.
+	bare := &Turn{}
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("panic swallowed without handler")
+			}
+		}()
+		func() {
+			defer bare.recoverGoroutine(context.Background(), "no handler")
+			panic("boom")
+		}()
+	}()
+
+	// With a handler the panic is recovered and reported exactly once.
+	var gotName string
+	var gotValue any
+	handled := &Turn{onPanic: func(_ context.Context, name string, recovered any) {
+		gotName = name
+		gotValue = recovered
+	}}
+	func() {
+		defer handled.recoverGoroutine(context.Background(), "handled")
+		panic("boom2")
+	}()
+	if gotName != "handled" || gotValue != "boom2" {
+		t.Fatalf("recovered = %q %v", gotName, gotValue)
+	}
+
+	// A clean return never invokes the handler.
+	gotName, gotValue = "", nil
+	func() {
+		defer handled.recoverGoroutine(context.Background(), "clean")
+	}()
+	if gotName != "" || gotValue != nil {
+		t.Fatal("handler invoked without panic")
+	}
+}

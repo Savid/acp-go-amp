@@ -119,7 +119,7 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 	cwd := flags.String("cwd", "", "session cwd; defaults to the JSONL cwd or current directory")
 	prompt := flags.String("prompt", defaultPrompt, "prompt to send after loading history")
 	ampPath := flags.String("path", "", "path to amp CLI")
-	ampHome := flags.String("home", "", "parent directory for isolated Amp home state")
+	ampHome := flags.String("home", "", "parent root for isolated Amp session state")
 
 	if err := flags.Parse(args); err != nil {
 		return err
