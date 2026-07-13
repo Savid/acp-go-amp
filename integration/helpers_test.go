@@ -222,7 +222,7 @@ func serveLiveAgentRawForTest(
 	ampPath := integrationAmpPath(t)
 	base := []ampacp.Option{
 		ampacp.WithExecutablePath(ampPath),
-		ampacp.WithHome(t.TempDir()),
+		ampacp.WithScratchDir(t.TempDir()),
 		ampacp.WithLogger(integrationLogger),
 	}
 

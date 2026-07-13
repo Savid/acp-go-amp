@@ -11,6 +11,14 @@ import (
 )
 
 func (a *Agent) validateSessionStartOptions(options AmpOptions) error {
+	// Amp has no native config/auth root, so any configured Home is rejected
+	// fail-closed on every session-establishing path (new/load/resume) with the
+	// uniform unsupported "home" field error. Ephemeral state lives under
+	// WithScratchDir instead.
+	if a.options.Home != "" {
+		return unsupportedField(optionFieldHome)
+	}
+
 	if a.options.DefaultModel != "" {
 		return unsupportedField(optionModelKey)
 	}

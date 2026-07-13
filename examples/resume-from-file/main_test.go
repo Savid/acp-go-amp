@@ -87,8 +87,8 @@ func TestRunUsesInferredValuesAndLoadedSession(t *testing.T) {
 	expectedCwd := cwd
 	expectedPrompt := "prompt"
 	expectedPath := "/bin/amp"
-	expectedHome := "/home/amp"
-	runLoaded = func(_ context.Context, store ampacp.SessionStore, sessionID string, gotCwd string, prompt string, ampPath string, ampHome string, stdout io.Writer) error {
+	expectedScratch := "/tmp/scratch"
+	runLoaded = func(_ context.Context, store ampacp.SessionStore, sessionID string, gotCwd string, prompt string, ampPath string, scratchDir string, stdout io.Writer) error {
 		t.Helper()
 
 		if sessionID != expectedSessionID {
@@ -107,8 +107,8 @@ func TestRunUsesInferredValuesAndLoadedSession(t *testing.T) {
 			t.Fatalf("path = %q, want %q", ampPath, expectedPath)
 		}
 
-		if ampHome != expectedHome {
-			t.Fatalf("home = %q, want %q", ampHome, expectedHome)
+		if scratchDir != expectedScratch {
+			t.Fatalf("scratch-dir = %q, want %q", scratchDir, expectedScratch)
 		}
 
 		manifests, err := store.Load(context.Background(), ampacp.SessionKey{SessionID: sessionID, Subpath: ampacp.SessionStoreMainSubpath})
@@ -144,7 +144,7 @@ func TestRunUsesInferredValuesAndLoadedSession(t *testing.T) {
 	}
 
 	var stdout bytes.Buffer
-	if err := run(context.Background(), []string{"-file", path, "-prompt", "prompt", "-path", "/bin/amp", "-home", "/home/amp"}, &stdout, io.Discard); err != nil {
+	if err := run(context.Background(), []string{"-file", path, "-prompt", "prompt", "-path", "/bin/amp", "-scratch-dir", "/tmp/scratch"}, &stdout, io.Discard); err != nil {
 		t.Fatalf("run inferred: %v", err)
 	}
 
@@ -157,7 +157,7 @@ func TestRunUsesInferredValuesAndLoadedSession(t *testing.T) {
 	expectedSessionID = "T-explicit"
 	expectedPrompt = defaultPrompt
 	expectedPath = ""
-	expectedHome = ""
+	expectedScratch = ""
 
 	if err := run(context.Background(), []string{"-file", path, "-session", "T-explicit", "-cwd", cwd}, &stdout, io.Discard); err != nil {
 		t.Fatalf("run explicit: %v", err)

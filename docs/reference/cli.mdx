@@ -11,7 +11,8 @@ subprocess; stdout is reserved for JSON-RPC and diagnostics go to stderr.
 | Flag | Meaning |
 |---|---|
 | `-path` | Amp executable path. Defaults to `amp` on `PATH`. |
-| `-home` | Parent directory for isolated per-session native HOME/XDG state and Amp settings files. |
+| `-scratch-dir` | Parent directory for ephemeral session scratch: the isolated per-session native HOME/XDG state, the startup probe directory, and any temp. Empty means the system temp directory. |
+| `-home` | Native config/auth root. Accepted on the adapter surface; non-empty values fail session start because Amp has no such root — its per-session isolated HOME/XDG state lives under `-scratch-dir` instead. |
 | `-model` | Default model. Accepted on the adapter surface; non-empty values fail session start because Amp has no ACP model config option. |
 | `-seed-file` | Repeatable `<relpath>=<hostpath>`. Reads the host file and writes its contents to `<relpath>` inside each session's isolated native `HOME` before `amp` launches. See [Seed files](/docs/features/models-config#seed-files). |
 | `-debug` | Write adapter debug logs to stderr. |

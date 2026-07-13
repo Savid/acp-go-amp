@@ -12,19 +12,21 @@ inside your own Go program.
 An ACP host launches the command and speaks JSON-RPC over its stdio:
 
 ```sh
-acp-go-amp -path amp -home /path/to/adapter-home
+acp-go-amp -path amp -scratch-dir /path/to/scratch
 ```
 
-`-home` is a parent directory. The adapter creates one isolated directory per
-ACP session under it, sets native `HOME` plus `XDG_CONFIG_HOME`,
+`-scratch-dir` is a parent directory. The adapter creates one isolated directory
+per ACP session under it, sets native `HOME` plus `XDG_CONFIG_HOME`,
 `XDG_CACHE_HOME`, `XDG_DATA_HOME`, and `XDG_STATE_HOME` inside that directory,
 and writes the per-session Amp settings file inside the isolated config tree.
-The directory is removed on close/delete.
+The directory is removed on close/delete. When `-scratch-dir` is empty the system
+temp directory is used. Amp has no native config/auth root, so `-home` is
+unsupported: a non-empty value fails session start.
 
 `-debug` writes adapter logs to stderr; ACP JSON-RPC stays on stdout only. Amp
 `mode` and `effort` are ACP session config options, not command flags. The
-serve-mode flags are `-path`, `-home`, `-model`, `-seed-file`, `-debug`, and
-`-version` — see the [CLI reference](/docs/reference/cli) for each.
+serve-mode flags are `-path`, `-scratch-dir`, `-home`, `-model`, `-seed-file`,
+`-debug`, and `-version` — see the [CLI reference](/docs/reference/cli) for each.
 
 ## Embedded
 
@@ -34,12 +36,13 @@ ACP input/output streams:
 ```go
 err := ampacp.Serve(ctx, input, output,
 	ampacp.WithExecutablePath("amp"),
-	ampacp.WithHome("/path/to/adapter-home"),
+	ampacp.WithScratchDir("/path/to/scratch"),
 	ampacp.WithSessionStore(ampacp.NewInMemorySessionStore()),
 )
 ```
 
 Every command flag has an option equivalent (`-path` ↔ `WithExecutablePath`,
-`-home` ↔ `WithHome`, `-seed-file` ↔ `WithSeedFiles`), plus embed-only options
-such as `WithSessionStore` and the OpenTelemetry providers. See the
+`-scratch-dir` ↔ `WithScratchDir`, `-home` ↔ `WithHome` (unsupported),
+`-seed-file` ↔ `WithSeedFiles`), plus embed-only options such as
+`WithSessionStore` and the OpenTelemetry providers. See the
 [Go API](/docs/reference/go-api) for the full set.

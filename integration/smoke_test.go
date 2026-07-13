@@ -40,7 +40,7 @@ func TestSmokeFakeACPLifecycleAndMCP(t *testing.T) {
 	path := fakeAmpBinary(t)
 	agent := ampacp.NewAgent(
 		ampacp.WithExecutablePath(path),
-		ampacp.WithHome(t.TempDir()),
+		ampacp.WithScratchDir(t.TempDir()),
 		ampacp.WithSessionStore(ampacp.NewInMemorySessionStore()),
 	)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -159,7 +159,7 @@ func TestLiveRestoreAfterLocalStateWipe(t *testing.T) {
 	defer cancel()
 
 	agent := ampacp.NewAgent(
-		ampacp.WithHome(homeParent),
+		ampacp.WithScratchDir(homeParent),
 		ampacp.WithEnv(env),
 		ampacp.WithSessionStore(store),
 	)
@@ -188,7 +188,7 @@ func TestLiveRestoreAfterLocalStateWipe(t *testing.T) {
 	cleanupEnv = env
 
 	restored := ampacp.NewAgent(
-		ampacp.WithHome(homeParent),
+		ampacp.WithScratchDir(homeParent),
 		ampacp.WithEnv(env),
 		ampacp.WithSessionStore(store),
 	)

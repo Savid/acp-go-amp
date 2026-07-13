@@ -87,8 +87,9 @@ func main() {
 ```
 
 See [Go API docs](docs/reference/go-api.mdx) for options such as the Amp
-executable path, isolated home directory, session storage, and OpenTelemetry
-providers.
+executable path, the ephemeral scratch directory (`WithScratchDir`), session
+storage, and OpenTelemetry providers. Amp has no native config/auth root, so
+`WithHome`/`-home` is unsupported and rejects at session start.
 
 ## What It Provides
 

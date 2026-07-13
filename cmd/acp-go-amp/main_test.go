@@ -35,6 +35,7 @@ func TestRunPassesContractFlags(t *testing.T) {
 		"-path", "/bin/amp",
 		"-home", "/tmp/amp",
 		"-model", "ignored",
+		"-scratch-dir", "/tmp/scratch",
 		"-debug",
 	}, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil))
 
@@ -52,6 +53,9 @@ func TestRunPassesContractFlags(t *testing.T) {
 	}
 	if got.DefaultModel != "ignored" {
 		t.Fatalf("DefaultModel = %q", got.DefaultModel)
+	}
+	if got.ScratchDir != "/tmp/scratch" {
+		t.Fatalf("ScratchDir = %q", got.ScratchDir)
 	}
 	if got.Logger == nil {
 		t.Fatal("Logger is nil")

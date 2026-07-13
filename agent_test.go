@@ -129,7 +129,7 @@ func TestServeFakeAmpLifecycleStdoutCleanStoreReplayAndDelete(t *testing.T) {
 	cwd := t.TempDir()
 	conn, client, cleanup := startTestServe(t,
 		WithExecutablePath(path),
-		WithHome(t.TempDir()),
+		WithScratchDir(t.TempDir()),
 		WithSessionStore(store),
 		WithEnv(map[string]string{"AMP_API_KEY": "fake"}),
 	)
@@ -416,7 +416,7 @@ func TestUnknownSessionErrorShape(t *testing.T) {
 	// and MUST emit the identical uniform unknown-session shape.
 	path, _ := fakeAgentAmpPath(t, "")
 	cwd := t.TempDir()
-	agent := NewAgent(WithExecutablePath(path), WithHome(t.TempDir()), WithSessionStore(NewInMemorySessionStore()))
+	agent := NewAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()), WithSessionStore(NewInMemorySessionStore()))
 	_, err = agent.LoadSession(ctx, LoadSessionRequest("T-missing", cwd))
 	requireUnknownSessionError(t, err)
 	_, err = agent.ResumeSession(ctx, ResumeSessionRequest("T-missing", cwd))
@@ -455,7 +455,7 @@ func TestNativeMissingThreadAndDeleteFailureTombstone(t *testing.T) {
 	ctx := context.Background()
 	missingPath, _ := fakeAgentAmpPath(t, "missing")
 	store := NewInMemorySessionStore()
-	agent := NewAgent(WithExecutablePath(missingPath), WithSessionStore(store), WithHome(t.TempDir()))
+	agent := NewAgent(WithExecutablePath(missingPath), WithSessionStore(store), WithScratchDir(t.TempDir()))
 	newResp, err := agent.NewSession(ctx, NewSessionRequest(t.TempDir()))
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
@@ -467,7 +467,7 @@ func TestNativeMissingThreadAndDeleteFailureTombstone(t *testing.T) {
 
 	deletePath, _ := fakeAgentAmpPath(t, "delete-fail")
 	deleteStore := NewInMemorySessionStore()
-	deleteAgent := NewAgent(WithExecutablePath(deletePath), WithSessionStore(deleteStore), WithHome(t.TempDir()))
+	deleteAgent := NewAgent(WithExecutablePath(deletePath), WithSessionStore(deleteStore), WithScratchDir(t.TempDir()))
 	deleteResp, err := deleteAgent.NewSession(ctx, NewSessionRequest(t.TempDir()))
 	if err != nil {
 		t.Fatalf("NewSession delete: %v", err)

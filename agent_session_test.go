@@ -44,7 +44,7 @@ func TestActiveLoadResumeSemantics(t *testing.T) {
 			WithSessionRawEvents(raw),
 		}
 	}
-	agent := NewAgent(WithExecutablePath(path), WithHome(t.TempDir()))
+	agent := NewAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()))
 	resp, newErr := agent.NewSession(ctx, NewSessionRequest(cwd, requestOptions(false)...))
 	if newErr != nil {
 		t.Fatalf("NewSession: %v", newErr)
@@ -113,7 +113,7 @@ func TestActiveLoadRetriesMirrorBeforeReplay(t *testing.T) {
 	path, _ := fakeAgentAmpPath(t, "")
 	cwd := t.TempDir()
 	store := &flakyReplaceStore{InMemorySessionStore: NewInMemorySessionStore()}
-	agent := NewAgent(WithExecutablePath(path), WithHome(t.TempDir()), WithSessionStore(store))
+	agent := NewAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()), WithSessionStore(store))
 	client, cleanup := attachRecordingClient(t, agent)
 	defer cleanup()
 	resp, err := agent.NewSession(ctx, NewSessionRequest(cwd))
@@ -144,7 +144,7 @@ func TestActiveLoadVerifiesContinuability(t *testing.T) {
 	ctx := context.Background()
 	path, _ := fakeAgentAmpPath(t, "missing-export")
 	cwd := t.TempDir()
-	agent := NewAgent(WithExecutablePath(path), WithHome(t.TempDir()), WithSessionStore(NewInMemorySessionStore()))
+	agent := NewAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()), WithSessionStore(NewInMemorySessionStore()))
 	resp, err := agent.NewSession(ctx, NewSessionRequest(cwd))
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
@@ -161,7 +161,7 @@ func TestActiveLoadPropagatesContinuabilityFailure(t *testing.T) {
 	ctx := context.Background()
 	path, _ := fakeAgentAmpPath(t, "export-fail")
 	cwd := t.TempDir()
-	agent := NewAgent(WithExecutablePath(path), WithHome(t.TempDir()), WithSessionStore(NewInMemorySessionStore()))
+	agent := NewAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()), WithSessionStore(NewInMemorySessionStore()))
 	resp, err := agent.NewSession(ctx, NewSessionRequest(cwd))
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
@@ -189,7 +189,7 @@ func isMismatchField(err error, field string) bool {
 
 func TestNewSessionFailsFastWithoutAPIKey(t *testing.T) {
 	t.Setenv("AMP_API_KEY", "")
-	agent := NewAgent(WithHome(t.TempDir()))
+	agent := NewAgent(WithScratchDir(t.TempDir()))
 	_, err := agent.NewSession(context.Background(), NewSessionRequest(t.TempDir()))
 	if err == nil || !strings.Contains(err.Error(), "AMP_API_KEY") {
 		t.Fatalf("missing key error = %v", err)
@@ -199,7 +199,7 @@ func TestNewSessionFailsFastWithoutAPIKey(t *testing.T) {
 func TestNewSessionFailsFastWithEmptyAPIKeyOverride(t *testing.T) {
 	t.Setenv("AMP_API_KEY", "process-key")
 	agent := NewAgent(
-		WithHome(t.TempDir()),
+		WithScratchDir(t.TempDir()),
 		WithEnv(map[string]string{"AMP_API_KEY": ""}),
 	)
 	_, err := agent.NewSession(context.Background(), NewSessionRequest(t.TempDir()))
@@ -210,7 +210,7 @@ func TestNewSessionFailsFastWithEmptyAPIKeyOverride(t *testing.T) {
 
 func TestNewSessionAcceptsProcessEnvAPIKey(t *testing.T) {
 	path, _ := fakeAgentAmpPath(t, "")
-	agent := NewAgent(WithExecutablePath(path), WithHome(t.TempDir()))
+	agent := NewAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()))
 	resp, err := agent.NewSession(context.Background(), NewSessionRequest(t.TempDir()))
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
@@ -226,7 +226,7 @@ func TestSessionSlotFilesystemServeAndCloseEdges(t *testing.T) {
 	previousWriteFile := writeFile
 	writeFile = func(string, []byte, os.FileMode) error { return errors.New("write settings failed") }
 	t.Cleanup(func() { writeFile = previousWriteFile })
-	if _, err := newAgentSession(NewAgent(WithHome(t.TempDir())), "T-write", t.TempDir(), parsedSessionMeta{}, "", nil); err == nil {
+	if _, err := newAgentSession(NewAgent(WithScratchDir(t.TempDir())), "T-write", t.TempDir(), parsedSessionMeta{}, "", nil); err == nil {
 		t.Fatal("settings write failure was ignored")
 	}
 	writeFile = previousWriteFile
@@ -274,7 +274,7 @@ func TestLoadReplayDeleteAndConfigEdges(t *testing.T) {
 	putStoredSession(t, store, "T-load-edge", cwd, []SessionStoreEntry{
 		json.RawMessage(`{"type":"assistant","message":{"content":[{"type":"text","text":"stored"}]},"session_id":"T-load-edge"}`),
 	})
-	agent := NewAgent(WithExecutablePath(path), WithHome(t.TempDir()), WithSessionStore(store))
+	agent := NewAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()), WithSessionStore(store))
 	agent.markDeleted("T-load-edge")
 	listResp, err := agent.ListSessions(ctx, ListSessionsRequest())
 	if err != nil {
@@ -296,7 +296,7 @@ func TestLoadReplayDeleteAndConfigEdges(t *testing.T) {
 
 	badReplay := NewInMemorySessionStore()
 	putStoredSession(t, badReplay, "T-bad-replay", cwd, []SessionStoreEntry{json.RawMessage(`{`)})
-	if _, replayErr := NewAgent(WithExecutablePath(path), WithHome(t.TempDir()), WithSessionStore(badReplay)).LoadSession(ctx, LoadSessionRequest("T-bad-replay", cwd)); replayErr == nil {
+	if _, replayErr := NewAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()), WithSessionStore(badReplay)).LoadSession(ctx, LoadSessionRequest("T-bad-replay", cwd)); replayErr == nil {
 		t.Fatal("bad transcript replay succeeded")
 	}
 
@@ -384,7 +384,7 @@ func TestPromptAndPersistenceEdges(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			modePath, _ := fakeAgentAmpPath(t, tc.mode)
-			agent := NewAgent(WithExecutablePath(modePath), WithHome(t.TempDir()))
+			agent := NewAgent(WithExecutablePath(modePath), WithScratchDir(t.TempDir()))
 			newResp, err := agent.NewSession(ctx, NewSessionRequest(t.TempDir()))
 			if err != nil {
 				t.Fatalf("NewSession: %v", err)
@@ -396,7 +396,7 @@ func TestPromptAndPersistenceEdges(t *testing.T) {
 		})
 	}
 
-	updateAgent := NewAgent(WithExecutablePath(path), WithHome(t.TempDir()))
+	updateAgent := NewAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()))
 	updateResp, err := updateAgent.NewSession(ctx, NewSessionRequest(t.TempDir()))
 	if err != nil {
 		t.Fatalf("NewSession update: %v", err)
@@ -406,7 +406,7 @@ func TestPromptAndPersistenceEdges(t *testing.T) {
 		t.Fatal("session update failure was ignored")
 	}
 
-	persistAgent := NewAgent(WithExecutablePath(path), WithHome(t.TempDir()))
+	persistAgent := NewAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()))
 	persistResp, err := persistAgent.NewSession(ctx, NewSessionRequest(t.TempDir()))
 	if err != nil {
 		t.Fatalf("NewSession persist: %v", err)
@@ -418,7 +418,7 @@ func TestPromptAndPersistenceEdges(t *testing.T) {
 	}
 
 	cancelPath, state := fakeAgentAmpPath(t, "hang")
-	cancelAgent := NewAgent(WithExecutablePath(cancelPath), WithHome(t.TempDir()))
+	cancelAgent := NewAgent(WithExecutablePath(cancelPath), WithScratchDir(t.TempDir()))
 	cancelResp, err := cancelAgent.NewSession(ctx, NewSessionRequest(t.TempDir()))
 	if err != nil {
 		t.Fatalf("NewSession cancel: %v", err)
@@ -618,7 +618,7 @@ func TestReconcileNativeConfigReadBack(t *testing.T) {
 	path, _ := fakeAgentAmpPath(t, "reconcile-config")
 	conn, client, cleanup := startTestServe(t,
 		WithExecutablePath(path),
-		WithHome(t.TempDir()),
+		WithScratchDir(t.TempDir()),
 		WithEnv(map[string]string{"AMP_API_KEY": "fake"}),
 	)
 	defer cleanup()
@@ -674,7 +674,7 @@ func TestEffortDefaultOmittedWhenUnset(t *testing.T) {
 	path, state := fakeAgentAmpPath(t, "")
 	conn, _, cleanup := startTestServe(t,
 		WithExecutablePath(path),
-		WithHome(t.TempDir()),
+		WithScratchDir(t.TempDir()),
 		WithEnv(map[string]string{"AMP_API_KEY": "fake"}),
 	)
 	defer cleanup()
@@ -719,7 +719,7 @@ func TestEffortDefaultOmittedWhenUnset(t *testing.T) {
 func TestReconcileNativeConfigEmitFailureAbortsTurn(t *testing.T) {
 	ctx := context.Background()
 	path, _ := fakeAgentAmpPath(t, "reconcile-config")
-	agent := NewAgent(WithExecutablePath(path), WithHome(t.TempDir()))
+	agent := NewAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()))
 	newResp, err := agent.NewSession(ctx, NewSessionRequest(t.TempDir()))
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
@@ -757,7 +757,7 @@ func TestListSessionsMergePaginationAndCwd(t *testing.T) {
 	path, _ := fakeAgentAmpPath(t, "")
 	store := NewInMemorySessionStore()
 	cwd := t.TempDir()
-	agent := NewAgent(WithExecutablePath(path), WithHome(t.TempDir()), WithSessionStore(store))
+	agent := NewAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()), WithSessionStore(store))
 
 	// One active session, whose id also exists in the store (dedupe), one
 	// store-only session in another cwd, and one store-only empty-cwd session.

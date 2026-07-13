@@ -33,12 +33,11 @@ const (
 // sibling of HOME rather than a child of it, so seed files can never overwrite
 // the wrapper's required settings.
 //
-// This is the always-isolated case, not the direct-WithHome case: homeDir is a
-// child of the dir returned by mkdirTemp(settingsParent(), ...). When WithHome
-// is unset, settingsParent() is empty and mkdirTemp falls back to the OS temp
-// dir, so amp never runs in the operator's real HOME or ~/.config/amp. Because
-// the wrapper always creates a fresh isolated HOME per session regardless of
-// WithHome, seeding needs no WithHome guard and cannot leak into a shared home.
+// This is always the isolated case: homeDir is a child of the dir returned by
+// mkdirTemp(ensureScratchParent(ScratchDir), ...). When WithScratchDir is unset
+// the scratch parent is the OS temp dir, so amp never runs in the operator's
+// real HOME or ~/.config/amp. Because the wrapper always creates a fresh
+// isolated HOME per session, seeding cannot leak into a shared home.
 //
 // Provenance guard: writes are routed through an ownership manifest
 // (.seed-manifest.json, kept in the seed root — $HOME, the sibling of the

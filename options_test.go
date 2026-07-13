@@ -25,6 +25,7 @@ func TestOptionsAndAmpOptions(t *testing.T) {
 		WithExecutablePath("/bin/amp"),
 		WithHome("/tmp/home"),
 		WithDefaultModel("model"),
+		WithScratchDir("/tmp/scratch"),
 		WithEnv(map[string]string{"A": "B"}),
 		WithTracerProvider(tracenoop.NewTracerProvider()),
 		WithMeterProvider(noop.NewMeterProvider()),
@@ -40,6 +41,9 @@ func TestOptionsAndAmpOptions(t *testing.T) {
 	}
 	if options.Env["A"] != "B" || options.SessionStore != store || options.SessionStoreLoadTimeout != time.Second {
 		t.Fatalf("common options = %#v", options)
+	}
+	if options.ExecutablePath != "/bin/amp" || options.Home != "/tmp/home" || options.DefaultModel != "model" || options.ScratchDir != "/tmp/scratch" {
+		t.Fatalf("path/home/model/scratch options = %#v", options)
 	}
 	if options.TurnTimeout != 90*time.Second {
 		t.Fatalf("turn timeout = %s", options.TurnTimeout)

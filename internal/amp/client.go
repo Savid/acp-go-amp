@@ -42,9 +42,14 @@ var (
 )
 
 type Options struct {
-	CLIPath       string
-	Cwd           string
-	SettingsFile  string
+	CLIPath      string
+	Cwd          string
+	SettingsFile string
+	// ScratchParent is the already-resolved parent directory the root package
+	// supplies for the startup probe's ephemeral settings directory. The root
+	// package owns temp-directory resolution; this package never consults the
+	// system temp directory itself.
+	ScratchParent string
 	Env           map[string]string
 	ThreadID      string
 	Mode          string
@@ -133,7 +138,7 @@ func (c *Client) probeSubcommands(ctx context.Context) error {
 		return fmt.Errorf("amp threads list --json probe failed: %w", err)
 	}
 
-	settingsFile, cleanup, err := startupProbeSettingsFile()
+	settingsFile, cleanup, err := startupProbeSettingsFile(c.options.ScratchParent)
 	if err != nil {
 		return err
 	}
@@ -169,8 +174,8 @@ func (c *Client) probeSubcommands(ctx context.Context) error {
 	return nil
 }
 
-func startupProbeSettingsFile() (string, func(), error) {
-	dir, err := mkdirTemp("", "acp-go-amp-startup-*")
+func startupProbeSettingsFile(parent string) (string, func(), error) {
+	dir, err := mkdirTemp(parent, "acp-go-amp-startup-*")
 	if err != nil {
 		return "", nil, fmt.Errorf("create amp startup settings dir: %w", err)
 	}

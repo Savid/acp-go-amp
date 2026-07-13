@@ -43,6 +43,7 @@ const (
 	optionModeKey          = "mode"
 	optionEffortKey        = "effort"
 	optionEnvKey           = "env"
+	optionFieldHome        = "home"
 
 	fieldValue  = "value"
 	fieldPrompt = "prompt"
@@ -123,13 +124,12 @@ type agentSession struct {
 func newAgentSession(agent *Agent, id acp.SessionId, cwd string, meta parsedSessionMeta, mcpConfigJSON string, additionalDirs []string) (*agentSession, error) {
 	now := time.Now().UnixMilli()
 
-	if parent := agent.settingsParent(); parent != "" {
-		if err := mkdirAll(parent, 0o700); err != nil {
-			return nil, fmt.Errorf("create amp home parent: %w", err)
-		}
+	parent, err := ensureScratchParent(agent.options.ScratchDir)
+	if err != nil {
+		return nil, err
 	}
 
-	dir, err := mkdirTemp(agent.settingsParent(), "acp-go-amp-session-*")
+	dir, err := mkdirTemp(parent, "acp-go-amp-session-*")
 	if err != nil {
 		return nil, fmt.Errorf("create amp settings dir: %w", err)
 	}

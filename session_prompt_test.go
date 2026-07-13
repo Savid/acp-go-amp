@@ -318,7 +318,7 @@ func TestTurnFailureProviderError(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path, _ := fakeAgentAmpPath(t, tc.mode)
-			agent := NewAgent(WithExecutablePath(path), WithHome(t.TempDir()))
+			agent := NewAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()))
 			resp, err := agent.NewSession(ctx, NewSessionRequest(t.TempDir()))
 			if err != nil {
 				t.Fatalf("NewSession: %v", err)
@@ -339,7 +339,7 @@ func TestTurnFailureProviderError(t *testing.T) {
 func TestTurnFailureFallsBackToResultField(t *testing.T) {
 	ctx := context.Background()
 	path, _ := fakeAgentAmpPath(t, "result-only-in-result")
-	agent := NewAgent(WithExecutablePath(path), WithHome(t.TempDir()))
+	agent := NewAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()))
 	resp, err := agent.NewSession(ctx, NewSessionRequest(t.TempDir()))
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
@@ -362,7 +362,7 @@ func TestTurnFailureTransportRecoversCause(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path, _ := fakeAgentAmpPath(t, tc.mode)
-			agent := NewAgent(WithExecutablePath(path), WithHome(t.TempDir()))
+			agent := NewAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()))
 			resp, err := agent.NewSession(ctx, NewSessionRequest(t.TempDir()))
 			if err != nil {
 				t.Fatalf("NewSession: %v", err)
@@ -378,7 +378,7 @@ func TestTurnFailureTransportRecoversCause(t *testing.T) {
 func TestTurnFailureProcessDeathIsRetriable(t *testing.T) {
 	ctx := context.Background()
 	path, _ := fakeAgentAmpPath(t, "delayed-error")
-	agent := NewAgent(WithExecutablePath(path), WithHome(t.TempDir()))
+	agent := NewAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()))
 	resp, err := agent.NewSession(ctx, NewSessionRequest(t.TempDir()))
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
@@ -399,7 +399,7 @@ func TestTurnFailureProcessDeathIsRetriable(t *testing.T) {
 func TestTurnFailureMalformedLineNotFatal(t *testing.T) {
 	ctx := context.Background()
 	path, _ := fakeAgentAmpPath(t, "malformed-only")
-	agent := NewAgent(WithExecutablePath(path), WithHome(t.TempDir()))
+	agent := NewAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()))
 	resp, err := agent.NewSession(ctx, NewSessionRequest(t.TempDir()))
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
@@ -419,7 +419,7 @@ func TestTurnFailureMalformedLineNotFatal(t *testing.T) {
 func TestTurnFailureCancelNotConflated(t *testing.T) {
 	ctx := context.Background()
 	path, state := fakeAgentAmpPath(t, "delayed-error")
-	agent := NewAgent(WithExecutablePath(path), WithHome(t.TempDir()))
+	agent := NewAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()))
 	agent.options.runtime.nativeCancelTimeout = 50 * time.Millisecond
 	resp, err := agent.NewSession(ctx, NewSessionRequest(t.TempDir()))
 	if err != nil {
@@ -452,7 +452,7 @@ func TestTurnFailureCancelNotConflated(t *testing.T) {
 func TestTurnFailureTimeout(t *testing.T) {
 	ctx := context.Background()
 	path, _ := fakeAgentAmpPath(t, "hang")
-	agent := NewAgent(WithExecutablePath(path), WithHome(t.TempDir()), WithTurnTimeout(150*time.Millisecond))
+	agent := NewAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()), WithTurnTimeout(150*time.Millisecond))
 	agent.options.runtime.nativeCancelTimeout = 50 * time.Millisecond
 	resp, err := agent.NewSession(ctx, NewSessionRequest(t.TempDir()))
 	if err != nil {
@@ -487,7 +487,7 @@ func TestTurnFailureTimeout(t *testing.T) {
 func TestTurnFailureCancelWinsOnTimeoutCoincidence(t *testing.T) {
 	ctx := context.Background()
 	path, _ := fakeAgentAmpPath(t, "hang")
-	agent := NewAgent(WithExecutablePath(path), WithHome(t.TempDir()), WithTurnTimeout(time.Hour))
+	agent := NewAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()), WithTurnTimeout(time.Hour))
 	agent.options.runtime.nativeCancelTimeout = 50 * time.Millisecond
 	resp, err := agent.NewSession(ctx, NewSessionRequest(t.TempDir()))
 	if err != nil {

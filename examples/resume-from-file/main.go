@@ -119,7 +119,7 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 	cwd := flags.String("cwd", "", "session cwd; defaults to the JSONL cwd or current directory")
 	prompt := flags.String("prompt", defaultPrompt, "prompt to send after loading history")
 	ampPath := flags.String("path", "", "path to amp CLI")
-	ampHome := flags.String("home", "", "parent root for isolated Amp session state")
+	scratchDir := flags.String("scratch-dir", "", "parent directory for ephemeral session scratch; empty means the system temp directory")
 
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -168,7 +168,7 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 		return err
 	}
 
-	return runLoaded(ctx, store, *sessionID, *cwd, *prompt, *ampPath, *ampHome, stdout)
+	return runLoaded(ctx, store, *sessionID, *cwd, *prompt, *ampPath, *scratchDir, stdout)
 }
 
 func runLoadedSession(
@@ -178,7 +178,7 @@ func runLoadedSession(
 	cwd string,
 	prompt string,
 	ampPath string,
-	ampHome string,
+	scratchDir string,
 	stdout io.Writer,
 ) error {
 	clientInput, agentOutput := io.Pipe()
@@ -201,7 +201,7 @@ func runLoadedSession(
 			agentInput,
 			agentOutput,
 			ampacp.WithExecutablePath(ampPath),
-			ampacp.WithHome(ampHome),
+			ampacp.WithScratchDir(scratchDir),
 			ampacp.WithSessionStore(store),
 			ampacp.WithLogger(slog.New(slog.DiscardHandler)),
 		)

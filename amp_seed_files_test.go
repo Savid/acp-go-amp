@@ -277,7 +277,7 @@ func TestWriteSeedFilesManifestWriteError(t *testing.T) {
 }
 
 func TestNewAgentSessionSeedFiles(t *testing.T) {
-	agent := NewAgent(WithHome(t.TempDir()), WithSeedFiles(map[string]string{
+	agent := NewAgent(WithScratchDir(t.TempDir()), WithSeedFiles(map[string]string{
 		"custom/settings.json": `{"seed":true}`,
 	}))
 	session, err := newAgentSession(agent, "T-seed", t.TempDir(), parsedSessionMeta{}, "", nil)
@@ -306,7 +306,7 @@ func TestNewAgentSessionSeedFiles(t *testing.T) {
 }
 
 func TestNewAgentSessionSeedFilesInvalid(t *testing.T) {
-	agent := NewAgent(WithHome(t.TempDir()), WithSeedFiles(map[string]string{
+	agent := NewAgent(WithScratchDir(t.TempDir()), WithSeedFiles(map[string]string{
 		"../escape.json": "x",
 	}))
 	_, err := newAgentSession(agent, "T-bad", t.TempDir(), parsedSessionMeta{}, "", nil)

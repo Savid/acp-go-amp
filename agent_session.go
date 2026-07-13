@@ -689,14 +689,6 @@ func (a *Agent) deleteNativeThread(ctx context.Context, id acp.SessionId, sessio
 	return tmp.client().DeleteThread(ctx, string(id))
 }
 
-func (a *Agent) settingsParent() string {
-	if a.options.Home != "" {
-		return a.options.Home
-	}
-
-	return ""
-}
-
 // missingAPIKeyMessage explains the session-start fail-fast: session commands
 // run inside an isolated home, so `amp login` credentials on the host are
 // invisible and the amp CLI would otherwise block forever on its interactive
@@ -711,10 +703,16 @@ func (a *Agent) ensureStartup(ctx context.Context, cwd string, meta parsedSessio
 		return acp.NewInternalError(map[string]any{jsonFieldError: missingAPIKeyMessage})
 	}
 
+	scratchParent, err := ensureScratchParent(a.options.ScratchDir)
+	if err != nil {
+		return acp.NewInternalError(map[string]any{jsonFieldError: err.Error()})
+	}
+
 	client := amp.NewClient(a.log, amp.Options{
 		CLIPath:          a.options.ExecutablePath,
 		Cwd:              cwd,
 		Env:              env,
+		ScratchParent:    scratchParent,
 		MaxLineBytes:     a.options.runtime.maxJSONLineBytes,
 		OnGoroutinePanic: a.onNativeGoroutinePanic,
 	})

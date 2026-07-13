@@ -49,7 +49,7 @@ func TestActiveOmittedEnvMeansDefaultEnv(t *testing.T) {
 
 	agent := NewAgent(
 		WithExecutablePath(path),
-		WithHome(t.TempDir()),
+		WithScratchDir(t.TempDir()),
 		WithEnv(map[string]string{"AMP_API_KEY": "default"}),
 	)
 	resp, err := agent.NewSession(ctx, NewSessionRequest(cwd,
@@ -69,7 +69,7 @@ func TestActiveOmittedEnvMeansDefaultEnv(t *testing.T) {
 
 	defaultAgent := NewAgent(
 		WithExecutablePath(path),
-		WithHome(t.TempDir()),
+		WithScratchDir(t.TempDir()),
 		WithEnv(map[string]string{"AMP_API_KEY": "default"}),
 	)
 	defaultResp, err := defaultAgent.NewSession(ctx, NewSessionRequest(cwd))
@@ -91,7 +91,7 @@ func TestColdLoadOmittedEnvBuildsDefaultEnv(t *testing.T) {
 	cwd := t.TempDir()
 	created := NewAgent(
 		WithExecutablePath(path),
-		WithHome(t.TempDir()),
+		WithScratchDir(t.TempDir()),
 		WithSessionStore(store),
 		WithEnv(map[string]string{"AMP_API_KEY": "create-default"}),
 	)
@@ -107,7 +107,7 @@ func TestColdLoadOmittedEnvBuildsDefaultEnv(t *testing.T) {
 
 	restored := NewAgent(
 		WithExecutablePath(path),
-		WithHome(t.TempDir()),
+		WithScratchDir(t.TempDir()),
 		WithSessionStore(store),
 		WithEnv(map[string]string{
 			"AMP_API_KEY": "restore-default",
@@ -129,7 +129,7 @@ func TestColdLoadOmittedEnvBuildsDefaultEnv(t *testing.T) {
 
 func TestPromptErrorAfterCallerContextCancelInterrupts(t *testing.T) {
 	path, state := fakeAgentAmpPath(t, "delayed-error")
-	agent := NewAgent(WithExecutablePath(path), WithHome(t.TempDir()))
+	agent := NewAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()))
 	resp, err := agent.NewSession(context.Background(), NewSessionRequest(t.TempDir()))
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)

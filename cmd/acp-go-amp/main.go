@@ -29,6 +29,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 		path        string
 		home        string
 		model       string
+		scratchDir  string
 		debug       bool
 		showVersion bool
 		seedFiles   = seedFileFlag{}
@@ -37,8 +38,9 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 	flags := flag.NewFlagSet("acp-go-amp", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	flags.StringVar(&path, "path", "", "native amp executable path")
-	flags.StringVar(&home, "home", "", "parent directory for isolated Amp settings files")
+	flags.StringVar(&home, "home", "", "native config/auth root; unsupported by Amp and rejected at session start")
 	flags.StringVar(&model, "model", "", "default model; unsupported by Amp and rejected at session start")
+	flags.StringVar(&scratchDir, "scratch-dir", "", "parent directory for ephemeral session scratch; empty means the system temp directory")
 	flags.BoolVar(&debug, "debug", false, "enable debug logging")
 	flags.BoolVar(&showVersion, "version", false, "print adapter version and exit")
 	flags.Var(&seedFiles, "seed-file", "seed file as <relpath>=<hostpath>, written into each session's isolated native root; repeatable")
@@ -88,12 +90,13 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 	ctx, stop := signal.NotifyContext(ctx, signals...)
 	defer stop()
 
-	serveOptions := make([]ampacp.Option, 0, 6+len(telemetry.options))
+	serveOptions := make([]ampacp.Option, 0, 7+len(telemetry.options))
 
 	serveOptions = append(serveOptions,
 		ampacp.WithExecutablePath(path),
 		ampacp.WithHome(home),
 		ampacp.WithDefaultModel(model),
+		ampacp.WithScratchDir(scratchDir),
 		ampacp.WithLogger(logger),
 		ampacp.WithAgentVersion(agentVer),
 	)

@@ -39,9 +39,15 @@ type Options struct {
 	AgentVersion string
 
 	ExecutablePath string
-	Home           string
-	DefaultModel   string
-	Env            map[string]string
+	// Home is unsupported: Amp has no native config/auth root, so a non-empty
+	// value is rejected at every session start. See WithHome and WithScratchDir.
+	Home         string
+	DefaultModel string
+	// ScratchDir is the sole parent for all ephemeral on-disk materialization
+	// (per-session isolated HOME/XDG dirs, startup probe dirs, any temp). Empty
+	// falls back to the system temp directory. See WithScratchDir.
+	ScratchDir string
+	Env        map[string]string
 
 	Logger            *slog.Logger
 	TracerProvider    trace.TracerProvider
@@ -144,10 +150,26 @@ func WithExecutablePath(path string) Option {
 	}
 }
 
-// WithHome sets the parent directory for isolated per-session Amp home state.
+// WithHome records a native config/auth root, but Amp has no such root: it runs
+// each session inside an ephemeral isolated home under WithScratchDir instead.
+// The option stays in the surface for symmetry; a non-empty value is rejected
+// fail-closed at every session start with the uniform unsupported "home" field
+// error. Use WithScratchDir to control where the ephemeral state is
+// materialized.
 func WithHome(path string) Option {
 	return func(options *Options) {
 		options.Home = path
+	}
+}
+
+// WithScratchDir sets the sole parent directory for all ephemeral on-disk
+// materialization: the per-session isolated HOME/XDG settings directories, the
+// startup probe's settings directory, and any other temporary state. An empty
+// value falls back to the system temp directory. The directory is created 0700
+// when it does not yet exist.
+func WithScratchDir(dir string) Option {
+	return func(options *Options) {
+		options.ScratchDir = dir
 	}
 }
 

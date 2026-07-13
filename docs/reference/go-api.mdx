@@ -24,7 +24,8 @@ import ampacp "github.com/savid/acp-go-amp"
 | Option | Purpose |
 |---|---|
 | `WithExecutablePath` | Native `amp` executable path. |
-| `WithHome` | Parent for isolated per-session native `HOME`/XDG directories. |
+| `WithScratchDir` | Sole parent for all ephemeral on-disk scratch (per-session isolated `HOME`/XDG directories, startup probe directory). Empty falls back to the system temp directory; created `0700` when missing. |
+| `WithHome` | Unsupported: Amp has no native config/auth root. Kept on the surface for symmetry; a non-empty value rejects at session start. Use `WithScratchDir`. |
 | `WithDefaultModel` | Accepted for symmetry; non-empty values reject at session start. |
 | `WithEnv` | Environment injected into native processes (e.g. `AMP_API_KEY`). |
 | `WithSessionStore` | Durable mirror; see [Session store](/docs/features/session-store). |
