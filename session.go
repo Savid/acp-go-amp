@@ -62,9 +62,9 @@ const (
 	valDuplicate         = "duplicate"
 	reasonUnserializable = "unserializable"
 
-	modeSmart = "smart"
-	modeDeep  = "deep"
-	modeRush  = "rush"
+	modeLow    = "low"
+	modeMedium = "medium"
+	modeHigh   = "high"
 
 	effortNone    = "none"
 	effortMinimal = "minimal"
@@ -163,7 +163,7 @@ func newAgentSession(agent *Agent, id acp.SessionId, cwd string, meta parsedSess
 
 	mode := meta.options.Mode
 	if mode == "" {
-		mode = modeSmart
+		mode = modeMedium
 	}
 	// Effort has no wrapper-imposed default: --effort is passed to amp only when
 	// the host explicitly set it (per-request option or session config). When it

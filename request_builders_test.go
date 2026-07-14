@@ -20,7 +20,7 @@ func TestRequestBuildersAndCallForkSession(t *testing.T) {
 		WithSessionMCPServers(stdio, http, sse, acpServer),
 		WithSessionAdditionalDirectories("/tmp/other"),
 		WithSessionOutputSchema(map[string]any{"type": "object"}),
-		WithSessionAmpOptions(AmpOptions{Mode: "rush", Effort: "low"}),
+		WithSessionAmpOptions(AmpOptions{Mode: "low", Effort: "low"}),
 		WithSessionRawEvents(true),
 		nil,
 	)
@@ -46,7 +46,7 @@ func TestRequestBuildersAndCallForkSession(t *testing.T) {
 	if PromptRequest("T-1", acp.TextBlock("hi")).SessionId != "T-1" || TextPromptRequest("T-1", "hi").SessionId != "T-1" {
 		t.Fatal("prompt request failed")
 	}
-	if SetConfigOptionRequest("T-1", "mode", "rush").ValueId == nil || SetModelRequest("T-1", "model").ValueId == nil {
+	if SetConfigOptionRequest("T-1", "mode", "low").ValueId == nil || SetModelRequest("T-1", "model").ValueId == nil {
 		t.Fatal("set config request failed")
 	}
 	listReq := ListSessionsRequest(WithListSessionsCwd("/tmp/cwd"), WithListSessionsCursor("cursor"), WithListSessionsMeta(map[string]any{"m": "v"}), nil)

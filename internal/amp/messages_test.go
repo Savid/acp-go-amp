@@ -50,7 +50,7 @@ func TestParseAllMessageShapesAndAccessors(t *testing.T) {
 	}{
 		{
 			name: "system init",
-			line: `{"type":"system","subtype":"init","cwd":"/tmp/project","session_id":"T-1","tools":["Read",2],"mcp_servers":[{"name":"svc","status":"connected"}],"agent_mode":"smart","reasoning_effort":"high"}`,
+			line: `{"type":"system","subtype":"init","cwd":"/tmp/project","session_id":"T-1","tools":["Read",2],"mcp_servers":[{"name":"svc","status":"connected"}],"agent_mode":"medium","reasoning_effort":"high"}`,
 			typ:  TypeSystem,
 		},
 		{

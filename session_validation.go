@@ -165,7 +165,7 @@ func mcpConfigJSON(servers []acp.McpServer) (string, error) {
 }
 
 func validModes() []string {
-	return []string{modeSmart, modeDeep, modeRush}
+	return []string{modeLow, modeMedium, modeHigh}
 }
 
 func validEfforts() []string {

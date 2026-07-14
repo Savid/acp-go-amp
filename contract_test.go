@@ -100,7 +100,7 @@ func TestStrictMetaAndConfigResponse(t *testing.T) {
 	if _, err := agent.LoadSession(ctxWithTimeout(t), LoadSessionRequest("T-config-response", cwd)); err != nil {
 		t.Fatalf("LoadSession: %v", err)
 	}
-	resp, err := agent.SetSessionConfigOption(context.Background(), SetConfigOptionRequest("T-config-response", "mode", "rush"))
+	resp, err := agent.SetSessionConfigOption(context.Background(), SetConfigOptionRequest("T-config-response", "mode", "low"))
 	if err != nil {
 		t.Fatalf("SetSessionConfigOption: %v", err)
 	}
@@ -295,8 +295,8 @@ func TestRemainingBranches(t *testing.T) {
 	if maxConcurrentClientCalls(ConcurrencyLimits{MaxConcurrentClientCalls: 3}) != 3 || maxConcurrentClientCalls(ConcurrencyLimits{}) != defaultMaxConcurrentCalls {
 		t.Fatal("client call limit normalization failed")
 	}
-	options, err := parseAmpOptions(map[string]any{"model": "m", "mode": "rush", "effort": "low"})
-	if err != nil || options.Model != "m" || options.Mode != "rush" || options.Effort != "low" {
+	options, err := parseAmpOptions(map[string]any{"model": "m", "mode": "low", "effort": "low"})
+	if err != nil || options.Model != "m" || options.Mode != "low" || options.Effort != "low" {
 		t.Fatalf("parse valid options = %#v, %v", options, err)
 	}
 	for _, raw := range []map[string]any{

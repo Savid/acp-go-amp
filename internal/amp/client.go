@@ -147,7 +147,7 @@ func (c *Client) probeSubcommands(ctx context.Context) error {
 	continueClient := *c
 	continueClient.options.SettingsFile = settingsFile
 	continueClient.options.MCPConfigJSON = "{}"
-	continueClient.options.Mode = "smart"
+	continueClient.options.Mode = "medium"
 	continueClient.options.Effort = "high"
 	continueArgs := continueClient.globalArgs()
 	continueArgs = append(continueArgs, ampArgThreads, ampThreadContinue, startupProbeThreadID, "--stream-json", "--stream-json-input", "-x")

@@ -98,10 +98,10 @@ func TestFakeAmpAgentHelper(t *testing.T) {
 		case "reconcile-config":
 			// Report a mode/effort that diverges from whatever the host requested so
 			// the wrapper's native read-back reconciliation is exercised.
-			os.Stdout.WriteString(`{"type":"system","subtype":"init","cwd":"/tmp/project","session_id":"T-agent-thread","tools":["Read"],"mcp_servers":[{"name":"svc","status":"connected"}],"agent_mode":"deep","reasoning_effort":"max"}` + "\n")
+			os.Stdout.WriteString(`{"type":"system","subtype":"init","cwd":"/tmp/project","session_id":"T-agent-thread","tools":["Read"],"mcp_servers":[{"name":"svc","status":"connected"}],"agent_mode":"high","reasoning_effort":"max"}` + "\n")
 			os.Stdout.WriteString(`{"type":"result","subtype":"success","duration_ms":1,"is_error":false,"num_turns":1,"result":"done","session_id":"T-agent-thread"}` + "\n")
 		default:
-			initMode := "smart"
+			initMode := "medium"
 			if i := slices.Index(args, "-m"); i >= 0 && i+1 < len(args) {
 				initMode = args[i+1]
 			}
@@ -175,7 +175,7 @@ func TestServeFakeAmpLifecycleStdoutCleanStoreReplayAndDelete(t *testing.T) {
 		WithSessionAdditionalDirectories("/tmp/other"),
 		WithSessionAmpOptions(NewAmpOptions(
 			WithAmpEnv(map[string]string{"AMP_URL": "https://amp.example.test"}),
-			WithAmpMode("deep"),
+			WithAmpMode("high"),
 			WithAmpEffort("max"),
 		)),
 		WithSessionMCPServers(
@@ -271,7 +271,7 @@ func TestServeFakeAmpLifecycleStdoutCleanStoreReplayAndDelete(t *testing.T) {
 			continueArgs = args
 		}
 	}
-	for _, want := range []string{"--no-ide", "--no-color", "--no-notifications", "--settings-file", "--mcp-config", "-m", "deep", "--effort", "max", "threads", "continue", "T-agent-thread", "--stream-json", "--stream-json-input", "-x"} {
+	for _, want := range []string{"--no-ide", "--no-color", "--no-notifications", "--settings-file", "--mcp-config", "-m", "high", "--effort", "max", "threads", "continue", "T-agent-thread", "--stream-json", "--stream-json-input", "-x"} {
 		if !slices.Contains(continueArgs, want) {
 			t.Fatalf("continue args missing %q: %#v", want, continueArgs)
 		}
@@ -839,11 +839,11 @@ func main() {
 		if mode == "reconcile-config" {
 			// Report a mode/effort that diverges from whatever the host requested so
 			// the wrapper's native read-back reconciliation is exercised.
-			os.Stdout.WriteString("{\"type\":\"system\",\"subtype\":\"init\",\"cwd\":\"/tmp/project\",\"session_id\":\"T-agent-thread\",\"tools\":[\"Read\"],\"mcp_servers\":[{\"name\":\"svc\",\"status\":\"connected\"}],\"agent_mode\":\"deep\",\"reasoning_effort\":\"max\"}\n")
+			os.Stdout.WriteString("{\"type\":\"system\",\"subtype\":\"init\",\"cwd\":\"/tmp/project\",\"session_id\":\"T-agent-thread\",\"tools\":[\"Read\"],\"mcp_servers\":[{\"name\":\"svc\",\"status\":\"connected\"}],\"agent_mode\":\"high\",\"reasoning_effort\":\"max\"}\n")
 			os.Stdout.WriteString("{\"type\":\"result\",\"subtype\":\"success\",\"duration_ms\":1,\"is_error\":false,\"num_turns\":1,\"result\":\"done\",\"session_id\":\"T-agent-thread\"}\n")
 			return
 		}
-		initMode := "smart"
+		initMode := "medium"
 		if i := index(args, "-m"); i >= 0 && i+1 < len(args) {
 			initMode = args[i+1]
 		}

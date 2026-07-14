@@ -19,7 +19,7 @@ import (
 )
 
 func TestConfigOptions(t *testing.T) {
-	session := &agentSession{mode: "smart", effort: "high"}
+	session := &agentSession{mode: "medium", effort: "high"}
 	options := session.configOptions()
 	if len(options) != 2 {
 		t.Fatalf("options=%d", len(options))
@@ -35,7 +35,7 @@ func TestActiveLoadResumeSemantics(t *testing.T) {
 	cwd := t.TempDir()
 	extra := t.TempDir()
 	server := StdioMCPServer("stdio", "printf", []string{"ok"}, map[string]string{"A": "B"})
-	options := NewAmpOptions(WithAmpEnv(map[string]string{"AMP_URL": "https://amp.example.test"}), WithAmpMode("deep"), WithAmpEffort("max"))
+	options := NewAmpOptions(WithAmpEnv(map[string]string{"AMP_URL": "https://amp.example.test"}), WithAmpMode("high"), WithAmpEffort("max"))
 	requestOptions := func(raw bool) []SessionRequestOption {
 		return []SessionRequestOption{
 			WithSessionAdditionalDirectories(extra),
@@ -71,21 +71,21 @@ func TestActiveLoadResumeSemantics(t *testing.T) {
 	if _, resumeErr := agent.ResumeSession(ctx, ResumeSessionRequest(id, cwd,
 		WithSessionAdditionalDirectories(extra),
 		WithSessionMCPServers(server),
-		WithSessionAmpOptions(NewAmpOptions(WithAmpEnv(map[string]string{"AMP_URL": "https://other.example.test"}), WithAmpMode("deep"), WithAmpEffort("max"))),
+		WithSessionAmpOptions(NewAmpOptions(WithAmpEnv(map[string]string{"AMP_URL": "https://other.example.test"}), WithAmpMode("high"), WithAmpEffort("max"))),
 	)); !isMismatchField(resumeErr, "env") {
 		t.Fatalf("different active env = %v, want env mismatch", resumeErr)
 	}
 	if _, loadErr := agent.LoadSession(ctx, LoadSessionRequest(id, cwd,
 		WithSessionAdditionalDirectories(extra),
 		WithSessionMCPServers(server),
-		WithSessionAmpOptions(NewAmpOptions(WithAmpEnv(map[string]string{"AMP_URL": "https://amp.example.test"}), WithAmpMode("rush"), WithAmpEffort("max"))),
+		WithSessionAmpOptions(NewAmpOptions(WithAmpEnv(map[string]string{"AMP_URL": "https://amp.example.test"}), WithAmpMode("low"), WithAmpEffort("max"))),
 	)); !isMismatchField(loadErr, "mode") {
 		t.Fatalf("different active mode = %v, want mode mismatch", loadErr)
 	}
 	if _, resumeErr := agent.ResumeSession(ctx, ResumeSessionRequest(id, cwd,
 		WithSessionAdditionalDirectories(extra),
 		WithSessionMCPServers(server),
-		WithSessionAmpOptions(NewAmpOptions(WithAmpEnv(map[string]string{"AMP_URL": "https://amp.example.test"}), WithAmpMode("deep"), WithAmpEffort("low"))),
+		WithSessionAmpOptions(NewAmpOptions(WithAmpEnv(map[string]string{"AMP_URL": "https://amp.example.test"}), WithAmpMode("high"), WithAmpEffort("low"))),
 	)); !isMismatchField(resumeErr, "effort") {
 		t.Fatalf("different active effort = %v, want effort mismatch", resumeErr)
 	}
@@ -342,8 +342,8 @@ func TestLoadReplayDeleteAndConfigEdges(t *testing.T) {
 
 	replaceErr := errors.New("replace failed")
 	configAgent := NewAgent(WithExecutablePath("/does/not/exist"), WithSessionStore(&errorStore{replaceErr: replaceErr}))
-	configSession := &agentSession{agent: configAgent, id: "T-config", mode: "smart", effort: "high", turn: make(chan struct{}, 1)}
-	if err := configSession.setConfig(ctx, configMode, "rush"); !errors.Is(err, replaceErr) {
+	configSession := &agentSession{agent: configAgent, id: "T-config", mode: "medium", effort: "high", turn: make(chan struct{}, 1)}
+	if err := configSession.setConfig(ctx, configMode, "low"); !errors.Is(err, replaceErr) {
 		t.Fatalf("setConfig replace error = %v", err)
 	}
 }
@@ -572,7 +572,7 @@ func putStoredSession(t *testing.T, store *InMemorySessionStore, id string, cwd 
 		Format:             SessionStoreFormat,
 		ThreadID:           id,
 		Cwd:                cwd,
-		Mode:               "smart",
+		Mode:               "medium",
 		Effort:             "high",
 		CreatedAtUnixMilli: 1,
 		UpdatedAtUnixMilli: 2,
@@ -629,14 +629,14 @@ func TestReconcileNativeConfigReadBack(t *testing.T) {
 	}
 	cwd := t.TempDir()
 	newResp, err := conn.NewSession(ctx, NewSessionRequest(cwd,
-		WithSessionAmpOptions(NewAmpOptions(WithAmpMode("smart"), WithAmpEffort("low"))),
+		WithSessionAmpOptions(NewAmpOptions(WithAmpMode("medium"), WithAmpEffort("low"))),
 	))
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
 	}
 
 	// Requested surface is echoed before any native report.
-	requireConfigValues(t, newResp.ConfigOptions, "smart", "low")
+	requireConfigValues(t, newResp.ConfigOptions, "medium", "low")
 
 	if _, promptErr := conn.Prompt(ctx, acp.PromptRequest{
 		SessionId: newResp.SessionId,
@@ -645,7 +645,7 @@ func TestReconcileNativeConfigReadBack(t *testing.T) {
 		t.Fatalf("Prompt: %v", promptErr)
 	}
 
-	// The turn's init frame reports deep/max: a config_option_update carries the
+	// The turn's init frame reports high/max: a config_option_update carries the
 	// reconciled native truth to the host.
 	var reconciled []acp.SessionConfigOption
 	for _, notification := range client.updatesSnapshot() {
@@ -656,15 +656,15 @@ func TestReconcileNativeConfigReadBack(t *testing.T) {
 	if reconciled == nil {
 		t.Fatalf("no config_option_update emitted; updates = %#v", client.updatesSnapshot())
 	}
-	requireConfigValues(t, reconciled, "deep", "max")
+	requireConfigValues(t, reconciled, "high", "max")
 
 	// A subsequent read-back (resume of the active session) reports amp's truth,
-	// not the originally requested smart/low.
+	// not the originally requested medium/low.
 	resumeResp, err := conn.ResumeSession(ctx, ResumeSessionRequest(newResp.SessionId, cwd))
 	if err != nil {
 		t.Fatalf("ResumeSession: %v", err)
 	}
-	requireConfigValues(t, resumeResp.ConfigOptions, "deep", "max")
+	requireConfigValues(t, resumeResp.ConfigOptions, "high", "max")
 }
 
 // TestEffortDefaultOmittedWhenUnset pins R5-8: when the host does not set effort,
@@ -708,8 +708,8 @@ func TestEffortDefaultOmittedWhenUnset(t *testing.T) {
 	if slices.Contains(continueArgs, "--effort") {
 		t.Fatalf("--effort passed with no host-set effort: %#v", continueArgs)
 	}
-	if i := slices.Index(continueArgs, "-m"); i < 0 || i+1 >= len(continueArgs) || continueArgs[i+1] != "smart" {
-		t.Fatalf("mode flag missing or not smart: %#v", continueArgs)
+	if i := slices.Index(continueArgs, "-m"); i < 0 || i+1 >= len(continueArgs) || continueArgs[i+1] != "medium" {
+		t.Fatalf("mode flag missing or not medium: %#v", continueArgs)
 	}
 }
 

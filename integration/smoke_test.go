@@ -113,7 +113,7 @@ func TestLiveThreadTurn(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	client := amp.NewClient(slog.Default(), amp.Options{SettingsFile: settings, Mode: "smart", Effort: "high"})
+	client := amp.NewClient(slog.Default(), amp.Options{SettingsFile: settings, Mode: "medium", Effort: "high"})
 	thread, err := client.NewThread(ctx)
 	if err != nil {
 		t.Fatal(err)

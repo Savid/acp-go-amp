@@ -149,7 +149,7 @@ func TestClientCommandsUseGlobalArgsAndParseOutput(t *testing.T) {
 	if len(startupContinue) == 0 {
 		t.Fatalf("startup continue probe not recorded: %#v", records)
 	}
-	for _, want := range []string{"--settings-file", "--mcp-config", "{}", "-m", "smart", "--effort", "high", "--stream-json", "--stream-json-input", "-x"} {
+	for _, want := range []string{"--settings-file", "--mcp-config", "{}", "-m", "medium", "--effort", "high", "--stream-json", "--stream-json-input", "-x"} {
 		if !slices.Contains(startupContinue, want) {
 			t.Fatalf("startup continue probe missing %q: %#v", want, startupContinue)
 		}
@@ -744,7 +744,7 @@ func helperContinue(mode string, state string) {
 		os.Stderr.WriteString("native stderr noise\n")
 		os.Stdout.WriteString("native stdout noise\n")
 		os.Stdout.WriteString("{bad json\n")
-		os.Stdout.WriteString(`{"type":"system","subtype":"init","cwd":"/tmp/project","session_id":"T-fake-thread","tools":["Read"],"mcp_servers":[{"name":"svc","status":"connected"}],"agent_mode":"smart","reasoning_effort":"high"}` + "\n")
+		os.Stdout.WriteString(`{"type":"system","subtype":"init","cwd":"/tmp/project","session_id":"T-fake-thread","tools":["Read"],"mcp_servers":[{"name":"svc","status":"connected"}],"agent_mode":"medium","reasoning_effort":"high"}` + "\n")
 		os.Stdout.WriteString(`{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":1,"output_tokens":2,"max_tokens":99,"service_tier":"standard"}},"session_id":"T-fake-thread"}` + "\n")
 		os.Stdout.WriteString(`{"type":"result","subtype":"success","duration_ms":1,"is_error":false,"num_turns":1,"result":"done","session_id":"T-fake-thread","usage":{"input_tokens":1,"output_tokens":2,"max_tokens":99}}` + "\n")
 	default:
