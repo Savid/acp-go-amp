@@ -56,6 +56,7 @@ const (
 	defaultNativeCancelTimeout   = 5 * time.Second
 	defaultNativeCloseTurnWait   = 5 * time.Second
 	defaultNativeCommandTimeout  = 30 * time.Second
+	defaultNativeSessionTimeout  = 2 * time.Minute
 	defaultNativePromptLineLimit = 10 * 1024 * 1024
 )
 
@@ -103,6 +104,11 @@ type runtimeOptions struct {
 	nativeCancelTimeout  time.Duration
 	nativeCloseTurnWait  time.Duration
 	nativeCommandTimeout time.Duration
+	// nativeSessionTimeout bounds Amp's authenticated remote thread creation.
+	// It is intentionally longer than the ordinary command bound because the
+	// native service can take close to a minute to create an otherwise healthy
+	// thread.
+	nativeSessionTimeout time.Duration
 	maxJSONLineBytes     int
 	// newTurnTimer builds the per-turn deadline channel. It is a seam so tests
 	// can drive the timeout branch deterministically against a coincident
@@ -128,6 +134,7 @@ func applyOptions(opts []Option) Options {
 			nativeCancelTimeout:  defaultNativeCancelTimeout,
 			nativeCloseTurnWait:  defaultNativeCloseTurnWait,
 			nativeCommandTimeout: defaultNativeCommandTimeout,
+			nativeSessionTimeout: defaultNativeSessionTimeout,
 			maxJSONLineBytes:     defaultNativePromptLineLimit,
 			newTurnTimer:         newRealTurnTimer,
 		},

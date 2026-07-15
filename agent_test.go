@@ -662,8 +662,10 @@ func fakeAgentAmpPath(t *testing.T, mode string) (string, string) {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("build fake amp: %v\n%s", err, out)
 	}
-	if out, err := exec.Command(path, "threads", "new").CombinedOutput(); err != nil {
-		t.Fatalf("preflight fake amp: %v\n%s", err, out)
+	if mode != "block-new" {
+		if out, err := exec.Command(path, "threads", "new").CombinedOutput(); err != nil {
+			t.Fatalf("preflight fake amp: %v\n%s", err, out)
+		}
 	}
 	return path, state
 }
@@ -714,6 +716,11 @@ func main() {
 	}
 	switch args[threads+1] {
 	case "new":
+		if mode == "block-new" {
+			for {
+				time.Sleep(time.Hour)
+			}
+		}
 		if mode == "bad-new-id" {
 			os.Stdout.WriteString("not-a-thread\n")
 			return

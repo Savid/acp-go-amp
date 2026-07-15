@@ -5,12 +5,95 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/coder/acp-go-sdk"
 	nativeamp "github.com/savid/acp-go-amp/internal/amp"
 	"github.com/stretchr/testify/require"
 )
+
+func TestNewSessionTimeoutKillsNativeTreeAndReleasesResources(t *testing.T) {
+	path, state := fakeAgentAmpPath(t, "block-new")
+	scratch := t.TempDir()
+
+	var mu sync.Mutex
+	acquired := map[RuntimeResourceKind]int{}
+	released := map[RuntimeResourceKind]int{}
+	reservedScratch := 0
+	releasedScratch := 0
+
+	agent := NewAgent(
+		WithExecutablePath(path),
+		WithScratchDir(scratch),
+		WithEnv(map[string]string{"AMP_API_KEY": "fake"}),
+		WithRuntimeResourceHooks(RuntimeResourceHooks{
+			AcquireNativeRoot: func(_ context.Context, kind RuntimeResourceKind) (func(), error) {
+				mu.Lock()
+				acquired[kind]++
+				mu.Unlock()
+
+				return func() {
+					mu.Lock()
+					released[kind]++
+					mu.Unlock()
+				}, nil
+			},
+			ReserveScratchRoot: func(_ context.Context, kind RuntimeResourceKind) (func(), error) {
+				require.Equal(t, RuntimeResourceSession, kind)
+				mu.Lock()
+				reservedScratch++
+				mu.Unlock()
+
+				return func() {
+					mu.Lock()
+					releasedScratch++
+					mu.Unlock()
+				}, nil
+			},
+		}),
+	)
+	agent.options.runtime.nativeSessionTimeout = 50 * time.Millisecond
+
+	started := time.Now()
+	_, err := agent.NewSession(context.Background(), NewSessionRequest(t.TempDir()))
+	require.Error(t, err)
+	require.Less(t, time.Since(started), 2*time.Second)
+
+	argsRecords := readHelperJSON[[]string](t, filepath.Join(state, "args.jsonl"))
+	require.False(t, slicesContainCommand(nil, "threads", "new"))
+	require.True(t, slicesContainCommand(argsRecords, "threads", "new"), "missing blocked threads new invocation: %#v", argsRecords)
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Equal(t, 1, acquired[RuntimeResourceDiscovery])
+	require.Equal(t, 1, released[RuntimeResourceDiscovery])
+	require.Equal(t, 1, acquired[RuntimeResourceSession])
+	require.Equal(t, 1, released[RuntimeResourceSession])
+	require.Equal(t, 1, reservedScratch)
+	require.Equal(t, 1, releasedScratch)
+
+	entries, readErr := os.ReadDir(scratch)
+	require.NoError(t, readErr)
+	require.Empty(t, entries, "session scratch survived timed-out native creation")
+}
+
+func slicesContainCommand(records [][]string, parts ...string) bool {
+	for _, record := range records {
+		cursor := 0
+		for _, arg := range record {
+			if cursor < len(parts) && arg == parts[cursor] {
+				cursor++
+			}
+		}
+		if cursor == len(parts) {
+			return true
+		}
+	}
+
+	return false
+}
 
 func TestRuntimeResourceHooks(t *testing.T) {
 	options := Options{}

@@ -78,8 +78,15 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (r
 		return acp.NewSessionResponse{}, err
 	}
 
+	// Amp thread creation is an authenticated remote operation and has been
+	// observed taking close to a minute during healthy startup. Give it its own
+	// generous hard bound so an unbounded ACP request can never leave an
+	// interactive or stalled `threads new` process alive indefinitely.
+	sessionCtx, cancelSession := context.WithTimeout(ctx, a.options.runtime.nativeSessionTimeout)
 	sessionStarted := time.Now()
-	threadID, err := probeSession.client().NewThread(ctx)
+	threadID, err := probeSession.client().NewThread(sessionCtx)
+
+	cancelSession()
 	observeRuntimeStartupStage(ctx, a.options.RuntimeResourceHooks, RuntimeResourceSession, RuntimeStartupSession, sessionStarted, err)
 
 	releaseNativeRootWhenQuiescent(nativeRelease, err)
