@@ -30,6 +30,31 @@ type jobBasicAccountingInformation struct {
 	TotalTerminatedProcesses  uint32
 }
 
+func (t *processTree) descendantCount() (int, bool) {
+	if t == nil {
+		return 0, false
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.job == 0 {
+		return 0, false
+	}
+
+	var info jobBasicAccountingInformation
+	if err := windows.QueryInformationJobObject(
+		t.job,
+		windows.JobObjectBasicAccountingInformation,
+		uintptr(unsafe.Pointer(&info)),
+		uint32(unsafe.Sizeof(info)),
+		nil,
+	); err != nil {
+		return 0, false
+	}
+
+	return int(info.ActiveProcesses), true
+}
+
 func configureCommand(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_SUSPENDED}
 }

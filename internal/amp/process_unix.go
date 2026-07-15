@@ -19,6 +19,8 @@ type processTree struct {
 	pgid int
 }
 
+func (*processTree) descendantCount() (int, bool) { return 0, false }
+
 func startProcessTree(cmd *exec.Cmd) (*processTree, error) {
 	if err := cmd.Start(); err != nil {
 		return nil, err

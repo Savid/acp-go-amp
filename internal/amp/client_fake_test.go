@@ -883,3 +883,83 @@ func TestTurnRecoverGoroutine(t *testing.T) {
 		t.Fatal("handler invoked without panic")
 	}
 }
+
+func TestFinishProcessTreeObservationUsesProofBoundary(t *testing.T) {
+	var quiescent, unproven int
+	observer := ProcessSnapshotObserver{
+		Quiescent: func(context.Context) { quiescent++ },
+		Unproven:  func() { unproven++ },
+	}
+
+	finishProcessTreeObservation(t.Context(), observer, nil)
+	if quiescent != 1 || unproven != 0 {
+		t.Fatalf("proven lifecycle = quiescent %d, unproven %d", quiescent, unproven)
+	}
+
+	finishProcessTreeObservation(t.Context(), observer, ErrProcessTreeNotQuiescent)
+	if quiescent != 1 || unproven != 1 {
+		t.Fatalf("unproven lifecycle = quiescent %d, unproven %d", quiescent, unproven)
+	}
+}
+
+func TestProcessTreeSnapshotAvailabilityBoundary(t *testing.T) {
+	if observer := (*Client)(nil).newProcessSnapshotObserver(t.Context()); observer.Observe != nil || observer.Quiescent != nil || observer.Unproven != nil {
+		t.Fatal("nil client created a process observer")
+	}
+	if observer := (&Client{}).newProcessSnapshotObserver(t.Context()); observer.Observe != nil || observer.Quiescent != nil || observer.Unproven != nil {
+		t.Fatal("client without a factory created a process observer")
+	}
+
+	created := false
+	client := &Client{options: Options{NewProcessSnapshotObserver: func(context.Context) ProcessSnapshotObserver {
+		created = true
+		return ProcessSnapshotObserver{}
+	}}}
+	_ = client.newProcessSnapshotObserver(t.Context())
+	if !created {
+		t.Fatal("process observer factory was not called")
+	}
+
+	observeProcessTreeSnapshot(t.Context(), &processTree{}, ProcessSnapshotObserver{})
+	called := false
+	observeProcessTreeSnapshot(t.Context(), &processTree{}, ProcessSnapshotObserver{Observe: func(context.Context, int) {
+		called = true
+	}})
+	if called {
+		t.Fatal("unavailable Unix inventory was reported")
+	}
+
+	original := processTreeDescendantCount
+	t.Cleanup(func() { processTreeDescendantCount = original })
+	processTreeDescendantCount = func(*processTree) (int, bool) { return 7, true }
+	observeProcessTreeSnapshot(t.Context(), &processTree{}, ProcessSnapshotObserver{Observe: func(_ context.Context, count int) {
+		called = count == 7
+	}})
+	if !called {
+		t.Fatal("available containment inventory was not reported")
+	}
+}
+
+func TestTurnClosePreservesSnapshotOnUnprovenTree(t *testing.T) {
+	original := processTreeTerminateAndWait
+	t.Cleanup(func() { processTreeTerminateAndWait = original })
+	processTreeTerminateAndWait = func(*processTree, time.Duration) error {
+		return ErrProcessTreeNotQuiescent
+	}
+
+	var quiescent, unproven int
+	turn := &Turn{
+		tree: &processTree{},
+		processObserver: ProcessSnapshotObserver{
+			Quiescent: func(context.Context) { quiescent++ },
+			Unproven:  func() { unproven++ },
+		},
+	}
+	err := turn.Close()
+	if !errors.Is(err, ErrProcessTreeNotQuiescent) {
+		t.Fatalf("Close error = %v, want process-tree proof sentinel", err)
+	}
+	if quiescent != 0 || unproven != 1 {
+		t.Fatalf("Close lifecycle = quiescent %d, unproven %d", quiescent, unproven)
+	}
+}

@@ -212,15 +212,16 @@ func (s *agentSession) client() *amp.Client {
 
 func (s *agentSession) clientWithEnv(env map[string]string, mcpConfigPath string) *amp.Client {
 	return amp.NewClient(s.agent.log, amp.Options{
-		CLIPath:          s.agent.options.ExecutablePath,
-		Cwd:              s.cwd,
-		SettingsFile:     s.settingsFile,
-		Env:              env,
-		ThreadID:         string(s.id),
-		Mode:             s.mode,
-		MCPConfigPath:    mcpConfigPath,
-		MaxLineBytes:     s.agent.options.runtime.maxJSONLineBytes,
-		OnGoroutinePanic: s.agent.onNativeGoroutinePanic,
+		CLIPath:                    s.agent.options.ExecutablePath,
+		Cwd:                        s.cwd,
+		SettingsFile:               s.settingsFile,
+		Env:                        env,
+		ThreadID:                   string(s.id),
+		Mode:                       s.mode,
+		MCPConfigPath:              mcpConfigPath,
+		MaxLineBytes:               s.agent.options.runtime.maxJSONLineBytes,
+		OnGoroutinePanic:           s.agent.onNativeGoroutinePanic,
+		NewProcessSnapshotObserver: s.agent.newProcessSnapshotObserver,
 	})
 }
 

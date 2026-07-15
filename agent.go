@@ -27,6 +27,7 @@ type Agent struct {
 	pendingNativeDeletes map[acp.SessionId]struct{}
 	pending              int
 	clientCalls          chan struct{}
+	providerProcesses    *providerProcessSnapshotTracker
 
 	activeLimitErr error
 }
@@ -59,6 +60,7 @@ func NewAgent(opts ...Option) *Agent {
 		Version:        options.AgentVersion,
 	})
 	options.RuntimeResourceHooks = instrumentRuntimeResourceHooks(options.RuntimeResourceHooks, observe)
+	providerProcesses := newProviderProcessSnapshotTracker(options.RuntimeResourceHooks)
 
 	return &Agent{
 		options:              options,
@@ -69,6 +71,7 @@ func NewAgent(opts ...Option) *Agent {
 		deleted:              make(map[acp.SessionId]struct{}),
 		pendingNativeDeletes: make(map[acp.SessionId]struct{}),
 		clientCalls:          make(chan struct{}, maxConcurrentClientCalls(options.ConcurrencyLimits)),
+		providerProcesses:    providerProcesses,
 		activeLimitErr:       validateConcurrencyLimits(options.ConcurrencyLimits),
 	}
 }

@@ -754,12 +754,13 @@ func (a *Agent) ensureStartup(ctx context.Context, cwd string, meta parsedSessio
 	}
 
 	client := amp.NewClient(a.log, amp.Options{
-		CLIPath:          a.options.ExecutablePath,
-		Cwd:              cwd,
-		Env:              env,
-		ScratchParent:    scratchParent,
-		MaxLineBytes:     a.options.runtime.maxJSONLineBytes,
-		OnGoroutinePanic: a.onNativeGoroutinePanic,
+		CLIPath:                    a.options.ExecutablePath,
+		Cwd:                        cwd,
+		Env:                        env,
+		ScratchParent:              scratchParent,
+		MaxLineBytes:               a.options.runtime.maxJSONLineBytes,
+		OnGoroutinePanic:           a.onNativeGoroutinePanic,
+		NewProcessSnapshotObserver: a.newProcessSnapshotObserver,
 	})
 	if err := client.StartupProbe(ctx); err != nil {
 		return acp.NewInternalError(map[string]any{jsonFieldError: err.Error()})

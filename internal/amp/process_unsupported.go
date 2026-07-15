@@ -10,6 +10,8 @@ import (
 
 type processTree struct{}
 
+func (*processTree) descendantCount() (int, bool) { return 0, false }
+
 func configureCommand(*exec.Cmd) {}
 
 func startProcessTree(*exec.Cmd) (*processTree, error) {

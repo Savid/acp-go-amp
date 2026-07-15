@@ -34,14 +34,20 @@ const (
 )
 
 var (
-	commandContext   = exec.CommandContext
-	getwd            = os.Getwd
-	lookPath         = exec.LookPath
-	mkdirTemp        = os.MkdirTemp
-	removeAll        = os.RemoveAll
-	writeFile        = os.WriteFile
-	closeWriteCloser = func(closer io.Closer) error { return closer.Close() }
-	probeCache       sync.Map
+	commandContext             = exec.CommandContext
+	getwd                      = os.Getwd
+	lookPath                   = exec.LookPath
+	mkdirTemp                  = os.MkdirTemp
+	removeAll                  = os.RemoveAll
+	writeFile                  = os.WriteFile
+	closeWriteCloser           = func(closer io.Closer) error { return closer.Close() }
+	probeCache                 sync.Map
+	processTreeDescendantCount = func(tree *processTree) (int, bool) {
+		return tree.descendantCount()
+	}
+	processTreeTerminateAndWait = func(tree *processTree, timeout time.Duration) error {
+		return tree.terminateAndWait(timeout)
+	}
 )
 
 type Options struct {
@@ -62,11 +68,55 @@ type Options struct {
 	// goroutine panics, so the embedding agent can log the panic instead of
 	// crashing the process. A nil handler leaves the panic to propagate.
 	OnGoroutinePanic func(ctx context.Context, name string, recovered any)
+	// NewProcessSnapshotObserver registers one successfully started contained
+	// native root with the embedding agent's absolute descendant inventory.
+	NewProcessSnapshotObserver func(context.Context) ProcessSnapshotObserver
+}
+
+// ProcessSnapshotObserver reports only containment-proven process inventory.
+// Observe is optional on platforms without an absolute live inventory;
+// Quiescent is called only after containment proves the root empty.
+type ProcessSnapshotObserver struct {
+	Observe   func(context.Context, int)
+	Quiescent func(context.Context)
+	Unproven  func()
 }
 
 type Client struct {
 	log     *slog.Logger
 	options Options
+}
+
+func (c *Client) newProcessSnapshotObserver(ctx context.Context) ProcessSnapshotObserver {
+	if c == nil || c.options.NewProcessSnapshotObserver == nil {
+		return ProcessSnapshotObserver{}
+	}
+
+	return c.options.NewProcessSnapshotObserver(ctx)
+}
+
+func observeProcessTreeSnapshot(ctx context.Context, tree *processTree, observer ProcessSnapshotObserver) {
+	if observer.Observe == nil {
+		return
+	}
+
+	if count, available := processTreeDescendantCount(tree); available {
+		observer.Observe(ctx, count)
+	}
+}
+
+func finishProcessTreeObservation(ctx context.Context, observer ProcessSnapshotObserver, quiescenceErr error) {
+	if ProcessTreeQuiescent(quiescenceErr) {
+		if observer.Quiescent != nil {
+			observer.Quiescent(ctx)
+		}
+
+		return
+	}
+
+	if observer.Unproven != nil {
+		observer.Unproven()
+	}
 }
 
 func NewClient(log *slog.Logger, options Options) *Client {
@@ -305,17 +355,21 @@ func (c *Client) Continue(ctx context.Context, threadID string, input any) (*Tur
 		return nil, fmt.Errorf("start amp: %w", err)
 	}
 
+	processObserver := c.newProcessSnapshotObserver(ctx)
+	observeProcessTreeSnapshot(ctx, tree, processObserver)
+
 	turn := &Turn{
-		log:          c.log,
-		cmd:          cmd,
-		tree:         tree,
-		stdin:        stdin,
-		stdout:       stdout,
-		stderr:       stderr,
-		maxLineBytes: c.options.MaxLineBytes,
-		messages:     make(chan Message),
-		errs:         make(chan error, 4),
-		onPanic:      c.options.OnGoroutinePanic,
+		log:             c.log,
+		cmd:             cmd,
+		tree:            tree,
+		processObserver: processObserver,
+		stdin:           stdin,
+		stdout:          stdout,
+		stderr:          stderr,
+		maxLineBytes:    c.options.MaxLineBytes,
+		messages:        make(chan Message),
+		errs:            make(chan error, 4),
+		onPanic:         c.options.OnGoroutinePanic,
 	}
 	turn.start(ctx)
 
@@ -376,6 +430,9 @@ func (c *Client) outputWithArgs(ctx context.Context, args ...string) ([]byte, er
 		return nil, fmt.Errorf("amp %s: %w", strings.Join(args, " "), err)
 	}
 
+	processObserver := c.newProcessSnapshotObserver(ctx)
+	observeProcessTreeSnapshot(ctx, tree, processObserver)
+
 	cancellationDone := make(chan struct{})
 	stopCancellation := context.AfterFunc(ctx, func() {
 		defer close(cancellationDone)
@@ -390,7 +447,10 @@ func (c *Client) outputWithArgs(ctx context.Context, args ...string) ([]byte, er
 
 	<-cancellationDone
 
-	quiescenceErr := tree.terminateAndWait(defaultCloseWait)
+	observeProcessTreeSnapshot(ctx, tree, processObserver)
+	quiescenceErr := processTreeTerminateAndWait(tree, defaultCloseWait)
+	finishProcessTreeObservation(ctx, processObserver, quiescenceErr)
+
 	if errors.Is(waitErr, exec.ErrWaitDelay) && quiescenceErr == nil {
 		waitErr = nil
 	}
@@ -548,22 +608,23 @@ func versionParts(value string) []int64 {
 }
 
 type Turn struct {
-	log          *slog.Logger
-	cmd          *exec.Cmd
-	tree         *processTree
-	stdin        io.WriteCloser
-	stdout       io.ReadCloser
-	stderr       io.ReadCloser
-	maxLineBytes int
-	messages     chan Message
-	errs         chan error
-	stderrMu     sync.Mutex
-	stderrTail   bytes.Buffer
-	waitOnce     sync.Once
-	waitErr      error
-	waitFunc     func() error
-	closeOnce    sync.Once
-	onPanic      func(ctx context.Context, name string, recovered any)
+	log             *slog.Logger
+	cmd             *exec.Cmd
+	tree            *processTree
+	stdin           io.WriteCloser
+	stdout          io.ReadCloser
+	stderr          io.ReadCloser
+	maxLineBytes    int
+	messages        chan Message
+	errs            chan error
+	stderrMu        sync.Mutex
+	stderrTail      bytes.Buffer
+	waitOnce        sync.Once
+	waitErr         error
+	waitFunc        func() error
+	closeOnce       sync.Once
+	onPanic         func(ctx context.Context, name string, recovered any)
+	processObserver ProcessSnapshotObserver
 }
 
 // recoverGoroutine is deferred at the top of every turn-owned goroutine. It
@@ -752,7 +813,10 @@ func (t *Turn) Close() error {
 
 		err = errors.Join(err, t.wait())
 		if t.tree != nil {
-			err = errors.Join(err, t.tree.terminateAndWait(defaultCloseWait))
+			observeProcessTreeSnapshot(context.Background(), t.tree, t.processObserver)
+			quiescenceErr := processTreeTerminateAndWait(t.tree, defaultCloseWait)
+			finishProcessTreeObservation(context.Background(), t.processObserver, quiescenceErr)
+			err = errors.Join(err, quiescenceErr)
 		}
 	})
 
