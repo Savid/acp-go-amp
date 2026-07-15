@@ -20,16 +20,21 @@ func TestProviderProcessSnapshotTrackerAggregatesProvenRoots(t *testing.T) {
 		},
 	})
 
-	first := tracker.start(t.Context())
-	first.snapshot(t.Context(), 2)
-	second := tracker.start(t.Context())
-	require.Equal(t, []int{2}, snapshots, "an unknown root must suppress a new absolute total")
+	firstCount := 2
+	first := tracker.start(t.Context(), func() (int, bool) { return firstCount, true })
+	first.refresh(t.Context())
+	secondCount := 3
+	second := tracker.start(t.Context(), func() (int, bool) { return secondCount, true })
+	second.refresh(t.Context())
 
-	second.snapshot(t.Context(), 3)
+	// Every boundary re-queries every active root. A cached firstCount=2
+	// would incorrectly publish 5 here after the live inventory became 4.
+	firstCount = 4
+	second.refresh(t.Context())
 	first.quiescent(t.Context())
 	second.quiescent(t.Context())
 
-	require.Equal(t, []int{2, 5, 3, 0}, snapshots)
+	require.Equal(t, []int{2, 5, 7, 3, 0}, snapshots)
 }
 
 func TestProviderProcessSnapshotTrackerUnprovenRootPreservesLastNonzero(t *testing.T) {
@@ -40,12 +45,12 @@ func TestProviderProcessSnapshotTrackerUnprovenRootPreservesLastNonzero(t *testi
 		},
 	})
 
-	unproven := tracker.start(t.Context())
-	unproven.snapshot(t.Context(), 4)
+	unproven := tracker.start(t.Context(), func() (int, bool) { return 4, true })
+	unproven.refresh(t.Context())
 	unproven.unproven()
 
-	other := tracker.start(t.Context())
-	other.snapshot(t.Context(), 1)
+	other := tracker.start(t.Context(), func() (int, bool) { return 1, true })
+	other.refresh(t.Context())
 	other.quiescent(t.Context())
 
 	require.Equal(t, []int{4}, snapshots, "unproven containment must suppress lower totals and zero")
@@ -54,6 +59,7 @@ func TestProviderProcessSnapshotTrackerUnprovenRootPreservesLastNonzero(t *testi
 func TestProviderProcessSnapshotTrackerConcurrentLifecycle(t *testing.T) {
 	const roots = 32
 
+	available := false
 	var snapshots []int
 	tracker := newProviderProcessSnapshotTracker(RuntimeResourceHooks{
 		ObserveProcessSnapshot: func(_ context.Context, _ RuntimeProcessKind, count int) {
@@ -62,15 +68,16 @@ func TestProviderProcessSnapshotTrackerConcurrentLifecycle(t *testing.T) {
 	})
 	observations := make([]*providerProcessRootObservation, roots)
 	for i := range observations {
-		observations[i] = tracker.start(context.Background())
+		observations[i] = tracker.start(context.Background(), func() (int, bool) { return 1, available })
 	}
+	available = true
 
 	var group sync.WaitGroup
 	for _, observation := range observations {
 		group.Add(1)
 		go func() {
 			defer group.Done()
-			observation.snapshot(context.Background(), 1)
+			observation.refresh(context.Background())
 		}()
 	}
 	group.Wait()
@@ -89,16 +96,36 @@ func TestProviderProcessSnapshotTrackerConcurrentLifecycle(t *testing.T) {
 	require.Equal(t, 0, snapshots[len(snapshots)-1])
 }
 
+func TestProviderProcessSnapshotTrackerHookReentryPublishesFreshAggregate(t *testing.T) {
+	var snapshots []int
+	var reentered bool
+	var second *providerProcessRootObservation
+
+	tracker := newProviderProcessSnapshotTracker(RuntimeResourceHooks{})
+	tracker.hooks.ObserveProcessSnapshot = func(ctx context.Context, _ RuntimeProcessKind, count int) {
+		snapshots = append(snapshots, count)
+		if !reentered {
+			reentered = true
+			second = tracker.start(ctx, func() (int, bool) { return 3, true })
+		}
+	}
+
+	first := tracker.start(t.Context(), func() (int, bool) { return 2, true })
+	require.NotNil(t, first)
+	require.NotNil(t, second)
+	require.Equal(t, []int{2, 5}, snapshots)
+}
+
 func TestProviderProcessSnapshotTrackerDefensiveAndDuplicateBoundaries(t *testing.T) {
 	ctx := t.Context()
 	var nilTracker *providerProcessSnapshotTracker
-	require.Nil(t, nilTracker.start(ctx))
+	require.Nil(t, nilTracker.start(ctx, nil))
 
 	var nilObservation *providerProcessRootObservation
-	nilObservation.snapshot(ctx, 1)
+	nilObservation.refresh(ctx)
 	nilObservation.quiescent(ctx)
 	nilObservation.unproven()
-	(&providerProcessRootObservation{}).snapshot(ctx, 1)
+	(&providerProcessRootObservation{}).refresh(ctx)
 	(&providerProcessRootObservation{}).quiescent(ctx)
 	(&providerProcessRootObservation{}).unproven()
 
@@ -108,16 +135,25 @@ func TestProviderProcessSnapshotTrackerDefensiveAndDuplicateBoundaries(t *testin
 			snapshots = append(snapshots, count)
 		},
 	})
-	root := tracker.start(ctx)
-	root.snapshot(ctx, -1)
-	root.snapshot(ctx, 2)
-	root.snapshot(ctx, 2)
+	root := tracker.start(ctx, func() (int, bool) { return 2, true })
+	root.refresh(ctx)
+	root.refresh(ctx)
 	root.quiescent(ctx)
-	root.snapshot(ctx, 1)
+	root.refresh(ctx)
 	root.quiescent(ctx)
 	root.unproven()
 
 	require.Equal(t, []int{2, 0}, snapshots)
+
+	unavailable := tracker.start(ctx, nil)
+	unavailable.refresh(ctx)
+	unavailable.unproven()
+	negative := newProviderProcessSnapshotTracker(RuntimeResourceHooks{}).start(ctx, func() (int, bool) { return -1, true })
+	negative.refresh(ctx)
+	unknown := newProviderProcessSnapshotTracker(RuntimeResourceHooks{}).start(ctx, func() (int, bool) { return 0, false })
+	unknown.refresh(ctx)
+	zero := newProviderProcessSnapshotTracker(RuntimeResourceHooks{}).start(ctx, func() (int, bool) { return 0, true })
+	zero.refresh(ctx)
 
 	entries, err := (&agentSession{agent: &Agent{}}).loadTranscript(ctx)
 	require.NoError(t, err)

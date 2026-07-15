@@ -903,40 +903,41 @@ func TestFinishProcessTreeObservationUsesProofBoundary(t *testing.T) {
 }
 
 func TestProcessTreeSnapshotAvailabilityBoundary(t *testing.T) {
-	if observer := (*Client)(nil).newProcessSnapshotObserver(t.Context()); observer.Observe != nil || observer.Quiescent != nil || observer.Unproven != nil {
+	if observer := (*Client)(nil).newProcessSnapshotObserver(t.Context(), nil); observer.Refresh != nil || observer.Quiescent != nil || observer.Unproven != nil {
 		t.Fatal("nil client created a process observer")
 	}
-	if observer := (&Client{}).newProcessSnapshotObserver(t.Context()); observer.Observe != nil || observer.Quiescent != nil || observer.Unproven != nil {
+	if observer := (&Client{}).newProcessSnapshotObserver(t.Context(), nil); observer.Refresh != nil || observer.Quiescent != nil || observer.Unproven != nil {
 		t.Fatal("client without a factory created a process observer")
 	}
 
 	created := false
-	client := &Client{options: Options{NewProcessSnapshotObserver: func(context.Context) ProcessSnapshotObserver {
+	var inventory ProcessInventory
+	client := &Client{options: Options{NewProcessSnapshotObserver: func(_ context.Context, got ProcessInventory) ProcessSnapshotObserver {
 		created = true
+		inventory = got
 		return ProcessSnapshotObserver{}
 	}}}
-	_ = client.newProcessSnapshotObserver(t.Context())
+	_ = client.newProcessSnapshotObserver(t.Context(), &processTree{})
 	if !created {
 		t.Fatal("process observer factory was not called")
 	}
-
-	observeProcessTreeSnapshot(t.Context(), &processTree{}, ProcessSnapshotObserver{})
-	called := false
-	observeProcessTreeSnapshot(t.Context(), &processTree{}, ProcessSnapshotObserver{Observe: func(context.Context, int) {
-		called = true
-	}})
-	if called {
-		t.Fatal("unavailable Unix inventory was reported")
+	if count, available := inventory(); available || count != 0 {
+		t.Fatalf("Unix inventory = (%d, %t), want unavailable", count, available)
 	}
 
 	original := processTreeDescendantCount
 	t.Cleanup(func() { processTreeDescendantCount = original })
 	processTreeDescendantCount = func(*processTree) (int, bool) { return 7, true }
-	observeProcessTreeSnapshot(t.Context(), &processTree{}, ProcessSnapshotObserver{Observe: func(_ context.Context, count int) {
-		called = count == 7
-	}})
-	if !called {
-		t.Fatal("available containment inventory was not reported")
+	observer := client.newProcessSnapshotObserver(t.Context(), &processTree{})
+	if count, available := inventory(); !available || count != 7 {
+		t.Fatalf("available inventory = (%d, %t), want (7, true)", count, available)
+	}
+
+	observeProcessTreeSnapshot(t.Context(), observer)
+	refreshed := false
+	observeProcessTreeSnapshot(t.Context(), ProcessSnapshotObserver{Refresh: func(context.Context) { refreshed = true }})
+	if !refreshed {
+		t.Fatal("snapshot refresh callback was not called")
 	}
 }
 

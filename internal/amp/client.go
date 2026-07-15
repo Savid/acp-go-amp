@@ -70,14 +70,18 @@ type Options struct {
 	OnGoroutinePanic func(ctx context.Context, name string, recovered any)
 	// NewProcessSnapshotObserver registers one successfully started contained
 	// native root with the embedding agent's absolute descendant inventory.
-	NewProcessSnapshotObserver func(context.Context) ProcessSnapshotObserver
+	NewProcessSnapshotObserver func(context.Context, ProcessInventory) ProcessSnapshotObserver
 }
+
+// ProcessInventory queries the current absolute inventory of one containment
+// boundary. False means the platform cannot prove the count at this boundary.
+type ProcessInventory func() (count int, available bool)
 
 // ProcessSnapshotObserver reports only containment-proven process inventory.
 // Observe is optional on platforms without an absolute live inventory;
 // Quiescent is called only after containment proves the root empty.
 type ProcessSnapshotObserver struct {
-	Observe   func(context.Context, int)
+	Refresh   func(context.Context)
 	Quiescent func(context.Context)
 	Unproven  func()
 }
@@ -87,21 +91,19 @@ type Client struct {
 	options Options
 }
 
-func (c *Client) newProcessSnapshotObserver(ctx context.Context) ProcessSnapshotObserver {
+func (c *Client) newProcessSnapshotObserver(ctx context.Context, tree *processTree) ProcessSnapshotObserver {
 	if c == nil || c.options.NewProcessSnapshotObserver == nil {
 		return ProcessSnapshotObserver{}
 	}
 
-	return c.options.NewProcessSnapshotObserver(ctx)
+	return c.options.NewProcessSnapshotObserver(ctx, func() (int, bool) {
+		return processTreeDescendantCount(tree)
+	})
 }
 
-func observeProcessTreeSnapshot(ctx context.Context, tree *processTree, observer ProcessSnapshotObserver) {
-	if observer.Observe == nil {
-		return
-	}
-
-	if count, available := processTreeDescendantCount(tree); available {
-		observer.Observe(ctx, count)
+func observeProcessTreeSnapshot(ctx context.Context, observer ProcessSnapshotObserver) {
+	if observer.Refresh != nil {
+		observer.Refresh(ctx)
 	}
 }
 
@@ -355,8 +357,8 @@ func (c *Client) Continue(ctx context.Context, threadID string, input any) (*Tur
 		return nil, fmt.Errorf("start amp: %w", err)
 	}
 
-	processObserver := c.newProcessSnapshotObserver(ctx)
-	observeProcessTreeSnapshot(ctx, tree, processObserver)
+	processObserver := c.newProcessSnapshotObserver(ctx, tree)
+	observeProcessTreeSnapshot(ctx, processObserver)
 
 	turn := &Turn{
 		log:             c.log,
@@ -430,8 +432,8 @@ func (c *Client) outputWithArgs(ctx context.Context, args ...string) ([]byte, er
 		return nil, fmt.Errorf("amp %s: %w", strings.Join(args, " "), err)
 	}
 
-	processObserver := c.newProcessSnapshotObserver(ctx)
-	observeProcessTreeSnapshot(ctx, tree, processObserver)
+	processObserver := c.newProcessSnapshotObserver(ctx, tree)
+	observeProcessTreeSnapshot(ctx, processObserver)
 
 	cancellationDone := make(chan struct{})
 	stopCancellation := context.AfterFunc(ctx, func() {
@@ -447,7 +449,8 @@ func (c *Client) outputWithArgs(ctx context.Context, args ...string) ([]byte, er
 
 	<-cancellationDone
 
-	observeProcessTreeSnapshot(ctx, tree, processObserver)
+	observeProcessTreeSnapshot(ctx, processObserver)
+
 	quiescenceErr := processTreeTerminateAndWait(tree, defaultCloseWait)
 	finishProcessTreeObservation(ctx, processObserver, quiescenceErr)
 
@@ -813,7 +816,7 @@ func (t *Turn) Close() error {
 
 		err = errors.Join(err, t.wait())
 		if t.tree != nil {
-			observeProcessTreeSnapshot(context.Background(), t.tree, t.processObserver)
+			observeProcessTreeSnapshot(context.Background(), t.processObserver)
 			quiescenceErr := processTreeTerminateAndWait(t.tree, defaultCloseWait)
 			finishProcessTreeObservation(context.Background(), t.processObserver, quiescenceErr)
 			err = errors.Join(err, quiescenceErr)

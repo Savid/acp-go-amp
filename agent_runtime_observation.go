@@ -13,17 +13,18 @@ import (
 // descendant count. A local process-tree count is not an absolute agent count:
 // every active root must be known before the aggregate can be published.
 type providerProcessSnapshotTracker struct {
-	mu     sync.Mutex
-	hooks  RuntimeResourceHooks
-	nextID uint64
-	roots  map[uint64]providerProcessRootSnapshot
-	last   int
-	set    bool
+	mu         sync.Mutex
+	hooks      RuntimeResourceHooks
+	nextID     uint64
+	roots      map[uint64]providerProcessRootSnapshot
+	last       int
+	set        bool
+	publishing bool
+	dirty      bool
 }
 
 type providerProcessRootSnapshot struct {
-	known bool
-	count int
+	inventory nativeamp.ProcessInventory
 }
 
 type providerProcessRootObservation struct {
@@ -38,17 +39,17 @@ func newProviderProcessSnapshotTracker(hooks RuntimeResourceHooks) *providerProc
 	}
 }
 
-func (a *Agent) newProcessSnapshotObserver(ctx context.Context) nativeamp.ProcessSnapshotObserver {
-	root := a.providerProcesses.start(ctx)
+func (a *Agent) newProcessSnapshotObserver(ctx context.Context, inventory nativeamp.ProcessInventory) nativeamp.ProcessSnapshotObserver {
+	root := a.providerProcesses.start(ctx, inventory)
 
 	return nativeamp.ProcessSnapshotObserver{
-		Observe:   root.snapshot,
+		Refresh:   root.refresh,
 		Quiescent: root.quiescent,
 		Unproven:  root.unproven,
 	}
 }
 
-func (t *providerProcessSnapshotTracker) start(context.Context) *providerProcessRootObservation {
+func (t *providerProcessSnapshotTracker) start(ctx context.Context, inventory nativeamp.ProcessInventory) *providerProcessRootObservation {
 	if t == nil {
 		return nil
 	}
@@ -56,32 +57,37 @@ func (t *providerProcessSnapshotTracker) start(context.Context) *providerProcess
 	t.mu.Lock()
 	t.nextID++
 	id := t.nextID
-	t.roots[id] = providerProcessRootSnapshot{}
+	t.roots[id] = providerProcessRootSnapshot{inventory: inventory}
+	publish := t.markDirtyLocked()
 	t.mu.Unlock()
+
+	if publish {
+		t.publishLoop(ctx)
+	}
 
 	return &providerProcessRootObservation{tracker: t, id: id}
 }
 
-func (o *providerProcessRootObservation) snapshot(ctx context.Context, count int) {
-	if o == nil || o.tracker == nil || count < 0 {
+func (o *providerProcessRootObservation) refresh(ctx context.Context) {
+	if o == nil || o.tracker == nil {
 		return
 	}
 
 	t := o.tracker
 	t.mu.Lock()
 
-	root, ok := t.roots[o.id]
-	if !ok {
+	if _, ok := t.roots[o.id]; !ok {
 		t.mu.Unlock()
 
 		return
 	}
 
-	root.known = true
-	root.count = count
-	t.roots[o.id] = root
-	t.publishKnownLocked(ctx)
+	publish := t.markDirtyLocked()
 	t.mu.Unlock()
+
+	if publish {
+		t.publishLoop(ctx)
+	}
 }
 
 func (o *providerProcessRootObservation) quiescent(ctx context.Context) {
@@ -98,13 +104,12 @@ func (o *providerProcessRootObservation) quiescent(ctx context.Context) {
 	}
 
 	delete(t.roots, o.id)
-
-	if len(t.roots) == 0 {
-		t.publishLocked(ctx, 0)
-	} else {
-		t.publishKnownLocked(ctx)
-	}
+	publish := t.markDirtyLocked()
 	t.mu.Unlock()
+
+	if publish {
+		t.publishLoop(ctx)
+	}
 }
 
 func (o *providerProcessRootObservation) unproven() {
@@ -114,38 +119,89 @@ func (o *providerProcessRootObservation) unproven() {
 
 	t := o.tracker
 	t.mu.Lock()
+	publish := false
+
 	if root, ok := t.roots[o.id]; ok {
 		// Once quiescence is unproven, even a previously observed count is no
 		// longer an absolute inventory. Retain the root as unknown so later
 		// roots cannot manufacture a lower aggregate or a false zero.
-		root.known = false
+		root.inventory = nil
 		t.roots[o.id] = root
+		publish = t.markDirtyLocked()
 	}
 	t.mu.Unlock()
+
+	if publish {
+		t.publishLoop(context.Background())
+	}
 }
 
-func (t *providerProcessSnapshotTracker) publishKnownLocked(ctx context.Context) {
-	total := 0
+func (t *providerProcessSnapshotTracker) markDirtyLocked() bool {
+	t.dirty = true
 
-	for _, root := range t.roots {
-		if !root.known {
+	if t.publishing {
+		return false
+	}
+
+	t.publishing = true
+
+	return true
+}
+
+func (t *providerProcessSnapshotTracker) publishLoop(ctx context.Context) {
+	for {
+		t.mu.Lock()
+		if !t.dirty {
+			t.publishing = false
+			t.mu.Unlock()
+
 			return
 		}
 
-		total += root.count
-	}
+		t.dirty = false
+		count, available := t.snapshotLocked()
+		observe := t.hooks.ObserveProcessSnapshot
 
-	t.publishLocked(ctx, total)
+		publish := available && observe != nil && (!t.set || t.last != count)
+		if publish {
+			t.last = count
+			t.set = true
+		}
+		t.mu.Unlock()
+
+		if publish {
+			observe(ctx, RuntimeProcessProviderDescendant, count)
+		}
+	}
 }
 
-func (t *providerProcessSnapshotTracker) publishLocked(ctx context.Context, count int) {
-	if t.set && t.last == count {
-		return
+func (t *providerProcessSnapshotTracker) snapshotLocked() (int, bool) {
+	if len(t.roots) == 0 {
+		return 0, true
 	}
 
-	t.last = count
-	t.set = true
-	observeRuntimeProcessSnapshot(ctx, t.hooks, RuntimeProcessProviderDescendant, count)
+	total := 0
+
+	for _, root := range t.roots {
+		if root.inventory == nil {
+			return 0, false
+		}
+
+		count, available := root.inventory()
+		if !available || count < 0 {
+			return 0, false
+		}
+
+		total += count
+	}
+
+	// A zero while roots remain registered has not crossed their proven
+	// quiescence boundary. Only the empty tracker may publish zero.
+	if total == 0 {
+		return 0, false
+	}
+
+	return total, true
 }
 
 func instrumentRuntimeResourceHooks(hooks RuntimeResourceHooks, observe *observer.Observer) RuntimeResourceHooks {
