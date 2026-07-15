@@ -105,6 +105,7 @@ type agentSession struct {
 	nativeMissingCause    string
 	scratchQuiescenceErr  error
 	unsyncedFrames        []SessionStoreEntry
+	transcriptFrames      int
 	turn                  chan struct{}
 	cancelMu              sync.Mutex
 	activePrompt          *promptTurnState
@@ -487,6 +488,11 @@ func (s *agentSession) persistAfterTurn(ctx context.Context, transcript []Sessio
 	s.mu.Unlock()
 
 	if s.agent.store == nil {
+		s.mu.Lock()
+		s.transcriptFrames += len(pending)
+		s.unsyncedFrames = nil
+		s.mu.Unlock()
+
 		return nil
 	}
 
@@ -499,6 +505,20 @@ func (s *agentSession) persistAfterTurn(ctx context.Context, transcript []Sessio
 		s.retainUnsynced(pending)
 
 		return err
+	}
+
+	s.mu.Lock()
+	persistedFrames := s.transcriptFrames
+	s.mu.Unlock()
+
+	if len(fullTranscript) != persistedFrames {
+		s.retainUnsynced(pending)
+
+		return acp.NewInternalError(map[string]any{
+			jsonFieldError: "amp transcript frame count drift",
+			"got":          len(fullTranscript),
+			"want":         persistedFrames,
+		})
 	}
 
 	if len(pending) > 0 {
@@ -521,9 +541,24 @@ func (s *agentSession) persistAfterTurn(ctx context.Context, transcript []Sessio
 
 	s.mu.Lock()
 	s.unsyncedFrames = nil
+	s.transcriptFrames = len(fullTranscript)
 	s.mu.Unlock()
 
 	return nil
+}
+
+func (s *agentSession) transcriptFrameCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.transcriptFrames
+}
+
+func (s *agentSession) setTranscriptFrameCount(count int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.transcriptFrames = count
 }
 
 // retainUnsynced marks the mirror as unsynced by keeping the exact frames that

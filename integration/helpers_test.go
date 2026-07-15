@@ -172,6 +172,36 @@ func (c *recordingClient) text() string {
 	return strings.Join(c.textChunks, "")
 }
 
+func (c *recordingClient) ampMessageIDs() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	ids := make([]string, 0)
+	for _, update := range c.updates {
+		if update.AgentMessageChunk == nil {
+			continue
+		}
+
+		messageID, ok := ampMessageID(update.AgentMessageChunk.Meta)
+		if ok {
+			ids = append(ids, messageID)
+		}
+	}
+
+	return ids
+}
+
+func ampMessageID(meta map[string]any) (string, bool) {
+	ampMeta, ok := meta["amp"].(map[string]any)
+	if !ok {
+		return "", false
+	}
+
+	messageID, ok := ampMeta["messageId"].(string)
+
+	return messageID, ok && messageID != ""
+}
+
 // lockedBuffer is a concurrency-safe buffer for capturing agent stderr.
 type lockedBuffer struct {
 	mu  sync.Mutex
@@ -273,9 +303,11 @@ func connectLiveAgentBinary(
 		t.Skipf("set %s to run compiled binary integration coverage", envAgentBinary)
 	}
 
-	args := []string{"-path", ampPath, "-home", t.TempDir()}
+	args := []string{"-path", ampPath}
 
 	cmd := exec.Command(agentPath, args...) // #nosec G204 -- path is the test-built agent binary.
+	cmd.Env = append(os.Environ(), envAmpAPIKey+"=fake-integration-key")
+
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		t.Fatal(err)

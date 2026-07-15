@@ -41,6 +41,12 @@ one `Replace` generation. These frames back `session/load` replay and raw-event
 fidelity. Auth material, settings files, API keys, and secrets are never
 written to the store.
 
+The transcript remains byte-verbatim native Amp stream JSON. Because Amp does
+not expose message ids, the adapter derives each main-agent message UUID from
+the stored frame's absolute position and exact bytes. No wrapper metadata is
+injected into the mirror; replaying it reproduces the same identities emitted
+during the live turn.
+
 ## Restore is display-only
 
 `session/load` hydrates the local mirror, verifies the thread can still be

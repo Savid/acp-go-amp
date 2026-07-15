@@ -100,6 +100,15 @@ func TestLiveACPPromptTurn(t *testing.T) {
 	if !strings.Contains(client.text(), "acp-go-amp-acp-ok") {
 		t.Fatalf("client text = %q", client.text())
 	}
+	responseMessageID, ok := ampMessageID(resp.Meta)
+	if !ok {
+		t.Fatalf("prompt response missing _meta.amp.messageId: %#v", resp.Meta)
+	}
+	messageIDs := client.ampMessageIDs()
+	if len(messageIDs) == 0 || messageIDs[len(messageIDs)-1] != responseMessageID {
+		t.Fatalf("terminal message identity mismatch: updates=%#v response=%q", messageIDs, responseMessageID)
+	}
+
 	if _, err := conn.CloseSession(ctx, acp.CloseSessionRequest{SessionId: session.SessionId}); err != nil {
 		t.Fatalf("CloseSession: %v", err)
 	}
@@ -177,9 +186,24 @@ func TestLiveRestoreAfterLocalStateWipe(t *testing.T) {
 		}
 	}()
 
-	if _, promptErr := agent.Prompt(ctx, ampacp.TextPromptRequest(newResp.SessionId, "test-turn", "Reply with exactly: acp-go-amp-restore-seed")); promptErr != nil {
+	seedResponse, promptErr := agent.Prompt(ctx, ampacp.TextPromptRequest(newResp.SessionId, "test-turn", "Reply with exactly: acp-go-amp-restore-seed"))
+	if promptErr != nil {
 		t.Fatalf("seed prompt: %v", promptErr)
 	}
+	seedMessageID, ok := ampMessageID(seedResponse.Meta)
+	if !ok {
+		t.Fatalf("seed response missing _meta.amp.messageId: %#v", seedResponse.Meta)
+	}
+	storedFrames, loadErr := store.Load(ctx, ampacp.SessionKey{SessionID: threadID, Subpath: "transcript"})
+	if loadErr != nil {
+		t.Fatalf("load native mirror: %v", loadErr)
+	}
+	for _, frame := range storedFrames {
+		if strings.Contains(string(frame), `"messageId"`) || strings.Contains(string(frame), `"_meta"`) {
+			t.Fatalf("wrapper identity contaminated native frame: %s", frame)
+		}
+	}
+
 	_ = agent.Close()
 
 	if removeErr := os.RemoveAll(root); removeErr != nil {
@@ -204,6 +228,14 @@ func TestLiveRestoreAfterLocalStateWipe(t *testing.T) {
 	if resp.StopReason != "end_turn" {
 		t.Fatalf("restore prompt stop reason = %q", resp.StopReason)
 	}
+	continuedMessageID, ok := ampMessageID(resp.Meta)
+	if !ok {
+		t.Fatalf("continued response missing _meta.amp.messageId: %#v", resp.Meta)
+	}
+	if continuedMessageID == seedMessageID {
+		t.Fatalf("continued turn reused seed message identity %q", seedMessageID)
+	}
+
 	if _, err := restored.UnstableDeleteSession(ctx, ampacp.DeleteSessionRequest(newResp.SessionId)); err != nil {
 		t.Fatalf("delete restored thread: %v", err)
 	}

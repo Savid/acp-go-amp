@@ -99,6 +99,8 @@ storage, and OpenTelemetry providers. Amp has no native config/auth root, so
   isolated native HOME/XDG state, an isolated settings file, and dedicated
   stdout/stderr pipes.
 - Prompt streaming for assistant messages, tool calls, and thread results.
+- Stable wrapper-derived message UUIDs on main-agent chunks and terminal prompt
+  responses, replayed from the byte-verbatim Amp transcript mirror.
 - MCP stdio and streamable HTTP configuration; other MCP transports are
   rejected because Amp exposes no supported path for them.
 - No ACP slash-command advertisement; `/review`, `/plan`, and similar text is

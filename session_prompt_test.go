@@ -187,7 +187,7 @@ func TestEmitMessageTagsDelegatedFrames(t *testing.T) {
 	}
 
 	for _, frame := range frames {
-		require.NoError(t, session.emitMessage(ctx, frame, true))
+		require.NoError(t, session.emitMessage(ctx, frame, true, ""))
 	}
 
 	waitForRecorded(t, func() bool {
@@ -250,7 +250,7 @@ func TestEmitMessageReplayNeverTags(t *testing.T) {
 	}
 
 	for _, frame := range frames {
-		require.NoError(t, session.emitMessage(ctx, frame, false))
+		require.NoError(t, session.emitMessage(ctx, frame, false, ""))
 	}
 
 	waitForRecorded(t, func() bool {

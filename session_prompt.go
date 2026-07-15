@@ -214,9 +214,11 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (re
 	}
 
 	var (
-		transcript  []SessionStoreEntry
-		promptUsage *acp.Usage
-		terminal    *amp.ResultMessage
+		transcript       []SessionStoreEntry
+		promptUsage      *acp.Usage
+		terminal         *amp.ResultMessage
+		finalMessageID   string
+		baseTranscriptAt = s.transcriptFrameCount()
 	)
 
 	for {
@@ -244,6 +246,7 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (re
 				}
 
 				return acp.PromptResponse{
+					Meta:          ampMessageMeta(nil, finalMessageID),
 					StopReason:    acp.StopReasonEndTurn,
 					Usage:         promptUsage,
 					UserMessageId: params.MessageId,
@@ -254,8 +257,15 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (re
 				return acp.PromptResponse{}, err
 			}
 
+			messageID := ""
+
 			if raw := msg.RawJSON(); raw != "" {
 				transcript = append(transcript, SessionStoreEntry(raw))
+
+				messageID = assistantMessageIdentity(s.id, baseTranscriptAt+len(transcript), msg)
+				if messageID != "" {
+					finalMessageID = messageID
+				}
 			}
 			// Raw events are non-authoritative debug output: an emit failure is
 			// recorded on the observer hook and the turn continues. It never
@@ -264,7 +274,7 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (re
 				s.agent.observe.RecordRawEventEmitFailure(ctx, err)
 			}
 
-			if err := s.emitMessage(ctx, msg, true); err != nil {
+			if err := s.emitMessage(ctx, msg, true, messageID); err != nil {
 				_ = s.interrupt(context.Background())
 
 				return acp.PromptResponse{}, err
@@ -364,7 +374,7 @@ func cancelPending(ctx context.Context, state *promptTurnState) bool {
 // live is true for a running prompt turn and false for session/load replay; only
 // a live turn reconciles the session's advertised mode from a native init
 // frame, because replay restores state from the persisted manifest.
-func (s *agentSession) emitMessage(ctx context.Context, msg amp.Message, live bool) error {
+func (s *agentSession) emitMessage(ctx context.Context, msg amp.Message, live bool, messageID string) error {
 	switch typed := msg.(type) {
 	case *amp.SystemMessage:
 		if live {
@@ -403,7 +413,8 @@ func (s *agentSession) emitMessage(ctx context.Context, msg amp.Message, live bo
 		for _, block := range typed.Content {
 			switch block := block.(type) {
 			case amp.TextBlock:
-				if err := s.emitUpdate(ctx, tagParentToolUse(acp.UpdateAgentMessageText(block.Text), parent)); err != nil {
+				update := withAmpMessageIdentity(acp.UpdateAgentMessageText(block.Text), messageID)
+				if err := s.emitUpdate(ctx, tagParentToolUse(update, parent)); err != nil {
 					return err
 				}
 			case amp.ToolUseBlock:

@@ -27,6 +27,12 @@ Amp stream-JSON frames map to ACP updates:
 - usage data becomes ACP `usage_update`
 - final result usage is copied to the prompt response
 
+Main-agent message chunks carry a wrapper-derived UUID in `messageId` and
+`_meta.amp.messageId`; the successful prompt response repeats the terminal
+main-agent value. Amp exposes no native message/turn id, so the adapter anchors
+the UUID to the exact raw frame and its durable transcript position. This keeps
+load replay stable without modifying native mirror bytes.
+
 The `usage_update` `size` field carries Amp's native `usage.max_tokens`
 verbatim (a model-scale value Amp reports), or `0` when absent.
 

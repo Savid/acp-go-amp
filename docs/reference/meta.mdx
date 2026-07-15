@@ -39,6 +39,15 @@ fail closed. Foreign metadata namespaces are ignored.
 
 ## Emitted metadata
 
+Every main-agent `agent_message_chunk` carries `_meta.amp.messageId`, and the
+terminal main-agent value is repeated on the successful `session/prompt`
+response. The same value is also placed in the ACP `messageId` field. Amp does
+not expose a native message or turn id, so the adapter derives a UUID from the
+frame's absolute position and exact bytes in the durable transcript mirror.
+The derivation makes replay stable while keeping byte-identical assistant
+frames in separate turns distinct. Delegated-agent frames never become the
+terminal checkpoint identity.
+
 `session/update` notifications derived from delegated-agent frames — subagents,
 the oracle, and the Task tool — carry `_meta.amp.parentToolUseId`, the id of the
 `tool_use` block that spawned the delegated agent. Main-agent updates omit the

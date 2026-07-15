@@ -511,6 +511,16 @@ func (a *Agent) loadOrResume(ctx context.Context, sessionID acp.SessionId, cwd s
 	session.createdUnix = manifest.CreatedAtUnixMilli
 
 	session.updatedUnix = manifest.UpdatedAtUnixMilli
+
+	transcript, err := session.loadTranscript(ctx)
+	if err != nil {
+		_ = session.Close(context.Background())
+
+		return nil, err
+	}
+
+	session.setTranscriptFrameCount(len(transcript))
+
 	if err = session.verifyContinuable(ctx); err != nil {
 		_ = session.Close(context.Background())
 
@@ -795,27 +805,38 @@ func (s *agentSession) replayTranscript(ctx context.Context) error {
 		return nil
 	}
 
-	loadCtx, cancel := s.agent.sessionStoreLoadContext(ctx)
-	defer cancel()
-
-	entries, err := s.agent.store.Load(loadCtx, SessionKey{SessionID: string(s.id), Subpath: transcriptSubpath})
+	entries, err := s.loadTranscript(ctx)
 	if err != nil {
 		return err
 	}
 	// Authoritative session/load replay emits session/update frames only. Raw
 	// events are live-turn only and are never replayed from the store.
-	for _, entry := range entries {
+	for index, entry := range entries {
 		msg, err := amp.ParseJSONLine(entry)
 		if err != nil {
 			return err
 		}
 
-		if err := s.emitMessage(ctx, msg, false); err != nil {
+		messageID := assistantMessageIdentity(s.id, index+1, msg)
+		if err := s.emitMessage(ctx, msg, false, messageID); err != nil {
 			return err
 		}
 	}
 
+	s.setTranscriptFrameCount(len(entries))
+
 	return nil
+}
+
+func (s *agentSession) loadTranscript(ctx context.Context) ([]SessionStoreEntry, error) {
+	if s.agent.store == nil {
+		return nil, nil
+	}
+
+	loadCtx, cancel := s.agent.sessionStoreLoadContext(ctx)
+	defer cancel()
+
+	return s.agent.store.Load(loadCtx, SessionKey{SessionID: string(s.id), Subpath: transcriptSubpath})
 }
 
 func (s *agentSession) configOptions() []acp.SessionConfigOption {
