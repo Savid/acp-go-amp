@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
@@ -71,6 +72,34 @@ func TestLocalAgentConnectionHandleDispatch(t *testing.T) {
 	_, reqErr = conn.handle(ctx, acp.AgentMethodSessionPrompt, json.RawMessage(`{"sessionId":"T-missing","prompt":[{"type":"text","text":"x"}]}`))
 	if reqErr == nil || reqErr.Code != -32602 {
 		t.Fatalf("unknown-session prompt = %#v", reqErr)
+	}
+}
+
+func TestLocalAgentConnectionClosedWinsBeforeDispatchAndDecode(t *testing.T) {
+	ctx := context.Background()
+	agent := NewAgent()
+	if err := agent.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	conn := &localAgentConnection{agent: agent}
+	conn.initialized.Store(true)
+
+	for name, request := range map[string]struct {
+		method string
+		params json.RawMessage
+	}{
+		"initialize":        {method: acp.AgentMethodInitialize, params: json.RawMessage(`{bad`)},
+		"known malformed":   {method: acp.AgentMethodSessionNew, params: json.RawMessage(`{bad`)},
+		"unknown stable":    {method: "unknown/method", params: json.RawMessage(`{bad`)},
+		"unknown extension": {method: "_amp/unknown", params: json.RawMessage(`{bad`)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, reqErr := conn.handle(ctx, request.method, request.params)
+			if reqErr == nil || reqErr.Code != -32600 || !strings.Contains(reqErr.Error(), "agent closed") {
+				t.Fatalf("closed dispatch = %#v", reqErr)
+			}
+		})
 	}
 }
 

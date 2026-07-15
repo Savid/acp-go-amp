@@ -96,6 +96,7 @@ type agentSession struct {
 	mcpConfigJSON         string
 	env                   map[string]string
 	rawEvents             bool
+	rawEventMu            sync.Mutex
 	rawEventSeq           atomic.Int64
 	settingsDir           string
 	settingsFile          string

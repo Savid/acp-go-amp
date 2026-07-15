@@ -84,14 +84,12 @@ func parentTagOf(t *testing.T, update acp.SessionUpdate) (string, bool) {
 	return id, ok
 }
 
-// TestParentToolUseTagLiveGate confirms provenance is stamped only for live
-// turns: a replayed frame (live=false) drops the id so replay stays untagged,
-// and a live main-agent frame with no parent id yields no tag.
-func TestParentToolUseTagLiveGate(t *testing.T) {
-	assert.Equal(t, "toolu_1", parentToolUseTag("toolu_1", true), "live delegated frame keeps id")
-	assert.Empty(t, parentToolUseTag("toolu_1", false), "replay drops id")
-	assert.Empty(t, parentToolUseTag("", true), "live main-agent frame stays untagged")
-	assert.Empty(t, parentToolUseTag("", false), "replayed main-agent frame stays untagged")
+// TestParentToolUseTagPreservesFrameIdentity confirms provenance is a
+// deterministic property of the native frame, so both live mapping and replay
+// can stamp it without adapter-owned state.
+func TestParentToolUseTagPreservesFrameIdentity(t *testing.T) {
+	assert.Equal(t, "toolu_1", parentToolUseTag("toolu_1"))
+	assert.Empty(t, parentToolUseTag(""), "main-agent frames stay untagged")
 }
 
 // TestTagParentToolUseAllUpdateKinds proves every frame-derived update variant
@@ -233,10 +231,9 @@ func TestEmitMessageTagsDelegatedFrames(t *testing.T) {
 	assert.Equal(t, 2, untagged, "the two main-agent frames stay untagged")
 }
 
-// TestEmitMessageReplayNeverTags confirms replay (live=false) never stamps
-// provenance even when the stored frame carries parent_tool_use_id, keeping
-// session/load replay semantics unchanged.
-func TestEmitMessageReplayNeverTags(t *testing.T) {
+// TestEmitMessageReplayPreservesDelegatedTags confirms replay derives the same
+// provenance from the byte-verbatim native frame as the live turn.
+func TestEmitMessageReplayPreservesDelegatedTags(t *testing.T) {
 	ctx := context.Background()
 	agent := NewAgent()
 	client, cleanup := attachRecordingClient(t, agent)
@@ -265,8 +262,9 @@ func TestEmitMessageReplayNeverTags(t *testing.T) {
 	client.mu.Unlock()
 
 	for _, notification := range updates {
-		_, ok := parentTagOf(t, notification.Update)
-		assert.False(t, ok, "replayed frame must not carry provenance tag")
+		id, ok := parentTagOf(t, notification.Update)
+		assert.True(t, ok, "replayed delegated frame must carry provenance tag")
+		assert.Equal(t, "toolu_x", id)
 	}
 }
 

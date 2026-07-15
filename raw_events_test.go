@@ -3,6 +3,7 @@ package ampacp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"sort"
 	"strings"
 	"sync"
@@ -12,6 +13,45 @@ import (
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
+
+type failThenRecordRawClient struct {
+	mu     sync.Mutex
+	fail   bool
+	events []json.RawMessage
+}
+
+func (*failThenRecordRawClient) Done() <-chan struct{} { return make(chan struct{}) }
+
+func (*failThenRecordRawClient) SessionUpdate(context.Context, acp.SessionNotification) error {
+	return nil
+}
+
+func (c *failThenRecordRawClient) NotifyExtension(_ context.Context, _ string, params any) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.fail {
+		c.fail = false
+
+		return errors.New("injected raw delivery failure")
+	}
+
+	encoded, err := json.Marshal(params)
+	if err != nil {
+		return err
+	}
+
+	c.events = append(c.events, encoded)
+
+	return nil
+}
+
+func (c *failThenRecordRawClient) snapshot() []json.RawMessage {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return append([]json.RawMessage(nil), c.events...)
+}
 
 // recordedRawEvent is the decoded shape of a `_amp/rawEvent` notification.
 type recordedRawEvent struct {
@@ -126,6 +166,34 @@ func TestRawEventContiguousPerSessionSequence(t *testing.T) {
 		if event.Sequence != int64(i+1) {
 			t.Fatalf("sequence[%d] = %d, want %d (contiguous)", i, event.Sequence, i+1)
 		}
+	}
+}
+
+func TestRawEventDeliveryFailureDoesNotConsumeSequence(t *testing.T) {
+	ctx := context.Background()
+	agent := NewAgent()
+	client := &failThenRecordRawClient{fail: true}
+	agent.setConnection(client)
+	session := &agentSession{agent: agent, id: "T-delivery-seq", rawEvents: true}
+	message := fakeAmpMessage{raw: map[string]any{"type": "assistant"}}
+
+	if err := session.emitRawEvent(ctx, "stream-json", message); err == nil {
+		t.Fatal("injected delivery failure succeeded")
+	}
+	if got := session.rawEventSeq.Load(); got != 0 {
+		t.Fatalf("failed delivery consumed sequence %d", got)
+	}
+
+	if err := session.emitRawEvent(ctx, "stream-json", message); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.emitRawEvent(ctx, "stream-json", message); err != nil {
+		t.Fatal(err)
+	}
+
+	events := decodeRawEvents(t, client.snapshot())
+	if len(events) != 2 || events[0].Sequence != 1 || events[1].Sequence != 2 {
+		t.Fatalf("delivered sequences = %#v", events)
 	}
 }
 

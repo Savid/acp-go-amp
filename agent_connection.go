@@ -91,6 +91,12 @@ func (c *localAgentConnection) Done() <-chan struct{} {
 }
 
 func (c *localAgentConnection) handle(ctx context.Context, method string, params json.RawMessage) (any, *acp.RequestError) {
+	// Closed is the outermost dispatch state. Once set it wins over the
+	// initialize gate, method lookup, and parameter decoding for every request.
+	if err := c.agent.ensureOpen(); err != nil {
+		return nil, requestError(err)
+	}
+
 	if method != acp.AgentMethodInitialize && !c.initialized.Load() {
 		return nil, acp.NewInvalidRequest(map[string]any{
 			jsonFieldMethod: method,

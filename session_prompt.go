@@ -381,7 +381,7 @@ func (s *agentSession) emitMessage(ctx context.Context, msg amp.Message, live bo
 			return s.reconcileNativeConfig(ctx, typed)
 		}
 	case *amp.UserMessage:
-		parent := parentToolUseTag(typed.ParentToolUseID, live)
+		parent := parentToolUseTag(typed.ParentToolUseID)
 
 		for _, block := range typed.Content {
 			if text, ok := block.(amp.TextBlock); ok {
@@ -408,7 +408,7 @@ func (s *agentSession) emitMessage(ctx context.Context, msg amp.Message, live bo
 			}
 		}
 	case *amp.AssistantMessage:
-		parent := parentToolUseTag(typed.ParentToolUseID, live)
+		parent := parentToolUseTag(typed.ParentToolUseID)
 
 		for _, block := range typed.Content {
 			switch block := block.(type) {
@@ -442,17 +442,11 @@ func (s *agentSession) emitMessage(ctx context.Context, msg amp.Message, live bo
 	return nil
 }
 
-// parentToolUseTag returns the delegated-agent provenance id to stamp on
-// frame-derived updates. Provenance tagging is a live-turn concern only:
-// session/load replay restores updates verbatim from the stored transcript and
-// must never re-tag, so the id is dropped (returned empty) unless the update
-// originates from a live turn. An empty frame id (main-agent activity) likewise
-// yields no tag.
-func parentToolUseTag(frameID string, live bool) string {
-	if !live {
-		return ""
-	}
-
+// parentToolUseTag returns the delegated-agent provenance id to stamp on every
+// update derived from the frame, both live and during session/load replay. The
+// transcript preserves the native parent_tool_use_id, so replay can reproduce
+// the same attribution without adapter-owned state.
+func parentToolUseTag(frameID string) string {
 	return frameID
 }
 
@@ -559,9 +553,18 @@ func (s *agentSession) emitRawEvent(ctx context.Context, source string, msg amp.
 		return nil
 	}
 
+	// Raw notifications for one session are serialized across sequence
+	// selection and delivery. A failed delivery leaves the committed counter
+	// unchanged, so the next notification visible to the client reuses the
+	// candidate instead of exposing a gap.
+	s.rawEventMu.Lock()
+	defer s.rawEventMu.Unlock()
+
+	sequence := s.rawEventSeq.Load() + 1
+
 	payload := map[string]any{
 		"sessionId": s.id,
-		"sequence":  s.nextRawEventSequence(),
+		"sequence":  sequence,
 		keySource:   source,
 		"event":     raw,
 	}
@@ -580,14 +583,13 @@ func (s *agentSession) emitRawEvent(ctx context.Context, source string, msg amp.
 		}
 	}
 
-	return conn.NotifyExtension(ctx, RawEventMethod, payload)
-}
+	if err := conn.NotifyExtension(ctx, RawEventMethod, payload); err != nil {
+		return err
+	}
 
-// nextRawEventSequence returns the next per-session raw-event sequence, starting
-// at 1. Each session owns its counter so concurrent sessions each see a
-// contiguous 1..N stream.
-func (s *agentSession) nextRawEventSequence() int64 {
-	return s.rawEventSeq.Add(1)
+	s.rawEventSeq.Store(sequence)
+
+	return nil
 }
 
 func (s *agentSession) validateFrameSessionID(msg amp.Message, state *promptTurnState) error {
