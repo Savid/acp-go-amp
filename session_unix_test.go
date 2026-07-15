@@ -36,7 +36,7 @@ func TestCloseSessionCancelsActiveTurnAfterProcessExit(t *testing.T) {
 	resultCh := make(chan acp.PromptResponse, 1)
 	errCh := make(chan error, 1)
 	go func() {
-		result, promptErr := agent.Prompt(context.Background(), TextPromptRequest(resp.SessionId, "close me"))
+		result, promptErr := agent.Prompt(context.Background(), TextPromptRequest(resp.SessionId, "test-turn", "close me"))
 		resultCh <- result
 		errCh <- promptErr
 	}()
@@ -105,7 +105,7 @@ func TestPromptContextCancelUsesInterruptLadder(t *testing.T) {
 	resultCh := make(chan acp.PromptResponse, 1)
 	errCh := make(chan error, 1)
 	go func() {
-		result, promptErr := agent.Prompt(promptCtx, TextPromptRequest(resp.SessionId, "cancel by context"))
+		result, promptErr := agent.Prompt(promptCtx, TextPromptRequest(resp.SessionId, "test-turn", "cancel by context"))
 		resultCh <- result
 		errCh <- promptErr
 	}()

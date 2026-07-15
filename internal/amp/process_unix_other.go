@@ -1,4 +1,4 @@
-//go:build unix && !linux && !freebsd && !darwin
+//go:build openbsd
 
 package amp
 

@@ -217,7 +217,7 @@ func TestRemainingAgentBranches(t *testing.T) {
 	// A tombstoned session is wire-indistinguishable from one that never
 	// existed: prompt/cancel/close all yield the uniform unknown-session shape.
 	for _, id := range []acp.SessionId{"T-deleted", "T-missing"} {
-		_, promptErr := agent.Prompt(ctx, TextPromptRequest(id, "x"))
+		_, promptErr := agent.Prompt(ctx, TextPromptRequest(id, "test-turn", "x"))
 		requireUnknownSessionError(t, promptErr)
 		requireUnknownSessionError(t, agent.Cancel(ctx, acp.CancelNotification{SessionId: id}))
 		_, closeErr := agent.CloseSession(ctx, acp.CloseSessionRequest{SessionId: id})
@@ -475,14 +475,14 @@ func TestMirrorUnsyncedRetention(t *testing.T) {
 	// Fail the completed turn's persist and the first retry.
 	store.failReplaces = 2
 
-	if _, err = agent.Prompt(ctx, TextPromptRequest(id, "turn one")); err == nil {
+	if _, err = agent.Prompt(ctx, TextPromptRequest(id, "test-turn", "turn one")); err == nil {
 		t.Fatal("prompt with failing persist returned no error")
 	}
-	if _, err = agent.Prompt(ctx, TextPromptRequest(id, "blocked")); err == nil || !strings.Contains(err.Error(), "mirror_unsynced") {
+	if _, err = agent.Prompt(ctx, TextPromptRequest(id, "test-turn", "blocked")); err == nil || !strings.Contains(err.Error(), "mirror_unsynced") {
 		t.Fatalf("second prompt not blocked with mirror_unsynced: %v", err)
 	}
 	// Third prompt: retry of the exact frames succeeds, then the new turn runs.
-	if _, err = agent.Prompt(ctx, TextPromptRequest(id, "turn three")); err != nil {
+	if _, err = agent.Prompt(ctx, TextPromptRequest(id, "test-turn", "turn three")); err != nil {
 		t.Fatalf("prompt after store recovery: %v", err)
 	}
 
@@ -561,13 +561,13 @@ func TestSessionDirectBranches(t *testing.T) {
 	if err := os.WriteFile(fileScratch, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := newAgentSession(NewAgent(WithScratchDir(fileScratch)), "T-1", "", parsedSessionMeta{}, "", nil); err == nil {
+	if _, err := newAgentSession(t.Context(), NewAgent(WithScratchDir(fileScratch)), "T-1", "", parsedSessionMeta{}, "", nil); err == nil {
 		t.Fatal("newAgentSession with file scratch dir succeeded")
 	}
 
 	path, _ := fakeAgentAmpPath(t, "")
 	agent := NewAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()))
-	session, err := newAgentSession(agent, "T-1", t.TempDir(), parsedSessionMeta{rawEvent: true}, "", nil)
+	session, err := newAgentSession(t.Context(), agent, "T-1", t.TempDir(), parsedSessionMeta{rawEvent: true}, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

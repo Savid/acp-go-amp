@@ -43,8 +43,11 @@ func TestRequestBuildersAndCallForkSession(t *testing.T) {
 	if DeleteSessionRequest("T-1").SessionId != "T-1" {
 		t.Fatal("delete request failed")
 	}
-	if PromptRequest("T-1", acp.TextBlock("hi")).SessionId != "T-1" || TextPromptRequest("T-1", "hi").SessionId != "T-1" {
+	if PromptRequest("T-1", "turn-1", acp.TextBlock("hi")).SessionId != "T-1" || TextPromptRequest("T-1", "test-turn", "hi").SessionId != "T-1" {
 		t.Fatal("prompt request failed")
+	}
+	if cancel := CancelRequest("T-1", "ignored"); cancel.SessionId != "T-1" || cancel.Meta != nil {
+		t.Fatalf("cancel request = %#v", cancel)
 	}
 	if SetConfigOptionRequest("T-1", "mode", "low").ValueId == nil || SetModelRequest("T-1", "model").ValueId == nil {
 		t.Fatal("set config request failed")

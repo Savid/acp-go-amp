@@ -39,6 +39,8 @@ req := ampacp.NewSessionRequest(cwd,
 )
 ```
 
-The adapter renders those two servers into one `--mcp-config` JSON document for
-that session's prompt process. See the [Go API](/docs/reference/go-api) for the
-builder signatures.
+The adapter renders those two servers into a mode-`0600` file inside the
+adapter-owned session settings directory and passes only its path through
+`--mcp-config`. Header values therefore do not appear in process arguments. The
+file is removed after the prompt process exits. See the
+[Go API](/docs/reference/go-api) for the builder signatures.

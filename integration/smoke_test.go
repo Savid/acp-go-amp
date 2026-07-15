@@ -58,7 +58,7 @@ func TestSmokeFakeACPLifecycleAndMCP(t *testing.T) {
 	if _, sseErr := agent.NewSession(ctx, ampacp.NewSessionRequest(cwd, ampacp.WithSessionMCPServers(acp.McpServer{Sse: &acp.McpServerSseInline{Name: "sse", Url: "https://example.test/sse"}}))); sseErr == nil {
 		t.Fatal("SSE MCP accepted")
 	}
-	promptResp, err := agent.Prompt(ctx, ampacp.TextPromptRequest(resp.SessionId, "smoke"))
+	promptResp, err := agent.Prompt(ctx, ampacp.TextPromptRequest(resp.SessionId, "test-turn", "smoke"))
 	if err != nil {
 		t.Fatalf("Prompt: %v", err)
 	}
@@ -176,7 +176,7 @@ func TestLiveRestoreAfterLocalStateWipe(t *testing.T) {
 		}
 	}()
 
-	if _, promptErr := agent.Prompt(ctx, ampacp.TextPromptRequest(newResp.SessionId, "Reply with exactly: acp-go-amp-restore-seed")); promptErr != nil {
+	if _, promptErr := agent.Prompt(ctx, ampacp.TextPromptRequest(newResp.SessionId, "test-turn", "Reply with exactly: acp-go-amp-restore-seed")); promptErr != nil {
 		t.Fatalf("seed prompt: %v", promptErr)
 	}
 	_ = agent.Close()
@@ -196,7 +196,7 @@ func TestLiveRestoreAfterLocalStateWipe(t *testing.T) {
 	if _, loadErr := restored.LoadSession(ctx, ampacp.LoadSessionRequest(newResp.SessionId, cwd)); loadErr != nil {
 		t.Fatalf("load after local wipe: %v", loadErr)
 	}
-	resp, promptErr := restored.Prompt(ctx, ampacp.TextPromptRequest(newResp.SessionId, "Reply with exactly: acp-go-amp-restore-ok"))
+	resp, promptErr := restored.Prompt(ctx, ampacp.TextPromptRequest(newResp.SessionId, "test-turn", "Reply with exactly: acp-go-amp-restore-ok"))
 	if promptErr != nil {
 		t.Fatalf("continue after local wipe: %v", promptErr)
 	}

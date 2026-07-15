@@ -1,4 +1,4 @@
-//go:build unix
+//go:build linux || darwin || freebsd || openbsd
 
 package amp
 
@@ -7,6 +7,9 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -42,6 +45,126 @@ func TestSignalProcessGroupErrors(t *testing.T) {
 	if err := interruptProcess(cmd); !errors.Is(err, syscall.EPERM) {
 		t.Fatalf("kill EPERM should propagate, got %v", err)
 	}
+}
+
+func TestOutputWaitsForDescendantTreeQuiescence(t *testing.T) {
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "child.pid")
+	script := filepath.Join(dir, "amp")
+	err := os.WriteFile(script, []byte("#!/bin/sh\n(trap '' INT TERM; while :; do sleep 1; done) &\necho $! > \"$AMP_CHILD_PID_FILE\"\nexit 0\n"), 0o700)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	client := NewClient(nil, Options{
+		CLIPath: script,
+		Cwd:     dir,
+		Env:     map[string]string{"AMP_CHILD_PID_FILE": pidFile},
+	})
+	if _, outputErr := client.outputRaw(t.Context(), "descendant"); outputErr != nil {
+		t.Fatalf("contained output: %v", outputErr)
+	}
+
+	rawPID, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(rawPID)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if processPIDAlive(pid) {
+		t.Fatalf("descendant pid %d survived successful command return", pid)
+	}
+}
+
+func TestOutputCancellationTerminatesContainedTree(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "amp")
+	err := os.WriteFile(script, []byte("#!/bin/sh\ntrap '' INT TERM\nwhile :; do sleep 1; done\n"), 0o700)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	client := NewClient(nil, Options{CLIPath: script, Cwd: dir})
+	cancelled, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	if _, outputErr := client.outputRaw(cancelled, "cancelled-before-start"); !errors.Is(outputErr, context.Canceled) {
+		t.Fatalf("pre-start cancellation = %v, want context.Canceled", outputErr)
+	}
+
+	running, stop := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer stop()
+
+	if _, outputErr := client.outputRaw(running, "cancel-running"); outputErr == nil {
+		t.Fatal("running cancellation unexpectedly succeeded")
+	}
+}
+
+func TestProcessTreeQuiescenceFailureBranches(t *testing.T) {
+	originalKill := syscallKill
+	t.Cleanup(func() { syscallKill = originalKill })
+
+	if err := (*processTree)(nil).terminateAndWait(time.Millisecond); err != nil {
+		t.Fatalf("nil tree: %v", err)
+	}
+	if err := signalProcessGroupID(0, syscall.SIGKILL); err != nil {
+		t.Fatalf("zero process group: %v", err)
+	}
+	if !ProcessTreeQuiescent(nil) || ProcessTreeQuiescent(ErrProcessTreeNotQuiescent) {
+		t.Fatal("process-tree quiescence classification mismatch")
+	}
+
+	tree := &processTree{pgid: 12345}
+	syscallKill = func(int, syscall.Signal) error { return syscall.EPERM }
+	if err := tree.terminateAndWait(time.Millisecond); !errors.Is(err, ErrProcessTreeNotQuiescent) {
+		t.Fatalf("terminate failure = %v", err)
+	}
+
+	calls := 0
+	syscallKill = func(_ int, signal syscall.Signal) error {
+		calls++
+		if signal == syscall.Signal(0) {
+			return syscall.ESRCH
+		}
+
+		return nil
+	}
+	if err := tree.terminateAndWait(time.Second); err != nil {
+		t.Fatalf("quiescent group: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("syscall calls = %d, want kill plus probe", calls)
+	}
+
+	syscallKill = func(_ int, signal syscall.Signal) error {
+		if signal == syscall.Signal(0) {
+			return syscall.EINVAL
+		}
+
+		return nil
+	}
+	if err := tree.terminateAndWait(time.Second); !errors.Is(err, ErrProcessTreeNotQuiescent) {
+		t.Fatalf("probe failure = %v", err)
+	}
+
+	syscallKill = func(_ int, signal syscall.Signal) error {
+		if signal == syscall.Signal(0) {
+			return syscall.EPERM
+		}
+
+		return nil
+	}
+	if err := tree.terminateAndWait(time.Millisecond); !errors.Is(err, ErrProcessTreeNotQuiescent) {
+		t.Fatalf("live group timeout = %v", err)
+	}
+}
+
+func processPIDAlive(pid int) bool {
+	err := syscall.Kill(pid, 0)
+
+	return err == nil || errors.Is(err, syscall.EPERM)
 }
 
 func TestInterruptReturnsSignalError(t *testing.T) {

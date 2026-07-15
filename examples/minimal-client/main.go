@@ -304,7 +304,7 @@ func runConversation(
 		_, _ = conn.CloseSession(context.Background(), acp.CloseSessionRequest{SessionId: session.SessionId})
 	}()
 
-	resp, err := conn.Prompt(ctx, ampacp.TextPromptRequest(session.SessionId, prompt))
+	resp, err := conn.Prompt(ctx, ampacp.TextPromptRequest(session.SessionId, "test-turn", prompt))
 	if err != nil {
 		return err
 	}

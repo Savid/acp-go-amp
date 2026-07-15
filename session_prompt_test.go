@@ -323,7 +323,7 @@ func TestTurnFailureProviderError(t *testing.T) {
 			if err != nil {
 				t.Fatalf("NewSession: %v", err)
 			}
-			promptResp, promptErr := agent.Prompt(ctx, TextPromptRequest(resp.SessionId, "x"))
+			promptResp, promptErr := agent.Prompt(ctx, TextPromptRequest(resp.SessionId, "test-turn", "x"))
 			if promptErr == nil {
 				t.Fatalf("provider error returned success: %#v", promptResp)
 			}
@@ -344,7 +344,7 @@ func TestTurnFailureFallsBackToResultField(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
 	}
-	_, promptErr := agent.Prompt(ctx, TextPromptRequest(resp.SessionId, "x"))
+	_, promptErr := agent.Prompt(ctx, TextPromptRequest(resp.SessionId, "test-turn", "x"))
 	requireTurnFailure(t, promptErr, causeProvider, "failure carried in result field")
 }
 
@@ -367,7 +367,7 @@ func TestTurnFailureTransportRecoversCause(t *testing.T) {
 			if err != nil {
 				t.Fatalf("NewSession: %v", err)
 			}
-			_, promptErr := agent.Prompt(ctx, TextPromptRequest(resp.SessionId, "x"))
+			_, promptErr := agent.Prompt(ctx, TextPromptRequest(resp.SessionId, "test-turn", "x"))
 			requireTurnFailure(t, promptErr, causeTransport, tc.want)
 		})
 	}
@@ -383,14 +383,14 @@ func TestTurnFailureProcessDeathIsRetriable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
 	}
-	_, promptErr := agent.Prompt(ctx, TextPromptRequest(resp.SessionId, "x"))
+	_, promptErr := agent.Prompt(ctx, TextPromptRequest(resp.SessionId, "test-turn", "x"))
 	requireTurnFailure(t, promptErr, causeProcessExit, "delayed failure")
 
 	// The session is neither removed nor poisoned: it re-drives the native turn.
 	if _, sessionErr := agent.session(resp.SessionId); sessionErr != nil {
 		t.Fatalf("session removed after process death: %v", sessionErr)
 	}
-	_, retryErr := agent.Prompt(ctx, TextPromptRequest(resp.SessionId, "again"))
+	_, retryErr := agent.Prompt(ctx, TextPromptRequest(resp.SessionId, "test-turn", "again"))
 	requireTurnFailure(t, retryErr, causeProcessExit, "delayed failure")
 }
 
@@ -404,13 +404,13 @@ func TestTurnFailureMalformedLineNotFatal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
 	}
-	_, promptErr := agent.Prompt(ctx, TextPromptRequest(resp.SessionId, "x"))
+	_, promptErr := agent.Prompt(ctx, TextPromptRequest(resp.SessionId, "test-turn", "x"))
 	requireTurnFailure(t, promptErr, causeTransport, "decode amp json line")
 
 	if _, sessionErr := agent.session(resp.SessionId); sessionErr != nil {
 		t.Fatalf("session torn down by malformed line: %v", sessionErr)
 	}
-	_, retryErr := agent.Prompt(ctx, TextPromptRequest(resp.SessionId, "again"))
+	_, retryErr := agent.Prompt(ctx, TextPromptRequest(resp.SessionId, "test-turn", "again"))
 	requireTurnFailure(t, retryErr, causeTransport, "decode amp json line")
 }
 
@@ -428,7 +428,7 @@ func TestTurnFailureCancelNotConflated(t *testing.T) {
 	resultCh := make(chan acp.PromptResponse, 1)
 	errCh := make(chan error, 1)
 	go func() {
-		promptResp, promptErr := agent.Prompt(ctx, TextPromptRequest(resp.SessionId, "x"))
+		promptResp, promptErr := agent.Prompt(ctx, TextPromptRequest(resp.SessionId, "test-turn", "x"))
 		resultCh <- promptResp
 		errCh <- promptErr
 	}()
@@ -461,7 +461,7 @@ func TestTurnFailureTimeout(t *testing.T) {
 	resultCh := make(chan acp.PromptResponse, 1)
 	errCh := make(chan error, 1)
 	go func() {
-		promptResp, promptErr := agent.Prompt(ctx, TextPromptRequest(resp.SessionId, "x"))
+		promptResp, promptErr := agent.Prompt(ctx, TextPromptRequest(resp.SessionId, "test-turn", "x"))
 		resultCh <- promptResp
 		errCh <- promptErr
 	}()
@@ -513,7 +513,7 @@ func TestTurnFailureCancelWinsOnTimeoutCoincidence(t *testing.T) {
 		resultCh := make(chan acp.PromptResponse, 1)
 		errCh := make(chan error, 1)
 		go func() {
-			promptResp, promptErr := agent.Prompt(ctx, TextPromptRequest(resp.SessionId, "x"))
+			promptResp, promptErr := agent.Prompt(ctx, TextPromptRequest(resp.SessionId, "test-turn", "x"))
 			resultCh <- promptResp
 			errCh <- promptErr
 		}()

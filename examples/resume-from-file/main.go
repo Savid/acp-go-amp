@@ -232,7 +232,7 @@ func runLoadedSession(
 
 	fmt.Fprintln(stdout, "== resume smoke test ==")
 
-	resp, err := conn.Prompt(ctx, ampacp.TextPromptRequest(id, prompt))
+	resp, err := conn.Prompt(ctx, ampacp.TextPromptRequest(id, "test-turn", prompt))
 	if err != nil {
 		return err
 	}

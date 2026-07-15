@@ -123,7 +123,7 @@ func TestActiveLoadRetriesMirrorBeforeReplay(t *testing.T) {
 	id := resp.SessionId
 
 	store.failReplaces = 1
-	if _, err := agent.Prompt(ctx, TextPromptRequest(id, "persist after native success")); err == nil {
+	if _, err := agent.Prompt(ctx, TextPromptRequest(id, "test-turn", "persist after native success")); err == nil {
 		t.Fatal("prompt with failing persist returned no error")
 	}
 	store.failReplaces = 1
@@ -152,7 +152,7 @@ func TestActiveLoadVerifiesContinuability(t *testing.T) {
 	if _, err := agent.LoadSession(ctx, LoadSessionRequest(resp.SessionId, cwd)); err != nil {
 		t.Fatalf("active LoadSession with missing native thread should replay only: %v", err)
 	}
-	if _, err := agent.Prompt(ctx, TextPromptRequest(resp.SessionId, "should fail")); err == nil || !strings.Contains(err.Error(), "native_state_missing") {
+	if _, err := agent.Prompt(ctx, TextPromptRequest(resp.SessionId, "test-turn", "should fail")); err == nil || !strings.Contains(err.Error(), "native_state_missing") {
 		t.Fatalf("prompt after active load missing export = %v, want native_state_missing", err)
 	}
 }
@@ -226,7 +226,7 @@ func TestSessionSlotFilesystemServeAndCloseEdges(t *testing.T) {
 	previousWriteFile := writeFile
 	writeFile = func(string, []byte, os.FileMode) error { return errors.New("write settings failed") }
 	t.Cleanup(func() { writeFile = previousWriteFile })
-	if _, err := newAgentSession(NewAgent(WithScratchDir(t.TempDir())), "T-write", t.TempDir(), parsedSessionMeta{}, "", nil); err == nil {
+	if _, err := newAgentSession(t.Context(), NewAgent(WithScratchDir(t.TempDir())), "T-write", t.TempDir(), parsedSessionMeta{}, "", nil); err == nil {
 		t.Fatal("settings write failure was ignored")
 	}
 	writeFile = previousWriteFile
@@ -353,13 +353,13 @@ func TestPromptAndPersistenceEdges(t *testing.T) {
 	path, _ := fakeAgentAmpPath(t, "")
 
 	closed := &agentSession{agent: NewAgent(), id: "T-closed", closed: true, turn: make(chan struct{}, 1)}
-	if _, err := closed.Prompt(ctx, TextPromptRequest("T-closed", "x")); !errors.Is(err, errSessionClosed) {
+	if _, err := closed.Prompt(ctx, TextPromptRequest("T-closed", "test-turn", "x")); !errors.Is(err, errSessionClosed) {
 		t.Fatalf("closed prompt = %v", err)
 	}
 
 	busy := &agentSession{agent: NewAgent(), id: "T-busy", turn: make(chan struct{}, 1)}
 	busy.turn <- struct{}{}
-	if _, err := busy.Prompt(ctx, TextPromptRequest("T-busy", "x")); err == nil || !strings.Contains(err.Error(), "backpressure") {
+	if _, err := busy.Prompt(ctx, TextPromptRequest("T-busy", "test-turn", "x")); err == nil || !strings.Contains(err.Error(), "backpressure") {
 		t.Fatalf("busy prompt = %v", err)
 	}
 
@@ -369,7 +369,7 @@ func TestPromptAndPersistenceEdges(t *testing.T) {
 	}
 
 	continueErr := &agentSession{agent: NewAgent(WithExecutablePath("/does/not/exist")), id: "T-continue", cwd: t.TempDir(), turn: make(chan struct{}, 1)}
-	if _, err := continueErr.Prompt(ctx, TextPromptRequest("T-continue", "x")); err == nil {
+	if _, err := continueErr.Prompt(ctx, TextPromptRequest("T-continue", "test-turn", "x")); err == nil {
 		t.Fatal("native continue error ignored")
 	}
 
@@ -389,7 +389,7 @@ func TestPromptAndPersistenceEdges(t *testing.T) {
 			if err != nil {
 				t.Fatalf("NewSession: %v", err)
 			}
-			_, err = agent.Prompt(ctx, TextPromptRequest(newResp.SessionId, "x"))
+			_, err = agent.Prompt(ctx, TextPromptRequest(newResp.SessionId, "test-turn", "x"))
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("Prompt error = %v, want %q", err, tc.want)
 			}
@@ -402,7 +402,7 @@ func TestPromptAndPersistenceEdges(t *testing.T) {
 		t.Fatalf("NewSession update: %v", err)
 	}
 	updateAgent.setConnection(newClosedAgentConnection(t))
-	if _, updateErr := updateAgent.Prompt(ctx, TextPromptRequest(updateResp.SessionId, "x")); updateErr == nil {
+	if _, updateErr := updateAgent.Prompt(ctx, TextPromptRequest(updateResp.SessionId, "test-turn", "x")); updateErr == nil {
 		t.Fatal("session update failure was ignored")
 	}
 
@@ -413,7 +413,7 @@ func TestPromptAndPersistenceEdges(t *testing.T) {
 	}
 	persistErr := errors.New("persist replace failed")
 	persistAgent.store = &errorStore{replaceErr: persistErr}
-	if _, persistGotErr := persistAgent.Prompt(ctx, TextPromptRequest(persistResp.SessionId, "x")); !errors.Is(persistGotErr, persistErr) {
+	if _, persistGotErr := persistAgent.Prompt(ctx, TextPromptRequest(persistResp.SessionId, "test-turn", "x")); !errors.Is(persistGotErr, persistErr) {
 		t.Fatalf("prompt persist error = %v", persistGotErr)
 	}
 
@@ -427,7 +427,7 @@ func TestPromptAndPersistenceEdges(t *testing.T) {
 	resultCh := make(chan acp.PromptResponse, 1)
 	errCh := make(chan error, 1)
 	go func() {
-		resp, promptErr := cancelAgent.Prompt(promptCtx, TextPromptRequest(cancelResp.SessionId, "x"))
+		resp, promptErr := cancelAgent.Prompt(promptCtx, TextPromptRequest(cancelResp.SessionId, "test-turn", "x"))
 		resultCh <- resp
 		errCh <- promptErr
 	}()
@@ -725,7 +725,7 @@ func TestReconcileNativeConfigEmitFailureAbortsTurn(t *testing.T) {
 		t.Fatalf("NewSession: %v", err)
 	}
 	agent.setConnection(newClosedAgentConnection(t))
-	if _, promptErr := agent.Prompt(ctx, TextPromptRequest(newResp.SessionId, "x")); promptErr == nil {
+	if _, promptErr := agent.Prompt(ctx, TextPromptRequest(newResp.SessionId, "test-turn", "x")); promptErr == nil {
 		t.Fatal("reconcile config update failure was ignored")
 	}
 }

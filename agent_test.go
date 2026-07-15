@@ -409,7 +409,7 @@ func TestUnknownSessionErrorShape(t *testing.T) {
 	ctx := context.Background()
 
 	// prompt resolves the session synchronously via a.session().
-	_, err := NewAgent().Prompt(ctx, TextPromptRequest("T-missing", "x"))
+	_, err := NewAgent().Prompt(ctx, TextPromptRequest("T-missing", "test-turn", "x"))
 	requireUnknownSessionError(t, err)
 
 	// load/resume against an id absent from the store hit the manifest lookup
@@ -424,7 +424,7 @@ func TestUnknownSessionErrorShape(t *testing.T) {
 
 	// a tombstoned id is wire-indistinguishable from one that never existed.
 	agent.markDeleted("T-missing")
-	_, err = agent.Prompt(ctx, TextPromptRequest("T-missing", "x"))
+	_, err = agent.Prompt(ctx, TextPromptRequest("T-missing", "test-turn", "x"))
 	requireUnknownSessionError(t, err)
 	_, err = agent.LoadSession(ctx, LoadSessionRequest("T-missing", cwd))
 	requireUnknownSessionError(t, err)
@@ -460,7 +460,7 @@ func TestNativeMissingThreadAndDeleteFailureTombstone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
 	}
-	_, err = agent.Prompt(ctx, TextPromptRequest(newResp.SessionId, "continue missing"))
+	_, err = agent.Prompt(ctx, TextPromptRequest(newResp.SessionId, "test-turn", "continue missing"))
 	if err == nil || !strings.Contains(err.Error(), "native_state_missing") {
 		t.Fatalf("missing thread prompt error = %v", err)
 	}
@@ -981,5 +981,40 @@ func TestServeReturnsOnPreCancelledContext(t *testing.T) {
 
 	if err := Serve(ctx, c2aR, a2cW); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Serve pre-cancelled = %v", err)
+	}
+}
+
+func TestServeReturnsProcessTreeProofErrorFromClose(t *testing.T) {
+	agent := NewAgent()
+	session := &agentSession{
+		agent: agent,
+		id:    "T-unproven",
+		turn:  make(chan struct{}, 1),
+	}
+	session.recordScratchQuiescence(ErrProcessTreeUnproven)
+	agent.sessions[session.id] = session
+
+	started := make(chan struct{})
+	previous := newAgentForServe
+	newAgentForServe = func(...Option) *Agent {
+		close(started)
+
+		return agent
+	}
+	t.Cleanup(func() { newAgentForServe = previous })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	input, inputWriter := io.Pipe()
+	t.Cleanup(func() {
+		_ = input.Close()
+		_ = inputWriter.Close()
+	})
+	errCh := make(chan error, 1)
+	go func() { errCh <- Serve(ctx, input, io.Discard) }()
+	<-started
+	cancel()
+	err := <-errCh
+	if !errors.Is(err, ErrProcessTreeUnproven) {
+		t.Fatalf("Serve close proof error = %v", err)
 	}
 }

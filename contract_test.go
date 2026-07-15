@@ -24,7 +24,7 @@ func TestCancelDeterminismAndNativeCancelResult(t *testing.T) {
 	if cancelErr := idleAgent.Cancel(ctx, acp.CancelNotification{SessionId: idleResp.SessionId}); cancelErr != nil {
 		t.Fatalf("idle cancel: %v", cancelErr)
 	}
-	idlePrompt, err := idleAgent.Prompt(ctx, TextPromptRequest(idleResp.SessionId, "after idle cancel"))
+	idlePrompt, err := idleAgent.Prompt(ctx, TextPromptRequest(idleResp.SessionId, "test-turn", "after idle cancel"))
 	if err != nil || idlePrompt.StopReason != acp.StopReasonEndTurn {
 		t.Fatalf("prompt after idle cancel = %#v, %v", idlePrompt, err)
 	}
@@ -39,7 +39,7 @@ func TestCancelDeterminismAndNativeCancelResult(t *testing.T) {
 	resultCh := make(chan acp.PromptResponse, 1)
 	errCh := make(chan error, 1)
 	go func() {
-		result, promptErr := agent.Prompt(ctx, TextPromptRequest(resp.SessionId, "cancel me"))
+		result, promptErr := agent.Prompt(ctx, TextPromptRequest(resp.SessionId, "test-turn", "cancel me"))
 		resultCh <- result
 		errCh <- promptErr
 	}()
@@ -66,7 +66,7 @@ func TestCancelDeterminismAndNativeCancelResult(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSession cancel result: %v", err)
 	}
-	cancelPrompt, err := cancelResultAgent.Prompt(ctx, TextPromptRequest(cancelResultResp.SessionId, "x"))
+	cancelPrompt, err := cancelResultAgent.Prompt(ctx, TextPromptRequest(cancelResultResp.SessionId, "test-turn", "x"))
 	if err != nil || cancelPrompt.StopReason != acp.StopReasonCancelled {
 		t.Fatalf("native cancel result = %#v, %v", cancelPrompt, err)
 	}
@@ -127,11 +127,11 @@ func TestClientBackpressureAndSessionIDDrift(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSession drift: %v", err)
 	}
-	_, err = driftAgent.Prompt(context.Background(), TextPromptRequest(resp.SessionId, "x"))
+	_, err = driftAgent.Prompt(context.Background(), TextPromptRequest(resp.SessionId, "test-turn", "x"))
 	if err == nil || !strings.Contains(err.Error(), "native session_id drift") {
 		t.Fatalf("drift prompt error = %v", err)
 	}
-	_, err = driftAgent.Prompt(context.Background(), TextPromptRequest(resp.SessionId, "again"))
+	_, err = driftAgent.Prompt(context.Background(), TextPromptRequest(resp.SessionId, "test-turn", "again"))
 	if err == nil || !strings.Contains(err.Error(), "native session_id drift") {
 		t.Fatalf("poisoned prompt error = %v", err)
 	}
@@ -214,6 +214,7 @@ func TestPathHomeContinuabilityAndStartup(t *testing.T) {
 
 	scratchRoot := t.TempDir()
 	session, err := newAgentSession(
+		t.Context(),
 		NewAgent(WithScratchDir(scratchRoot), WithEnv(map[string]string{"HOME": "/should/not/leak", "AMP_API_KEY": "fake"})),
 		"T-home",
 		t.TempDir(),
@@ -247,7 +248,7 @@ func TestPathHomeContinuabilityAndStartup(t *testing.T) {
 	if _, err := missingAgent.LoadSession(context.Background(), LoadSessionRequest("T-agent-thread", missingCwd)); err != nil {
 		t.Fatalf("load missing native thread should replay mirror: %v", err)
 	}
-	if _, err := missingAgent.Prompt(context.Background(), TextPromptRequest("T-agent-thread", "x")); err == nil || !strings.Contains(err.Error(), "native_state_missing") {
+	if _, err := missingAgent.Prompt(context.Background(), TextPromptRequest("T-agent-thread", "test-turn", "x")); err == nil || !strings.Contains(err.Error(), "native_state_missing") {
 		t.Fatalf("native missing prompt error = %v", err)
 	}
 
@@ -325,13 +326,13 @@ func TestRemainingBranches(t *testing.T) {
 
 		return previousMkdirAll(path, perm)
 	}
-	if _, err := newAgentSession(NewAgent(WithScratchDir(t.TempDir())), "T-mkdir", t.TempDir(), parsedSessionMeta{}, "", nil); err == nil {
+	if _, err := newAgentSession(t.Context(), NewAgent(WithScratchDir(t.TempDir())), "T-mkdir", t.TempDir(), parsedSessionMeta{}, "", nil); err == nil {
 		t.Fatal("isolated mkdir error ignored")
 	}
 	previousMkdirTemp := mkdirTemp
 	t.Cleanup(func() { mkdirTemp = previousMkdirTemp })
 	mkdirTemp = func(string, string) (string, error) { return "", errors.New("mkdir temp failed") }
-	if _, err := newAgentSession(NewAgent(), "T-temp", t.TempDir(), parsedSessionMeta{}, "", nil); err == nil {
+	if _, err := newAgentSession(t.Context(), NewAgent(), "T-temp", t.TempDir(), parsedSessionMeta{}, "", nil); err == nil {
 		t.Fatal("temp dir error ignored")
 	}
 
@@ -395,7 +396,7 @@ func TestCancelWhileContinueIsStarting(t *testing.T) {
 	resultCh := make(chan acp.PromptResponse, 1)
 	errCh := make(chan error, 1)
 	go func() {
-		result, promptErr := agent.Prompt(context.Background(), TextPromptRequest(resp.SessionId, largePrompt))
+		result, promptErr := agent.Prompt(context.Background(), TextPromptRequest(resp.SessionId, "test-turn", largePrompt))
 		resultCh <- result
 		errCh <- promptErr
 	}()
@@ -485,7 +486,7 @@ func TestSessionDirFailurePropagates(t *testing.T) {
 
 func TestWithScratchDirCreatesDirectories(t *testing.T) {
 	parent := t.TempDir()
-	session, err := newAgentSession(NewAgent(WithScratchDir(parent)), "T-dirs", t.TempDir(), parsedSessionMeta{}, "", nil)
+	session, err := newAgentSession(t.Context(), NewAgent(WithScratchDir(parent)), "T-dirs", t.TempDir(), parsedSessionMeta{}, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

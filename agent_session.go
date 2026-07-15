@@ -43,7 +43,18 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (r
 		return acp.NewSessionResponse{}, err
 	}
 
-	if startErr := a.ensureStartup(ctx, params.Cwd, meta); startErr != nil {
+	discoveryRelease, err := acquireNativeRoot(ctx, a.options.RuntimeResourceHooks, RuntimeResourceDiscovery)
+	if err != nil {
+		return acp.NewSessionResponse{}, err
+	}
+
+	readinessStarted := time.Now()
+	startErr := a.ensureStartup(ctx, params.Cwd, meta)
+	observeRuntimeStartupStage(ctx, a.options.RuntimeResourceHooks, RuntimeResourceDiscovery, RuntimeStartupReadiness, readinessStarted, startErr)
+
+	releaseNativeRootWhenQuiescent(discoveryRelease, startErr)
+
+	if startErr != nil {
 		return acp.NewSessionResponse{}, startErr
 	}
 
@@ -51,14 +62,28 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (r
 		return acp.NewSessionResponse{}, slotErr
 	}
 
-	probeSession, err := newAgentSession(a, "", params.Cwd, meta, mcpConfig, params.AdditionalDirectories)
+	probeSession, err := newAgentSession(ctx, a, "", params.Cwd, meta, mcpConfig, params.AdditionalDirectories)
 	if err != nil {
 		a.releaseSessionSlot("")
 
 		return acp.NewSessionResponse{}, err
 	}
 
+	nativeRelease, err := acquireNativeRoot(ctx, a.options.RuntimeResourceHooks, RuntimeResourceSession)
+	if err != nil {
+		a.releaseSessionSlot("")
+
+		_ = probeSession.Close(context.Background())
+
+		return acp.NewSessionResponse{}, err
+	}
+
+	sessionStarted := time.Now()
 	threadID, err := probeSession.client().NewThread(ctx)
+	observeRuntimeStartupStage(ctx, a.options.RuntimeResourceHooks, RuntimeResourceSession, RuntimeStartupSession, sessionStarted, err)
+
+	releaseNativeRootWhenQuiescent(nativeRelease, err)
+
 	if err != nil {
 		a.releaseSessionSlot("")
 
@@ -426,7 +451,18 @@ func (a *Agent) loadOrResume(ctx context.Context, sessionID acp.SessionId, cwd s
 		return nil, err
 	}
 
-	if startErr := a.ensureStartup(ctx, cwd, meta); startErr != nil {
+	discoveryRelease, err := acquireNativeRoot(ctx, a.options.RuntimeResourceHooks, RuntimeResourceDiscovery)
+	if err != nil {
+		return nil, err
+	}
+
+	readinessStarted := time.Now()
+	startErr := a.ensureStartup(ctx, cwd, meta)
+	observeRuntimeStartupStage(ctx, a.options.RuntimeResourceHooks, RuntimeResourceDiscovery, RuntimeStartupReadiness, readinessStarted, startErr)
+
+	releaseNativeRootWhenQuiescent(discoveryRelease, startErr)
+
+	if startErr != nil {
 		return nil, startErr
 	}
 
@@ -463,7 +499,7 @@ func (a *Agent) loadOrResume(ctx context.Context, sessionID acp.SessionId, cwd s
 		meta.options.Effort = manifest.Effort
 	}
 
-	session, err := newAgentSession(a, sessionID, cwd, meta, mcpConfig, additionalDirs)
+	session, err := newAgentSession(ctx, a, sessionID, cwd, meta, mcpConfig, additionalDirs)
 	if err != nil {
 		return nil, err
 	}
@@ -679,7 +715,7 @@ func (a *Agent) deleteNativeThread(ctx context.Context, id acp.SessionId, sessio
 		return session.Delete(ctx)
 	}
 
-	tmp, err := newAgentSession(a, id, "", parsedSessionMeta{}, "", nil)
+	tmp, err := newAgentSession(ctx, a, id, "", parsedSessionMeta{}, "", nil)
 	if err != nil {
 		return err
 	}

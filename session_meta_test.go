@@ -139,7 +139,7 @@ func TestPromptErrorAfterCallerContextCancelInterrupts(t *testing.T) {
 	resultCh := make(chan acp.PromptResponse, 1)
 	errCh := make(chan error, 1)
 	go func() {
-		result, promptErr := agent.Prompt(promptCtx, TextPromptRequest(resp.SessionId, "cancel before error"))
+		result, promptErr := agent.Prompt(promptCtx, TextPromptRequest(resp.SessionId, "test-turn", "cancel before error"))
 		resultCh <- result
 		errCh <- promptErr
 	}()

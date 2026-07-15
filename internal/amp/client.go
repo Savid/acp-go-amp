@@ -54,7 +54,7 @@ type Options struct {
 	ThreadID      string
 	Mode          string
 	Effort        string
-	MCPConfigJSON string
+	MCPConfigPath string
 	MaxLineBytes  int
 	// OnGoroutinePanic is invoked with the recovered value when a turn-owned
 	// goroutine panics, so the embedding agent can log the panic instead of
@@ -146,7 +146,12 @@ func (c *Client) probeSubcommands(ctx context.Context) error {
 
 	continueClient := *c
 	continueClient.options.SettingsFile = settingsFile
-	continueClient.options.MCPConfigJSON = "{}"
+
+	continueClient.options.MCPConfigPath = filepath.Join(filepath.Dir(settingsFile), "mcp.json")
+	if err := writeFile(continueClient.options.MCPConfigPath, []byte("{}\n"), 0o600); err != nil {
+		return fmt.Errorf("write amp startup MCP config: %w", err)
+	}
+
 	continueClient.options.Mode = "medium"
 	continueClient.options.Effort = "high"
 	continueArgs := continueClient.globalArgs()
@@ -294,13 +299,15 @@ func (c *Client) Continue(ctx context.Context, threadID string, input any) (*Tur
 		return nil, fmt.Errorf("create amp stderr: %w", err)
 	}
 
-	if err := cmd.Start(); err != nil {
+	tree, err := startProcessTree(cmd)
+	if err != nil {
 		return nil, fmt.Errorf("start amp: %w", err)
 	}
 
 	turn := &Turn{
 		log:          c.log,
 		cmd:          cmd,
+		tree:         tree,
 		stdin:        stdin,
 		stdout:       stdout,
 		stderr:       stderr,
@@ -335,12 +342,16 @@ func (c *Client) outputRaw(ctx context.Context, args ...string) ([]byte, error) 
 }
 
 func (c *Client) outputWithArgs(ctx context.Context, args ...string) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	path, err := Discover(ctx, c.options.CLIPath)
 	if err != nil {
 		return nil, err
 	}
 
-	cmd := commandContext(ctx, path, args...)
+	cmd := commandContext(context.Background(), path, args...)
 	configureCommand(cmd)
 
 	cmd.Dir = c.options.Cwd
@@ -350,21 +361,52 @@ func (c *Client) outputWithArgs(ctx context.Context, args ...string) ([]byte, er
 
 	cmd.Env = BuildEnv(c.options.Env, cmd.Dir)
 
-	var stderr bytes.Buffer
+	var stdout, stderr bytes.Buffer
 
+	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	// A provider descendant may inherit stdout/stderr after the native root
+	// exits. Bound exec's copy-goroutine wait so containment cleanup can kill the
+	// descendant and prove the group empty instead of deadlocking in Cmd.Wait.
+	cmd.WaitDelay = defaultCloseKillAfter
 
-	out, err := cmd.Output()
+	tree, err := startProcessTree(cmd)
 	if err != nil {
-		msg := strings.TrimSpace(stripANSI(stderr.String()))
-		if msg == "" {
-			msg = err.Error()
-		}
-
-		return nil, fmt.Errorf("amp %s: %s", strings.Join(args, " "), msg)
+		return nil, fmt.Errorf("amp %s: %w", strings.Join(args, " "), err)
 	}
 
-	return out, nil
+	cancellationDone := make(chan struct{})
+	stopCancellation := context.AfterFunc(ctx, func() {
+		defer close(cancellationDone)
+
+		_ = tree.kill()
+	})
+	waitErr := cmd.Wait()
+
+	if stopCancellation() {
+		close(cancellationDone)
+	}
+
+	<-cancellationDone
+
+	quiescenceErr := tree.terminateAndWait(defaultCloseWait)
+	if errors.Is(waitErr, exec.ErrWaitDelay) && quiescenceErr == nil {
+		waitErr = nil
+	}
+
+	if waitErr != nil || quiescenceErr != nil {
+		msg := strings.TrimSpace(stripANSI(stderr.String()))
+		if msg == "" {
+			msg = errors.Join(waitErr, quiescenceErr).Error()
+		}
+
+		return nil, errors.Join(
+			fmt.Errorf("amp %s: %s", strings.Join(args, " "), msg),
+			quiescenceErr,
+		)
+	}
+
+	return stdout.Bytes(), nil
 }
 
 func (c *Client) globalArgs() []string {
@@ -373,8 +415,8 @@ func (c *Client) globalArgs() []string {
 		args = append(args, "--settings-file", c.options.SettingsFile)
 	}
 
-	if c.options.MCPConfigJSON != "" {
-		args = append(args, "--mcp-config", c.options.MCPConfigJSON)
+	if c.options.MCPConfigPath != "" {
+		args = append(args, "--mcp-config", c.options.MCPConfigPath)
 	}
 
 	if c.options.Mode != "" {
@@ -511,6 +553,7 @@ func versionParts(value string) []int64 {
 type Turn struct {
 	log          *slog.Logger
 	cmd          *exec.Cmd
+	tree         *processTree
 	stdin        io.WriteCloser
 	stdout       io.ReadCloser
 	stderr       io.ReadCloser
@@ -643,7 +686,7 @@ func (t *Turn) Interrupt(ctx context.Context, killAfter time.Duration) error {
 		return nil
 	}
 
-	if err := interruptProcess(t.cmd); err != nil {
+	if err := t.interruptProcess(); err != nil {
 		return err
 	}
 
@@ -666,7 +709,7 @@ func (t *Turn) Interrupt(ctx context.Context, killAfter time.Duration) error {
 	case err := <-done:
 		return interruptWaitResult(err)
 	case <-timer.C:
-		killErr := killProcess(t.cmd)
+		killErr := t.killProcess()
 
 		select {
 		case err := <-done:
@@ -711,9 +754,28 @@ func (t *Turn) Close() error {
 		}
 
 		err = errors.Join(err, t.wait())
+		if t.tree != nil {
+			err = errors.Join(err, t.tree.terminateAndWait(defaultCloseWait))
+		}
 	})
 
 	return err
+}
+
+func (t *Turn) interruptProcess() error {
+	if t.tree != nil {
+		return t.tree.interrupt()
+	}
+
+	return interruptProcess(t.cmd)
+}
+
+func (t *Turn) killProcess() error {
+	if t.tree != nil {
+		return t.tree.kill()
+	}
+
+	return killProcess(t.cmd)
 }
 
 func (t *Turn) wait() error {

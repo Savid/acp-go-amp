@@ -280,7 +280,7 @@ func TestNewAgentSessionSeedFiles(t *testing.T) {
 	agent := NewAgent(WithScratchDir(t.TempDir()), WithSeedFiles(map[string]string{
 		"custom/settings.json": `{"seed":true}`,
 	}))
-	session, err := newAgentSession(agent, "T-seed", t.TempDir(), parsedSessionMeta{}, "", nil)
+	session, err := newAgentSession(t.Context(), agent, "T-seed", t.TempDir(), parsedSessionMeta{}, "", nil)
 	if err != nil {
 		t.Fatalf("newAgentSession: %v", err)
 	}
@@ -309,7 +309,7 @@ func TestNewAgentSessionSeedFilesInvalid(t *testing.T) {
 	agent := NewAgent(WithScratchDir(t.TempDir()), WithSeedFiles(map[string]string{
 		"../escape.json": "x",
 	}))
-	_, err := newAgentSession(agent, "T-bad", t.TempDir(), parsedSessionMeta{}, "", nil)
+	_, err := newAgentSession(t.Context(), agent, "T-bad", t.TempDir(), parsedSessionMeta{}, "", nil)
 	if err == nil {
 		t.Fatal("escaping seed accepted at session start")
 	}

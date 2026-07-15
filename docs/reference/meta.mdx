@@ -51,3 +51,7 @@ key. See [Updates](/docs/reference/updates) for the tagged update kinds.
 `initialize` advertises `_meta.amp.rawEvent` and `_meta.amp.sessionStore`. It
 omits fork and elicitation capability metadata, because the adapter supports
 neither.
+
+Amp therefore does not advertise `_meta["acp-go.dev/route"]`, stamp it on
+callbacks, or validate a turn nonce. Its prompt-builder nonce parameter is
+intentionally ignored; cancellation remains structurally scoped by `sessionId`.

@@ -1729,7 +1729,7 @@ func runPrompt(
 ) error {
 	ui.beginAgentTurn(prompt)
 
-	resp, err := conn.Prompt(ctx, ampacp.TextPromptRequest(sessionID, prompt))
+	resp, err := conn.Prompt(ctx, ampacp.TextPromptRequest(sessionID, "test-turn", prompt))
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			ui.endAgentTurn(acp.StopReasonCancelled)

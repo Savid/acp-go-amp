@@ -128,7 +128,7 @@ func TestClientCommandsUseGlobalArgsAndParseOutput(t *testing.T) {
 		Env:           map[string]string{"AMP_API_KEY": "fake"},
 		Mode:          "strange-mode",
 		Effort:        "strange-effort",
-		MCPConfigJSON: `{"svc":{"command":"true"}}`,
+		MCPConfigPath: filepath.Join(t.TempDir(), "mcp.json"),
 	})
 	ctx := context.Background()
 
@@ -149,7 +149,7 @@ func TestClientCommandsUseGlobalArgsAndParseOutput(t *testing.T) {
 	if len(startupContinue) == 0 {
 		t.Fatalf("startup continue probe not recorded: %#v", records)
 	}
-	for _, want := range []string{"--settings-file", "--mcp-config", "{}", "-m", "medium", "--effort", "high", "--stream-json", "--stream-json-input", "-x"} {
+	for _, want := range []string{"--settings-file", "--mcp-config", "-m", "medium", "--effort", "high", "--stream-json", "--stream-json-input", "-x"} {
 		if !slices.Contains(startupContinue, want) {
 			t.Fatalf("startup continue probe missing %q: %#v", want, startupContinue)
 		}
@@ -238,6 +238,21 @@ func TestStartupProbeAndVersionBranches(t *testing.T) {
 		writeFail, _ := fakeAmpPath(t, "startup-write-fail")
 		if err := NewClient(nil, Options{CLIPath: writeFail, Cwd: t.TempDir()}).StartupProbe(ctx); err == nil || !strings.Contains(err.Error(), "write amp startup settings file") {
 			t.Fatalf("startup settings write failure = %v", err)
+		}
+	}()
+	func() {
+		oldWriteFile := writeFile
+		defer func() { writeFile = oldWriteFile }()
+		writeFile = func(path string, data []byte, mode os.FileMode) error {
+			if filepath.Base(path) == "mcp.json" {
+				return errors.New("write MCP failed")
+			}
+
+			return oldWriteFile(path, data, mode)
+		}
+		writeFail, _ := fakeAmpPath(t, "startup-mcp-write-fail")
+		if err := NewClient(nil, Options{CLIPath: writeFail, Cwd: t.TempDir()}).StartupProbe(ctx); err == nil || !strings.Contains(err.Error(), "write amp startup MCP config") {
+			t.Fatalf("startup MCP write failure = %v", err)
 		}
 	}()
 

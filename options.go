@@ -1,6 +1,7 @@
 package ampacp
 
 import (
+	"context"
 	"log/slog"
 	"time"
 
@@ -8,6 +9,41 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 )
+
+// RuntimeResourceKind identifies the lifecycle scope consuming a host-managed resource.
+type RuntimeResourceKind string
+
+const (
+	RuntimeResourceRuntime   RuntimeResourceKind = "runtime"
+	RuntimeResourceSession   RuntimeResourceKind = "session"
+	RuntimeResourcePrompt    RuntimeResourceKind = "prompt"
+	RuntimeResourceDiscovery RuntimeResourceKind = "discovery"
+)
+
+type RuntimeProcessKind string
+
+const (
+	RuntimeProcessHomeLockSupervisor RuntimeProcessKind = "home_lock_supervisor"
+	RuntimeProcessProviderDescendant RuntimeProcessKind = "provider_descendant"
+)
+
+type RuntimeStartupStage string
+
+const (
+	RuntimeStartupSpawn         RuntimeStartupStage = "spawn"
+	RuntimeStartupReadiness     RuntimeStartupStage = "readiness"
+	RuntimeStartupConfiguration RuntimeStartupStage = "configuration"
+	RuntimeStartupSession       RuntimeStartupStage = "session"
+)
+
+// RuntimeResourceHooks lets an embedding host enforce native-root and scratch-root limits.
+type RuntimeResourceHooks struct {
+	AcquireNativeRoot      func(context.Context, RuntimeResourceKind) (func(), error)
+	ReserveScratchRoot     func(context.Context, RuntimeResourceKind) (func(), error)
+	ObserveProcess         func(context.Context, RuntimeProcessKind, int64)
+	ObserveProcessSnapshot func(context.Context, RuntimeProcessKind, int)
+	ObserveStartupStage    func(context.Context, RuntimeResourceKind, RuntimeStartupStage, time.Duration, error)
+}
 
 const (
 	defaultAgentName             = "acp-go-amp"
@@ -59,6 +95,7 @@ type Options struct {
 	ConcurrencyLimits       ConcurrencyLimits
 	SeedFiles               map[string]string
 	TurnTimeout             time.Duration
+	RuntimeResourceHooks    RuntimeResourceHooks
 	runtime                 runtimeOptions
 }
 
@@ -170,6 +207,13 @@ func WithHome(path string) Option {
 func WithScratchDir(dir string) Option {
 	return func(options *Options) {
 		options.ScratchDir = dir
+	}
+}
+
+// WithRuntimeResourceHooks installs host-facing native-root and scratch-root admission hooks.
+func WithRuntimeResourceHooks(hooks RuntimeResourceHooks) Option {
+	return func(options *Options) {
+		options.RuntimeResourceHooks = hooks
 	}
 }
 

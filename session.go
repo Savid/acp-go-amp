@@ -81,6 +81,7 @@ var (
 	readFile         = os.ReadFile
 	mkdirAll         = os.MkdirAll
 	mkdirTemp        = os.MkdirTemp
+	removeSessionDir = os.RemoveAll
 )
 
 type ampManifest struct {
@@ -110,9 +111,11 @@ type agentSession struct {
 	rawEventSeq           atomic.Int64
 	settingsDir           string
 	settingsFile          string
+	scratchRootRelease    func()
 	closed                bool
 	poisonCause           string
 	nativeMissingCause    string
+	scratchQuiescenceErr  error
 	unsyncedFrames        []SessionStoreEntry
 	turn                  chan struct{}
 	cancelMu              sync.Mutex
@@ -121,15 +124,40 @@ type agentSession struct {
 	mu                    sync.Mutex
 }
 
-func newAgentSession(agent *Agent, id acp.SessionId, cwd string, meta parsedSessionMeta, mcpConfigJSON string, additionalDirs []string) (*agentSession, error) {
+func newAgentSession(ctx context.Context, agent *Agent, id acp.SessionId, cwd string, meta parsedSessionMeta, mcpConfigJSON string, additionalDirs []string) (_ *agentSession, err error) {
 	now := time.Now().UnixMilli()
+
+	scratchRelease, err := reserveScratchRoot(ctx, agent.options.RuntimeResourceHooks, RuntimeResourceSession)
+	if err != nil {
+		return nil, err
+	}
+
+	var dir string
+
+	keepScratch := false
+	defer func() {
+		if keepScratch {
+			return
+		}
+
+		var removeErr error
+		if dir != "" {
+			removeErr = removeSessionDir(dir)
+		}
+
+		if removeErr == nil {
+			scratchRelease()
+		}
+
+		err = errors.Join(err, removeErr)
+	}()
 
 	parent, err := ensureScratchParent(agent.options.ScratchDir)
 	if err != nil {
 		return nil, err
 	}
 
-	dir, err := mkdirTemp(parent, "acp-go-amp-session-*")
+	dir, err = mkdirTemp(parent, "acp-go-amp-session-*")
 	if err != nil {
 		return nil, fmt.Errorf("create amp settings dir: %w", err)
 	}
@@ -142,22 +170,16 @@ func newAgentSession(agent *Agent, id acp.SessionId, cwd string, meta parsedSess
 	stateDir := filepath.Join(dir, "xdg-state")
 	for _, path := range []string{homeDir, configDir, cacheDir, dataDir, stateDir, filepath.Join(configDir, "amp")} {
 		if err := mkdirAll(path, 0o700); err != nil {
-			_ = os.RemoveAll(dir)
-
 			return nil, fmt.Errorf("create amp isolated home: %w", err)
 		}
 	}
 
 	settingsFile := filepath.Join(configDir, "amp", "settings.json")
 	if err := writeFile(settingsFile, []byte("{}\n"), 0o600); err != nil {
-		_ = os.RemoveAll(dir)
-
 		return nil, fmt.Errorf("write amp settings file: %w", err)
 	}
 
 	if err := writeSeedFiles(homeDir, agent.options.SeedFiles); err != nil {
-		_ = os.RemoveAll(dir)
-
 		return nil, err
 	}
 
@@ -177,7 +199,7 @@ func newAgentSession(agent *Agent, id acp.SessionId, cwd string, meta parsedSess
 	env["XDG_DATA_HOME"] = dataDir
 	env["XDG_STATE_HOME"] = stateDir
 
-	return &agentSession{
+	session := &agentSession{
 		agent:                 agent,
 		id:                    id,
 		cwd:                   cwd,
@@ -191,15 +213,19 @@ func newAgentSession(agent *Agent, id acp.SessionId, cwd string, meta parsedSess
 		rawEvents:             meta.rawEvent,
 		settingsDir:           dir,
 		settingsFile:          settingsFile,
+		scratchRootRelease:    scratchRelease,
 		turn:                  make(chan struct{}, 1),
-	}, nil
+	}
+	keepScratch = true
+
+	return session, nil
 }
 
 func (s *agentSession) client() *amp.Client {
-	return s.clientWithEnv(s.env)
+	return s.clientWithEnv(s.env, "")
 }
 
-func (s *agentSession) clientWithEnv(env map[string]string) *amp.Client {
+func (s *agentSession) clientWithEnv(env map[string]string, mcpConfigPath string) *amp.Client {
 	return amp.NewClient(s.agent.log, amp.Options{
 		CLIPath:          s.agent.options.ExecutablePath,
 		Cwd:              s.cwd,
@@ -208,7 +234,7 @@ func (s *agentSession) clientWithEnv(env map[string]string) *amp.Client {
 		ThreadID:         string(s.id),
 		Mode:             s.mode,
 		Effort:           s.effort,
-		MCPConfigJSON:    s.mcpConfigJSON,
+		MCPConfigPath:    mcpConfigPath,
 		MaxLineBytes:     s.agent.options.runtime.maxJSONLineBytes,
 		OnGoroutinePanic: s.agent.onNativeGoroutinePanic,
 	})
@@ -304,8 +330,6 @@ func (s *agentSession) poison(cause string) error {
 }
 
 func (s *agentSession) Close(ctx context.Context) error {
-	_ = ctx
-
 	s.mu.Lock()
 	s.closed = true
 	s.mu.Unlock()
@@ -316,43 +340,111 @@ func (s *agentSession) Close(ctx context.Context) error {
 	}
 
 	err := s.interruptState(context.Background(), state)
-	if s.settingsDir != "" {
-		err = errors.Join(err, os.RemoveAll(s.settingsDir))
+
+	proofErr := s.scratchQuiescenceError()
+	if state != nil {
+		waitCtx, cancelWait := context.WithTimeout(
+			context.WithoutCancel(ctx),
+			s.agent.options.runtime.nativeCancelTimeout+2*s.agent.options.runtime.nativeCloseTurnWait,
+		)
+		closeErr := state.awaitCompletion(waitCtx)
+
+		cancelWait()
+
+		s.recordScratchQuiescence(closeErr)
+		proofErr = errors.Join(proofErr, closeErr)
 	}
 
-	return err
+	return finalizeSessionScratch(err, proofErr, s.settingsDir, s.scratchRootRelease)
 }
 
 func (s *agentSession) Delete(ctx context.Context) error {
 	s.mu.Lock()
 	s.closed = true
 	s.mu.Unlock()
+
 	_ = s.interrupt(ctx)
 
-	err := s.client().DeleteThread(ctx, string(s.id))
-	if s.settingsDir != "" {
-		err = errors.Join(err, os.RemoveAll(s.settingsDir))
+	if proofErr := s.scratchQuiescenceError(); proofErr != nil {
+		return proofErr
 	}
 
-	return err
+	nativeRelease, acquireErr := acquireNativeRoot(ctx, s.agent.options.RuntimeResourceHooks, RuntimeResourceSession)
+	if acquireErr != nil {
+		return acquireErr
+	}
+
+	err := s.client().DeleteThread(ctx, string(s.id))
+
+	releaseNativeRootWhenQuiescent(nativeRelease, err)
+	s.recordScratchQuiescence(err)
+
+	return finalizeSessionScratch(err, err, s.settingsDir, s.scratchRootRelease)
+}
+
+func finalizeSessionScratch(runtimeErr, proofErr error, settingsDir string, scratchRelease func()) error {
+	if !amp.ProcessTreeQuiescent(proofErr) {
+		return errors.Join(runtimeErr, proofErr)
+	}
+
+	var removeErr error
+	if settingsDir != "" {
+		removeErr = removeSessionDir(settingsDir)
+	}
+
+	if removeErr == nil && scratchRelease != nil {
+		scratchRelease()
+	}
+
+	return errors.Join(runtimeErr, removeErr)
+}
+
+func (s *agentSession) recordScratchQuiescence(err error) {
+	if amp.ProcessTreeQuiescent(err) {
+		return
+	}
+
+	s.mu.Lock()
+	s.scratchQuiescenceErr = errors.Join(s.scratchQuiescenceErr, err)
+	s.mu.Unlock()
+}
+
+func (s *agentSession) scratchQuiescenceError() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.scratchQuiescenceErr
 }
 
 func (s *agentSession) verifyContinuable(ctx context.Context) error {
+	if proofErr := s.scratchQuiescenceError(); proofErr != nil {
+		return proofErr
+	}
+
 	timeout := s.agent.options.runtime.nativeCommandTimeout
 
 	probeCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	if _, err := s.client().ExportThread(probeCtx, string(s.id)); err != nil {
-		if isNativeMissingError(err) {
+	nativeRelease, err := acquireNativeRoot(probeCtx, s.agent.options.RuntimeResourceHooks, RuntimeResourceSession)
+	if err != nil {
+		return err
+	}
+
+	_, exportErr := s.client().ExportThread(probeCtx, string(s.id))
+
+	releaseNativeRootWhenQuiescent(nativeRelease, exportErr)
+
+	if exportErr != nil {
+		if isNativeMissingError(exportErr) {
 			s.mu.Lock()
-			s.nativeMissingCause = err.Error()
+			s.nativeMissingCause = exportErr.Error()
 			s.mu.Unlock()
 
 			return nil
 		}
 
-		return acp.NewInternalError(map[string]any{jsonFieldError: err.Error()})
+		return acp.NewInternalError(map[string]any{jsonFieldError: exportErr.Error()})
 	}
 
 	return nil
@@ -368,6 +460,10 @@ func (s *agentSession) ready() error {
 
 	if s.nativeMissingCause != "" {
 		return acp.NewInternalError(map[string]any{jsonFieldError: "native_state_missing", keyDetail: s.nativeMissingCause})
+	}
+
+	if s.scratchQuiescenceErr != nil {
+		return s.scratchQuiescenceErr
 	}
 
 	if s.closed {

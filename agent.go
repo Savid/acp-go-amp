@@ -31,6 +31,8 @@ type Agent struct {
 	activeLimitErr error
 }
 
+var newAgentForServe = NewAgent
+
 var (
 	_ acp.Agent                  = (*Agent)(nil)
 	_ acp.AgentLoader            = (*Agent)(nil)
@@ -50,16 +52,19 @@ func NewAgent(opts ...Option) *Agent {
 		store = NewInMemorySessionStore()
 	}
 
+	observe := observer.New(observer.Config{
+		TracerProvider: options.TracerProvider,
+		MeterProvider:  options.MeterProvider,
+		Propagator:     options.TextMapPropagator,
+		Version:        options.AgentVersion,
+	})
+	options.RuntimeResourceHooks = instrumentRuntimeResourceHooks(options.RuntimeResourceHooks, observe)
+
 	return &Agent{
-		options: options,
-		log:     log,
-		store:   store,
-		observe: observer.New(observer.Config{
-			TracerProvider: options.TracerProvider,
-			MeterProvider:  options.MeterProvider,
-			Propagator:     options.TextMapPropagator,
-			Version:        options.AgentVersion,
-		}),
+		options:              options,
+		log:                  log,
+		store:                store,
+		observe:              observe,
 		sessions:             make(map[acp.SessionId]*agentSession),
 		deleted:              make(map[acp.SessionId]struct{}),
 		pendingNativeDeletes: make(map[acp.SessionId]struct{}),
@@ -68,9 +73,13 @@ func NewAgent(opts ...Option) *Agent {
 	}
 }
 
-func Serve(ctx context.Context, input io.Reader, output io.Writer, opts ...Option) error {
-	agent := NewAgent(opts...)
-	defer func() { _ = agent.Close() }()
+func Serve(ctx context.Context, input io.Reader, output io.Writer, opts ...Option) (returnErr error) {
+	agent := newAgentForServe(opts...)
+	defer func() {
+		if closeErr := agent.Close(); closeErr != nil {
+			returnErr = closeErr
+		}
+	}()
 
 	conn := newLocalAgentConnection(agent, output, input)
 	agent.setConnection(conn)

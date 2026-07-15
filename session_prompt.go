@@ -3,7 +3,10 @@ package ampacp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -48,15 +51,18 @@ func turnFailure(cause, message string) error {
 }
 
 type promptTurnState struct {
-	mu        sync.Mutex
-	turn      *amp.Turn
-	cancelCtx context.CancelFunc
-	cancelled chan struct{}
-	once      sync.Once
+	mu           sync.Mutex
+	turn         *amp.Turn
+	cancelCtx    context.CancelFunc
+	closeErr     error
+	cancelled    chan struct{}
+	completed    chan struct{}
+	cancelOnce   sync.Once
+	completeOnce sync.Once
 }
 
 func newPromptTurnState() *promptTurnState {
-	return &promptTurnState{cancelled: make(chan struct{})}
+	return &promptTurnState{cancelled: make(chan struct{}), completed: make(chan struct{})}
 }
 
 func (s *promptTurnState) setTurn(turn *amp.Turn) {
@@ -86,10 +92,31 @@ func (s *promptTurnState) cancel() {
 	s.mu.Lock()
 	cancel = s.cancelCtx
 	s.mu.Unlock()
-	s.once.Do(func() { close(s.cancelled) })
+	s.cancelOnce.Do(func() { close(s.cancelled) })
 
 	if cancel != nil {
 		cancel()
+	}
+}
+
+func (s *promptTurnState) complete(closeErr error) {
+	s.completeOnce.Do(func() {
+		s.mu.Lock()
+		s.closeErr = closeErr
+		s.mu.Unlock()
+		close(s.completed)
+	})
+}
+
+func (s *promptTurnState) awaitCompletion(ctx context.Context) error {
+	select {
+	case <-s.completed:
+		s.mu.Lock()
+		defer s.mu.Unlock()
+
+		return s.closeErr
+	case <-ctx.Done():
+		return fmt.Errorf("%w: wait for active Amp turn cleanup: %v", amp.ErrProcessTreeNotQuiescent, ctx.Err())
 	}
 }
 
@@ -102,7 +129,7 @@ func (s *promptTurnState) isCancelled() bool {
 	}
 }
 
-func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (acp.PromptResponse, error) {
+func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (resp acp.PromptResponse, returnErr error) { //nolint:gocyclo // Prompt owns the complete turn state machine.
 	if err := s.ready(); err != nil {
 		return acp.PromptResponse{}, err
 	}
@@ -131,18 +158,49 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (ac
 
 	s.setActivePrompt(state)
 	defer s.clearActivePrompt(state)
+	defer state.complete(nil)
+
+	configurationStarted := time.Now()
+	mcpConfigPath, err := s.writePromptMCPConfig()
+	observeRuntimeStartupStage(continueCtx, s.agent.options.RuntimeResourceHooks, RuntimeResourcePrompt, RuntimeStartupConfiguration, configurationStarted, err)
+
+	if err != nil {
+		return acp.PromptResponse{}, err
+	}
+
+	if mcpConfigPath != "" {
+		defer func() { _ = os.Remove(mcpConfigPath) }()
+	}
 
 	s.agent.observe.RecordAmpProcessStart(continueCtx)
-	promptClient := s.clientWithEnv(s.agent.observe.InjectTraceEnv(continueCtx, s.env))
+	promptClient := s.clientWithEnv(s.agent.observe.InjectTraceEnv(continueCtx, s.env), mcpConfigPath)
 
-	turn, err := promptClient.Continue(continueCtx, string(s.id), input)
+	nativeRelease, err := acquireNativeRoot(continueCtx, s.agent.options.RuntimeResourceHooks, RuntimeResourcePrompt)
 	if err != nil {
+		return acp.PromptResponse{}, err
+	}
+
+	spawnStarted := time.Now()
+	turn, err := promptClient.Continue(continueCtx, string(s.id), input)
+	observeRuntimeStartupStage(continueCtx, s.agent.options.RuntimeResourceHooks, RuntimeResourcePrompt, RuntimeStartupSpawn, spawnStarted, err)
+
+	if err != nil {
+		releaseNativeRootWhenQuiescent(nativeRelease, err)
+		s.recordScratchQuiescence(err)
+
 		if state.isCancelled() {
 			return cancelledPromptResponse(nil, params.MessageId), nil
 		}
 
 		return acp.PromptResponse{}, classifyNativePromptError(err)
 	}
+
+	defer func() {
+		closeErr := turn.Close()
+		state.complete(closeErr)
+		s.recordScratchQuiescence(closeErr)
+		resp, returnErr = finalizeNativePrompt(resp, returnErr, closeErr, nativeRelease)
+	}()
 
 	state.setTurn(turn)
 
@@ -246,6 +304,34 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (ac
 			return cancelledPromptResponse(promptUsage, params.MessageId), nil
 		}
 	}
+}
+
+func finalizeNativePrompt(
+	resp acp.PromptResponse,
+	returnErr error,
+	closeErr error,
+	release func(),
+) (acp.PromptResponse, error) {
+	releaseNativeRootWhenQuiescent(release, closeErr)
+
+	if !amp.ProcessTreeQuiescent(closeErr) {
+		return acp.PromptResponse{}, errors.Join(returnErr, closeErr)
+	}
+
+	return resp, returnErr
+}
+
+func (s *agentSession) writePromptMCPConfig() (string, error) {
+	if s.mcpConfigJSON == "" {
+		return "", nil
+	}
+
+	path := filepath.Join(s.settingsDir, "mcp.json")
+	if err := os.WriteFile(path, []byte(s.mcpConfigJSON), 0o600); err != nil {
+		return "", fmt.Errorf("write amp MCP config: %w", err)
+	}
+
+	return path, nil
 }
 
 // resolveTurnDeadline maps a fired WithTurnTimeout deadline to a terminal

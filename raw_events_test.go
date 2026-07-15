@@ -234,7 +234,7 @@ func TestRawEventEmitFailureDoesNotFailTurn(t *testing.T) {
 	}
 	agent.setConnection(newClosedAgentConnection(t))
 
-	promptResp, err := agent.Prompt(ctx, TextPromptRequest(resp.SessionId, "x"))
+	promptResp, err := agent.Prompt(ctx, TextPromptRequest(resp.SessionId, "test-turn", "x"))
 	if err != nil {
 		t.Fatalf("raw emit failure aborted the turn: %v", err)
 	}
@@ -264,7 +264,7 @@ func TestRawEventDefaultOff(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
 	}
-	promptResp, err := agent.Prompt(ctx, TextPromptRequest(resp.SessionId, "x"))
+	promptResp, err := agent.Prompt(ctx, TextPromptRequest(resp.SessionId, "test-turn", "x"))
 	if err != nil {
 		t.Fatalf("prompt: %v", err)
 	}
