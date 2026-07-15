@@ -1,6 +1,7 @@
 package ampacp
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"strconv"
@@ -57,6 +58,46 @@ func assistantMessageIdentity(sessionID acp.SessionId, transcriptFrame int, msg 
 	}
 
 	return ampMessageIdentity(sessionID, transcriptFrame, assistant.RawJSON())
+}
+
+// terminalAssistantMessageIdentity returns the final main-agent assistant
+// identity from the durable transcript. Resume intentionally emits no history,
+// but a persistent host still needs this identity-only checkpoint to prove
+// that the native transcript matches its committed turn.
+func terminalAssistantMessageIdentity(sessionID acp.SessionId, entries []SessionStoreEntry) (string, error) {
+	var terminal string
+
+	for index, entry := range entries {
+		msg, err := amp.ParseJSONLine(entry)
+		if err != nil {
+			return "", err
+		}
+
+		if messageID := assistantMessageIdentity(sessionID, index+1, msg); messageID != "" {
+			terminal = messageID
+		}
+	}
+
+	return terminal, nil
+}
+
+func (s *agentSession) emitNativeMessageIdentity(ctx context.Context, messageID string) error {
+	if messageID == "" {
+		return nil
+	}
+
+	conn := s.agent.connection()
+	if conn == nil {
+		return nil
+	}
+
+	return conn.SessionUpdate(ctx, acp.SessionNotification{
+		SessionId: s.id,
+		Meta:      ampMessageMeta(nil, messageID),
+		Update: acp.SessionUpdate{
+			SessionInfoUpdate: &acp.SessionSessionInfoUpdate{},
+		},
+	})
 }
 
 func withAmpMessageIdentity(update acp.SessionUpdate, messageID string) acp.SessionUpdate {

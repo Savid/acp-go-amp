@@ -92,8 +92,10 @@ func TestLoadResumeManifestAndConfigBranches(t *testing.T) {
 	if _, err := agent.ResumeSession(ctx, ResumeSessionRequest("T-load", cwd)); err != nil {
 		t.Fatalf("ResumeSession active: %v", err)
 	}
-	if len(client.updatesSnapshot()) != before {
-		t.Fatal("resume replayed active session")
+	waitForRecorded(t, func() bool { return len(client.updatesSnapshot()) == before+1 })
+	updates := client.updatesSnapshot()
+	if len(updates) != before+1 || updates[len(updates)-1].Update.SessionInfoUpdate == nil {
+		t.Fatalf("resume did not emit exactly one identity-only checkpoint: before=%d updates=%#v", before, updates)
 	}
 
 	if _, err := agent.SetSessionConfigOption(ctx, acp.SetSessionConfigOptionRequest{Boolean: &acp.SetSessionConfigOptionBoolean{SessionId: "T-load", ConfigId: "mode", Value: true}}); err == nil {
@@ -196,7 +198,7 @@ func TestRemainingAgentBranches(t *testing.T) {
 	}
 	activeLimited := NewAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()), WithSessionStore(store), WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 0}))
 	activeLimited.options.ConcurrencyLimits.MaxActiveSessions = 0
-	if _, err := activeLimited.loadOrResume(ctx, "T-file", t.TempDir(), nil, nil, nil); err != nil {
+	if _, _, _, err := activeLimited.loadOrResume(ctx, "T-file", t.TempDir(), nil, nil, nil); err != nil {
 		t.Fatalf("loadOrResume direct: %v", err)
 	}
 	activeLimited.options.ConcurrencyLimits.MaxActiveSessions = 1
@@ -204,7 +206,7 @@ func TestRemainingAgentBranches(t *testing.T) {
 	if err := store.Replace(ctx, SessionKey{SessionID: "T-file-2", Subpath: ""}, []SessionStoreReplacement{{Key: SessionKey{SessionID: "T-file-2", Subpath: ""}, Entries: []SessionStoreEntry{manifest2}}}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := activeLimited.loadOrResume(ctx, "T-file-2", t.TempDir(), nil, nil, nil); err == nil {
+	if _, _, _, err := activeLimited.loadOrResume(ctx, "T-file-2", t.TempDir(), nil, nil, nil); err == nil {
 		t.Fatal("active load backpressure not enforced")
 	}
 	agent.markDeleted("T-deleted")

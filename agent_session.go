@@ -127,12 +127,16 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 		return acp.LoadSessionResponse{}, openErr
 	}
 
-	session, err := a.loadOrResume(ctx, params.SessionId, params.Cwd, params.McpServers, params.AdditionalDirectories, params.Meta)
+	session, transcript, started, err := a.loadOrResume(ctx, params.SessionId, params.Cwd, params.McpServers, params.AdditionalDirectories, params.Meta)
 	if err != nil {
 		return acp.LoadSessionResponse{}, err
 	}
 
-	if err := session.replayTranscript(ctx); err != nil {
+	if err := session.replayTranscriptEntries(ctx, transcript); err != nil {
+		if started {
+			a.removeSession(ctx, params.SessionId, session)
+		}
+
 		return acp.LoadSessionResponse{}, err
 	}
 
@@ -149,9 +153,26 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 		return acp.ResumeSessionResponse{}, openErr
 	}
 
-	session, err := a.loadOrResume(ctx, params.SessionId, params.Cwd, params.McpServers, params.AdditionalDirectories, params.Meta)
+	session, transcript, started, err := a.loadOrResume(ctx, params.SessionId, params.Cwd, params.McpServers, params.AdditionalDirectories, params.Meta)
 	if err != nil {
 		return acp.ResumeSessionResponse{}, err
+	}
+
+	messageID, identityErr := terminalAssistantMessageIdentity(params.SessionId, transcript)
+	if identityErr != nil {
+		if started {
+			a.removeSession(ctx, params.SessionId, session)
+		}
+
+		return acp.ResumeSessionResponse{}, identityErr
+	}
+
+	if emitErr := session.emitNativeMessageIdentity(ctx, messageID); emitErr != nil {
+		if started {
+			a.removeSession(ctx, params.SessionId, session)
+		}
+
+		return acp.ResumeSessionResponse{}, emitErr
 	}
 
 	return acp.ResumeSessionResponse{ConfigOptions: session.configOptions()}, nil
@@ -429,11 +450,11 @@ func (a *Agent) SetSessionMode(ctx context.Context, params acp.SetSessionModeReq
 	return acp.SetSessionModeResponse{}, acp.NewMethodNotFound(acp.AgentMethodSessionSetMode)
 }
 
-func (a *Agent) loadOrResume(ctx context.Context, sessionID acp.SessionId, cwd string, mcpServers []acp.McpServer, additionalDirs []string, rawMeta map[string]any) (*agentSession, error) {
+func (a *Agent) loadOrResume(ctx context.Context, sessionID acp.SessionId, cwd string, mcpServers []acp.McpServer, additionalDirs []string, rawMeta map[string]any) (*agentSession, []SessionStoreEntry, bool, error) {
 	a.retryPendingNativeDeletes(ctx)
 
 	if _, deleted := a.isDeleted(sessionID); deleted {
-		return nil, unknownSessionError()
+		return nil, nil, false, unknownSessionError()
 	}
 
 	// X1: validate the full request identically to the cold path FIRST, so an
@@ -442,25 +463,25 @@ func (a *Agent) loadOrResume(ctx context.Context, sessionID acp.SessionId, cwd s
 	// succeeds may an active session be reused.
 	meta, err := parseSessionMeta(rawMeta)
 	if err != nil {
-		return nil, err
+		return nil, nil, false, err
 	}
 
 	if optErr := a.validateSessionStartOptions(meta.options); optErr != nil {
-		return nil, optErr
+		return nil, nil, false, optErr
 	}
 
 	if pathErr := validateSessionPaths(cwd, additionalDirs); pathErr != nil {
-		return nil, pathErr
+		return nil, nil, false, pathErr
 	}
 
 	mcpConfig, err := mcpConfigJSON(mcpServers)
 	if err != nil {
-		return nil, err
+		return nil, nil, false, err
 	}
 
 	discoveryRelease, err := acquireNativeRoot(ctx, a.options.RuntimeResourceHooks, RuntimeResourceDiscovery)
 	if err != nil {
-		return nil, err
+		return nil, nil, false, err
 	}
 
 	readinessStarted := time.Now()
@@ -470,7 +491,7 @@ func (a *Agent) loadOrResume(ctx context.Context, sessionID acp.SessionId, cwd s
 	releaseNativeRootWhenQuiescent(discoveryRelease, startErr)
 
 	if startErr != nil {
-		return nil, startErr
+		return nil, nil, false, startErr
 	}
 
 	a.mu.Lock()
@@ -478,24 +499,31 @@ func (a *Agent) loadOrResume(ctx context.Context, sessionID acp.SessionId, cwd s
 		a.mu.Unlock()
 
 		if applyErr := session.applyActiveRequest(meta, cwd, mcpConfig, additionalDirs); applyErr != nil {
-			return nil, applyErr
+			return nil, nil, false, applyErr
 		}
 
 		if syncErr := session.ensureMirrorSynced(ctx); syncErr != nil {
-			return nil, syncErr
+			return nil, nil, false, syncErr
 		}
 
 		if verifyErr := session.verifyContinuable(ctx); verifyErr != nil {
-			return nil, verifyErr
+			return nil, nil, false, verifyErr
 		}
 
-		return session, nil
+		transcript, loadErr := session.loadTranscript(ctx)
+		if loadErr != nil {
+			return nil, nil, false, loadErr
+		}
+
+		session.setTranscriptFrameCount(len(transcript))
+
+		return session, transcript, false, nil
 	}
 	a.mu.Unlock()
 
 	manifest, err := a.loadManifest(ctx, sessionID)
 	if err != nil {
-		return nil, err
+		return nil, nil, false, err
 	}
 
 	if meta.options.Mode == "" {
@@ -504,7 +532,7 @@ func (a *Agent) loadOrResume(ctx context.Context, sessionID acp.SessionId, cwd s
 
 	session, err := newAgentSession(ctx, a, sessionID, cwd, meta, mcpConfig, additionalDirs)
 	if err != nil {
-		return nil, err
+		return nil, nil, false, err
 	}
 
 	session.title = manifest.Title
@@ -516,7 +544,7 @@ func (a *Agent) loadOrResume(ctx context.Context, sessionID acp.SessionId, cwd s
 	if err != nil {
 		_ = session.Close(context.Background())
 
-		return nil, err
+		return nil, nil, false, err
 	}
 
 	session.setTranscriptFrameCount(len(transcript))
@@ -524,7 +552,7 @@ func (a *Agent) loadOrResume(ctx context.Context, sessionID acp.SessionId, cwd s
 	if err = session.verifyContinuable(ctx); err != nil {
 		_ = session.Close(context.Background())
 
-		return nil, err
+		return nil, nil, false, err
 	}
 
 	a.mu.Lock()
@@ -533,14 +561,30 @@ func (a *Agent) loadOrResume(ctx context.Context, sessionID acp.SessionId, cwd s
 
 		_ = session.Close(context.Background())
 
-		return nil, backpressureError("active_sessions")
+		return nil, nil, false, backpressureError("active_sessions")
 	}
 
 	a.sessions[sessionID] = session
 	a.mu.Unlock()
 	a.observe.AddActiveSession(ctx, 1)
 
-	return session, nil
+	return session, transcript, true, nil
+}
+
+func (a *Agent) removeSession(ctx context.Context, sessionID acp.SessionId, session *agentSession) {
+	a.mu.Lock()
+
+	removed := a.sessions[sessionID] == session
+	if removed {
+		delete(a.sessions, sessionID)
+	}
+	a.mu.Unlock()
+
+	if removed {
+		a.observe.AddActiveSession(ctx, -1)
+
+		_ = session.Close(context.Background())
+	}
 }
 
 // sessionStoreLoadTimeout resolves the WithSessionStoreLoadTimeout bound for
@@ -810,6 +854,11 @@ func (s *agentSession) replayTranscript(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+
+	return s.replayTranscriptEntries(ctx, entries)
+}
+
+func (s *agentSession) replayTranscriptEntries(ctx context.Context, entries []SessionStoreEntry) error {
 	// Authoritative session/load replay emits session/update frames only. Raw
 	// events are live-turn only and are never replayed from the store.
 	for index, entry := range entries {

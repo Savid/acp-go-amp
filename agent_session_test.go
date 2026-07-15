@@ -288,8 +288,12 @@ func TestLoadReplayDeleteAndConfigEdges(t *testing.T) {
 
 	badReplay := NewInMemorySessionStore()
 	putStoredSession(t, badReplay, "T-bad-replay", cwd, []SessionStoreEntry{json.RawMessage(`{`)})
-	if _, replayErr := NewAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()), WithSessionStore(badReplay)).LoadSession(ctx, LoadSessionRequest("T-bad-replay", cwd)); replayErr == nil {
+	badReplayAgent := NewAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()), WithSessionStore(badReplay))
+	if _, replayErr := badReplayAgent.LoadSession(ctx, LoadSessionRequest("T-bad-replay", cwd)); replayErr == nil {
 		t.Fatal("bad transcript replay succeeded")
+	}
+	if _, active := badReplayAgent.sessions["T-bad-replay"]; active {
+		t.Fatal("failed cold load retained its materialized session")
 	}
 
 	replayLoadErr := errors.New("transcript load failed")

@@ -227,8 +227,18 @@ func TestServeFakeAmpLifecycleStdoutCleanStoreReplayAndDelete(t *testing.T) {
 	if _, err := conn.ResumeSession(ctx, ResumeSessionRequest(newResp.SessionId, cwd, sessionOptions...)); err != nil {
 		t.Fatalf("ResumeSession: %v", err)
 	}
-	if got := len(client.updatesSnapshot()); got != afterLoad {
-		t.Fatalf("resume replayed transcript: before=%d after=%d", afterLoad, got)
+	waitForRecorded(t, func() bool { return len(client.updatesSnapshot()) == afterLoad+1 })
+	updates := client.updatesSnapshot()
+	if got := len(updates); got != afterLoad+1 {
+		t.Fatalf("resume updates: before=%d after=%d", afterLoad, got)
+	}
+	checkpoint := updates[len(updates)-1]
+	if checkpoint.Update.SessionInfoUpdate == nil {
+		t.Fatalf("resume checkpoint update = %#v", checkpoint.Update)
+	}
+	checkpointAmp, ok := checkpoint.Meta[ampMetaKey].(map[string]any)
+	if !ok || checkpointAmp[metaMessageIDKey] != responseAmpMessageID(t, promptResp) {
+		t.Fatalf("resume checkpoint meta = %#v", checkpoint.Meta)
 	}
 	requireNoCommandUpdates(t, client.updatesSnapshot())
 

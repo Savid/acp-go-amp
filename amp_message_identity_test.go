@@ -93,6 +93,134 @@ func TestMessageIdentityMatchesLiveResponseReplayAndContinuation(t *testing.T) {
 	require.Equal(t, []string{firstID, secondID, thirdID}, updateAmpMessageIDs(t, restoredClient.updatesSnapshot()))
 }
 
+func TestResumePublishesTerminalMessageIdentityWithoutHistory(t *testing.T) {
+	ctx := context.Background()
+	path, _ := fakeAgentAmpPath(t, "")
+	cwd := t.TempDir()
+	const sessionID = acp.SessionId("T-resume-identity")
+	const mainFrame = `{"type":"assistant","message":{"content":[{"type":"text","text":"answer"}]},"session_id":"T-resume-identity"}`
+	store := NewInMemorySessionStore()
+	putStoredSession(t, store, string(sessionID), cwd, []SessionStoreEntry{
+		json.RawMessage(`{"type":"user","message":{"content":[{"type":"text","text":"question"}]},"session_id":"T-resume-identity"}`),
+		json.RawMessage(mainFrame),
+		json.RawMessage(`{"type":"assistant","parent_tool_use_id":"TU-parent","message":{"content":[{"type":"text","text":"delegated"}]},"session_id":"T-resume-identity"}`),
+		json.RawMessage(`{"type":"result","subtype":"success","is_error":false,"session_id":"T-resume-identity"}`),
+	})
+	expectedID := ampMessageIdentity(sessionID, 2, mainFrame)
+
+	agent := NewAgent(
+		WithExecutablePath(path),
+		WithScratchDir(t.TempDir()),
+		WithSessionStore(store),
+	)
+	client := newIdentityAgentClient()
+	agent.setConnection(client)
+	t.Cleanup(func() { require.NoError(t, agent.Close()) })
+
+	_, err := agent.ResumeSession(ctx, ResumeSessionRequest(sessionID, cwd))
+	require.NoError(t, err)
+	require.Len(t, client.notifications, 1, "resume must not replay transcript history")
+	notification := client.notifications[0]
+	require.Equal(t, sessionID, notification.SessionId)
+	require.Equal(t, acp.SessionUpdate{
+		SessionInfoUpdate: &acp.SessionSessionInfoUpdate{},
+	}, notification.Update)
+	ampMeta, ok := notification.Meta[ampMetaKey].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, expectedID, ampMeta[metaMessageIDKey])
+
+	client.updateErr = errors.New("identity delivery failed")
+	_, err = agent.ResumeSession(ctx, ResumeSessionRequest(sessionID, cwd))
+	require.ErrorContains(t, err, "identity delivery failed")
+	require.Contains(t, agent.sessions, sessionID, "an active session survives lifecycle delivery failure")
+
+	failingAgent := NewAgent(
+		WithExecutablePath(path),
+		WithScratchDir(t.TempDir()),
+		WithSessionStore(store),
+	)
+	failingClient := newIdentityAgentClient()
+	failingClient.updateErr = errors.New("identity delivery failed")
+	failingAgent.setConnection(failingClient)
+	_, err = failingAgent.ResumeSession(ctx, ResumeSessionRequest(sessionID, cwd))
+	require.ErrorContains(t, err, "identity delivery failed")
+	require.NotContains(t, failingAgent.sessions, sessionID, "failed cold resume must roll back its materialized session")
+	require.NoError(t, failingAgent.Close())
+
+	connectionlessAgent := NewAgent(
+		WithExecutablePath(path),
+		WithScratchDir(t.TempDir()),
+		WithSessionStore(store),
+	)
+	_, err = connectionlessAgent.ResumeSession(ctx, ResumeSessionRequest(sessionID, cwd))
+	require.NoError(t, err)
+	require.NoError(t, connectionlessAgent.Close())
+}
+
+func TestResumeIdentityEmptyAndMalformedTranscript(t *testing.T) {
+	ctx := context.Background()
+	path, _ := fakeAgentAmpPath(t, "")
+	cwd := t.TempDir()
+
+	emptyStore := NewInMemorySessionStore()
+	putStoredSession(t, emptyStore, "T-resume-empty", cwd, []SessionStoreEntry{
+		json.RawMessage(`{"type":"result","subtype":"success","is_error":false,"session_id":"T-resume-empty"}`),
+	})
+	emptyAgent := NewAgent(
+		WithExecutablePath(path),
+		WithScratchDir(t.TempDir()),
+		WithSessionStore(emptyStore),
+	)
+	emptyClient := newIdentityAgentClient()
+	emptyAgent.setConnection(emptyClient)
+	_, err := emptyAgent.ResumeSession(ctx, ResumeSessionRequest("T-resume-empty", cwd))
+	require.NoError(t, err)
+	require.Empty(t, emptyClient.notifications, "no assistant identity means no synthetic history update")
+	require.NoError(t, emptyAgent.Close())
+
+	malformedStore := NewInMemorySessionStore()
+	putStoredSession(t, malformedStore, "T-resume-malformed", cwd, []SessionStoreEntry{
+		json.RawMessage(`{`),
+	})
+	malformedAgent := NewAgent(
+		WithExecutablePath(path),
+		WithScratchDir(t.TempDir()),
+		WithSessionStore(malformedStore),
+	)
+	malformedAgent.setConnection(newIdentityAgentClient())
+	_, err = malformedAgent.ResumeSession(ctx, ResumeSessionRequest("T-resume-malformed", cwd))
+	require.Error(t, err)
+	require.NotContains(t, malformedAgent.sessions, acp.SessionId("T-resume-malformed"))
+	require.NoError(t, malformedAgent.Close())
+}
+
+type identityAgentClient struct {
+	done          chan struct{}
+	notifications []acp.SessionNotification
+	updateErr     error
+}
+
+func newIdentityAgentClient() *identityAgentClient {
+	return &identityAgentClient{done: make(chan struct{})}
+}
+
+func (c *identityAgentClient) Done() <-chan struct{} {
+	return c.done
+}
+
+func (c *identityAgentClient) SessionUpdate(_ context.Context, notification acp.SessionNotification) error {
+	if c.updateErr != nil {
+		return c.updateErr
+	}
+	c.notifications = append(c.notifications, notification)
+
+	return nil
+}
+
+func (*identityAgentClient) NotifyExtension(context.Context, string, any) error {
+	return nil
+}
+
 func responseAmpMessageID(t *testing.T, response acp.PromptResponse) string {
 	t.Helper()
 
