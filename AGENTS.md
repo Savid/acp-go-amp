@@ -44,9 +44,9 @@ stdio or embed the agent directly in Go.
 - New code must keep `make coverage-check` at 100.0%.
 - Fake Amp binaries and generated test files must live under `t.TempDir()` or
   another ignored path outside the repository tree.
-- Conformance tests must pin strict `_meta.amp` handling, no fork capability,
-  no elicitation metadata, command silence, MCP accept/reject behavior, and
-  backpressure errors.
+- Conformance tests must pin strict `_meta.amp` handling, the mode-only config
+  surface, no fork capability, no elicitation metadata, command silence, MCP
+  accept/reject behavior, and backpressure errors.
 - Live tests may spend tokens only when explicitly env-gated.
 
 ## Security And Boundaries

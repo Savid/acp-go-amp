@@ -62,7 +62,7 @@ func TestLoadResumeManifestAndConfigBranches(t *testing.T) {
 	path, _ := fakeAgentAmpPath(t, "")
 	cwd := t.TempDir()
 	store := NewInMemorySessionStore()
-	manifest, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, ThreadID: "T-load", Cwd: cwd, Mode: "high", Effort: "max", CreatedAtUnixMilli: 1, UpdatedAtUnixMilli: 2})
+	manifest, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, ThreadID: "T-load", Cwd: cwd, Mode: "high", CreatedAtUnixMilli: 1, UpdatedAtUnixMilli: 2})
 	if err := store.Replace(ctx, SessionKey{SessionID: "T-load", Subpath: SessionStoreMainSubpath}, []SessionStoreReplacement{
 		{Key: SessionKey{SessionID: "T-load", Subpath: SessionStoreMainSubpath}, Entries: []SessionStoreEntry{manifest}},
 		{Key: SessionKey{SessionID: "T-load", Subpath: transcriptSubpath}, Entries: []SessionStoreEntry{
@@ -105,14 +105,8 @@ func TestLoadResumeManifestAndConfigBranches(t *testing.T) {
 	if _, err := agent.SetSessionConfigOption(ctx, SetConfigOptionRequest("T-load", "mode", "low")); err != nil {
 		t.Fatalf("set mode: %v", err)
 	}
-	if _, err := agent.SetSessionConfigOption(ctx, SetConfigOptionRequest("T-load", "effort", "low")); err != nil {
-		t.Fatalf("set effort: %v", err)
-	}
 	if _, err := agent.SetSessionConfigOption(ctx, SetConfigOptionRequest("T-load", "mode", "bad")); err == nil {
 		t.Fatal("bad mode accepted")
-	}
-	if _, err := agent.SetSessionConfigOption(ctx, SetConfigOptionRequest("T-load", "effort", "bad")); err == nil {
-		t.Fatal("bad effort accepted")
 	}
 	if _, err := agent.SetSessionConfigOption(ctx, SetConfigOptionRequest("T-load", "unknown", "x")); err == nil {
 		t.Fatal("unknown config accepted")

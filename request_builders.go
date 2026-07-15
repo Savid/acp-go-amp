@@ -335,10 +335,6 @@ func ampOptionsPayload(options AmpOptions) map[string]any {
 		payload[optionModeKey] = options.Mode
 	}
 
-	if options.Effort != "" {
-		payload[optionEffortKey] = options.Effort
-	}
-
 	return payload
 }
 

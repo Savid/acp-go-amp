@@ -18,14 +18,14 @@ func TestSessionMetaStrictness(t *testing.T) {
 	meta, err := parseSessionMeta(map[string]any{
 		"other": map[string]any{"ignored": true},
 		"amp": map[string]any{
-			"options":  map[string]any{"mode": "low", "effort": "low"},
+			"options":  map[string]any{"mode": "low"},
 			"rawEvent": map[string]any{"enabled": true},
 		},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if meta.options.Mode != "low" || meta.options.Effort != "low" || !meta.rawEvent {
+	if meta.options.Mode != "low" || !meta.rawEvent {
 		t.Fatalf("bad meta: %+v", meta)
 	}
 }
@@ -39,12 +39,11 @@ func TestActiveOmittedEnvMeansDefaultEnv(t *testing.T) {
 	explicitOptions := NewAmpOptions(
 		WithAmpEnv(map[string]string{"AMP_URL": "https://session.example.test"}),
 		WithAmpMode("high"),
-		WithAmpEffort("max"),
 	)
 	omittedEnvOptions := []SessionRequestOption{
 		WithSessionAdditionalDirectories(extra),
 		WithSessionMCPServers(server),
-		WithSessionAmpOptions(NewAmpOptions(WithAmpMode("high"), WithAmpEffort("max"))),
+		WithSessionAmpOptions(NewAmpOptions(WithAmpMode("high"))),
 	}
 
 	agent := NewAgent(

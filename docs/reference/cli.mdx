@@ -19,8 +19,8 @@ subprocess; stdout is reserved for JSON-RPC and diagnostics go to stderr.
 | `-version` | Print adapter version and exit. |
 
 `-seed-file` is accepted on the adapter surface, but Amp is locked to its hosted
-backend, so seeds cannot repoint it at a custom LLM endpoint. Amp `mode` and
-`effort` are session config options, not flags — see
+backend, so seeds cannot repoint it at a custom LLM endpoint. Amp `mode` is a
+session config option, not a serve-mode flag — see
 [Models and config](/docs/features/models-config).
 
 ## Stream handling

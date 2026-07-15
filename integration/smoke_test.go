@@ -41,6 +41,7 @@ func TestSmokeFakeACPLifecycleAndMCP(t *testing.T) {
 	agent := ampacp.NewAgent(
 		ampacp.WithExecutablePath(path),
 		ampacp.WithScratchDir(t.TempDir()),
+		ampacp.WithEnv(map[string]string{"AMP_API_KEY": "fake"}),
 		ampacp.WithSessionStore(ampacp.NewInMemorySessionStore()),
 	)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -113,7 +114,7 @@ func TestLiveThreadTurn(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	client := amp.NewClient(slog.Default(), amp.Options{SettingsFile: settings, Mode: "medium", Effort: "high"})
+	client := amp.NewClient(slog.Default(), amp.Options{SettingsFile: settings, Mode: "medium"})
 	thread, err := client.NewThread(ctx)
 	if err != nil {
 		t.Fatal(err)

@@ -35,10 +35,6 @@ func (a *Agent) validateSessionStartOptions(options AmpOptions) error {
 		return acp.NewInvalidParams(map[string]any{jsonFieldField: "_meta.amp.options.mode"})
 	}
 
-	if options.Effort != "" && !slices.Contains(validEfforts(), options.Effort) {
-		return acp.NewInvalidParams(map[string]any{jsonFieldField: "_meta.amp.options.effort"})
-	}
-
 	return nil
 }
 
@@ -166,8 +162,4 @@ func mcpConfigJSON(servers []acp.McpServer) (string, error) {
 
 func validModes() []string {
 	return []string{modeLow, modeMedium, modeHigh}
-}
-
-func validEfforts() []string {
-	return []string{effortNone, effortMinimal, effortLow, effortMedium, effortHigh, effortXHigh, effortMax}
 }

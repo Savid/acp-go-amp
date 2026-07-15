@@ -362,7 +362,7 @@ func cancelPending(ctx context.Context, state *promptTurnState) bool {
 
 // emitMessage translates one native message into session/update notifications.
 // live is true for a running prompt turn and false for session/load replay; only
-// a live turn reconciles the session's advertised mode/effort from a native init
+// a live turn reconciles the session's advertised mode from a native init
 // frame, because replay restores state from the persisted manifest.
 func (s *agentSession) emitMessage(ctx context.Context, msg amp.Message, live bool) error {
 	switch typed := msg.(type) {

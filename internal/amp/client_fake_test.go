@@ -45,7 +45,7 @@ func TestFakeAmpHelper(t *testing.T) {
 			os.Stdout.WriteString("threads only\n")
 			os.Exit(0)
 		}
-		os.Stdout.WriteString("--settings-file --mcp-config -m --effort --json --stream-json-input threads continue threads export threads delete\n")
+		os.Stdout.WriteString("--settings-file --mcp-config -m --json --stream-json-input threads continue threads export threads delete\n")
 		os.Exit(0)
 	}
 	threads := slices.Index(args, "threads")
@@ -127,7 +127,6 @@ func TestClientCommandsUseGlobalArgsAndParseOutput(t *testing.T) {
 		SettingsFile:  filepath.Join(t.TempDir(), "settings.json"),
 		Env:           map[string]string{"AMP_API_KEY": "fake"},
 		Mode:          "strange-mode",
-		Effort:        "strange-effort",
 		MCPConfigPath: filepath.Join(t.TempDir(), "mcp.json"),
 	})
 	ctx := context.Background()
@@ -149,10 +148,18 @@ func TestClientCommandsUseGlobalArgsAndParseOutput(t *testing.T) {
 	if len(startupContinue) == 0 {
 		t.Fatalf("startup continue probe not recorded: %#v", records)
 	}
-	for _, want := range []string{"--settings-file", "--mcp-config", "-m", "medium", "--effort", "high", "--stream-json", "--stream-json-input", "-x"} {
+	for _, want := range []string{"--settings-file", "--mcp-config", "-m", "medium", "--stream-json", "--stream-json-input", "-x"} {
 		if !slices.Contains(startupContinue, want) {
 			t.Fatalf("startup continue probe missing %q: %#v", want, startupContinue)
 		}
+	}
+	for _, global := range []string{ampArgNoIDE, ampArgNoColor, ampArgNoNotifications, "--settings-file", "--mcp-config", "-m"} {
+		if count := countArg(startupContinue, global); count != 1 {
+			t.Fatalf("startup continue probe has %d copies of %q: %#v", count, global, startupContinue)
+		}
+	}
+	if slices.Contains(startupContinue, "--effort") {
+		t.Fatalf("startup continue probe used removed --effort flag: %#v", startupContinue)
 	}
 	if err := client.StartupProbe(ctx); err != nil {
 		t.Fatalf("StartupProbe cached: %v", err)
@@ -180,11 +187,22 @@ func TestClientCommandsUseGlobalArgsAndParseOutput(t *testing.T) {
 		t.Fatalf("recorded args = %#v", records)
 	}
 	last := records[len(records)-1]
-	for _, want := range []string{"--no-ide", "--no-color", "--no-notifications", "--settings-file", "--mcp-config", "-m", "strange-mode", "--effort", "strange-effort", "threads", "delete", "T-missing"} {
+	for _, want := range []string{ampArgNoIDE, ampArgNoColor, ampArgNoNotifications, "--settings-file", "--mcp-config", "-m", "strange-mode", "threads", "delete", "T-missing"} {
 		if !slices.Contains(last, want) {
 			t.Fatalf("last args missing %q: %#v", want, last)
 		}
 	}
+}
+
+func countArg(args []string, want string) int {
+	count := 0
+	for _, arg := range args {
+		if arg == want {
+			count++
+		}
+	}
+
+	return count
 }
 
 func TestStartupProbeAndVersionBranches(t *testing.T) {

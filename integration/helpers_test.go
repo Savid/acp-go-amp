@@ -364,7 +364,7 @@ fi
 last=""
 for arg in "$@"; do last="$arg"; done
 if [ "$last" = "--help" ]; then
-  echo "--settings-file --mcp-config -m --effort --json --stream-json-input threads continue threads export threads delete"
+  echo "--settings-file --mcp-config -m --json --stream-json-input threads continue threads export threads delete"
   exit 0
 fi
 for arg in "$@"; do

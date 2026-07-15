@@ -11,7 +11,7 @@ local mirror for display and continuity.
 ## Lifecycle
 
 - `session/new` calls `amp threads new`, persists an initial manifest, and
-  returns select config options for `mode` and `effort`. No prompt tokens are
+  returns the select config option for `mode`. No prompt tokens are
   spent creating the empty thread.
 - `session/load` reads the store manifest and transcript, verifies that the
   server-side Amp thread can still be addressed, recreates the adapter session

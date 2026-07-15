@@ -14,8 +14,7 @@ Unknown keys fail closed; foreign namespaces are ignored.
     "amp": {
       "options": {
         "env": {},
-        "mode": "smart",
-        "effort": "high"
+        "mode": "high"
       },
       "rawEvent": {
         "enabled": false
@@ -30,8 +29,7 @@ Unknown keys fail closed; foreign namespaces are ignored.
 | Field | Accepted values |
 |---|---|
 | `options.env` | Map of environment overrides. |
-| `options.mode` | `smart`, `deep`, `rush`. |
-| `options.effort` | `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. |
+| `options.mode` | `low`, `medium`, `high`. |
 | `options.model` | Present for symmetry; any value fails with the uniform unsupported error. |
 | `options.outputSchema` | Present for symmetry; any presence fails with the uniform unsupported error. |
 | `rawEvent.enabled` | `true` to stream `_amp/rawEvent` for the session. |

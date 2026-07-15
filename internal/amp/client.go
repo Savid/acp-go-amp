@@ -28,6 +28,9 @@ const (
 	ampThreadContinue      = "continue"
 	ampThreadDelete        = "delete"
 	ampThreadExport        = "export"
+	ampArgNoIDE            = "--no-ide"
+	ampArgNoColor          = "--no-color"
+	ampArgNoNotifications  = "--no-notifications"
 )
 
 var (
@@ -53,7 +56,6 @@ type Options struct {
 	Env           map[string]string
 	ThreadID      string
 	Mode          string
-	Effort        string
 	MCPConfigPath string
 	MaxLineBytes  int
 	// OnGoroutinePanic is invoked with the recovered value when a turn-owned
@@ -153,21 +155,20 @@ func (c *Client) probeSubcommands(ctx context.Context) error {
 	}
 
 	continueClient.options.Mode = "medium"
-	continueClient.options.Effort = "high"
-	continueArgs := continueClient.globalArgs()
-	continueArgs = append(continueArgs, ampArgThreads, ampThreadContinue, startupProbeThreadID, "--stream-json", "--stream-json-input", "-x")
+	continueArgs := []string{ampArgThreads, ampThreadContinue, startupProbeThreadID, "--stream-json", "--stream-json-input", "-x"}
 
 	probes := []struct {
 		name                 string
+		client               *Client
 		args                 []string
 		requireMissingThread bool
 	}{
-		{name: "threads export", args: []string{ampArgThreads, ampThreadExport, startupProbeThreadID}},
-		{name: "threads continue", args: continueArgs, requireMissingThread: true},
-		{name: "threads delete", args: []string{ampArgThreads, ampThreadDelete, startupProbeThreadID}},
+		{name: "threads export", client: c, args: []string{ampArgThreads, ampThreadExport, startupProbeThreadID}},
+		{name: "threads continue", client: &continueClient, args: continueArgs, requireMissingThread: true},
+		{name: "threads delete", client: c, args: []string{ampArgThreads, ampThreadDelete, startupProbeThreadID}},
 	}
 	for _, probe := range probes {
-		if _, err := c.output(probeCtx, probe.args...); err != nil {
+		if _, err := probe.client.output(probeCtx, probe.args...); err != nil {
 			if methodErr := methodProbeError(probe.name, err, probe.requireMissingThread); methodErr != nil {
 				return methodErr
 			}
@@ -410,7 +411,7 @@ func (c *Client) outputWithArgs(ctx context.Context, args ...string) ([]byte, er
 }
 
 func (c *Client) globalArgs() []string {
-	args := []string{"--no-ide", "--no-color", "--no-notifications"}
+	args := []string{ampArgNoIDE, ampArgNoColor, ampArgNoNotifications}
 	if c.options.SettingsFile != "" {
 		args = append(args, "--settings-file", c.options.SettingsFile)
 	}
@@ -421,10 +422,6 @@ func (c *Client) globalArgs() []string {
 
 	if c.options.Mode != "" {
 		args = append(args, "-m", c.options.Mode)
-	}
-
-	if c.options.Effort != "" {
-		args = append(args, "--effort", c.options.Effort)
 	}
 
 	return args

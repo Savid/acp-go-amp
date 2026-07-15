@@ -431,7 +431,7 @@ func (a *Agent) loadOrResume(ctx context.Context, sessionID acp.SessionId, cwd s
 
 	// X1: validate the full request identically to the cold path FIRST, so an
 	// already-active session cannot bypass strict _meta, cwd/additional-dir,
-	// MCP transport, and model/mode/effort validation. Only after validation
+	// MCP transport, and model/mode validation. Only after validation
 	// succeeds may an active session be reused.
 	meta, err := parseSessionMeta(rawMeta)
 	if err != nil {
@@ -493,10 +493,6 @@ func (a *Agent) loadOrResume(ctx context.Context, sessionID acp.SessionId, cwd s
 
 	if meta.options.Mode == "" {
 		meta.options.Mode = manifest.Mode
-	}
-
-	if meta.options.Effort == "" {
-		meta.options.Effort = manifest.Effort
 	}
 
 	session, err := newAgentSession(ctx, a, sessionID, cwd, meta, mcpConfig, additionalDirs)
@@ -599,10 +595,6 @@ func (s *agentSession) applyActiveRequest(meta parsedSessionMeta, cwd string, mc
 
 	if meta.optionFields.mode && s.mode != meta.options.Mode {
 		return mismatchField(optionModeKey)
-	}
-
-	if meta.optionFields.effort && s.effort != meta.options.Effort {
-		return mismatchField(optionEffortKey)
 	}
 
 	if meta.rawEventField {
@@ -821,12 +813,8 @@ func (s *agentSession) replayTranscript(ctx context.Context) error {
 
 func (s *agentSession) configOptions() []acp.SessionConfigOption {
 	modeCategory := acp.SessionConfigOptionCategoryMode
-	effortCategory := acp.SessionConfigOptionCategoryThoughtLevel
 
-	return []acp.SessionConfigOption{
-		selectConfig(configMode, "Mode", modeCategory, s.mode, validModes()),
-		selectConfig(configEffort, "Effort", effortCategory, s.effort, validEfforts()),
-	}
+	return []acp.SessionConfigOption{selectConfig(configMode, "Mode", modeCategory, s.mode, validModes())}
 }
 
 func (s *agentSession) setConfig(ctx context.Context, id acp.SessionConfigId, value acp.SessionConfigValueId) error {
@@ -840,14 +828,6 @@ func (s *agentSession) setConfig(ctx context.Context, id acp.SessionConfigId, va
 		}
 
 		s.mode = string(value)
-	case configEffort:
-		if !slices.Contains(validEfforts(), string(value)) {
-			s.mu.Unlock()
-
-			return acp.NewInvalidParams(map[string]any{jsonFieldField: fieldValue})
-		}
-
-		s.effort = string(value)
 	default:
 		s.mu.Unlock()
 
@@ -864,8 +844,8 @@ func (s *agentSession) setConfig(ctx context.Context, id acp.SessionConfigId, va
 	return s.emitUpdate(ctx, s.configUpdate())
 }
 
-// reconcileNativeConfig aligns the session's advertised mode/effort with the
-// values amp actually used, as reported in the stream-json init frame. A
+// reconcileNativeConfig aligns the session's advertised mode with the value
+// amp actually used, as reported in the stream-json init frame. A
 // native-reported value wins over the host-requested one once observed; a field
 // amp does not report leaves the host-requested value in place. When the
 // reconciled state differs from what was last advertised, a config_option_update
@@ -880,10 +860,6 @@ func (s *agentSession) reconcileNativeConfig(ctx context.Context, sys *amp.Syste
 		changed = true
 	}
 
-	if sys.ReasoningEffort != "" && sys.ReasoningEffort != s.effort {
-		s.effort = sys.ReasoningEffort
-		changed = true
-	}
 	s.mu.Unlock()
 
 	if !changed {
@@ -894,7 +870,7 @@ func (s *agentSession) reconcileNativeConfig(ctx context.Context, sys *amp.Syste
 }
 
 // configUpdate builds the config_option_update notification carrying the
-// session's current mode/effort adverts.
+// session's current mode advert.
 func (s *agentSession) configUpdate() acp.SessionUpdate {
 	return acp.SessionUpdate{ConfigOptionUpdate: &acp.SessionConfigOptionUpdate{
 		SessionUpdate: "config_option_update",

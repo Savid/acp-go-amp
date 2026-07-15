@@ -21,7 +21,6 @@ const (
 
 	ampMetaKey       = "amp"
 	configMode       = acp.SessionConfigId(optionModeKey)
-	configEffort     = acp.SessionConfigId(optionEffortKey)
 	configTypeSelect = "select"
 
 	jsonFieldError  = "error"
@@ -41,7 +40,6 @@ const (
 	metaParentToolUseIDKey = "parentToolUseId"
 	optionModelKey         = "model"
 	optionModeKey          = "mode"
-	optionEffortKey        = "effort"
 	optionEnvKey           = "env"
 	optionFieldHome        = "home"
 
@@ -65,14 +63,6 @@ const (
 	modeLow    = "low"
 	modeMedium = "medium"
 	modeHigh   = "high"
-
-	effortNone    = "none"
-	effortMinimal = "minimal"
-	effortLow     = "low"
-	effortMedium  = "medium"
-	effortHigh    = "high"
-	effortXHigh   = "xhigh"
-	effortMax     = "max"
 )
 
 var (
@@ -90,7 +80,6 @@ type ampManifest struct {
 	Cwd                string `json:"cwd"`
 	Title              string `json:"title,omitempty"`
 	Mode               string `json:"mode,omitempty"`
-	Effort             string `json:"effort,omitempty"`
 	UpdatedAtUnixMilli int64  `json:"updatedAtUnixMilli"`
 	CreatedAtUnixMilli int64  `json:"createdAtUnixMilli"`
 }
@@ -101,7 +90,6 @@ type agentSession struct {
 	cwd                   string
 	title                 string
 	mode                  string
-	effort                string
 	createdUnix           int64
 	updatedUnix           int64
 	additionalDirectories []string
@@ -187,11 +175,7 @@ func newAgentSession(ctx context.Context, agent *Agent, id acp.SessionId, cwd st
 	if mode == "" {
 		mode = modeMedium
 	}
-	// Effort has no wrapper-imposed default: --effort is passed to amp only when
-	// the host explicitly set it (per-request option or session config). When it
-	// is unset the flag is omitted and amp chooses its own default, which is then
-	// surfaced back via reconcileNativeConfig once the init frame reports it.
-	effort := meta.options.Effort
+
 	env := mergeEnv(agent.options.Env, meta.options.Env)
 	env[envHome] = homeDir
 	env["XDG_CONFIG_HOME"] = configDir
@@ -204,7 +188,6 @@ func newAgentSession(ctx context.Context, agent *Agent, id acp.SessionId, cwd st
 		id:                    id,
 		cwd:                   cwd,
 		mode:                  mode,
-		effort:                effort,
 		createdUnix:           now,
 		updatedUnix:           now,
 		additionalDirectories: append([]string(nil), additionalDirs...),
@@ -233,7 +216,6 @@ func (s *agentSession) clientWithEnv(env map[string]string, mcpConfigPath string
 		Env:              env,
 		ThreadID:         string(s.id),
 		Mode:             s.mode,
-		Effort:           s.effort,
 		MCPConfigPath:    mcpConfigPath,
 		MaxLineBytes:     s.agent.options.runtime.maxJSONLineBytes,
 		OnGoroutinePanic: s.agent.onNativeGoroutinePanic,
@@ -483,7 +465,6 @@ func (s *agentSession) manifest() ampManifest {
 		Cwd:                s.cwd,
 		Title:              s.title,
 		Mode:               s.mode,
-		Effort:             s.effort,
 		UpdatedAtUnixMilli: s.updatedUnix,
 		CreatedAtUnixMilli: s.createdUnix,
 	}

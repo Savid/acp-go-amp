@@ -19,9 +19,9 @@ import (
 )
 
 func TestConfigOptions(t *testing.T) {
-	session := &agentSession{mode: "medium", effort: "high"}
+	session := &agentSession{mode: "medium"}
 	options := session.configOptions()
-	if len(options) != 2 {
+	if len(options) != 1 {
 		t.Fatalf("options=%d", len(options))
 	}
 	if options[0].Select == nil || options[0].Select.Type != "select" {
@@ -35,7 +35,7 @@ func TestActiveLoadResumeSemantics(t *testing.T) {
 	cwd := t.TempDir()
 	extra := t.TempDir()
 	server := StdioMCPServer("stdio", "printf", []string{"ok"}, map[string]string{"A": "B"})
-	options := NewAmpOptions(WithAmpEnv(map[string]string{"AMP_URL": "https://amp.example.test"}), WithAmpMode("high"), WithAmpEffort("max"))
+	options := NewAmpOptions(WithAmpEnv(map[string]string{"AMP_URL": "https://amp.example.test"}), WithAmpMode("high"))
 	requestOptions := func(raw bool) []SessionRequestOption {
 		return []SessionRequestOption{
 			WithSessionAdditionalDirectories(extra),
@@ -71,25 +71,17 @@ func TestActiveLoadResumeSemantics(t *testing.T) {
 	if _, resumeErr := agent.ResumeSession(ctx, ResumeSessionRequest(id, cwd,
 		WithSessionAdditionalDirectories(extra),
 		WithSessionMCPServers(server),
-		WithSessionAmpOptions(NewAmpOptions(WithAmpEnv(map[string]string{"AMP_URL": "https://other.example.test"}), WithAmpMode("high"), WithAmpEffort("max"))),
+		WithSessionAmpOptions(NewAmpOptions(WithAmpEnv(map[string]string{"AMP_URL": "https://other.example.test"}), WithAmpMode("high"))),
 	)); !isMismatchField(resumeErr, "env") {
 		t.Fatalf("different active env = %v, want env mismatch", resumeErr)
 	}
 	if _, loadErr := agent.LoadSession(ctx, LoadSessionRequest(id, cwd,
 		WithSessionAdditionalDirectories(extra),
 		WithSessionMCPServers(server),
-		WithSessionAmpOptions(NewAmpOptions(WithAmpEnv(map[string]string{"AMP_URL": "https://amp.example.test"}), WithAmpMode("low"), WithAmpEffort("max"))),
+		WithSessionAmpOptions(NewAmpOptions(WithAmpEnv(map[string]string{"AMP_URL": "https://amp.example.test"}), WithAmpMode("low"))),
 	)); !isMismatchField(loadErr, "mode") {
 		t.Fatalf("different active mode = %v, want mode mismatch", loadErr)
 	}
-	if _, resumeErr := agent.ResumeSession(ctx, ResumeSessionRequest(id, cwd,
-		WithSessionAdditionalDirectories(extra),
-		WithSessionMCPServers(server),
-		WithSessionAmpOptions(NewAmpOptions(WithAmpEnv(map[string]string{"AMP_URL": "https://amp.example.test"}), WithAmpMode("high"), WithAmpEffort("low"))),
-	)); !isMismatchField(resumeErr, "effort") {
-		t.Fatalf("different active effort = %v, want effort mismatch", resumeErr)
-	}
-
 	if _, err := agent.LoadSession(ctx, LoadSessionRequest(id, cwd, requestOptions(true)...)); err != nil {
 		t.Fatalf("active load applying raw events: %v", err)
 	}
@@ -342,7 +334,7 @@ func TestLoadReplayDeleteAndConfigEdges(t *testing.T) {
 
 	replaceErr := errors.New("replace failed")
 	configAgent := NewAgent(WithExecutablePath("/does/not/exist"), WithSessionStore(&errorStore{replaceErr: replaceErr}))
-	configSession := &agentSession{agent: configAgent, id: "T-config", mode: "medium", effort: "high", turn: make(chan struct{}, 1)}
+	configSession := &agentSession{agent: configAgent, id: "T-config", mode: "medium", turn: make(chan struct{}, 1)}
 	if err := configSession.setConfig(ctx, configMode, "low"); !errors.Is(err, replaceErr) {
 		t.Fatalf("setConfig replace error = %v", err)
 	}
@@ -573,7 +565,6 @@ func putStoredSession(t *testing.T, store *InMemorySessionStore, id string, cwd 
 		ThreadID:           id,
 		Cwd:                cwd,
 		Mode:               "medium",
-		Effort:             "high",
 		CreatedAtUnixMilli: 1,
 		UpdatedAtUnixMilli: 2,
 	})
@@ -610,7 +601,7 @@ type fakeTurnErrors struct {
 func (f fakeTurnErrors) Errors() <-chan error { return f.errs }
 
 // TestReconcileNativeConfigReadBack pins R5-7: when amp's stream-json init frame
-// reports a mode/effort that diverges from what the host requested, the wrapper
+// reports a mode that diverges from what the host requested, the wrapper
 // reconciles session state to amp's truth, emits a config_option_update, and
 // subsequent config-option reads report the native values rather than the echoed
 // request.
@@ -629,14 +620,14 @@ func TestReconcileNativeConfigReadBack(t *testing.T) {
 	}
 	cwd := t.TempDir()
 	newResp, err := conn.NewSession(ctx, NewSessionRequest(cwd,
-		WithSessionAmpOptions(NewAmpOptions(WithAmpMode("medium"), WithAmpEffort("low"))),
+		WithSessionAmpOptions(NewAmpOptions(WithAmpMode("medium"))),
 	))
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
 	}
 
 	// Requested surface is echoed before any native report.
-	requireConfigValues(t, newResp.ConfigOptions, "medium", "low")
+	requireConfigMode(t, newResp.ConfigOptions, "medium")
 
 	if _, promptErr := conn.Prompt(ctx, acp.PromptRequest{
 		SessionId: newResp.SessionId,
@@ -656,7 +647,7 @@ func TestReconcileNativeConfigReadBack(t *testing.T) {
 	if reconciled == nil {
 		t.Fatalf("no config_option_update emitted; updates = %#v", client.updatesSnapshot())
 	}
-	requireConfigValues(t, reconciled, "high", "max")
+	requireConfigMode(t, reconciled, "high")
 
 	// A subsequent read-back (resume of the active session) reports amp's truth,
 	// not the originally requested medium/low.
@@ -664,13 +655,12 @@ func TestReconcileNativeConfigReadBack(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResumeSession: %v", err)
 	}
-	requireConfigValues(t, resumeResp.ConfigOptions, "high", "max")
+	requireConfigMode(t, resumeResp.ConfigOptions, "high")
 }
 
-// TestEffortDefaultOmittedWhenUnset pins R5-8: when the host does not set effort,
-// the wrapper omits --effort entirely and lets amp choose its own default; the
-// mode flag is still passed.
-func TestEffortDefaultOmittedWhenUnset(t *testing.T) {
+// TestLaunchNeverUsesRemovedEffortFlag pins the current Amp CLI launch surface:
+// mode is forwarded and the removed --effort flag is never emitted.
+func TestLaunchNeverUsesRemovedEffortFlag(t *testing.T) {
 	path, state := fakeAgentAmpPath(t, "")
 	conn, _, cleanup := startTestServe(t,
 		WithExecutablePath(path),
@@ -715,7 +705,7 @@ func TestEffortDefaultOmittedWhenUnset(t *testing.T) {
 
 // TestReconcileNativeConfigEmitFailureAbortsTurn covers the reconcile branch in
 // the prompt loop: when the config_option_update carrying reconciled native
-// mode/effort cannot be delivered, the turn aborts with the delivery error.
+// mode cannot be delivered, the turn aborts with the delivery error.
 func TestReconcileNativeConfigEmitFailureAbortsTurn(t *testing.T) {
 	ctx := context.Background()
 	path, _ := fakeAgentAmpPath(t, "reconcile-config")
@@ -730,7 +720,7 @@ func TestReconcileNativeConfigEmitFailureAbortsTurn(t *testing.T) {
 	}
 }
 
-func requireConfigValues(t *testing.T, options []acp.SessionConfigOption, wantMode, wantEffort string) {
+func requireConfigMode(t *testing.T, options []acp.SessionConfigOption, wantMode string) {
 	t.Helper()
 	got := make(map[string]string, len(options))
 	for _, option := range options {
@@ -741,9 +731,6 @@ func requireConfigValues(t *testing.T, options []acp.SessionConfigOption, wantMo
 	}
 	if got[string(configMode)] != wantMode {
 		t.Fatalf("mode current value = %q, want %q", got[string(configMode)], wantMode)
-	}
-	if got[string(configEffort)] != wantEffort {
-		t.Fatalf("effort current value = %q, want %q", got[string(configEffort)], wantEffort)
 	}
 }
 

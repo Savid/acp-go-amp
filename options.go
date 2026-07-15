@@ -314,7 +314,6 @@ type AmpOptions struct {
 	Env          map[string]string `json:"env,omitempty"`
 	OutputSchema map[string]any    `json:"outputSchema,omitempty"`
 	Mode         string            `json:"mode,omitempty"`
-	Effort       string            `json:"effort,omitempty"`
 }
 
 // AmpOption configures AmpOptions.
@@ -367,13 +366,6 @@ func WithAmpOutputSchema(schema map[string]any) AmpOption {
 func WithAmpMode(mode string) AmpOption {
 	return func(options *AmpOptions) {
 		options.Mode = mode
-	}
-}
-
-// WithAmpEffort sets the per-session reasoning effort.
-func WithAmpEffort(effort string) AmpOption {
-	return func(options *AmpOptions) {
-		options.Effort = effort
 	}
 }
 

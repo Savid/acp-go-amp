@@ -54,7 +54,6 @@ func TestOptionsAndAmpOptions(t *testing.T) {
 		WithAmpEnv(env),
 		WithAmpOutputSchema(map[string]any{"type": "object"}),
 		WithAmpMode("mode"),
-		WithAmpEffort("effort"),
 		nil,
 	)
 	env["A"] = "changed"
@@ -67,7 +66,7 @@ func TestOptionsAndAmpOptions(t *testing.T) {
 	if !ok {
 		t.Fatalf("options meta = %#v", ampMeta["options"])
 	}
-	if payload["model"] != "model" || payload["mode"] != "mode" || payload["effort"] != "effort" {
+	if payload["model"] != "model" || payload["mode"] != "mode" {
 		t.Fatalf("amp options meta = %#v", payload)
 	}
 	envPayload, ok := payload["env"].(map[string]string)

@@ -20,7 +20,7 @@ func TestRequestBuildersAndCallForkSession(t *testing.T) {
 		WithSessionMCPServers(stdio, http, sse, acpServer),
 		WithSessionAdditionalDirectories("/tmp/other"),
 		WithSessionOutputSchema(map[string]any{"type": "object"}),
-		WithSessionAmpOptions(AmpOptions{Mode: "low", Effort: "low"}),
+		WithSessionAmpOptions(AmpOptions{Mode: "low"}),
 		WithSessionRawEvents(true),
 		nil,
 	)

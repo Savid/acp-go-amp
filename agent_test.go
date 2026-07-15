@@ -61,7 +61,7 @@ func TestFakeAmpAgentHelper(t *testing.T) {
 		os.Exit(0)
 	}
 	if len(args) > 0 && args[len(args)-1] == "--help" {
-		os.Stdout.WriteString("--settings-file --mcp-config -m --effort --json --stream-json-input threads continue threads export threads delete\n")
+		os.Stdout.WriteString("--settings-file --mcp-config -m --json --stream-json-input threads continue threads export threads delete\n")
 		os.Exit(0)
 	}
 	threads := slices.Index(args, "threads")
@@ -96,7 +96,7 @@ func TestFakeAmpAgentHelper(t *testing.T) {
 			os.Stderr.WriteString("Thread not found\n")
 			os.Exit(1)
 		case "reconcile-config":
-			// Report a mode/effort that diverges from whatever the host requested so
+			// Report a mode that diverges from whatever the host requested so
 			// the wrapper's native read-back reconciliation is exercised.
 			os.Stdout.WriteString(`{"type":"system","subtype":"init","cwd":"/tmp/project","session_id":"T-agent-thread","tools":["Read"],"mcp_servers":[{"name":"svc","status":"connected"}],"agent_mode":"high","reasoning_effort":"max"}` + "\n")
 			os.Stdout.WriteString(`{"type":"result","subtype":"success","duration_ms":1,"is_error":false,"num_turns":1,"result":"done","session_id":"T-agent-thread"}` + "\n")
@@ -105,13 +105,9 @@ func TestFakeAmpAgentHelper(t *testing.T) {
 			if i := slices.Index(args, "-m"); i >= 0 && i+1 < len(args) {
 				initMode = args[i+1]
 			}
-			initEffort := ""
-			if i := slices.Index(args, "--effort"); i >= 0 && i+1 < len(args) {
-				initEffort = args[i+1]
-			}
 			os.Stderr.WriteString("native stderr noise\n")
 			os.Stdout.WriteString("native stdout noise\n")
-			os.Stdout.WriteString(`{"type":"system","subtype":"init","cwd":"/tmp/project","session_id":"T-agent-thread","tools":["Read"],"mcp_servers":[{"name":"svc","status":"connected"}],"agent_mode":"` + initMode + `","reasoning_effort":"` + initEffort + `"}` + "\n")
+			os.Stdout.WriteString(`{"type":"system","subtype":"init","cwd":"/tmp/project","session_id":"T-agent-thread","tools":["Read"],"mcp_servers":[{"name":"svc","status":"connected"}],"agent_mode":"` + initMode + `"}` + "\n")
 			os.Stdout.WriteString(`{"type":"user","message":{"content":[{"type":"text","text":"echoed user"},{"type":"tool_result","tool_use_id":"TU-1","content":"tool output","is_error":true}]},"session_id":"T-agent-thread"}` + "\n")
 			os.Stdout.WriteString(`{"type":"assistant","message":{"content":[{"type":"text","text":"agent text"},{"type":"tool_use","id":"TU-1","name":"Read","input":{"path":"README.md"}}],"usage":{"input_tokens":3,"cache_creation_input_tokens":5,"cache_read_input_tokens":7,"output_tokens":11,"max_tokens":200,"service_tier":"standard"}},"session_id":"T-agent-thread"}` + "\n")
 			os.Stdout.WriteString(`{"type":"result","subtype":"success","duration_ms":1,"is_error":false,"num_turns":1,"result":"done","session_id":"T-agent-thread","usage":{"input_tokens":13,"output_tokens":17,"max_tokens":300}}` + "\n")
@@ -176,7 +172,6 @@ func TestServeFakeAmpLifecycleStdoutCleanStoreReplayAndDelete(t *testing.T) {
 		WithSessionAmpOptions(NewAmpOptions(
 			WithAmpEnv(map[string]string{"AMP_URL": "https://amp.example.test"}),
 			WithAmpMode("high"),
-			WithAmpEffort("max"),
 		)),
 		WithSessionMCPServers(
 			StdioMCPServer("stdio", "printf", []string{"ok"}, map[string]string{"A": "B"}),
@@ -271,7 +266,7 @@ func TestServeFakeAmpLifecycleStdoutCleanStoreReplayAndDelete(t *testing.T) {
 			continueArgs = args
 		}
 	}
-	for _, want := range []string{"--no-ide", "--no-color", "--no-notifications", "--settings-file", "--mcp-config", "-m", "high", "--effort", "max", "threads", "continue", "T-agent-thread", "--stream-json", "--stream-json-input", "-x"} {
+	for _, want := range []string{"--no-ide", "--no-color", "--no-notifications", "--settings-file", "--mcp-config", "-m", "high", "threads", "continue", "T-agent-thread", "--stream-json", "--stream-json-input", "-x"} {
 		if !slices.Contains(continueArgs, want) {
 			t.Fatalf("continue args missing %q: %#v", want, continueArgs)
 		}
@@ -368,9 +363,6 @@ func TestAgentErrorAndConformanceBranches(t *testing.T) {
 	}
 	if err := NewAgent().validateSessionStartOptions(AmpOptions{Mode: "large"}); err == nil {
 		t.Fatal("hidden mode accepted")
-	}
-	if err := NewAgent().validateSessionStartOptions(AmpOptions{Effort: "extreme"}); err == nil {
-		t.Fatal("unknown effort accepted")
 	}
 }
 
@@ -837,7 +829,7 @@ func main() {
 			}
 		}
 		if mode == "reconcile-config" {
-			// Report a mode/effort that diverges from whatever the host requested so
+			// Report a mode that diverges from whatever the host requested so
 			// the wrapper's native read-back reconciliation is exercised.
 			os.Stdout.WriteString("{\"type\":\"system\",\"subtype\":\"init\",\"cwd\":\"/tmp/project\",\"session_id\":\"T-agent-thread\",\"tools\":[\"Read\"],\"mcp_servers\":[{\"name\":\"svc\",\"status\":\"connected\"}],\"agent_mode\":\"high\",\"reasoning_effort\":\"max\"}\n")
 			os.Stdout.WriteString("{\"type\":\"result\",\"subtype\":\"success\",\"duration_ms\":1,\"is_error\":false,\"num_turns\":1,\"result\":\"done\",\"session_id\":\"T-agent-thread\"}\n")
@@ -847,13 +839,9 @@ func main() {
 		if i := index(args, "-m"); i >= 0 && i+1 < len(args) {
 			initMode = args[i+1]
 		}
-		initEffort := ""
-		if i := index(args, "--effort"); i >= 0 && i+1 < len(args) {
-			initEffort = args[i+1]
-		}
 		os.Stderr.WriteString("native stderr noise\n")
 		os.Stdout.WriteString("native stdout noise\n")
-		os.Stdout.WriteString("{\"type\":\"system\",\"subtype\":\"init\",\"cwd\":\"/tmp/project\",\"session_id\":\"T-agent-thread\",\"tools\":[\"Read\"],\"mcp_servers\":[{\"name\":\"svc\",\"status\":\"connected\"}],\"agent_mode\":\"" + initMode + "\",\"reasoning_effort\":\"" + initEffort + "\"}\n")
+		os.Stdout.WriteString("{\"type\":\"system\",\"subtype\":\"init\",\"cwd\":\"/tmp/project\",\"session_id\":\"T-agent-thread\",\"tools\":[\"Read\"],\"mcp_servers\":[{\"name\":\"svc\",\"status\":\"connected\"}],\"agent_mode\":\"" + initMode + "\"}\n")
 		os.Stdout.WriteString("{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"echoed user\"},{\"type\":\"tool_result\",\"tool_use_id\":\"TU-1\",\"content\":\"tool output\",\"is_error\":true}]},\"session_id\":\"T-agent-thread\"}\n")
 		os.Stdout.WriteString("{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"agent text\"},{\"type\":\"tool_use\",\"id\":\"TU-1\",\"name\":\"Read\",\"input\":{\"path\":\"README.md\"}}],\"usage\":{\"input_tokens\":3,\"cache_creation_input_tokens\":5,\"cache_read_input_tokens\":7,\"output_tokens\":11,\"max_tokens\":200,\"service_tier\":\"standard\"}},\"session_id\":\"T-agent-thread\"}\n")
 		os.Stdout.WriteString("{\"type\":\"result\",\"subtype\":\"success\",\"duration_ms\":1,\"is_error\":false,\"num_turns\":1,\"result\":\"done\",\"session_id\":\"T-agent-thread\",\"usage\":{\"input_tokens\":13,\"output_tokens\":17,\"max_tokens\":300}}\n")

@@ -12,9 +12,8 @@ type parsedSessionMeta struct {
 }
 
 type ampOptionFields struct {
-	env    bool
-	mode   bool
-	effort bool
+	env  bool
+	mode bool
 }
 
 func parseSessionMeta(meta map[string]any) (parsedSessionMeta, error) {
@@ -112,15 +111,6 @@ func parseAmpOptionsWithPresence(value any) (AmpOptions, ampOptionFields, error)
 			}
 
 			options.Mode = mode
-		case optionEffortKey:
-			fields.effort = true
-
-			effort, ok := value.(string)
-			if !ok {
-				return options, fields, unsupportedField("_meta.amp.options.effort")
-			}
-
-			options.Effort = effort
 		default:
 			return options, fields, unsupportedField("_meta.amp.options." + key)
 		}

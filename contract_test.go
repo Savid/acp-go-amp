@@ -83,6 +83,7 @@ func TestStrictMetaAndConfigResponse(t *testing.T) {
 		{name: "rawEvent enabled not bool", meta: map[string]any{"amp": map[string]any{"rawEvent": map[string]any{"enabled": "yes"}}}, field: "_meta.amp.rawEvent.enabled"},
 		{name: "rawEvent unknown", meta: map[string]any{"amp": map[string]any{"rawEvent": map[string]any{"extra": true}}}, field: "_meta.amp.rawEvent.extra"},
 		{name: "model not string", meta: map[string]any{"amp": map[string]any{"options": map[string]any{"model": 1}}}, field: "_meta.amp.options.model"},
+		{name: "removed effort", meta: map[string]any{"amp": map[string]any{"options": map[string]any{"effort": "high"}}}, field: "_meta.amp.options.effort"},
 		{name: "outputSchema empty", meta: map[string]any{"amp": map[string]any{"options": map[string]any{"outputSchema": map[string]any{}}}}, field: "_meta.amp.options.outputSchema"},
 		{name: "own namespace unknown", meta: map[string]any{"amp": map[string]any{"unknown": true}}, field: "_meta.amp.unknown"},
 	} {
@@ -104,7 +105,7 @@ func TestStrictMetaAndConfigResponse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SetSessionConfigOption: %v", err)
 	}
-	if len(resp.ConfigOptions) != 2 {
+	if len(resp.ConfigOptions) != 1 {
 		t.Fatalf("config response options = %#v", resp.ConfigOptions)
 	}
 }
@@ -296,13 +297,13 @@ func TestRemainingBranches(t *testing.T) {
 	if maxConcurrentClientCalls(ConcurrencyLimits{MaxConcurrentClientCalls: 3}) != 3 || maxConcurrentClientCalls(ConcurrencyLimits{}) != defaultMaxConcurrentCalls {
 		t.Fatal("client call limit normalization failed")
 	}
-	options, err := parseAmpOptions(map[string]any{"model": "m", "mode": "low", "effort": "low"})
-	if err != nil || options.Model != "m" || options.Mode != "low" || options.Effort != "low" {
+	options, err := parseAmpOptions(map[string]any{"model": "m", "mode": "low"})
+	if err != nil || options.Model != "m" || options.Mode != "low" {
 		t.Fatalf("parse valid options = %#v, %v", options, err)
 	}
 	for _, raw := range []map[string]any{
 		{"mode": 1},
-		{"effort": 1},
+		{"effort": "low"},
 	} {
 		if _, err := parseAmpOptions(raw); err == nil {
 			t.Fatalf("invalid options accepted: %#v", raw)
