@@ -5,7 +5,9 @@ package amp
 import (
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -16,17 +18,38 @@ var (
 )
 
 type processTree struct {
-	pgid int
+	mu         sync.Mutex
+	pgid       int
+	control    *os.File
+	supervised bool
 }
 
 func (*processTree) descendantCount() (int, bool) { return 0, false }
 
-func startProcessTree(cmd *exec.Cmd) (*processTree, error) {
-	if err := cmd.Start(); err != nil {
+func startProcessTree(launch *processTreeCommand) (*processTree, error) {
+	if err := launch.cmd.Start(); err != nil {
+		launch.close()
+
 		return nil, err
 	}
 
-	return &processTree{pgid: cmd.Process.Pid}, nil
+	launch.releaseInherited()
+
+	if err := awaitProcessTreeReady(launch); err != nil {
+		launch.close()
+		waitErr := launch.cmd.Wait()
+
+		return nil, errors.Join(err, waitErr)
+	}
+
+	tree := &processTree{
+		pgid:       launch.cmd.Process.Pid,
+		control:    launch.control,
+		supervised: launch.control != nil,
+	}
+	launch.control = nil
+
+	return tree, nil
 }
 
 func (t *processTree) interrupt() error {
@@ -34,6 +57,19 @@ func (t *processTree) interrupt() error {
 }
 
 func (t *processTree) kill() error {
+	t.mu.Lock()
+	if t.supervised {
+		var err error
+		if t.control != nil {
+			err = t.control.Close()
+			t.control = nil
+		}
+		t.mu.Unlock()
+
+		return err
+	}
+	t.mu.Unlock()
+
 	return signalProcessGroupID(t.pgid, syscall.SIGKILL)
 }
 

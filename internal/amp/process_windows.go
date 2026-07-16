@@ -59,9 +59,12 @@ func configureCommand(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_SUSPENDED}
 }
 
-func startProcessTree(cmd *exec.Cmd) (*processTree, error) {
+func startProcessTree(launch *processTreeCommand) (*processTree, error) {
+	cmd := launch.cmd
 	job, err := windows.CreateJobObject(nil, nil)
 	if err != nil {
+		launch.close()
+
 		return nil, fmt.Errorf("create amp containment job: %w", err)
 	}
 
@@ -80,9 +83,11 @@ func startProcessTree(cmd *exec.Cmd) (*processTree, error) {
 
 	if err := cmd.Start(); err != nil {
 		_ = windows.CloseHandle(job)
+		launch.close()
 
 		return nil, err
 	}
+	launch.releaseInherited()
 
 	var assignErr error
 	if err := cmd.Process.WithHandle(func(handle uintptr) {
@@ -97,6 +102,7 @@ func startProcessTree(cmd *exec.Cmd) (*processTree, error) {
 	if err := resumeProcessThreads(uint32(cmd.Process.Pid)); err != nil {
 		return nil, abortSuspendedProcess(cmd, job, fmt.Errorf("resume contained amp process: %w", err))
 	}
+	launch.control = nil
 
 	return &processTree{job: job}, nil
 }

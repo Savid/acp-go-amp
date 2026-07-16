@@ -687,6 +687,7 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -702,6 +703,17 @@ func main() {
 	args := os.Args[1:]
 	state := fakeState
 	mode := fakeMode
+	if len(args) > 0 && args[0] == "stubborn-descendant" {
+		if _, err := syscall.Setsid(); err != nil {
+			os.Stderr.WriteString("escape stubborn descendant process group: " + err.Error() + "\n")
+			os.Exit(1)
+		}
+		signal.Ignore(syscall.SIGINT, syscall.SIGTERM)
+		record(state, "descendant-ready", "yes")
+		for {
+			time.Sleep(time.Hour)
+		}
+	}
 	record(state, "args.jsonl", args)
 	if len(args) > 0 && args[0] == "version" {
 		if mode == "bad-version" {
@@ -844,6 +856,31 @@ func main() {
 			for {
 				time.Sleep(time.Hour)
 			}
+		}
+		if mode == "sigint-descendant" {
+			descendant := exec.Command(os.Args[0], "stubborn-descendant")
+			if err := descendant.Start(); err != nil {
+				os.Stderr.WriteString("start stubborn descendant: " + err.Error() + "\n")
+				os.Exit(1)
+			}
+			record(state, "descendant-pid.jsonl", descendant.Process.Pid)
+			deadline := time.Now().Add(5 * time.Second)
+			for {
+				if _, err := os.Stat(filepath.Join(state, "descendant-ready")); err == nil {
+					break
+				}
+				if time.Now().After(deadline) {
+					os.Stderr.WriteString("stubborn descendant did not become ready\n")
+					os.Exit(1)
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			signals := make(chan os.Signal, 1)
+			signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
+			record(state, "continue-ready", "yes")
+			sig := <-signals
+			record(state, "signal", sig.String())
+			return
 		}
 		if mode == "reconcile-config" {
 			// Report a mode that diverges from whatever the host requested so

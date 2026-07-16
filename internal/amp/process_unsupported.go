@@ -14,7 +14,9 @@ func (*processTree) descendantCount() (int, bool) { return 0, false }
 
 func configureCommand(*exec.Cmd) {}
 
-func startProcessTree(*exec.Cmd) (*processTree, error) {
+func startProcessTree(launch *processTreeCommand) (*processTree, error) {
+	launch.close()
+
 	return nil, fmt.Errorf("%w: platform containment backend unavailable", ErrProcessTreeNotQuiescent)
 }
 

@@ -48,6 +48,7 @@ var (
 	processTreeTerminateAndWait = func(tree *processTree, timeout time.Duration) error {
 		return tree.terminateAndWait(timeout)
 	}
+	prepareProcessTree = prepareProcessTreeCommand
 )
 
 type Options struct {
@@ -325,7 +326,6 @@ func (c *Client) Continue(ctx context.Context, threadID string, input any) (*Tur
 	args = append(args, ampArgThreads, ampThreadContinue, threadID, "--stream-json", "--stream-json-input", "-x")
 
 	cmd := commandContext(context.Background(), path, args...)
-	configureCommand(cmd)
 
 	cmd.Dir = c.options.Cwd
 	if cmd.Dir == "" {
@@ -336,24 +336,52 @@ func (c *Client) Continue(ctx context.Context, threadID string, input any) (*Tur
 	}
 
 	cmd.Env = BuildEnv(c.options.Env, cmd.Dir)
+	if cmd.Stdin != nil {
+		return nil, errors.New("create amp stdin: exec: Stdin already set")
+	}
+
+	if cmd.Stdout != nil {
+		return nil, errors.New("create amp stdout: exec: Stdout already set")
+	}
+
+	if cmd.Stderr != nil {
+		return nil, errors.New("create amp stderr: exec: Stderr already set")
+	}
+
+	launch, err := prepareProcessTree(cmd)
+	if err != nil {
+		return nil, err
+	}
+
+	cmd = launch.cmd
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
+		launch.close()
+
 		return nil, fmt.Errorf("create amp stdin: %w", err)
 	}
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
+		launch.close()
+
 		return nil, fmt.Errorf("create amp stdout: %w", err)
 	}
 
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
+		launch.close()
+
 		return nil, fmt.Errorf("create amp stderr: %w", err)
 	}
 
-	tree, err := startProcessTree(cmd)
+	tree, err := startProcessTree(launch)
 	if err != nil {
+		_ = stdin.Close()
+		_ = stdout.Close()
+		_ = stderr.Close()
+
 		return nil, fmt.Errorf("start amp: %w", err)
 	}
 
@@ -409,7 +437,6 @@ func (c *Client) outputWithArgs(ctx context.Context, args ...string) ([]byte, er
 	}
 
 	cmd := commandContext(context.Background(), path, args...)
-	configureCommand(cmd)
 
 	cmd.Dir = c.options.Cwd
 	if cmd.Dir == "" {
@@ -417,6 +444,8 @@ func (c *Client) outputWithArgs(ctx context.Context, args ...string) ([]byte, er
 	}
 
 	cmd.Env = BuildEnv(c.options.Env, cmd.Dir)
+	configureCommand(cmd)
+	launch := &processTreeCommand{cmd: cmd}
 
 	var stdout, stderr bytes.Buffer
 
@@ -427,7 +456,7 @@ func (c *Client) outputWithArgs(ctx context.Context, args ...string) ([]byte, er
 	// descendant and prove the group empty instead of deadlocking in Cmd.Wait.
 	cmd.WaitDelay = defaultCloseKillAfter
 
-	tree, err := startProcessTree(cmd)
+	tree, err := startProcessTree(launch)
 	if err != nil {
 		return nil, fmt.Errorf("amp %s: %w", strings.Join(args, " "), err)
 	}
@@ -454,9 +483,7 @@ func (c *Client) outputWithArgs(ctx context.Context, args ...string) ([]byte, er
 	quiescenceErr := processTreeTerminateAndWait(tree, defaultCloseWait)
 	finishProcessTreeObservation(ctx, processObserver, quiescenceErr)
 
-	if errors.Is(waitErr, exec.ErrWaitDelay) && quiescenceErr == nil {
-		waitErr = nil
-	}
+	waitErr = normalizeWaitDelay(waitErr, quiescenceErr)
 
 	if waitErr != nil || quiescenceErr != nil {
 		msg := strings.TrimSpace(stripANSI(stderr.String()))
@@ -471,6 +498,14 @@ func (c *Client) outputWithArgs(ctx context.Context, args ...string) ([]byte, er
 	}
 
 	return stdout.Bytes(), nil
+}
+
+func normalizeWaitDelay(waitErr error, quiescenceErr error) error {
+	if errors.Is(waitErr, exec.ErrWaitDelay) && quiescenceErr == nil {
+		return nil
+	}
+
+	return waitErr
 }
 
 func (c *Client) globalArgs() []string {
@@ -747,12 +782,10 @@ func (t *Turn) Interrupt(ctx context.Context, killAfter time.Duration) error {
 		return nil
 	}
 
-	if err := t.interruptProcess(); err != nil {
-		return err
-	}
+	interruptErr := t.interruptProcess()
 
 	if killAfter <= 0 {
-		return nil
+		return interruptErr
 	}
 
 	done := make(chan error, 1)
@@ -766,21 +799,32 @@ func (t *Turn) Interrupt(ctx context.Context, killAfter time.Duration) error {
 	timer := time.NewTimer(killAfter)
 	defer timer.Stop()
 
+	var waitErr error
+
 	select {
 	case err := <-done:
-		return interruptWaitResult(err)
+		waitErr = interruptWaitResult(err)
 	case <-timer.C:
 		killErr := t.killProcess()
 
 		select {
 		case err := <-done:
-			return errors.Join(killErr, interruptWaitResult(err))
+			waitErr = errors.Join(killErr, interruptWaitResult(err))
 		case <-ctx.Done():
-			return errors.Join(killErr, ctx.Err())
+			waitErr = errors.Join(killErr, ctx.Err())
 		}
 	case <-ctx.Done():
-		return ctx.Err()
+		waitErr = ctx.Err()
 	}
+
+	// Waiting for the native/supervisor root is not descendant proof. A Linux
+	// tool may leave the original process group with setsid(2), and Windows Job
+	// Object accounting can lag root exit. Always drive the platform containment
+	// boundary to zero before the cancel control path returns. Turn.Close repeats
+	// this idempotently so prompt finalization retains the same proof guarantee.
+	quiescenceErr := processTreeTerminateAndWait(t.tree, defaultCloseWait)
+
+	return errors.Join(interruptErr, waitErr, quiescenceErr)
 }
 
 func interruptWaitResult(err error) error {
