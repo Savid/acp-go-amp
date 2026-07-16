@@ -42,19 +42,23 @@ text and is sent to Amp unchanged.
 ## Cancel and stop reasons
 
 `session/cancel` sends an interrupt to the active prompt boundary. On Linux,
-each turn runs below a dedicated child subreaper. It adopts and terminates the
-whole descendant tree even when a native tool escapes the original process
-group with `setsid(2)`. On Windows, the turn is assigned to a Job Object and
-the adapter waits for its active-process count to reach zero. If graceful
-interruption exceeds the configured native cancel timeout, the entire boundary
-is terminated.
+every native command, including each turn, runs below its own child subreaper.
+It adopts and terminates the whole descendant tree even when a native tool
+escapes the original process group with `setsid(2)`. An empty `/proc` snapshot
+is not accepted as proof: the helper reaps children until `wait4(2)` reports
+`ECHILD`. On Windows, the command is assigned to a Job Object and the adapter
+waits for its active-process count to reach zero. If graceful interruption
+exceeds the configured native cancel timeout, the entire boundary is
+terminated.
 
 Prompt settlement is fenced by that containment proof. A successful turn, a
 cancelled turn, and a turn-timeout failure are not returned from
 `session/prompt` until every process in the turn boundary has exited. If the
 adapter cannot prove quiescence, it returns an error matching
 `ampacp.ErrProcessTreeUnproven` instead of the otherwise terminal result and
-retains resources that the unproven tree may still reach.
+retains resources that the unproven tree may still reach. The parent-side wait
+is bounded; while a Linux subtree remains unproven, its dedicated helper stays
+alive and keeps attempting containment rather than making `Close` wait forever.
 
 On platforms without the Linux subreaper or Windows Job Object backend,
 session startup and native operations fail closed rather than launching a turn

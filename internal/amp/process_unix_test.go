@@ -51,7 +51,7 @@ func TestOutputWaitsForDescendantTreeQuiescence(t *testing.T) {
 	dir := t.TempDir()
 	pidFile := filepath.Join(dir, "child.pid")
 	script := filepath.Join(dir, "amp")
-	err := os.WriteFile(script, []byte("#!/bin/sh\n(trap '' INT TERM; while :; do sleep 1; done) &\necho $! > \"$AMP_CHILD_PID_FILE\"\nexit 0\n"), 0o700)
+	err := os.WriteFile(script, []byte("#!/bin/sh\nsetsid sh -c 'trap \"\" INT TERM HUP; echo $$ > \"$AMP_CHILD_PID_FILE\"; while :; do sleep 1; done' &\nwhile [ ! -s \"$AMP_CHILD_PID_FILE\" ]; do sleep 0.01; done\nexit 0\n"), 0o700)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,13 +80,18 @@ func TestOutputWaitsForDescendantTreeQuiescence(t *testing.T) {
 
 func TestOutputCancellationTerminatesContainedTree(t *testing.T) {
 	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "child.pid")
 	script := filepath.Join(dir, "amp")
-	err := os.WriteFile(script, []byte("#!/bin/sh\ntrap '' INT TERM\nwhile :; do sleep 1; done\n"), 0o700)
+	err := os.WriteFile(script, []byte("#!/bin/sh\nsetsid sh -c 'trap \"\" INT TERM HUP; echo $$ > \"$AMP_CHILD_PID_FILE\"; while :; do sleep 1; done' &\nwhile [ ! -s \"$AMP_CHILD_PID_FILE\" ]; do sleep 0.01; done\ntrap '' INT TERM HUP\nwhile :; do sleep 1; done\n"), 0o700)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	client := NewClient(nil, Options{CLIPath: script, Cwd: dir})
+	client := NewClient(nil, Options{
+		CLIPath: script,
+		Cwd:     dir,
+		Env:     map[string]string{"AMP_CHILD_PID_FILE": pidFile},
+	})
 	cancelled, cancel := context.WithCancel(t.Context())
 	cancel()
 
@@ -99,6 +104,18 @@ func TestOutputCancellationTerminatesContainedTree(t *testing.T) {
 
 	if _, outputErr := client.outputRaw(running, "cancel-running"); outputErr == nil {
 		t.Fatal("running cancellation unexpectedly succeeded")
+	}
+
+	rawPID, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(rawPID)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if processPIDAlive(pid) {
+		t.Fatalf("setsid descendant pid %d survived cancelled command return", pid)
 	}
 }
 

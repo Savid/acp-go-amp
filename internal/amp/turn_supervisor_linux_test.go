@@ -7,10 +7,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -319,18 +321,32 @@ func TestTurnSupervisorConfigAndReadinessBranches(t *testing.T) {
 
 func TestTurnSupervisorEnvironmentReplacesInternalMode(t *testing.T) {
 	t.Setenv(turnSupervisorModeEnv, "stale")
+	t.Setenv("GORACE", "halt_on_error=1 atexit_sleep_ms=1000")
 	env := turnSupervisorEnvironment()
-	count := 0
+	modeCount := 0
+	raceCount := 0
 	for _, entry := range env {
 		if entry == turnSupervisorModeEnv+"="+turnSupervisorMode {
-			count++
+			modeCount++
 		}
 		if entry == turnSupervisorModeEnv+"=stale" {
 			t.Fatal("stale supervisor mode survived")
 		}
+		if strings.HasPrefix(entry, "GORACE=") {
+			raceCount++
+			if entry != "GORACE=halt_on_error=1 atexit_sleep_ms=1000 atexit_sleep_ms=0" {
+				t.Fatalf("supervisor GORACE = %q", entry)
+			}
+		}
 	}
-	if count != 1 {
-		t.Fatalf("supervisor mode count = %d", count)
+	if modeCount != 1 || raceCount != 1 {
+		t.Fatalf("supervisor environment counts = mode %d, GORACE %d", modeCount, raceCount)
+	}
+
+	t.Setenv("GORACE", "")
+	env = turnSupervisorEnvironment()
+	if !slices.Contains(env, "GORACE=atexit_sleep_ms=0") {
+		t.Fatalf("supervisor default GORACE missing from %#v", env)
 	}
 }
 
@@ -431,9 +447,13 @@ func TestRunTurnSupervisorBranches(t *testing.T) {
 		_ = controlWrite.Close()
 	}
 	signalled := 0
-	turnSupervisorSignalGroup = func(_ int, signal syscall.Signal) error {
+	turnSupervisorSignalGroup = func(pid int, signal syscall.Signal) error {
 		if signal == syscall.SIGINT {
 			signalled++
+		}
+		if signal == syscall.SIGKILL {
+			process, _ := os.FindProcess(pid)
+			_ = process.Kill()
 		}
 
 		return nil
@@ -458,31 +478,78 @@ func encodeSupervisorConfig(t *testing.T, config turnSupervisorConfig) io.Reader
 func TestContainLinuxSupervisorDescendantsBranches(t *testing.T) {
 	restoreTurnSupervisorSeams(t)
 	turnSupervisorSignalGroup = func(int, syscall.Signal) error { return errors.New("ignored") }
+	waitCalls := 0
+	turnSupervisorWait4 = func(int, *unix.WaitStatus, int, *unix.Rusage) (int, error) {
+		waitCalls++
+		if waitCalls == 1 {
+			return 0, nil
+		}
+
+		return -1, unix.ECHILD
+	}
 	retryCalls := 0
 	turnSupervisorDescendants = func(int) ([]linuxProcessIdentity, error) {
 		retryCalls++
-		if retryCalls == 1 {
-			return nil, errors.New("retry")
-		}
 
-		return nil, nil
+		return nil, errors.New("retry")
 	}
 	turnSupervisorSleep = func(time.Duration) {}
-	if err := awaitLinuxSupervisorContainment(1, 2); err != nil || retryCalls != 2 {
-		t.Fatalf("await containment = %v after %d calls", err, retryCalls)
+	if err := awaitLinuxSupervisorContainment(1, 2); err != nil || retryCalls != 1 || waitCalls != 2 {
+		t.Fatalf("await containment = %v after descendants=%d waits=%d", err, retryCalls, waitCalls)
 	}
 
+	turnSupervisorWait4 = func(int, *unix.WaitStatus, int, *unix.Rusage) (int, error) { return 0, nil }
 	turnSupervisorDescendants = func(int) ([]linuxProcessIdentity, error) { return nil, errors.New("list") }
 	if err := containLinuxSupervisorDescendants(1, 2); !errors.Is(err, ErrProcessTreeNotQuiescent) {
 		t.Fatalf("list failure = %v", err)
 	}
 
+	waitCalls = 0
+	turnSupervisorWait4 = func(int, *unix.WaitStatus, int, *unix.Rusage) (int, error) {
+		waitCalls++
+		if waitCalls == 1 {
+			return 0, nil
+		}
+
+		return -1, unix.ECHILD
+	}
 	turnSupervisorDescendants = func(int) ([]linuxProcessIdentity, error) { return nil, nil }
 	if err := containLinuxSupervisorDescendants(1, 2); err != nil {
 		t.Fatalf("empty tree: %v", err)
 	}
+	if waitCalls != 2 {
+		t.Fatalf("empty snapshot was accepted without ECHILD after %d waits", waitCalls)
+	}
+
+	waitCalls = 0
+	turnSupervisorWait4 = func(int, *unix.WaitStatus, int, *unix.Rusage) (int, error) {
+		waitCalls++
+		if waitCalls == 1 {
+			return -1, unix.EINTR
+		}
+
+		return -1, unix.ECHILD
+	}
+	if err := containLinuxSupervisorDescendants(1, 2); err != nil || waitCalls != 2 {
+		t.Fatalf("interrupted wait = %v after %d calls", err, waitCalls)
+	}
+
+	turnSupervisorWait4 = func(int, *unix.WaitStatus, int, *unix.Rusage) (int, error) {
+		return -1, unix.EPERM
+	}
+	if err := containLinuxSupervisorDescendants(1, 2); !errors.Is(err, ErrProcessTreeNotQuiescent) {
+		t.Fatalf("wait failure = %v", err)
+	}
+
+	turnSupervisorWait4 = func(int, *unix.WaitStatus, int, *unix.Rusage) (int, error) {
+		return -1, nil
+	}
+	if err := containLinuxSupervisorDescendants(1, 2); !errors.Is(err, ErrProcessTreeNotQuiescent) {
+		t.Fatalf("invalid wait result = %v", err)
+	}
 
 	descendant := linuxProcessIdentity{pid: 3, state: 'S', startTime: "1"}
+	turnSupervisorWait4 = func(int, *unix.WaitStatus, int, *unix.Rusage) (int, error) { return 0, nil }
 	turnSupervisorDescendants = func(int) ([]linuxProcessIdentity, error) { return []linuxProcessIdentity{descendant}, nil }
 	turnSupervisorSignalPID = func(linuxProcessIdentity, syscall.Signal) error { return errors.New("kill") }
 	if err := containLinuxSupervisorDescendants(1, 2); !errors.Is(err, ErrProcessTreeNotQuiescent) {
@@ -492,11 +559,8 @@ func TestContainLinuxSupervisorDescendantsBranches(t *testing.T) {
 	calls := 0
 	turnSupervisorDescendants = func(int) ([]linuxProcessIdentity, error) {
 		calls++
-		if calls == 1 {
-			return []linuxProcessIdentity{{pid: 2, state: 'Z'}, descendant}, nil
-		}
 
-		return nil, nil
+		return []linuxProcessIdentity{{pid: 2, state: 'Z'}, descendant}, nil
 	}
 	signals := 0
 	turnSupervisorSignalPID = func(linuxProcessIdentity, syscall.Signal) error {
@@ -507,15 +571,21 @@ func TestContainLinuxSupervisorDescendantsBranches(t *testing.T) {
 	waits := 0
 	turnSupervisorWait4 = func(int, *unix.WaitStatus, int, *unix.Rusage) (int, error) {
 		waits++
-
-		return 0, nil
+		switch waits {
+		case 1:
+			return 0, nil
+		case 2:
+			return descendant.pid, nil
+		default:
+			return -1, unix.ECHILD
+		}
 	}
 	turnSupervisorSleep = func(time.Duration) {}
 	if err := containLinuxSupervisorDescendants(1, 2); err != nil {
 		t.Fatalf("contain descendants: %v", err)
 	}
-	if signals != 1 || waits != 1 {
-		t.Fatalf("containment signals=%d waits=%d", signals, waits)
+	if signals != 1 || waits != 3 || calls != 1 {
+		t.Fatalf("containment signals=%d waits=%d snapshots=%d", signals, waits, calls)
 	}
 }
 
@@ -649,13 +719,142 @@ func TestTurnInterruptPropagatesTreeProofFailure(t *testing.T) {
 	}
 }
 
+const (
+	oneShotDeathPhaseEnv = "ACP_GO_AMP_TEST_ONE_SHOT_DEATH_PHASE"
+	oneShotDeathPathEnv  = "ACP_GO_AMP_TEST_ONE_SHOT_DEATH_PATH"
+	oneShotDeathStateEnv = "ACP_GO_AMP_TEST_ONE_SHOT_DEATH_STATE"
+)
+
+func TestOneShotSupervisorContainsTreeAfterAdapterDeath(t *testing.T) {
+	if os.Getenv(oneShotDeathPhaseEnv) == "adapter" {
+		path := os.Getenv(oneShotDeathPathEnv)
+		state := os.Getenv(oneShotDeathStateEnv)
+		result := make(chan error, 1)
+
+		go func() {
+			_, err := NewClient(nil, Options{
+				CLIPath: path,
+				Cwd:     filepath.Dir(path),
+				Env:     map[string]string{"AMP_CHILD_PID_FILE": filepath.Join(state, "child.pid")},
+			}).outputRaw(context.Background(), "parent-death")
+			result <- err
+		}()
+
+		ready := filepath.Join(state, "child.pid")
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			if info, err := os.Stat(ready); err == nil && info.Size() > 0 {
+				os.Exit(0)
+			}
+
+			select {
+			case err := <-result:
+				_, _ = fmt.Fprintln(os.Stderr, "one-shot command returned before adapter death:", err)
+				os.Exit(2)
+			default:
+			}
+
+			if time.Now().After(deadline) {
+				_, _ = fmt.Fprintln(os.Stderr, "one-shot detached descendant did not become ready")
+				os.Exit(3)
+			}
+
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	dir := t.TempDir()
+	state := filepath.Join(dir, "state")
+	if err := os.Mkdir(state, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "amp")
+	script := "#!/bin/sh\nsetsid sh -c 'trap \"\" INT TERM HUP; echo $$ > \"$AMP_CHILD_PID_FILE\"; while :; do sleep 1; done' &\nwhile [ ! -s \"$AMP_CHILD_PID_FILE\" ]; do sleep 0.01; done\ntrap '' INT TERM HUP\nwhile :; do sleep 1; done\n"
+	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	adapter := exec.Command(os.Args[0], "-test.run=^TestOneShotSupervisorContainsTreeAfterAdapterDeath$")
+	adapter.Env = append(os.Environ(),
+		oneShotDeathPhaseEnv+"=adapter",
+		oneShotDeathPathEnv+"="+path,
+		oneShotDeathStateEnv+"="+state,
+	)
+	if output, err := adapter.CombinedOutput(); err != nil {
+		t.Fatalf("adapter death helper: %v\n%s", err, output)
+	}
+
+	rawPID, err := os.ReadFile(filepath.Join(state, "child.pid"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(rawPID)))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for processPIDAlive(pid) && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if processPIDAlive(pid) {
+		t.Fatalf("setsid descendant pid %d survived adapter death", pid)
+	}
+}
+
+func TestTurnCloseBoundsPersistentSupervisorProofFailure(t *testing.T) {
+	originalProof := processTreeTerminateAndWait
+	originalKill := syscallKill
+	t.Cleanup(func() {
+		processTreeTerminateAndWait = originalProof
+		syscallKill = originalKill
+	})
+
+	processTreeTerminateAndWait = func(*processTree, time.Duration) error {
+		return ErrProcessTreeNotQuiescent
+	}
+	syscallKill = func(int, syscall.Signal) error { return nil }
+
+	releaseWait := make(chan struct{})
+	unproven := 0
+	turn := &Turn{
+		cmd:  &exec.Cmd{Process: &os.Process{Pid: 12345}},
+		tree: &processTree{pgid: 12345, supervised: true},
+		waitFunc: func() error {
+			<-releaseWait
+
+			return nil
+		},
+		processObserver: ProcessSnapshotObserver{Unproven: func() { unproven++ }},
+	}
+
+	started := time.Now()
+	err := turn.Close()
+	elapsed := time.Since(started)
+	close(releaseWait)
+
+	if !errors.Is(err, ErrProcessTreeNotQuiescent) {
+		t.Fatalf("Close error = %v, want proof sentinel", err)
+	}
+	if elapsed > time.Second {
+		t.Fatalf("Close blocked on persistent supervisor proof for %s", elapsed)
+	}
+	if unproven != 1 {
+		t.Fatalf("unproven observations = %d, want 1", unproven)
+	}
+}
+
 func TestPreparedCommandAndClientErrorBranches(t *testing.T) {
 	path, _ := fakeAmpPath(t, "")
 	originalPrepare := prepareProcessTree
 	originalProof := processTreeTerminateAndWait
+	originalWait := newCommandWait
+	originalWaitTimeout := commandWaitTimeout
 	t.Cleanup(func() {
 		prepareProcessTree = originalPrepare
 		processTreeTerminateAndWait = originalProof
+		newCommandWait = originalWait
+		commandWaitTimeout = originalWaitTimeout
 	})
 
 	prepareProcessTree = func(*exec.Cmd) (*processTreeCommand, error) {
@@ -664,6 +863,9 @@ func TestPreparedCommandAndClientErrorBranches(t *testing.T) {
 	client := NewClient(nil, Options{CLIPath: path, Cwd: t.TempDir()})
 	if _, err := client.Continue(t.Context(), "T-1", map[string]any{"type": "user"}); err == nil {
 		t.Fatal("Continue prepare failure was ignored")
+	}
+	if _, err := client.outputRaw(t.Context(), "version"); err == nil || !strings.Contains(err.Error(), "prepare") {
+		t.Fatalf("one-shot prepare failure = %v", err)
 	}
 
 	for _, test := range []struct {
@@ -709,5 +911,85 @@ func TestPreparedCommandAndClientErrorBranches(t *testing.T) {
 	launch := &processTreeCommand{cmd: exec.Command(filepath.Join(t.TempDir(), "missing"))}
 	if _, err := startProcessTree(launch); err == nil {
 		t.Fatal("supervisor start failure succeeded")
+	}
+
+	processTreeTerminateAndWait = func(*processTree, time.Duration) error { return nil }
+	commandWaitTimeout = time.Millisecond
+	newCommandWait = func(wait func() error) *commandWait {
+		_ = startCommandWait(wait)
+
+		return &commandWait{done: make(chan struct{})}
+	}
+	ready, err := os.CreateTemp(t.TempDir(), "not-a-pipe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	launch = &processTreeCommand{cmd: exec.Command("sh", "-c", "exit 0"), ready: ready}
+	if _, err := startProcessTree(launch); !errors.Is(err, ErrProcessTreeNotQuiescent) {
+		t.Fatalf("failed-launch wait timeout = %v", err)
+	}
+}
+
+func TestOneShotWaitTimeoutReportsUnprovenTree(t *testing.T) {
+	path, _ := fakeAmpPath(t, "")
+	originalWait := newCommandWait
+	originalWaitTimeout := commandWaitTimeout
+	t.Cleanup(func() {
+		newCommandWait = originalWait
+		commandWaitTimeout = originalWaitTimeout
+	})
+
+	newCommandWait = func(wait func() error) *commandWait {
+		_ = startCommandWait(wait)
+
+		return &commandWait{done: make(chan struct{})}
+	}
+	commandWaitTimeout = time.Millisecond
+
+	unproven := 0
+	client := NewClient(nil, Options{
+		CLIPath: path,
+		Cwd:     t.TempDir(),
+		NewProcessSnapshotObserver: func(context.Context, ProcessInventory) ProcessSnapshotObserver {
+			return ProcessSnapshotObserver{Unproven: func() { unproven++ }}
+		},
+	})
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+	if _, err := client.outputRaw(ctx, "version"); !errors.Is(err, ErrProcessTreeNotQuiescent) {
+		t.Fatalf("one-shot wait timeout = %v", err)
+	}
+	if unproven != 1 {
+		t.Fatalf("one-shot unproven observations = %d, want 1", unproven)
+	}
+}
+
+func TestCommandWaitNilAndCloseWaitTimeout(t *testing.T) {
+	var nilWait *commandWait
+	if err, completed := nilWait.await(t.Context()); err != nil || !completed {
+		t.Fatalf("nil command wait = %v, %t", err, completed)
+	}
+
+	originalTimeout := commandWaitTimeout
+	commandWaitTimeout = time.Millisecond
+	t.Cleanup(func() { commandWaitTimeout = originalTimeout })
+
+	release := make(chan struct{})
+	unproven := 0
+	turn := &Turn{
+		waitFunc: func() error {
+			<-release
+
+			return nil
+		},
+		processObserver: ProcessSnapshotObserver{Unproven: func() { unproven++ }},
+	}
+	err := turn.Close()
+	close(release)
+	if !errors.Is(err, ErrProcessTreeNotQuiescent) {
+		t.Fatalf("Close wait timeout = %v", err)
+	}
+	if unproven != 1 {
+		t.Fatalf("Close timeout unproven observations = %d, want 1", unproven)
 	}
 }

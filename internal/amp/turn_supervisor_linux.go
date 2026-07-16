@@ -21,9 +21,9 @@ import (
 )
 
 const (
-	turnSupervisorModeEnv = "ACP_GO_AMP_INTERNAL_TURN_SUPERVISOR"
+	turnSupervisorModeEnv = "ACP_GO_AMP_INTERNAL_NATIVE_SUPERVISOR"
 	turnSupervisorMode    = "1"
-	turnSupervisorFDName  = "acp-go-amp-turn-supervisor"
+	turnSupervisorFDName  = "acp-go-amp-native-supervisor"
 	turnSupervisorReady   = "ready\n"
 )
 
@@ -76,7 +76,7 @@ func inheritedTurnSupervisorInput() (io.ReadCloser, io.ReadCloser, io.WriteClose
 
 	ready := turnSupervisorOpenFile(5, "amp-turn-supervisor-ready")
 	if config == nil || control == nil || ready == nil {
-		return nil, nil, nil, errors.New("turn supervisor inherited descriptors are unavailable")
+		return nil, nil, nil, errors.New("native supervisor inherited descriptors are unavailable")
 	}
 
 	turnSupervisorCloseOnExec(int(config.Fd()))
@@ -113,7 +113,7 @@ func turnSupervisorBootstrap() {
 	}
 
 	if err != nil {
-		_, _ = fmt.Fprintln(os.Stderr, "acp-go-amp turn supervisor:", err)
+		_, _ = fmt.Fprintln(os.Stderr, "acp-go-amp native supervisor:", err)
 
 		turnSupervisorExit(1)
 
@@ -131,12 +131,12 @@ func prepareProcessTreeCommand(native *exec.Cmd) (*processTreeCommand, error) {
 		Env:  append([]string(nil), native.Env...),
 	}
 	if config.Path == "" || len(config.Args) == 0 {
-		return nil, errors.New("prepare Amp turn supervisor: native command is incomplete")
+		return nil, errors.New("prepare Amp native supervisor: native command is incomplete")
 	}
 
 	configFD, err := turnSupervisorMemfd(turnSupervisorFDName, unix.MFD_CLOEXEC)
 	if err != nil {
-		return nil, fmt.Errorf("prepare Amp turn supervisor config: %w", err)
+		return nil, fmt.Errorf("prepare Amp native supervisor config: %w", err)
 	}
 
 	configFile := os.NewFile(uintptr(configFD), turnSupervisorFDName)
@@ -150,7 +150,7 @@ func prepareProcessTreeCommand(native *exec.Cmd) (*processTreeCommand, error) {
 	if err != nil {
 		_ = configFile.Close()
 
-		return nil, fmt.Errorf("prepare Amp turn supervisor control: %w", err)
+		return nil, fmt.Errorf("prepare Amp native supervisor control: %w", err)
 	}
 
 	readyRead, readyWrite, err := turnSupervisorPipe()
@@ -159,7 +159,7 @@ func prepareProcessTreeCommand(native *exec.Cmd) (*processTreeCommand, error) {
 		_ = controlRead.Close()
 		_ = controlWrite.Close()
 
-		return nil, fmt.Errorf("prepare Amp turn supervisor readiness: %w", err)
+		return nil, fmt.Errorf("prepare Amp native supervisor readiness: %w", err)
 	}
 
 	executable, err := turnSupervisorExecutable()
@@ -170,7 +170,7 @@ func prepareProcessTreeCommand(native *exec.Cmd) (*processTreeCommand, error) {
 		_ = readyRead.Close()
 		_ = readyWrite.Close()
 
-		return nil, fmt.Errorf("resolve embedded Amp turn supervisor: %w", err)
+		return nil, fmt.Errorf("resolve embedded Amp native supervisor: %w", err)
 	}
 
 	helper := turnSupervisorCommand(executable) // #nosec G204 -- the current executable hosts the private supervisor mode.
@@ -197,16 +197,16 @@ func awaitProcessTreeReady(launch *processTreeCommand) error {
 	}()
 
 	if err := launch.ready.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
-		return fmt.Errorf("arm Amp turn supervisor readiness: %w", err)
+		return fmt.Errorf("arm Amp native supervisor readiness: %w", err)
 	}
 
 	line, err := bufio.NewReader(launch.ready).ReadString('\n')
 	if err != nil {
-		return fmt.Errorf("await Amp turn supervisor readiness: %w", err)
+		return fmt.Errorf("await Amp native supervisor readiness: %w", err)
 	}
 
 	if line != turnSupervisorReady {
-		return fmt.Errorf("invalid Amp turn supervisor readiness %q", strings.TrimSpace(line))
+		return fmt.Errorf("invalid Amp native supervisor readiness %q", strings.TrimSpace(line))
 	}
 
 	return nil
@@ -214,41 +214,60 @@ func awaitProcessTreeReady(launch *processTreeCommand) error {
 
 func writeTurnSupervisorConfig(file io.WriteSeeker, config turnSupervisorConfig) error {
 	if err := json.NewEncoder(file).Encode(config); err != nil {
-		return fmt.Errorf("encode Amp turn supervisor config: %w", err)
+		return fmt.Errorf("encode Amp native supervisor config: %w", err)
 	}
 
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		return fmt.Errorf("rewind Amp turn supervisor config: %w", err)
+		return fmt.Errorf("rewind Amp native supervisor config: %w", err)
 	}
 
 	return nil
 }
 
 func turnSupervisorEnvironment() []string {
-	env := make([]string, 0, len(os.Environ())+1)
+	env := make([]string, 0, len(os.Environ())+2)
+
+	var raceOptions string
+
 	for _, entry := range os.Environ() {
 		if strings.HasPrefix(entry, turnSupervisorModeEnv+"=") {
+			continue
+		}
+
+		if strings.HasPrefix(entry, "GORACE=") {
+			raceOptions = strings.TrimPrefix(entry, "GORACE=")
+
 			continue
 		}
 
 		env = append(env, entry)
 	}
 
-	return append(env, turnSupervisorModeEnv+"="+turnSupervisorMode)
+	if raceOptions != "" {
+		raceOptions += " "
+	}
+
+	raceOptions += "atexit_sleep_ms=0"
+
+	return append(
+		env,
+		turnSupervisorModeEnv+"="+turnSupervisorMode,
+		"GORACE="+raceOptions,
+	)
 }
 
 func runTurnSupervisor(configInput io.Reader, controlInput io.Reader, readyOutput io.Writer) error {
 	var config turnSupervisorConfig
 	if err := json.NewDecoder(configInput).Decode(&config); err != nil {
-		return fmt.Errorf("decode Amp turn supervisor config: %w", err)
+		return fmt.Errorf("decode Amp native supervisor config: %w", err)
 	}
 
 	if config.Path == "" || len(config.Args) == 0 {
-		return errors.New("amp turn supervisor config is incomplete")
+		return errors.New("amp native supervisor config is incomplete")
 	}
 
 	if err := turnSupervisorEnable(); err != nil {
-		return fmt.Errorf("enable Amp turn subreaper: %w", err)
+		return fmt.Errorf("enable Amp native subreaper: %w", err)
 	}
 
 	signals := make(chan os.Signal, 2)
@@ -270,10 +289,11 @@ func runTurnSupervisor(configInput io.Reader, controlInput io.Reader, readyOutpu
 	}
 
 	if _, err := io.WriteString(readyOutput, turnSupervisorReady); err != nil {
-		containErr := turnSupervisorContain(turnSupervisorProcessID(), native.Process.Pid)
+		_ = turnSupervisorSignalGroup(native.Process.Pid, syscall.SIGKILL)
 		waitErr := native.Wait()
+		containErr := turnSupervisorContain(turnSupervisorProcessID(), native.Process.Pid)
 
-		return errors.Join(fmt.Errorf("publish Amp turn supervisor readiness: %w", err), containErr, waitErr)
+		return errors.Join(fmt.Errorf("publish Amp native supervisor readiness: %w", err), containErr, waitErr)
 	}
 
 	waitDone := make(chan error, 1)
@@ -296,11 +316,14 @@ func runTurnSupervisor(configInput io.Reader, controlInput io.Reader, readyOutpu
 
 			return waitErr
 		case <-controlDone:
+			_ = turnSupervisorSignalGroup(native.Process.Pid, syscall.SIGKILL)
+			waitErr := <-waitDone
+
 			if err := turnSupervisorContain(turnSupervisorProcessID(), native.Process.Pid); err != nil {
 				return err
 			}
 
-			return <-waitDone
+			return waitErr
 		case received := <-signals:
 			nativeSignal, ok := received.(syscall.Signal)
 			if !ok {
@@ -331,13 +354,23 @@ func containLinuxSupervisorDescendants(supervisorPID int, nativePID int) error {
 	_ = turnSupervisorSignalGroup(nativePID, syscall.SIGKILL)
 
 	for {
+		waited, waitErr := turnSupervisorWait4(-1, nil, unix.WNOHANG, nil)
+		switch {
+		case waited > 0:
+			continue
+		case errors.Is(waitErr, unix.EINTR):
+			continue
+		case errors.Is(waitErr, unix.ECHILD):
+			return nil
+		case waitErr != nil:
+			return fmt.Errorf("%w: reap supervised Amp descendants: %v", ErrProcessTreeNotQuiescent, waitErr)
+		case waited < 0:
+			return fmt.Errorf("%w: invalid supervised Amp wait result %d", ErrProcessTreeNotQuiescent, waited)
+		}
+
 		descendants, err := turnSupervisorDescendants(supervisorPID)
 		if err != nil {
 			return fmt.Errorf("%w: enumerate supervised Amp descendants: %v", ErrProcessTreeNotQuiescent, err)
-		}
-
-		if len(descendants) == 0 {
-			return nil
 		}
 
 		for _, descendant := range descendants {
@@ -345,10 +378,6 @@ func containLinuxSupervisorDescendants(supervisorPID int, nativePID int) error {
 				if err := turnSupervisorSignalPID(descendant, syscall.SIGKILL); err != nil {
 					return fmt.Errorf("%w: kill supervised Amp descendant %d: %v", ErrProcessTreeNotQuiescent, descendant.pid, err)
 				}
-			}
-
-			if descendant.pid != nativePID {
-				_, _ = turnSupervisorWait4(descendant.pid, nil, unix.WNOHANG, nil)
 			}
 		}
 

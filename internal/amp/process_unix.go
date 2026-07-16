@@ -3,6 +3,7 @@
 package amp
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -34,20 +35,28 @@ func startProcessTree(launch *processTreeCommand) (*processTree, error) {
 	}
 
 	launch.releaseInherited()
-
-	if err := awaitProcessTreeReady(launch); err != nil {
-		launch.close()
-		waitErr := launch.cmd.Wait()
-
-		return nil, errors.Join(err, waitErr)
-	}
-
 	tree := &processTree{
 		pgid:       launch.cmd.Process.Pid,
 		control:    launch.control,
 		supervised: launch.control != nil,
 	}
 	launch.control = nil
+
+	if err := awaitProcessTreeReady(launch); err != nil {
+		launch.close()
+		waiter := newCommandWait(launch.cmd.Wait)
+		quiescenceErr := processTreeTerminateAndWait(tree, commandWaitTimeout)
+		waitCtx, cancelWait := context.WithTimeout(context.Background(), commandWaitTimeout)
+		waitErr, completed := waiter.await(waitCtx)
+
+		cancelWait()
+
+		if !completed {
+			waitErr = fmt.Errorf("%w: wait for failed Amp containment launch: %v", ErrProcessTreeNotQuiescent, waitErr)
+		}
+
+		return nil, errors.Join(err, waitErr, quiescenceErr)
+	}
 
 	return tree, nil
 }

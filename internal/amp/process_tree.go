@@ -1,6 +1,7 @@
 package amp
 
 import (
+	"context"
 	"errors"
 	"os"
 	"os/exec"
@@ -14,12 +15,47 @@ var ErrProcessTreeNotQuiescent = errors.New("amp process tree quiescence not pro
 // processTreeCommand owns the platform launch wrapper and any parent-side
 // descriptors that establish its containment boundary. Linux uses an embedded
 // subreaper supervisor, Windows uses a Job Object, and platforms without an
-// unescapable turn boundary reject the launch.
+// unescapable native-command boundary reject the launch.
 type processTreeCommand struct {
 	cmd       *exec.Cmd
 	inherited []*os.File
 	control   *os.File
 	ready     *os.File
+}
+
+// commandWait runs exec.Cmd.Wait exactly once without forcing a caller that is
+// fencing process-tree proof to block forever. The result is published before
+// done closes, so every waiter observes the same memoized error.
+type commandWait struct {
+	done chan struct{}
+	err  error
+}
+
+func startCommandWait(wait func() error) *commandWait {
+	state := &commandWait{done: make(chan struct{})}
+
+	go func() {
+		if wait != nil {
+			state.err = wait()
+		}
+
+		close(state.done)
+	}()
+
+	return state
+}
+
+func (w *commandWait) await(ctx context.Context) (error, bool) {
+	if w == nil {
+		return nil, true
+	}
+
+	select {
+	case <-w.done:
+		return w.err, true
+	case <-ctx.Done():
+		return ctx.Err(), false
+	}
 }
 
 func (c *processTreeCommand) releaseInherited() {

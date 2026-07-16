@@ -49,6 +49,8 @@ var (
 		return tree.terminateAndWait(timeout)
 	}
 	prepareProcessTree = prepareProcessTreeCommand
+	newCommandWait     = startCommandWait
+	commandWaitTimeout = defaultCloseWait
 )
 
 type Options struct {
@@ -444,8 +446,13 @@ func (c *Client) outputWithArgs(ctx context.Context, args ...string) ([]byte, er
 	}
 
 	cmd.Env = BuildEnv(c.options.Env, cmd.Dir)
-	configureCommand(cmd)
-	launch := &processTreeCommand{cmd: cmd}
+
+	launch, err := prepareProcessTree(cmd)
+	if err != nil {
+		return nil, fmt.Errorf("amp %s: %w", strings.Join(args, " "), err)
+	}
+
+	cmd = launch.cmd
 
 	var stdout, stderr bytes.Buffer
 
@@ -464,35 +471,51 @@ func (c *Client) outputWithArgs(ctx context.Context, args ...string) ([]byte, er
 	processObserver := c.newProcessSnapshotObserver(ctx, tree)
 	observeProcessTreeSnapshot(ctx, processObserver)
 
-	cancellationDone := make(chan struct{})
-	stopCancellation := context.AfterFunc(ctx, func() {
-		defer close(cancellationDone)
+	waiter := newCommandWait(cmd.Wait)
+	waitErr, completed := waiter.await(ctx)
 
-		_ = tree.kill()
-	})
-	waitErr := cmd.Wait()
+	var cancellationErr error
 
-	if stopCancellation() {
-		close(cancellationDone)
+	if !completed {
+		cancellationErr = errors.Join(waitErr, tree.kill())
+		waitErr = nil
 	}
-
-	<-cancellationDone
 
 	observeProcessTreeSnapshot(ctx, processObserver)
 
 	quiescenceErr := processTreeTerminateAndWait(tree, defaultCloseWait)
+	if ProcessTreeQuiescent(quiescenceErr) && !completed {
+		waitCtx, cancelWait := context.WithTimeout(context.Background(), commandWaitTimeout)
+		waitErr, completed = waiter.await(waitCtx)
+
+		cancelWait()
+
+		if !completed {
+			quiescenceErr = errors.Join(
+				quiescenceErr,
+				fmt.Errorf("%w: wait for contained Amp command: %v", ErrProcessTreeNotQuiescent, waitErr),
+			)
+			waitErr = nil
+		}
+	}
+
 	finishProcessTreeObservation(ctx, processObserver, quiescenceErr)
 
 	waitErr = normalizeWaitDelay(waitErr, quiescenceErr)
 
-	if waitErr != nil || quiescenceErr != nil {
-		msg := strings.TrimSpace(stripANSI(stderr.String()))
+	if cancellationErr != nil || waitErr != nil || quiescenceErr != nil {
+		var msg string
+		if completed {
+			msg = strings.TrimSpace(stripANSI(stderr.String()))
+		}
+
 		if msg == "" {
-			msg = errors.Join(waitErr, quiescenceErr).Error()
+			msg = errors.Join(cancellationErr, waitErr, quiescenceErr).Error()
 		}
 
 		return nil, errors.Join(
 			fmt.Errorf("amp %s: %s", strings.Join(args, " "), msg),
+			cancellationErr,
 			quiescenceErr,
 		)
 	}
@@ -658,7 +681,7 @@ type Turn struct {
 	stderrMu        sync.Mutex
 	stderrTail      bytes.Buffer
 	waitOnce        sync.Once
-	waitErr         error
+	waitState       *commandWait
 	waitFunc        func() error
 	closeOnce       sync.Once
 	onPanic         func(ctx context.Context, name string, recovered any)
@@ -783,18 +806,21 @@ func (t *Turn) Interrupt(ctx context.Context, killAfter time.Duration) error {
 	}
 
 	interruptErr := t.interruptProcess()
+	waiter := t.commandWait()
 
 	if killAfter <= 0 {
-		return interruptErr
+		killErr := t.killProcess()
+		quiescenceErr := processTreeTerminateAndWait(t.tree, defaultCloseWait)
+
+		var waitErr error
+
+		if ProcessTreeQuiescent(quiescenceErr) {
+			completedErr, _ := waiter.await(ctx)
+			waitErr = interruptWaitResult(completedErr)
+		}
+
+		return errors.Join(interruptErr, killErr, waitErr, quiescenceErr)
 	}
-
-	done := make(chan error, 1)
-
-	go func() {
-		defer t.recoverGoroutine(ctx, "amp interrupt waiter")
-
-		done <- t.wait()
-	}()
 
 	timer := time.NewTimer(killAfter)
 	defer timer.Stop()
@@ -802,17 +828,10 @@ func (t *Turn) Interrupt(ctx context.Context, killAfter time.Duration) error {
 	var waitErr error
 
 	select {
-	case err := <-done:
-		waitErr = interruptWaitResult(err)
+	case <-waiter.done:
+		waitErr = interruptWaitResult(waiter.err)
 	case <-timer.C:
-		killErr := t.killProcess()
-
-		select {
-		case err := <-done:
-			waitErr = errors.Join(killErr, interruptWaitResult(err))
-		case <-ctx.Done():
-			waitErr = errors.Join(killErr, ctx.Err())
-		}
+		waitErr = t.killProcess()
 	case <-ctx.Done():
 		waitErr = ctx.Err()
 	}
@@ -823,6 +842,10 @@ func (t *Turn) Interrupt(ctx context.Context, killAfter time.Duration) error {
 	// boundary to zero before the cancel control path returns. Turn.Close repeats
 	// this idempotently so prompt finalization retains the same proof guarantee.
 	quiescenceErr := processTreeTerminateAndWait(t.tree, defaultCloseWait)
+	if ProcessTreeQuiescent(quiescenceErr) {
+		completedErr, _ := waiter.await(ctx)
+		waitErr = errors.Join(waitErr, interruptWaitResult(completedErr))
+	}
 
 	return errors.Join(interruptErr, waitErr, quiescenceErr)
 }
@@ -839,11 +862,15 @@ func (t *Turn) Close() error {
 	var err error
 
 	t.closeOnce.Do(func() {
+		var proofErr error
+
 		if t.cmd != nil && t.cmd.Process != nil {
 			ctx, cancel := context.WithTimeout(context.Background(), defaultCloseKillAfter+defaultCloseWait)
-			defer cancel()
+			proofErr = t.Interrupt(ctx, defaultCloseKillAfter)
 
-			err = errors.Join(err, t.Interrupt(ctx, defaultCloseKillAfter))
+			cancel()
+
+			err = errors.Join(err, proofErr)
 		}
 
 		if t.stdin != nil {
@@ -858,13 +885,26 @@ func (t *Turn) Close() error {
 			err = errors.Join(err, t.stderr.Close())
 		}
 
-		err = errors.Join(err, t.wait())
-		if t.tree != nil {
+		if ProcessTreeQuiescent(proofErr) {
+			waitCtx, cancelWait := context.WithTimeout(context.Background(), commandWaitTimeout)
+			waitErr, completed := t.waitWithin(waitCtx)
+
+			cancelWait()
+
+			if !completed {
+				waitErr = fmt.Errorf("%w: wait for Amp command close: %v", ErrProcessTreeNotQuiescent, waitErr)
+			}
+
+			err = errors.Join(err, waitErr)
+		}
+
+		if t.tree != nil && ProcessTreeQuiescent(err) {
 			observeProcessTreeSnapshot(context.Background(), t.processObserver)
 			quiescenceErr := processTreeTerminateAndWait(t.tree, defaultCloseWait)
-			finishProcessTreeObservation(context.Background(), t.processObserver, quiescenceErr)
 			err = errors.Join(err, quiescenceErr)
 		}
+
+		finishProcessTreeObservation(context.Background(), t.processObserver, err)
 	})
 
 	return err
@@ -887,15 +927,27 @@ func (t *Turn) killProcess() error {
 }
 
 func (t *Turn) wait() error {
+	waiter := t.commandWait()
+	<-waiter.done
+
+	return waiter.err
+}
+
+func (t *Turn) waitWithin(ctx context.Context) (error, bool) {
+	return t.commandWait().await(ctx)
+}
+
+func (t *Turn) commandWait() *commandWait {
 	t.waitOnce.Do(func() {
-		if t.waitFunc != nil {
-			t.waitErr = t.waitFunc()
-		} else if t.cmd != nil {
-			t.waitErr = t.cmd.Wait()
+		wait := t.waitFunc
+		if wait == nil && t.cmd != nil {
+			wait = t.cmd.Wait
 		}
+
+		t.waitState = newCommandWait(wait)
 	})
 
-	return t.waitErr
+	return t.waitState
 }
 
 func (t *Turn) sendErr(err error) {

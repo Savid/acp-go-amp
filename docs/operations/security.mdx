@@ -41,15 +41,20 @@ Native Amp subprocesses never inherit ACP stdout. The adapter captures native
 stdout and stderr through dedicated pipes so JSON-RPC output stays clean and
 native diagnostics cannot leak into the protocol stream.
 
-## Prompt-process containment
+## Native-process containment
 
-Linux starts each prompt below a dedicated child subreaper. Descendants that
+Linux starts every Amp command — version/readiness probes, thread lifecycle
+commands, and prompts — below a dedicated child subreaper. Descendants that
 detach with `setsid(2)` are reparented into that boundary, terminated, and
-reaped before the prompt settles. Windows assigns the prompt tree to a Job
-Object and proves that its active-process count reached zero. Cancellation,
-timeout, and successful completion all cross the same proof fence.
+reaped. The helper does not treat an empty `/proc` snapshot as proof; only a
+kernel `wait4(2)` result of `ECHILD` proves that no child remains. Windows
+assigns every command tree to a Job Object and proves that its active-process
+count reached zero. Cancellation, timeout, and successful completion all cross
+the same proof fence.
 
 If proof fails, the adapter surfaces `ampacp.ErrProcessTreeUnproven` and does
 not release native-root or session-scratch resources that the tree may still
 reach. Platforms without either containment backend fail session startup and
-native operations closed.
+native operations closed. The parent-side proof wait is bounded so `Close` and
+`Serve` return the sentinel instead of hanging; while a Linux helper has not
+yet proved `ECHILD`, it remains alive and continues containment attempts.

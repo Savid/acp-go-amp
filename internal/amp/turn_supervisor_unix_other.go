@@ -9,7 +9,7 @@ import (
 
 func prepareProcessTreeCommand(*exec.Cmd) (*processTreeCommand, error) {
 	return nil, fmt.Errorf(
-		"%w: platform cannot prove Amp turn descendants that escape a process group",
+		"%w: platform cannot prove Amp native-command descendants that escape a process group",
 		ErrProcessTreeNotQuiescent,
 	)
 }

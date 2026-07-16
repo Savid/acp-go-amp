@@ -98,10 +98,11 @@ storage, and OpenTelemetry providers. Amp has no native config/auth root, so
 - One short-lived `amp threads continue` process per prompt, run with
   isolated native HOME/XDG state, an isolated settings file, and dedicated
   stdout/stderr pipes.
-- Proven prompt-process containment: Linux runs every turn under a dedicated
-  subreaper that adopts descendants even after `setsid(2)`, while Windows uses
-  a Job Object. Session startup and native operations fail closed on platforms
-  where the adapter cannot provide that boundary.
+- Proven native-process containment: Linux runs every Amp command under a
+  dedicated subreaper that adopts descendants even after `setsid(2)` and
+  requires kernel-confirmed child absence before success. Windows uses a Job
+  Object. Session startup and native operations fail closed on platforms where
+  the adapter cannot provide that boundary.
 - Prompt streaming for assistant messages, tool calls, and thread results.
 - Stable wrapper-derived message UUIDs on main-agent chunks and terminal prompt
   responses, replayed from the byte-verbatim Amp transcript mirror.

@@ -24,10 +24,13 @@ when shutdown cannot prove that every Amp descendant exited. `Serve` returns
 an `Agent.Close` error carrying this sentinel even when the stream loop would
 otherwise return normally or with context cancellation. A host that receives
 it must retain or quarantine any resources the native process tree may still
-reach. Normal prompt settlement has the same fence: Linux proves a dedicated
-per-turn subreaper empty (including descendants detached with `setsid(2)`), and
-Windows proves its Job Object empty. Session startup and native operations fail
-with this sentinel on platforms without either containment backend.
+reach. Every native command has the same fence: Linux proves a dedicated
+per-command subreaper empty (including descendants detached with `setsid(2)`)
+only after `wait4(2)` reports `ECHILD`, and Windows proves its Job Object empty.
+Session startup and native operations fail with this sentinel on platforms
+without either containment backend. Parent-side proof waits are bounded, so
+`Close` and `Serve` return the sentinel and retain reachable resources rather
+than waiting forever.
 
 ## Common options
 
