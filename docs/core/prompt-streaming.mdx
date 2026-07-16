@@ -41,10 +41,27 @@ text and is sent to Amp unchanged.
 
 ## Cancel and stop reasons
 
-`session/cancel` sends an interrupt to the active process. If Amp does not exit
-within the configured native cancel timeout, the process group is killed. A
-successful prompt returns exactly one terminal result, and this adapter emits
-only two of the ACP stop reasons: `end_turn` for a completed turn and
+`session/cancel` sends an interrupt to the active prompt boundary. On Linux,
+each turn runs below a dedicated child subreaper. It adopts and terminates the
+whole descendant tree even when a native tool escapes the original process
+group with `setsid(2)`. On Windows, the turn is assigned to a Job Object and
+the adapter waits for its active-process count to reach zero. If graceful
+interruption exceeds the configured native cancel timeout, the entire boundary
+is terminated.
+
+Prompt settlement is fenced by that containment proof. A successful turn, a
+cancelled turn, and a turn-timeout failure are not returned from
+`session/prompt` until every process in the turn boundary has exited. If the
+adapter cannot prove quiescence, it returns an error matching
+`ampacp.ErrProcessTreeUnproven` instead of the otherwise terminal result and
+retains resources that the unproven tree may still reach.
+
+On platforms without the Linux subreaper or Windows Job Object backend,
+session startup and native operations fail closed rather than launching a turn
+with partial containment.
+
+A successful prompt returns exactly one terminal result, and this adapter
+emits only two of the ACP stop reasons: `end_turn` for a completed turn and
 `cancelled` for a cancelled one. The other reasons in the ACP enum
 (`max_tokens`, `max_turn_requests`, `refusal`) exist but this adapter never
 produces them, so a host must not wait for them.

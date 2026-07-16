@@ -40,3 +40,16 @@ isolated native home. Never seed secrets through them; put credentials in
 Native Amp subprocesses never inherit ACP stdout. The adapter captures native
 stdout and stderr through dedicated pipes so JSON-RPC output stays clean and
 native diagnostics cannot leak into the protocol stream.
+
+## Prompt-process containment
+
+Linux starts each prompt below a dedicated child subreaper. Descendants that
+detach with `setsid(2)` are reparented into that boundary, terminated, and
+reaped before the prompt settles. Windows assigns the prompt tree to a Job
+Object and proves that its active-process count reached zero. Cancellation,
+timeout, and successful completion all cross the same proof fence.
+
+If proof fails, the adapter surfaces `ampacp.ErrProcessTreeUnproven` and does
+not release native-root or session-scratch resources that the tree may still
+reach. Platforms without either containment backend fail session startup and
+native operations closed.
