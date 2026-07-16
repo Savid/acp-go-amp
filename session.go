@@ -115,6 +115,12 @@ type agentSession struct {
 }
 
 func newAgentSession(ctx context.Context, agent *Agent, id acp.SessionId, cwd string, meta parsedSessionMeta, mcpConfigJSON string, additionalDirs []string) (_ *agentSession, err error) {
+	if id != "" {
+		if validateErr := amp.ValidateThreadID(string(id)); validateErr != nil {
+			return nil, fmt.Errorf("invalid amp session id: %w", validateErr)
+		}
+	}
+
 	now := time.Now().UnixMilli()
 
 	scratchRelease, err := reserveScratchRoot(ctx, agent.options.RuntimeResourceHooks, RuntimeResourceSession)

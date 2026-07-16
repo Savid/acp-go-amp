@@ -276,8 +276,8 @@ func (c *Client) NewThread(ctx context.Context) (string, error) {
 	}
 
 	threadID := strings.TrimSpace(stripANSI(string(out)))
-	if !strings.HasPrefix(threadID, "T-") {
-		return "", fmt.Errorf("amp threads new returned unexpected id %q", threadID)
+	if err := ValidateThreadID(threadID); err != nil {
+		return "", fmt.Errorf("amp threads new returned invalid id: %w", err)
 	}
 
 	return threadID, nil

@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	ampnative "github.com/savid/acp-go-amp/internal/amp"
 )
 
 func TestInMemoryStoreReplaceAppendDelete(t *testing.T) {
@@ -171,6 +173,12 @@ func TestInMemoryStoreContractEdges(t *testing.T) {
 	}
 	if _, ok := manifestFromStoreEntry(json.RawMessage(`{`)); ok {
 		t.Fatal("malformed manifest accepted")
+	}
+	overlongManifest, _ := json.Marshal(ampManifest{
+		Format: SessionStoreFormat, ThreadID: "T-" + strings.Repeat("x", ampnative.MaxThreadIDBytes),
+	})
+	if _, ok := manifestFromStoreEntry(overlongManifest); ok {
+		t.Fatal("overlong thread id manifest accepted")
 	}
 }
 

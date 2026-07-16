@@ -627,7 +627,7 @@ func (a *Agent) loadManifest(ctx context.Context, sessionID acp.SessionId) (ampM
 		return ampManifest{}, acp.NewInternalError(map[string]any{jsonFieldError: err.Error()})
 	}
 
-	if manifest.Format != SessionStoreFormat || manifest.ThreadID != string(sessionID) {
+	if manifest.Format != SessionStoreFormat || manifest.ThreadID != string(sessionID) || amp.ValidateThreadID(manifest.ThreadID) != nil {
 		return ampManifest{}, acp.NewInternalError(map[string]any{jsonFieldError: "invalid amp session manifest"})
 	}
 

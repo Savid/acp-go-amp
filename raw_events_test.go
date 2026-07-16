@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
+	ampnative "github.com/savid/acp-go-amp/internal/amp"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
@@ -136,6 +137,98 @@ func TestRawEventOversizeEmitsMarker(t *testing.T) {
 	}
 	if len(marker) != 4 {
 		t.Fatalf("oversize marker has extra fields: %#v", marker)
+	}
+}
+
+func TestRawEventCompletePayloadBoundaryAndStructuralOverflow(t *testing.T) {
+	payload := map[string]any{
+		"sessionId": "T-boundary",
+		"sequence":  int64(1),
+		keySource:   "stream-json",
+		"event":     "",
+	}
+	empty, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	padding := rawEventMaxBytes - len(empty)
+	if padding <= 0 {
+		t.Fatalf("raw envelope overhead = %d", len(empty))
+	}
+
+	payload["event"] = strings.Repeat("x", padding)
+	capped, err := capRawEventPayload(payload)
+	if err != nil {
+		t.Fatalf("exact boundary: %v", err)
+	}
+	exact, err := json.Marshal(capped)
+	if err != nil || len(exact) != rawEventMaxBytes {
+		t.Fatalf("exact boundary bytes = %d, err = %v", len(exact), err)
+	}
+
+	payload["event"] = strings.Repeat("x", padding+1)
+	capped, err = capRawEventPayload(payload)
+	if err != nil {
+		t.Fatalf("one byte over boundary: %v", err)
+	}
+	marked, err := json.Marshal(capped)
+	if err != nil || len(marked) > rawEventMaxBytes {
+		t.Fatalf("marked bytes = %d, err = %v", len(marked), err)
+	}
+	marker, ok := capped["event"].(map[string]any)
+	if !ok || marker["reason"] != "oversize" || marker["sizeBytes"] != rawEventMaxBytes+1 {
+		t.Fatalf("boundary marker = %#v", capped["event"])
+	}
+
+	structurallyInvalid := map[string]any{
+		"sessionId": strings.Repeat("s", rawEventMaxBytes),
+		"sequence":  int64(1),
+		keySource:   "stream-json",
+		"event":     oversizedMessage().raw,
+	}
+	if _, err := capRawEventPayload(structurallyInvalid); err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("structural overflow = %v", err)
+	}
+
+	unserializableStructure := map[string]any{
+		"sessionId": "T-structural",
+		"sequence":  int64(1),
+		keySource:   func() {},
+		"event":     map[string]any{"bad": func() {}},
+	}
+	if _, err := capRawEventPayload(unserializableStructure); err == nil || !strings.Contains(err.Error(), "marshal capped") {
+		t.Fatalf("unserializable structure = %v", err)
+	}
+}
+
+func TestRawEventStructuralFailureDoesNotConsumeSequence(t *testing.T) {
+	agent := NewAgent()
+	client := &failThenRecordRawClient{}
+	agent.setConnection(client)
+	session := &agentSession{
+		agent:     agent,
+		id:        acp.SessionId("T-" + strings.Repeat("s", rawEventMaxBytes)),
+		rawEvents: true,
+	}
+
+	err := session.emitRawEvent(context.Background(), "stream-json", oversizedMessage())
+	if err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("structural emit = %v", err)
+	}
+	if session.rawEventSeq.Load() != 0 || len(client.snapshot()) != 0 {
+		t.Fatalf("structural failure consumed sequence or emitted: sequence=%d events=%d", session.rawEventSeq.Load(), len(client.snapshot()))
+	}
+
+	// '<' is six bytes under encoding/json's default HTML escaping, so this
+	// exercises the worst admitted structural expansion rather than an ASCII
+	// token whose encoded size equals its input size.
+	session.id = acp.SessionId("T-" + strings.Repeat("<", ampnative.MaxThreadIDBytes-2))
+	if err := session.emitRawEvent(context.Background(), "stream-json", oversizedMessage()); err != nil {
+		t.Fatalf("valid maximum thread id: %v", err)
+	}
+	events := decodeRawEvents(t, client.snapshot())
+	if len(events) != 1 || events[0].Sequence != 1 {
+		t.Fatalf("recovered events = %#v", events)
 	}
 }
 

@@ -2,7 +2,6 @@ package ampacp
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -534,10 +533,11 @@ func (s *agentSession) emitUpdate(ctx context.Context, update acp.SessionUpdate)
 // only when a notification is actually sent, never on a skipped frame or a
 // suppressed (connection-less) send. A frame with a nil native payload is
 // skipped entirely — `event` is never null. An event whose marshalled payload
-// cannot be built or exceeds the 64 KiB cap is never dropped — its `event` is
-// replaced by the fixed truncation marker so the payload is always valid JSON.
-// The returned error signals only that delivery to the client failed; the
-// caller records it and continues (a debug toggle never fails the turn).
+// cannot be built or exceeds the 64 KiB cap is never dropped for an admitted
+// session — its `event` is replaced by the fixed truncation marker and the
+// complete notification is rechecked. An impossible oversized structural
+// envelope fails closed before delivery without consuming a sequence. The
+// returned error is recorded by the caller and never fails the turn.
 func (s *agentSession) emitRawEvent(ctx context.Context, source string, msg amp.Message) error {
 	if !s.rawEvents {
 		return nil
@@ -563,27 +563,18 @@ func (s *agentSession) emitRawEvent(ctx context.Context, source string, msg amp.
 	sequence := s.rawEventSeq.Load() + 1
 
 	payload := map[string]any{
-		"sessionId": s.id,
-		"sequence":  sequence,
-		keySource:   source,
-		"event":     raw,
-	}
-	if data, err := json.Marshal(payload); err != nil {
-		payload["event"] = map[string]any{
-			"truncated": true,
-			"reason":    reasonUnserializable,
-			keyMaxBytes: rawEventMaxBytes,
-		}
-	} else if len(data) > rawEventMaxBytes {
-		payload["event"] = map[string]any{
-			"truncated": true,
-			"reason":    "oversize",
-			keyMaxBytes: rawEventMaxBytes,
-			"sizeBytes": len(data),
-		}
+		jsonFieldSessionID:    s.id,
+		rawEventFieldSequence: sequence,
+		keySource:             source,
+		rawEventFieldEvent:    raw,
 	}
 
-	if err := conn.NotifyExtension(ctx, RawEventMethod, payload); err != nil {
+	capped, err := capRawEventPayload(payload)
+	if err != nil {
+		return err
+	}
+
+	if err := conn.NotifyExtension(ctx, RawEventMethod, capped); err != nil {
 		return err
 	}
 

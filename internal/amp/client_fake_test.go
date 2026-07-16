@@ -70,6 +70,10 @@ func TestFakeAmpHelper(t *testing.T) {
 			os.Stdout.WriteString("not-a-thread\n")
 			os.Exit(0)
 		}
+		if mode == "oversized-new-id" {
+			os.Stdout.WriteString("T-" + strings.Repeat("x", MaxThreadIDBytes) + "\n")
+			os.Exit(0)
+		}
 		os.Stdout.WriteString("\x1b[32mT-fake-thread\x1b[0m\n")
 	case "list":
 		if mode == "bad-list-json" {
@@ -460,6 +464,29 @@ func TestClientErrorBranches(t *testing.T) {
 	client := NewClient(nil, Options{CLIPath: path, Cwd: t.TempDir()})
 	if _, err := client.NewThread(context.Background()); err == nil {
 		t.Fatal("expected bad thread id error")
+	}
+	path, _ = fakeAmpPath(t, "oversized-new-id")
+	if _, err := NewClient(nil, Options{CLIPath: path, Cwd: t.TempDir()}).NewThread(context.Background()); err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("oversized thread id error = %v", err)
+	}
+	for _, test := range []struct {
+		name string
+		id   string
+		ok   bool
+	}{
+		{name: "missing prefix", id: "thread"},
+		{name: "exact maximum", id: "T-" + strings.Repeat("x", MaxThreadIDBytes-2), ok: true},
+		{name: "over maximum", id: "T-" + strings.Repeat("x", MaxThreadIDBytes-1)},
+	} {
+		t.Run("thread id "+test.name, func(t *testing.T) {
+			err := ValidateThreadID(test.id)
+			if test.ok && err != nil {
+				t.Fatalf("ValidateThreadID(%q): %v", test.name, err)
+			}
+			if !test.ok && err == nil {
+				t.Fatalf("ValidateThreadID(%q) succeeded", test.name)
+			}
+		})
 	}
 	path, _ = fakeAmpPath(t, "bad-list-json")
 	if _, err := NewClient(nil, Options{CLIPath: path, Cwd: t.TempDir()}).ListThreads(context.Background()); err == nil {

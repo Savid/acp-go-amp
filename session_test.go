@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/coder/acp-go-sdk"
+	ampnative "github.com/savid/acp-go-amp/internal/amp"
 )
 
 func TestAgentLifecycleErrorBranches(t *testing.T) {
@@ -150,6 +151,17 @@ func TestLoadManifestErrorsAndListFilters(t *testing.T) {
 			t.Fatalf("bad manifest accepted: %s", entry)
 		}
 	}
+	overlongID := acp.SessionId("T-" + strings.Repeat("x", ampnative.MaxThreadIDBytes))
+	overlong, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, ThreadID: string(overlongID)})
+	overlongStore := NewInMemorySessionStore()
+	if err := overlongStore.Replace(ctx, SessionKey{SessionID: string(overlongID)}, []SessionStoreReplacement{{
+		Key: SessionKey{SessionID: string(overlongID)}, Entries: []SessionStoreEntry{overlong},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewAgent(WithSessionStore(overlongStore)).loadManifest(ctx, overlongID); err == nil {
+		t.Fatal("overlong stored thread id admitted")
+	}
 	errStore := &errorStore{listErr: errors.New("list failed")}
 	if _, err := NewAgent(WithSessionStore(errStore)).ListSessions(ctx, acp.ListSessionsRequest{}); err == nil {
 		t.Fatal("list error ignored")
@@ -172,6 +184,9 @@ func TestRemainingAgentBranches(t *testing.T) {
 	ctx := context.Background()
 	path, _ := fakeAgentAmpPath(t, "")
 	agent := NewAgent(WithExecutablePath(path))
+	if _, err := newAgentSession(ctx, agent, acp.SessionId("T-"+strings.Repeat("x", ampnative.MaxThreadIDBytes)), t.TempDir(), parsedSessionMeta{}, "", nil); err == nil {
+		t.Fatal("overlong thread id admitted")
+	}
 	if millisToRFC3339(0) != "" {
 		t.Fatal("zero millis formatted")
 	}
