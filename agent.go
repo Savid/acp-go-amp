@@ -19,6 +19,11 @@ type Agent struct {
 	store   SessionStore
 	observe *observer.Observer
 
+	lifecycleDone chan struct{}
+	lifecycleWG   sync.WaitGroup
+	closeOnce     sync.Once
+	closeErr      error
+
 	mu                   sync.Mutex
 	closed               bool
 	conn                 agentClient
@@ -28,6 +33,7 @@ type Agent struct {
 	pending              int
 	clientCalls          chan struct{}
 	providerProcesses    *providerProcessSnapshotTracker
+	lifecycleProofErr    error
 
 	activeLimitErr error
 }
@@ -72,6 +78,7 @@ func NewAgent(opts ...Option) *Agent {
 		pendingNativeDeletes: make(map[acp.SessionId]struct{}),
 		clientCalls:          make(chan struct{}, maxConcurrentClientCalls(options.ConcurrencyLimits)),
 		providerProcesses:    providerProcesses,
+		lifecycleDone:        make(chan struct{}),
 		activeLimitErr:       validateConcurrencyLimits(options.ConcurrencyLimits),
 	}
 }
@@ -100,26 +107,44 @@ func Serve(ctx context.Context, input io.Reader, output io.Writer, opts ...Optio
 }
 
 func (a *Agent) Close() error {
-	a.mu.Lock()
+	a.closeOnce.Do(func() {
+		a.mu.Lock()
+		a.closed = true
+		a.conn = nil
+		shutdown := a.lifecycleDone
+		a.mu.Unlock()
 
-	sessions := make([]*agentSession, 0, len(a.sessions))
-	for _, session := range a.sessions {
-		sessions = append(sessions, session)
-	}
+		if shutdown != nil {
+			close(shutdown)
+		}
 
-	a.sessions = map[acp.SessionId]*agentSession{}
-	a.closed = true
-	a.conn = nil
-	a.mu.Unlock()
+		// A lifecycle request can own native discovery/session roots before it
+		// installs an active session. Fence those requests before snapshotting
+		// sessions so no root can outlive a settled Close and no late install can
+		// escape this shutdown pass.
+		a.lifecycleWG.Wait()
 
-	var err error
-	for _, session := range sessions {
-		err = errors.Join(err, session.Close(context.Background()))
-	}
+		a.mu.Lock()
 
-	a.observe.AddActiveSession(context.Background(), -int64(len(sessions)))
+		sessions := make([]*agentSession, 0, len(a.sessions))
+		for _, session := range a.sessions {
+			sessions = append(sessions, session)
+		}
 
-	return err
+		a.sessions = map[acp.SessionId]*agentSession{}
+		proofErr := a.lifecycleProofErr
+		a.mu.Unlock()
+
+		closeErr := proofErr
+		for _, session := range sessions {
+			closeErr = errors.Join(closeErr, session.Close(context.Background()))
+		}
+
+		a.observe.AddActiveSession(context.Background(), -int64(len(sessions)))
+		a.closeErr = closeErr
+	})
+
+	return a.closeErr
 }
 
 func (a *Agent) Initialize(ctx context.Context, params acp.InitializeRequest) (resp acp.InitializeResponse, err error) {

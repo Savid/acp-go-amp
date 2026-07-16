@@ -21,7 +21,7 @@ import (
 )
 
 const (
-	turnSupervisorModeEnv = "ACP_GO_AMP_INTERNAL_NATIVE_SUPERVISOR"
+	turnSupervisorModeEnv = adapterSupervisorModeEnv
 	turnSupervisorMode    = "1"
 	turnSupervisorFDName  = "acp-go-amp-native-supervisor"
 	turnSupervisorReady   = "ready\n"

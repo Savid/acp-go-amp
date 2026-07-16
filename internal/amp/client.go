@@ -20,17 +20,21 @@ import (
 )
 
 const (
-	MinimumVersion         = "0.0.1783155105"
-	maxCapturedStderrBytes = 64 * 1024
-	defaultCloseKillAfter  = 100 * time.Millisecond
-	defaultCloseWait       = 5 * time.Second
-	ampArgThreads          = "threads"
-	ampThreadContinue      = "continue"
-	ampThreadDelete        = "delete"
-	ampThreadExport        = "export"
-	ampArgNoIDE            = "--no-ide"
-	ampArgNoColor          = "--no-color"
-	ampArgNoNotifications  = "--no-notifications"
+	MinimumVersion              = "0.0.1783155105"
+	maxCapturedStderrBytes      = 64 * 1024
+	defaultCloseKillAfter       = 100 * time.Millisecond
+	defaultCloseWait            = 5 * time.Second
+	ampArgThreads               = "threads"
+	ampThreadContinue           = "continue"
+	ampThreadDelete             = "delete"
+	ampThreadExport             = "export"
+	ampArgNoIDE                 = "--no-ide"
+	ampArgNoColor               = "--no-color"
+	ampArgNoNotifications       = "--no-notifications"
+	adapterSupervisorModeEnv    = "ACP_GO_AMP_INTERNAL_NATIVE_SUPERVISOR"
+	adapterOneShotDeathPhaseEnv = "ACP_GO_AMP_TEST_ONE_SHOT_DEATH_PHASE"
+	adapterOneShotDeathPathEnv  = "ACP_GO_AMP_TEST_ONE_SHOT_DEATH_PATH"
+	adapterOneShotDeathStateEnv = "ACP_GO_AMP_TEST_ONE_SHOT_DEATH_STATE"
 )
 
 var (
@@ -187,7 +191,7 @@ func (c *Client) StartupProbe(ctx context.Context) error {
 // probes for `threads export/continue/delete` against a missing id. The continue
 // probe uses an isolated settings file and the same real-turn flag surface; the
 // known-missing thread must fail before any model turn can start.
-func (c *Client) probeSubcommands(ctx context.Context) error {
+func (c *Client) probeSubcommands(ctx context.Context) (returnErr error) {
 	probeCtx, cancel := context.WithTimeout(ctx, startupProbeTimeout)
 	defer cancel()
 
@@ -199,7 +203,11 @@ func (c *Client) probeSubcommands(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer cleanup()
+	defer func() {
+		if ProcessTreeQuiescent(returnErr) {
+			cleanup()
+		}
+	}()
 
 	continueClient := *c
 	continueClient.options.SettingsFile = settingsFile
@@ -257,6 +265,10 @@ func startupProbeSettingsFile(parent string) (string, func(), error) {
 // missing-thread error means the subcommand exists (probe passes, nil); any
 // other error means the subcommand is missing or broken (probe fails).
 func methodProbeError(name string, err error, requireMissingThread bool) error {
+	if errors.Is(err, ErrProcessTreeNotQuiescent) {
+		return fmt.Errorf("amp %s probe containment failed: %w", name, err)
+	}
+
 	if err == nil || isMissingThreadMessage(err.Error()) {
 		return nil
 	}
@@ -311,7 +323,7 @@ func (c *Client) ExportThread(ctx context.Context, threadID string) (json.RawMes
 
 func (c *Client) DeleteThread(ctx context.Context, threadID string) error {
 	_, err := c.output(ctx, ampArgThreads, ampThreadDelete, threadID)
-	if err != nil && strings.Contains(err.Error(), "does not exist") {
+	if err != nil && !errors.Is(err, ErrProcessTreeNotQuiescent) && strings.Contains(err.Error(), "does not exist") {
 		return nil
 	}
 
@@ -582,7 +594,7 @@ func BuildEnv(overrides map[string]string, cwd string) []string {
 	keys := make([]string, 0, len(os.Environ())+len(overrides)+1)
 
 	set := func(key, value string) {
-		if key == "" {
+		if key == "" || isPrivateAdapterEnv(key) {
 			return
 		}
 
@@ -620,6 +632,18 @@ func BuildEnv(overrides map[string]string, cwd string) []string {
 	}
 
 	return out
+}
+
+func isPrivateAdapterEnv(key string) bool {
+	switch key {
+	case adapterSupervisorModeEnv,
+		adapterOneShotDeathPhaseEnv,
+		adapterOneShotDeathPathEnv,
+		adapterOneShotDeathStateEnv:
+		return true
+	default:
+		return false
+	}
 }
 
 func versionAtLeast(got string, floor string) bool {

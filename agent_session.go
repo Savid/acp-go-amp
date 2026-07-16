@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"maps"
 	"slices"
@@ -19,11 +20,13 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (r
 	ctx, finish := a.observe.StartACPRequest(ctx, acp.AgentMethodSessionNew)
 	defer func() { finish(err) }()
 
-	ctx = a.observe.Extract(ctx, params.Meta)
-
-	if openErr := a.ensureOpen(); openErr != nil {
-		return acp.NewSessionResponse{}, openErr
+	ctx, finishLifecycle, err := a.beginLifecycleOperation(ctx)
+	if err != nil {
+		return acp.NewSessionResponse{}, err
 	}
+	defer func() { finishLifecycle(err) }()
+
+	ctx = a.observe.Extract(ctx, params.Meta)
 
 	meta, err := parseSessionMeta(params.Meta)
 	if err != nil {
@@ -48,11 +51,19 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (r
 		return acp.NewSessionResponse{}, err
 	}
 
+	discoveryScratchRelease, err := reserveScratchRoot(ctx, a.options.RuntimeResourceHooks, RuntimeResourceDiscovery)
+	if err != nil {
+		discoveryRelease()
+
+		return acp.NewSessionResponse{}, err
+	}
+
 	readinessStarted := time.Now()
 	startErr := a.ensureStartup(ctx, params.Cwd, meta)
 	observeRuntimeStartupStage(ctx, a.options.RuntimeResourceHooks, RuntimeResourceDiscovery, RuntimeStartupReadiness, readinessStarted, startErr)
 
 	releaseNativeRootWhenQuiescent(discoveryRelease, startErr)
+	releaseScratchRootWhenQuiescent(discoveryScratchRelease, startErr)
 
 	if startErr != nil {
 		return acp.NewSessionResponse{}, startErr
@@ -73,9 +84,9 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (r
 	if err != nil {
 		a.releaseSessionSlot("")
 
-		_ = probeSession.Close(context.Background())
+		closeErr := probeSession.Close(context.Background())
 
-		return acp.NewSessionResponse{}, err
+		return acp.NewSessionResponse{}, errors.Join(err, closeErr)
 	}
 
 	// Amp thread creation is an authenticated remote operation and has been
@@ -84,7 +95,7 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (r
 	// interactive or stalled `threads new` process alive indefinitely.
 	sessionCtx, cancelSession := context.WithTimeout(ctx, a.options.runtime.nativeSessionTimeout)
 	sessionStarted := time.Now()
-	threadID, err := probeSession.client().NewThread(sessionCtx)
+	threadID, err := a.options.runtime.newThread(sessionCtx, probeSession.client())
 
 	cancelSession()
 	observeRuntimeStartupStage(ctx, a.options.RuntimeResourceHooks, RuntimeResourceSession, RuntimeStartupSession, sessionStarted, err)
@@ -93,19 +104,19 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (r
 
 	if err != nil {
 		a.releaseSessionSlot("")
+		probeSession.recordScratchQuiescence(err)
+		closeErr := probeSession.Close(context.Background())
 
-		_ = probeSession.Close(context.Background())
-
-		return acp.NewSessionResponse{}, acp.NewInternalError(map[string]any{jsonFieldError: err.Error()})
+		return acp.NewSessionResponse{}, errors.Join(nativeInternalError(err), closeErr)
 	}
 
 	probeSession.id = acp.SessionId(threadID)
 	if persistErr := probeSession.persistAfterTurn(ctx, nil); persistErr != nil {
 		a.releaseSessionSlot("")
 
-		_ = probeSession.Delete(context.Background())
+		deleteErr := probeSession.Delete(context.Background())
 
-		return acp.NewSessionResponse{}, persistErr
+		return acp.NewSessionResponse{}, errors.Join(persistErr, deleteErr)
 	}
 
 	a.mu.Lock()
@@ -121,23 +132,26 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 	ctx, finish := a.observe.StartACPRequest(ctx, acp.AgentMethodSessionLoad)
 	defer func() { finish(err) }()
 
-	ctx = a.observe.Extract(ctx, params.Meta)
-
-	if openErr := a.ensureOpen(); openErr != nil {
-		return acp.LoadSessionResponse{}, openErr
+	ctx, finishLifecycle, err := a.beginLifecycleOperation(ctx)
+	if err != nil {
+		return acp.LoadSessionResponse{}, err
 	}
+	defer func() { finishLifecycle(err) }()
+
+	ctx = a.observe.Extract(ctx, params.Meta)
 
 	session, transcript, started, err := a.loadOrResume(ctx, params.SessionId, params.Cwd, params.McpServers, params.AdditionalDirectories, params.Meta)
 	if err != nil {
 		return acp.LoadSessionResponse{}, err
 	}
 
-	if err := session.replayTranscriptEntries(ctx, transcript); err != nil {
+	if replayErr := session.replayTranscriptEntries(ctx, transcript); replayErr != nil {
+		var cleanupErr error
 		if started {
-			a.removeSession(ctx, params.SessionId, session)
+			cleanupErr = a.removeSession(ctx, params.SessionId, session)
 		}
 
-		return acp.LoadSessionResponse{}, err
+		return acp.LoadSessionResponse{}, errors.Join(replayErr, cleanupErr)
 	}
 
 	return acp.LoadSessionResponse{ConfigOptions: session.configOptions()}, nil
@@ -147,11 +161,13 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 	ctx, finish := a.observe.StartACPRequest(ctx, acp.AgentMethodSessionResume)
 	defer func() { finish(err) }()
 
-	ctx = a.observe.Extract(ctx, params.Meta)
-
-	if openErr := a.ensureOpen(); openErr != nil {
-		return acp.ResumeSessionResponse{}, openErr
+	ctx, finishLifecycle, err := a.beginLifecycleOperation(ctx)
+	if err != nil {
+		return acp.ResumeSessionResponse{}, err
 	}
+	defer func() { finishLifecycle(err) }()
+
+	ctx = a.observe.Extract(ctx, params.Meta)
 
 	session, transcript, started, err := a.loadOrResume(ctx, params.SessionId, params.Cwd, params.McpServers, params.AdditionalDirectories, params.Meta)
 	if err != nil {
@@ -160,19 +176,21 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 
 	messageID, identityErr := terminalAssistantMessageIdentity(params.SessionId, transcript)
 	if identityErr != nil {
+		var cleanupErr error
 		if started {
-			a.removeSession(ctx, params.SessionId, session)
+			cleanupErr = a.removeSession(ctx, params.SessionId, session)
 		}
 
-		return acp.ResumeSessionResponse{}, identityErr
+		return acp.ResumeSessionResponse{}, errors.Join(identityErr, cleanupErr)
 	}
 
 	if emitErr := session.emitNativeMessageIdentity(ctx, messageID); emitErr != nil {
+		var cleanupErr error
 		if started {
-			a.removeSession(ctx, params.SessionId, session)
+			cleanupErr = a.removeSession(ctx, params.SessionId, session)
 		}
 
-		return acp.ResumeSessionResponse{}, emitErr
+		return acp.ResumeSessionResponse{}, errors.Join(emitErr, cleanupErr)
 	}
 
 	return acp.ResumeSessionResponse{ConfigOptions: session.configOptions()}, nil
@@ -182,15 +200,19 @@ func (a *Agent) ListSessions(ctx context.Context, params acp.ListSessionsRequest
 	ctx, finish := a.observe.StartACPRequest(ctx, acp.AgentMethodSessionList)
 	defer func() { finish(err) }()
 
-	if openErr := a.ensureOpen(); openErr != nil {
-		return acp.ListSessionsResponse{}, openErr
+	ctx, finishLifecycle, err := a.beginLifecycleOperation(ctx)
+	if err != nil {
+		return acp.ListSessionsResponse{}, err
 	}
+	defer func() { finishLifecycle(err) }()
 
 	if pathErr := validateOptionalAbsolutePath("cwd", params.Cwd); pathErr != nil {
 		return acp.ListSessionsResponse{}, pathErr
 	}
 
-	a.retryPendingNativeDeletes(ctx)
+	if retryErr := a.retryPendingNativeDeletes(ctx); retryErr != nil {
+		return acp.ListSessionsResponse{}, retryErr
+	}
 
 	a.mu.Lock()
 
@@ -361,6 +383,12 @@ func (a *Agent) CloseSession(ctx context.Context, params acp.CloseSessionRequest
 	ctx, finish := a.observe.StartACPRequest(ctx, acp.AgentMethodSessionClose)
 	defer func() { finish(err) }()
 
+	ctx, finishLifecycle, err := a.beginLifecycleOperation(ctx)
+	if err != nil {
+		return acp.CloseSessionResponse{}, err
+	}
+	defer func() { finishLifecycle(err) }()
+
 	session, err := a.session(params.SessionId)
 	if err != nil {
 		return acp.CloseSessionResponse{}, err
@@ -380,12 +408,33 @@ func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDe
 	ctx, finish := a.observe.StartACPRequest(ctx, acp.AgentMethodSessionDelete)
 	defer func() { finish(err) }()
 
+	ctx, finishLifecycle, err := a.beginLifecycleOperation(ctx)
+	if err != nil {
+		return acp.UnstableDeleteSessionResponse{}, err
+	}
+	defer func() { finishLifecycle(err) }()
+
 	ctx = a.observe.Extract(ctx, params.Meta)
 	if params.SessionId == "" {
 		return acp.UnstableDeleteSessionResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldField: jsonFieldSessionID})
 	}
 
-	a.retryPendingNativeDeletes(ctx)
+	if a.isPendingNativeDelete(params.SessionId) {
+		if retryErr := a.retryPendingNativeDelete(ctx, params.SessionId); retryErr != nil {
+			return acp.UnstableDeleteSessionResponse{}, retryErr
+		}
+
+		return acp.UnstableDeleteSessionResponse{}, nil
+	}
+
+	if retryErr := a.retryPendingNativeDeletes(ctx); retryErr != nil {
+		return acp.UnstableDeleteSessionResponse{}, retryErr
+	}
+
+	stored, err := a.storedSessionExists(ctx, params.SessionId)
+	if err != nil {
+		return acp.UnstableDeleteSessionResponse{}, err
+	}
 
 	if a.store != nil {
 		deleteCtx, cancelDelete := a.sessionStoreWriteContext(ctx)
@@ -406,6 +455,14 @@ func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDe
 
 	if session != nil {
 		a.observe.AddActiveSession(ctx, -1)
+	}
+
+	if !stored {
+		if session == nil {
+			return acp.UnstableDeleteSessionResponse{}, nil
+		}
+
+		return acp.UnstableDeleteSessionResponse{}, session.Close(ctx)
 	}
 
 	if err := a.deleteNativeThread(ctx, params.SessionId, session); err != nil {
@@ -451,7 +508,9 @@ func (a *Agent) SetSessionMode(ctx context.Context, params acp.SetSessionModeReq
 }
 
 func (a *Agent) loadOrResume(ctx context.Context, sessionID acp.SessionId, cwd string, mcpServers []acp.McpServer, additionalDirs []string, rawMeta map[string]any) (*agentSession, []SessionStoreEntry, bool, error) {
-	a.retryPendingNativeDeletes(ctx)
+	if retryErr := a.retryPendingNativeDeletes(ctx); retryErr != nil {
+		return nil, nil, false, retryErr
+	}
 
 	if _, deleted := a.isDeleted(sessionID); deleted {
 		return nil, nil, false, unknownSessionError()
@@ -484,11 +543,19 @@ func (a *Agent) loadOrResume(ctx context.Context, sessionID acp.SessionId, cwd s
 		return nil, nil, false, err
 	}
 
+	discoveryScratchRelease, err := reserveScratchRoot(ctx, a.options.RuntimeResourceHooks, RuntimeResourceDiscovery)
+	if err != nil {
+		discoveryRelease()
+
+		return nil, nil, false, err
+	}
+
 	readinessStarted := time.Now()
 	startErr := a.ensureStartup(ctx, cwd, meta)
 	observeRuntimeStartupStage(ctx, a.options.RuntimeResourceHooks, RuntimeResourceDiscovery, RuntimeStartupReadiness, readinessStarted, startErr)
 
 	releaseNativeRootWhenQuiescent(discoveryRelease, startErr)
+	releaseScratchRootWhenQuiescent(discoveryScratchRelease, startErr)
 
 	if startErr != nil {
 		return nil, nil, false, startErr
@@ -542,26 +609,26 @@ func (a *Agent) loadOrResume(ctx context.Context, sessionID acp.SessionId, cwd s
 
 	transcript, err := session.loadTranscript(ctx)
 	if err != nil {
-		_ = session.Close(context.Background())
+		closeErr := session.Close(context.Background())
 
-		return nil, nil, false, err
+		return nil, nil, false, errors.Join(err, closeErr)
 	}
 
 	session.setTranscriptFrameCount(len(transcript))
 
 	if err = session.verifyContinuable(ctx); err != nil {
-		_ = session.Close(context.Background())
+		closeErr := session.Close(context.Background())
 
-		return nil, nil, false, err
+		return nil, nil, false, errors.Join(err, closeErr)
 	}
 
 	a.mu.Lock()
 	if len(a.sessions) >= a.maxActiveSessions() {
 		a.mu.Unlock()
 
-		_ = session.Close(context.Background())
+		closeErr := session.Close(context.Background())
 
-		return nil, nil, false, backpressureError("active_sessions")
+		return nil, nil, false, errors.Join(backpressureError("active_sessions"), closeErr)
 	}
 
 	a.sessions[sessionID] = session
@@ -571,7 +638,7 @@ func (a *Agent) loadOrResume(ctx context.Context, sessionID acp.SessionId, cwd s
 	return session, transcript, true, nil
 }
 
-func (a *Agent) removeSession(ctx context.Context, sessionID acp.SessionId, session *agentSession) {
+func (a *Agent) removeSession(ctx context.Context, sessionID acp.SessionId, session *agentSession) error {
 	a.mu.Lock()
 
 	removed := a.sessions[sessionID] == session
@@ -583,8 +650,10 @@ func (a *Agent) removeSession(ctx context.Context, sessionID acp.SessionId, sess
 	if removed {
 		a.observe.AddActiveSession(ctx, -1)
 
-		_ = session.Close(context.Background())
+		return session.Close(context.Background())
 	}
+
+	return nil
 }
 
 // sessionStoreLoadTimeout resolves the WithSessionStoreLoadTimeout bound for
@@ -739,6 +808,15 @@ func (a *Agent) clearPendingNativeDelete(id acp.SessionId) {
 	delete(a.pendingNativeDeletes, id)
 }
 
+func (a *Agent) isPendingNativeDelete(id acp.SessionId) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	_, ok := a.pendingNativeDeletes[id]
+
+	return ok
+}
+
 func (a *Agent) pendingNativeDeleteIDs() []acp.SessionId {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -751,16 +829,47 @@ func (a *Agent) pendingNativeDeleteIDs() []acp.SessionId {
 	return ids
 }
 
-func (a *Agent) retryPendingNativeDeletes(ctx context.Context) {
+func (a *Agent) retryPendingNativeDeletes(ctx context.Context) error {
+	var proofErr error
+
 	for _, id := range a.pendingNativeDeleteIDs() {
-		if err := a.deleteNativeThread(ctx, id, nil); err != nil {
+		if err := a.retryPendingNativeDelete(ctx, id); err != nil {
 			a.log.DebugContext(ctx, "retry amp native delete failed", slog.String(jsonFieldSessionID, string(id)), slog.String(jsonFieldError, err.Error()))
 
-			continue
+			if errors.Is(err, ErrProcessTreeUnproven) {
+				proofErr = errors.Join(proofErr, err)
+			}
 		}
-
-		a.clearPendingNativeDelete(id)
 	}
+
+	return proofErr
+}
+
+func (a *Agent) retryPendingNativeDelete(ctx context.Context, id acp.SessionId) error {
+	if err := a.deleteNativeThread(ctx, id, nil); err != nil {
+		return err
+	}
+
+	a.clearPendingNativeDelete(id)
+
+	return nil
+}
+
+func (a *Agent) storedSessionExists(ctx context.Context, id acp.SessionId) (bool, error) {
+	if a.store == nil {
+		return false, nil
+	}
+
+	loadCtx, cancelLoad := a.sessionStoreLoadContext(ctx)
+	entries, err := a.store.Load(loadCtx, SessionKey{SessionID: string(id), Subpath: SessionStoreMainSubpath})
+
+	cancelLoad()
+
+	if err != nil {
+		return false, err
+	}
+
+	return len(entries) != 0, nil
 }
 
 func (a *Agent) deleteNativeThread(ctx context.Context, id acp.SessionId, session *agentSession) error {
@@ -773,9 +882,7 @@ func (a *Agent) deleteNativeThread(ctx context.Context, id acp.SessionId, sessio
 		return err
 	}
 
-	defer func() { _ = tmp.Close(context.Background()) }()
-
-	return tmp.client().DeleteThread(ctx, string(id))
+	return tmp.Delete(ctx)
 }
 
 // missingAPIKeyMessage explains the session-start fail-fast: session commands
@@ -806,8 +913,8 @@ func (a *Agent) ensureStartup(ctx context.Context, cwd string, meta parsedSessio
 		OnGoroutinePanic:           a.onNativeGoroutinePanic,
 		NewProcessSnapshotObserver: a.newProcessSnapshotObserver,
 	})
-	if err := client.StartupProbe(ctx); err != nil {
-		return acp.NewInternalError(map[string]any{jsonFieldError: err.Error()})
+	if err := a.options.runtime.startupProbe(ctx, client); err != nil {
+		return nativeInternalError(err)
 	}
 
 	return nil

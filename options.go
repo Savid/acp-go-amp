@@ -2,9 +2,11 @@ package ampacp
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"time"
 
+	nativeamp "github.com/savid/acp-go-amp/internal/amp"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
@@ -110,6 +112,9 @@ type runtimeOptions struct {
 	// thread.
 	nativeSessionTimeout time.Duration
 	maxJSONLineBytes     int
+	startupProbe         func(context.Context, *nativeamp.Client) error
+	newThread            func(context.Context, *nativeamp.Client) (string, error)
+	exportThread         func(context.Context, *nativeamp.Client, string) (json.RawMessage, error)
 	// newTurnTimer builds the per-turn deadline channel. It is a seam so tests
 	// can drive the timeout branch deterministically against a coincident
 	// cancel; production always uses a real time.Timer.
@@ -137,6 +142,15 @@ func applyOptions(opts []Option) Options {
 			nativeSessionTimeout: defaultNativeSessionTimeout,
 			maxJSONLineBytes:     defaultNativePromptLineLimit,
 			newTurnTimer:         newRealTurnTimer,
+			startupProbe: func(ctx context.Context, client *nativeamp.Client) error {
+				return client.StartupProbe(ctx)
+			},
+			newThread: func(ctx context.Context, client *nativeamp.Client) (string, error) {
+				return client.NewThread(ctx)
+			},
+			exportThread: func(ctx context.Context, client *nativeamp.Client, threadID string) (json.RawMessage, error) {
+				return client.ExportThread(ctx, threadID)
+			},
 		},
 	}
 

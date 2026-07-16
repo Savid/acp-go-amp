@@ -720,9 +720,9 @@ func TestTurnInterruptPropagatesTreeProofFailure(t *testing.T) {
 }
 
 const (
-	oneShotDeathPhaseEnv = "ACP_GO_AMP_TEST_ONE_SHOT_DEATH_PHASE"
-	oneShotDeathPathEnv  = "ACP_GO_AMP_TEST_ONE_SHOT_DEATH_PATH"
-	oneShotDeathStateEnv = "ACP_GO_AMP_TEST_ONE_SHOT_DEATH_STATE"
+	oneShotDeathPhaseEnv = adapterOneShotDeathPhaseEnv
+	oneShotDeathPathEnv  = adapterOneShotDeathPathEnv
+	oneShotDeathStateEnv = adapterOneShotDeathStateEnv
 )
 
 func TestOneShotSupervisorContainsTreeAfterAdapterDeath(t *testing.T) {

@@ -298,6 +298,44 @@ func TestStartupProbeAndVersionBranches(t *testing.T) {
 	}
 }
 
+func TestOneShotProofSentinelOutranksMissingThreadAndRetainsProbeScratch(t *testing.T) {
+	joined := errors.Join(errors.New("Thread not found"), ErrProcessTreeNotQuiescent)
+	if err := methodProbeError("threads export", joined, false); !errors.Is(err, ErrProcessTreeNotQuiescent) {
+		t.Fatalf("method probe swallowed containment sentinel: %v", err)
+	}
+
+	originalTerminate := processTreeTerminateAndWait
+	t.Cleanup(func() { processTreeTerminateAndWait = originalTerminate })
+
+	deletePath, _ := fakeAmpPath(t, "")
+	processTreeTerminateAndWait = func(*processTree, time.Duration) error {
+		return ErrProcessTreeNotQuiescent
+	}
+	if err := NewClient(nil, Options{CLIPath: deletePath, Cwd: t.TempDir()}).DeleteThread(t.Context(), "T-missing"); !errors.Is(err, ErrProcessTreeNotQuiescent) {
+		t.Fatalf("delete swallowed containment sentinel behind missing-thread result: %v", err)
+	}
+
+	probePath, _ := fakeAmpPath(t, "")
+	parent := t.TempDir()
+	terminateCalls := 0
+	processTreeTerminateAndWait = func(*processTree, time.Duration) error {
+		terminateCalls++
+		if terminateCalls == 2 {
+			return ErrProcessTreeNotQuiescent
+		}
+
+		return nil
+	}
+	err := NewClient(nil, Options{CLIPath: probePath, Cwd: t.TempDir(), ScratchParent: parent}).probeSubcommands(t.Context())
+	if !errors.Is(err, ErrProcessTreeNotQuiescent) {
+		t.Fatalf("startup probe swallowed containment sentinel: %v", err)
+	}
+	entries, readErr := os.ReadDir(parent)
+	if readErr != nil || len(entries) != 1 {
+		t.Fatalf("unproven startup scratch = %#v, %v; want one retained root", entries, readErr)
+	}
+}
+
 func TestContinueFramesMalformedLinesAndStderr(t *testing.T) {
 	path, state := fakeAmpPath(t, "stream")
 	client := NewClient(nil, Options{CLIPath: path, Cwd: t.TempDir(), ThreadID: "T-fake-thread", MaxLineBytes: 1024})
@@ -455,9 +493,29 @@ func TestClientErrorBranches(t *testing.T) {
 	if got, err := Discover(context.Background(), "/tmp/custom-amp"); err != nil || got != "/tmp/custom-amp" {
 		t.Fatalf("explicit Discover = %q, %v", got, err)
 	}
-	env := BuildEnv(map[string]string{"Z": "1", "A": "2", "": "ignored"}, "/tmp/cwd")
+	t.Setenv(adapterSupervisorModeEnv, "secret")
+	t.Setenv(adapterOneShotDeathPathEnv, "secret")
+	env := BuildEnv(map[string]string{
+		"Z":                         "1",
+		"A":                         "2",
+		"":                          "ignored",
+		adapterOneShotDeathPhaseEnv: "secret",
+		adapterOneShotDeathStateEnv: "secret",
+	}, "/tmp/cwd")
 	if !slices.Contains(env, "A=2") || !slices.Contains(env, "Z=1") || !slices.Contains(env, "PWD=/tmp/cwd") {
 		t.Fatalf("env missing overrides: %#v", env)
+	}
+	for _, privateKey := range []string{
+		adapterSupervisorModeEnv,
+		adapterOneShotDeathPhaseEnv,
+		adapterOneShotDeathPathEnv,
+		adapterOneShotDeathStateEnv,
+	} {
+		for _, item := range env {
+			if strings.HasPrefix(item, privateKey+"=") {
+				t.Fatalf("private adapter env leaked to native Amp: %q", item)
+			}
+		}
 	}
 
 	path, _ := fakeAmpPath(t, "bad-new-id")

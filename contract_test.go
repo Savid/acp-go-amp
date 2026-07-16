@@ -171,11 +171,20 @@ func TestDeleteOrderingRetryAndManifestShape(t *testing.T) {
 	if got := failOnce.pendingNativeDeleteIDs(); len(got) != 1 || got[0] != failOnceResp.SessionId {
 		t.Fatalf("pending native deletes = %#v", got)
 	}
+	if _, deleteErr := failOnce.UnstableDeleteSession(ctx, DeleteSessionRequest(failOnceResp.SessionId)); deleteErr != nil {
+		t.Fatalf("explicit pending native delete retry: %v", deleteErr)
+	}
 	if _, listErr := failOnce.ListSessions(ctx, ListSessionsRequest()); listErr != nil {
 		t.Fatalf("ListSessions retry: %v", listErr)
 	}
 	if got := failOnce.pendingNativeDeleteIDs(); len(got) != 0 {
 		t.Fatalf("pending native delete not retried: %#v", got)
+	}
+
+	pendingFailure := NewAgent(WithExecutablePath("/does/not/exist"), WithScratchDir(t.TempDir()))
+	pendingFailure.markPendingNativeDelete("T-pending-failure")
+	if _, deleteErr := pendingFailure.UnstableDeleteSession(ctx, DeleteSessionRequest("T-pending-failure")); deleteErr == nil {
+		t.Fatal("pending native delete retry failure was swallowed")
 	}
 
 	shapeStore := NewInMemorySessionStore()
@@ -196,6 +205,73 @@ func TestDeleteOrderingRetryAndManifestShape(t *testing.T) {
 		if _, ok := manifest[forbidden]; ok {
 			t.Fatalf("manifest contains %s: %s", forbidden, entries[0])
 		}
+	}
+}
+
+func TestDeleteUsesStoreAsSoleNativeAuthority(t *testing.T) {
+	ctx := context.Background()
+	path, state := fakeAgentAmpPath(t, "")
+	store := NewInMemorySessionStore()
+	agent := NewAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()), WithSessionStore(store))
+	before := readHelperJSON[[]string](t, filepath.Join(state, "args.jsonl"))
+
+	for range 2 {
+		if _, err := agent.UnstableDeleteSession(ctx, DeleteSessionRequest("T-arbitrary-native-id")); err != nil {
+			t.Fatalf("unknown delete: %v", err)
+		}
+	}
+	afterUnknown := readHelperJSON[[]string](t, filepath.Join(state, "args.jsonl"))
+	if len(afterUnknown) != len(before) {
+		t.Fatalf("unknown store id launched native command: before=%#v after=%#v", before, afterUnknown)
+	}
+
+	active, err := newAgentSession(ctx, agent, "T-active-without-store", t.TempDir(), parsedSessionMeta{}, "", nil)
+	if err != nil {
+		t.Fatalf("construct store-absent active session: %v", err)
+	}
+	agent.mu.Lock()
+	agent.sessions[active.id] = active
+	agent.mu.Unlock()
+	if _, activeDeleteErr := agent.UnstableDeleteSession(ctx, DeleteSessionRequest(active.id)); activeDeleteErr != nil {
+		t.Fatalf("store-absent active delete: %v", activeDeleteErr)
+	}
+	afterActive := readHelperJSON[[]string](t, filepath.Join(state, "args.jsonl"))
+	if len(afterActive) != len(before) {
+		t.Fatalf("store-absent active id launched native delete: before=%#v after=%#v", before, afterActive)
+	}
+
+	known, err := agent.NewSession(ctx, NewSessionRequest(t.TempDir()))
+	if err != nil {
+		t.Fatalf("NewSession known: %v", err)
+	}
+	if _, knownDeleteErr := agent.UnstableDeleteSession(ctx, DeleteSessionRequest(known.SessionId)); knownDeleteErr != nil {
+		t.Fatalf("known delete: %v", knownDeleteErr)
+	}
+	if _, repeatedDeleteErr := agent.UnstableDeleteSession(ctx, DeleteSessionRequest(known.SessionId)); repeatedDeleteErr != nil {
+		t.Fatalf("tombstoned repeat delete: %v", repeatedDeleteErr)
+	}
+
+	records := readHelperJSON[[]string](t, filepath.Join(state, "args.jsonl"))
+	deleteCalls := 0
+	for _, args := range records {
+		if slicesContainCommand([][]string{args}, "threads", "delete", string(known.SessionId)) {
+			deleteCalls++
+		}
+	}
+	if deleteCalls != 1 {
+		t.Fatalf("known/tombstoned native delete calls = %d, want 1: %#v", deleteCalls, records)
+	}
+
+	loadErr := errors.New("delete authority load failed")
+	if _, membershipErr := NewAgent(WithSessionStore(&errorStore{loadErr: loadErr})).UnstableDeleteSession(ctx, DeleteSessionRequest("T-load-error")); !errors.Is(membershipErr, loadErr) {
+		t.Fatalf("delete store membership error = %v", membershipErr)
+	}
+
+	nilStore := NewAgent()
+	nilStore.store = nil
+	knownInNil, err := nilStore.storedSessionExists(ctx, "T-any")
+	if err != nil || knownInNil {
+		t.Fatalf("nil store membership = %t, %v", knownInNil, err)
 	}
 }
 

@@ -2,6 +2,7 @@ package ampacp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -14,6 +15,184 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestAgentCloseFencesInFlightStartupProofFailure(t *testing.T) {
+	t.Setenv("AMP_API_KEY", "fake")
+	started := make(chan struct{})
+	cancelled := make(chan struct{})
+	unblock := make(chan struct{})
+
+	var mu sync.Mutex
+	releases := map[string]int{}
+	agent := NewAgent(
+		WithScratchDir(t.TempDir()),
+		WithRuntimeResourceHooks(RuntimeResourceHooks{
+			AcquireNativeRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
+				return func() {
+					mu.Lock()
+					releases["native"]++
+					mu.Unlock()
+				}, nil
+			},
+			ReserveScratchRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
+				return func() {
+					mu.Lock()
+					releases["scratch"]++
+					mu.Unlock()
+				}, nil
+			},
+		}),
+	)
+	agent.options.runtime.startupProbe = func(ctx context.Context, _ *nativeamp.Client) error {
+		close(started)
+		<-ctx.Done()
+		close(cancelled)
+		<-unblock
+
+		return ErrProcessTreeUnproven
+	}
+
+	requestErr := make(chan error, 1)
+	go func() {
+		_, err := agent.NewSession(context.Background(), NewSessionRequest(t.TempDir()))
+		requestErr <- err
+	}()
+	<-started
+
+	closeErr := make(chan error, 1)
+	go func() { closeErr <- agent.Close() }()
+	<-cancelled
+	select {
+	case err := <-closeErr:
+		t.Fatalf("Close settled before fenced startup returned: %v", err)
+	default:
+	}
+	close(unblock)
+
+	require.ErrorIs(t, <-requestErr, ErrProcessTreeUnproven)
+	require.ErrorIs(t, <-closeErr, ErrProcessTreeUnproven)
+	require.ErrorIs(t, agent.Close(), ErrProcessTreeUnproven)
+	mu.Lock()
+	defer mu.Unlock()
+	require.Zero(t, releases["native"])
+	require.Zero(t, releases["scratch"])
+}
+
+func TestNewThreadProofFailureRetainsNativeAndScratchRoots(t *testing.T) {
+	t.Setenv("AMP_API_KEY", "fake")
+	scratch := t.TempDir()
+
+	var mu sync.Mutex
+	acquired := map[RuntimeResourceKind]int{}
+	releasedNative := map[RuntimeResourceKind]int{}
+	reserved := map[RuntimeResourceKind]int{}
+	releasedScratch := map[RuntimeResourceKind]int{}
+	agent := NewAgent(
+		WithScratchDir(scratch),
+		WithRuntimeResourceHooks(RuntimeResourceHooks{
+			AcquireNativeRoot: func(_ context.Context, kind RuntimeResourceKind) (func(), error) {
+				mu.Lock()
+				acquired[kind]++
+				mu.Unlock()
+
+				return func() {
+					mu.Lock()
+					releasedNative[kind]++
+					mu.Unlock()
+				}, nil
+			},
+			ReserveScratchRoot: func(_ context.Context, kind RuntimeResourceKind) (func(), error) {
+				mu.Lock()
+				reserved[kind]++
+				mu.Unlock()
+
+				return func() {
+					mu.Lock()
+					releasedScratch[kind]++
+					mu.Unlock()
+				}, nil
+			},
+		}),
+	)
+	agent.options.runtime.startupProbe = func(context.Context, *nativeamp.Client) error { return nil }
+	agent.options.runtime.newThread = func(context.Context, *nativeamp.Client) (string, error) {
+		return "", ErrProcessTreeUnproven
+	}
+
+	_, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
+	require.ErrorIs(t, err, ErrProcessTreeUnproven)
+	var requestErr *acp.RequestError
+	require.ErrorAs(t, err, &requestErr)
+	require.ErrorIs(t, agent.Close(), ErrProcessTreeUnproven)
+
+	mu.Lock()
+	require.Equal(t, 1, acquired[RuntimeResourceDiscovery])
+	require.Equal(t, 1, releasedNative[RuntimeResourceDiscovery])
+	require.Equal(t, 1, reserved[RuntimeResourceDiscovery])
+	require.Equal(t, 1, releasedScratch[RuntimeResourceDiscovery])
+	require.Equal(t, 1, acquired[RuntimeResourceSession])
+	require.Zero(t, releasedNative[RuntimeResourceSession])
+	require.Equal(t, 1, reserved[RuntimeResourceSession])
+	require.Zero(t, releasedScratch[RuntimeResourceSession])
+	mu.Unlock()
+
+	entries, readErr := os.ReadDir(scratch)
+	require.NoError(t, readErr)
+	require.NotEmpty(t, entries)
+}
+
+func TestExportProofFailureRetainsColdSessionResources(t *testing.T) {
+	t.Setenv("AMP_API_KEY", "fake")
+	scratch := t.TempDir()
+	cwd := t.TempDir()
+	store := NewInMemorySessionStore()
+	putStoredSession(t, store, "T-export-proof", cwd, nil)
+
+	var mu sync.Mutex
+	releasedNative := map[RuntimeResourceKind]int{}
+	releasedScratch := map[RuntimeResourceKind]int{}
+	agent := NewAgent(
+		WithScratchDir(scratch),
+		WithSessionStore(store),
+		WithRuntimeResourceHooks(RuntimeResourceHooks{
+			AcquireNativeRoot: func(_ context.Context, kind RuntimeResourceKind) (func(), error) {
+				return func() {
+					mu.Lock()
+					releasedNative[kind]++
+					mu.Unlock()
+				}, nil
+			},
+			ReserveScratchRoot: func(_ context.Context, kind RuntimeResourceKind) (func(), error) {
+				return func() {
+					mu.Lock()
+					releasedScratch[kind]++
+					mu.Unlock()
+				}, nil
+			},
+		}),
+	)
+	agent.options.runtime.startupProbe = func(context.Context, *nativeamp.Client) error { return nil }
+	agent.options.runtime.exportThread = func(context.Context, *nativeamp.Client, string) (json.RawMessage, error) {
+		return nil, ErrProcessTreeUnproven
+	}
+
+	_, err := agent.LoadSession(t.Context(), LoadSessionRequest("T-export-proof", cwd))
+	require.ErrorIs(t, err, ErrProcessTreeUnproven)
+	var requestErr *acp.RequestError
+	require.ErrorAs(t, err, &requestErr)
+	require.ErrorIs(t, agent.Close(), ErrProcessTreeUnproven)
+
+	mu.Lock()
+	require.Equal(t, 1, releasedNative[RuntimeResourceDiscovery])
+	require.Equal(t, 1, releasedScratch[RuntimeResourceDiscovery])
+	require.Zero(t, releasedNative[RuntimeResourceSession])
+	require.Zero(t, releasedScratch[RuntimeResourceSession])
+	mu.Unlock()
+
+	entries, readErr := os.ReadDir(scratch)
+	require.NoError(t, readErr)
+	require.NotEmpty(t, entries)
+}
+
 func TestNewSessionTimeoutKillsNativeTreeAndReleasesResources(t *testing.T) {
 	path, state := fakeAgentAmpPath(t, "block-new")
 	scratch := t.TempDir()
@@ -21,8 +200,8 @@ func TestNewSessionTimeoutKillsNativeTreeAndReleasesResources(t *testing.T) {
 	var mu sync.Mutex
 	acquired := map[RuntimeResourceKind]int{}
 	released := map[RuntimeResourceKind]int{}
-	reservedScratch := 0
-	releasedScratch := 0
+	reservedScratch := map[RuntimeResourceKind]int{}
+	releasedScratch := map[RuntimeResourceKind]int{}
 
 	agent := NewAgent(
 		WithExecutablePath(path),
@@ -41,14 +220,13 @@ func TestNewSessionTimeoutKillsNativeTreeAndReleasesResources(t *testing.T) {
 				}, nil
 			},
 			ReserveScratchRoot: func(_ context.Context, kind RuntimeResourceKind) (func(), error) {
-				require.Equal(t, RuntimeResourceSession, kind)
 				mu.Lock()
-				reservedScratch++
+				reservedScratch[kind]++
 				mu.Unlock()
 
 				return func() {
 					mu.Lock()
-					releasedScratch++
+					releasedScratch[kind]++
 					mu.Unlock()
 				}, nil
 			},
@@ -71,8 +249,10 @@ func TestNewSessionTimeoutKillsNativeTreeAndReleasesResources(t *testing.T) {
 	require.Equal(t, 1, released[RuntimeResourceDiscovery])
 	require.Equal(t, 1, acquired[RuntimeResourceSession])
 	require.Equal(t, 1, released[RuntimeResourceSession])
-	require.Equal(t, 1, reservedScratch)
-	require.Equal(t, 1, releasedScratch)
+	require.Equal(t, 1, reservedScratch[RuntimeResourceDiscovery])
+	require.Equal(t, 1, releasedScratch[RuntimeResourceDiscovery])
+	require.Equal(t, 1, reservedScratch[RuntimeResourceSession])
+	require.Equal(t, 1, releasedScratch[RuntimeResourceSession])
 
 	entries, readErr := os.ReadDir(scratch)
 	require.NoError(t, readErr)
@@ -274,6 +454,25 @@ func TestAmpSessionResourceAdmission(t *testing.T) {
 	_, err = discoveryBlocked.LoadSession(t.Context(), LoadSessionRequest("T-missing", t.TempDir()))
 	require.ErrorIs(t, err, wantErr)
 
+	discoveryNativeReleases := 0
+	discoveryScratchBlocked := NewAgent(WithRuntimeResourceHooks(RuntimeResourceHooks{
+		AcquireNativeRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
+			return func() { discoveryNativeReleases++ }, nil
+		},
+		ReserveScratchRoot: func(_ context.Context, kind RuntimeResourceKind) (func(), error) {
+			if kind == RuntimeResourceDiscovery {
+				return nil, wantErr
+			}
+
+			return func() {}, nil
+		},
+	}))
+	_, err = discoveryScratchBlocked.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
+	require.ErrorIs(t, err, wantErr)
+	_, err = discoveryScratchBlocked.LoadSession(t.Context(), LoadSessionRequest("T-missing", t.TempDir()))
+	require.ErrorIs(t, err, wantErr)
+	require.Equal(t, 2, discoveryNativeReleases)
+
 	scratchBlocked := NewAgent(WithScratchDir(t.TempDir()), WithRuntimeResourceHooks(RuntimeResourceHooks{
 		ReserveScratchRoot: func(context.Context, RuntimeResourceKind) (func(), error) { return nil, wantErr },
 	}))
@@ -326,4 +525,82 @@ func TestAmpSessionResourceAdmission(t *testing.T) {
 	configSession := &agentSession{settingsDir: filepath.Join(t.TempDir(), "missing"), mcpConfigJSON: `{}`}
 	_, err = configSession.writePromptMCPConfig()
 	require.Error(t, err)
+}
+
+func TestClosedAgentRejectsEveryFencedLifecycleMethod(t *testing.T) {
+	agent := NewAgent()
+	require.NoError(t, agent.Close())
+
+	_, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
+	require.Error(t, err)
+	_, err = agent.LoadSession(t.Context(), LoadSessionRequest("T-closed", t.TempDir()))
+	require.Error(t, err)
+	_, err = agent.ResumeSession(t.Context(), ResumeSessionRequest("T-closed", t.TempDir()))
+	require.Error(t, err)
+	_, err = agent.ListSessions(t.Context(), ListSessionsRequest())
+	require.Error(t, err)
+	_, err = agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: "T-closed"})
+	require.Error(t, err)
+	_, err = agent.UnstableDeleteSession(t.Context(), DeleteSessionRequest("T-closed"))
+	require.Error(t, err)
+}
+
+func TestActiveLoadStoreFailureAndDeleteCompletionFence(t *testing.T) {
+	t.Setenv("AMP_API_KEY", "fake")
+	loadErr := errors.New("active transcript load failed")
+	agent := NewAgent(WithSessionStore(&errorStore{loadErr: loadErr}))
+	agent.options.runtime.startupProbe = func(context.Context, *nativeamp.Client) error { return nil }
+	agent.options.runtime.exportThread = func(context.Context, *nativeamp.Client, string) (json.RawMessage, error) {
+		return json.RawMessage(`{}`), nil
+	}
+	cwd := t.TempDir()
+	session, err := newAgentSession(t.Context(), agent, "T-active-load", cwd, parsedSessionMeta{}, "", nil)
+	require.NoError(t, err)
+	agent.sessions[session.id] = session
+
+	loaded, transcript, started, err := agent.loadOrResume(t.Context(), session.id, cwd, nil, nil, nil)
+	require.ErrorIs(t, err, loadErr)
+	require.Nil(t, loaded)
+	require.Nil(t, transcript)
+	require.False(t, started)
+	require.NoError(t, agent.removeSession(t.Context(), "T-not-installed", session))
+	require.NoError(t, agent.removeSession(t.Context(), session.id, session))
+
+	acquireErr := errors.New("delete native admission failed")
+	deleteAgent := NewAgent(WithRuntimeResourceHooks(RuntimeResourceHooks{
+		AcquireNativeRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
+			return nil, acquireErr
+		},
+	}))
+	completed := newPromptTurnState()
+	completed.complete(nil)
+	deleteSession := &agentSession{agent: deleteAgent, id: "T-delete-completed", activePrompt: completed}
+	require.ErrorIs(t, deleteSession.Delete(t.Context()), acquireErr)
+	require.NoError(t, (&agentSession{}).interrupt(t.Context()))
+	require.False(t, isNativeMissingError(errors.Join(errors.New("Thread not found"), ErrProcessTreeUnproven)))
+}
+
+func TestPendingDeleteProofFailureStopsEveryLifecycleRetry(t *testing.T) {
+	newPendingAgent := func(id acp.SessionId) *Agent {
+		agent := NewAgent(WithRuntimeResourceHooks(RuntimeResourceHooks{
+			AcquireNativeRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
+				return nil, ErrProcessTreeUnproven
+			},
+		}))
+		agent.markPendingNativeDelete(id)
+
+		return agent
+	}
+
+	listAgent := newPendingAgent("T-pending-list")
+	_, err := listAgent.ListSessions(t.Context(), ListSessionsRequest())
+	require.ErrorIs(t, err, ErrProcessTreeUnproven)
+
+	loadAgent := newPendingAgent("T-pending-load")
+	_, err = loadAgent.LoadSession(t.Context(), LoadSessionRequest("T-target-load", t.TempDir()))
+	require.ErrorIs(t, err, ErrProcessTreeUnproven)
+
+	deleteAgent := newPendingAgent("T-pending-other")
+	_, err = deleteAgent.UnstableDeleteSession(t.Context(), DeleteSessionRequest("T-target-delete"))
+	require.ErrorIs(t, err, ErrProcessTreeUnproven)
 }

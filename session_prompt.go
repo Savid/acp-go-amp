@@ -836,6 +836,10 @@ func isNativeMissingError(err error) bool {
 		return false
 	}
 
+	if errors.Is(err, amp.ErrProcessTreeNotQuiescent) {
+		return false
+	}
+
 	msg := err.Error()
 
 	return strings.Contains(msg, "does not exist") || strings.Contains(msg, "Thread not found")
