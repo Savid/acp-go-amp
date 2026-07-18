@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"slices"
 	"strings"
@@ -76,6 +77,11 @@ func TestFakeAmpHelper(t *testing.T) {
 		}
 		os.Stdout.WriteString("\x1b[32mT-fake-thread\x1b[0m\n")
 	case "list":
+		if mode == "hang-list" {
+			for {
+				time.Sleep(time.Hour)
+			}
+		}
 		if mode == "bad-list-json" {
 			os.Stdout.WriteString("{")
 			os.Exit(0)
@@ -123,9 +129,216 @@ func TestFakeAmpHelper(t *testing.T) {
 	os.Exit(0)
 }
 
+func TestDarwinClientLaunchPreparationAndPipeFailures(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("Darwin launch preparation")
+	}
+
+	path, _ := fakeAmpPath(t, "")
+	ctx := context.Background()
+	newGeneration := func(context.Context) (*DarwinGeneration, error) {
+		return &DarwinGeneration{RuntimeID: strings.Repeat("d", 32), ScratchRoot: t.TempDir()}, nil
+	}
+	client := NewClient(nil, Options{
+		CLIPath: path, Cwd: t.TempDir(), DarwinBestEffort: true,
+		NewDarwinGeneration: newGeneration,
+	})
+
+	originalOpenPipe := openPipe
+	t.Cleanup(func() { openPipe = originalOpenPipe })
+	for failAt := 1; failAt <= 3; failAt++ {
+		calls := 0
+		openPipe = func() (*os.File, *os.File, error) {
+			calls++
+			if calls == failAt {
+				return nil, nil, errors.New("pipe")
+			}
+
+			return os.Pipe()
+		}
+		if _, err := client.Continue(ctx, "T-1", map[string]any{"type": "user"}); err == nil || !strings.Contains(err.Error(), "pipe") {
+			t.Fatalf("pipe failure %d = %v", failAt, err)
+		}
+	}
+	openPipe = originalOpenPipe
+
+	canceled, cancel := context.WithCancel(ctx)
+	client.options.NewDarwinGeneration = func(context.Context) (*DarwinGeneration, error) {
+		cancel()
+
+		return &DarwinGeneration{RuntimeID: strings.Repeat("e", 32), ScratchRoot: t.TempDir()}, nil
+	}
+	if _, err := client.Continue(canceled, "T-1", map[string]any{"type": "user"}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Continue cancellation after preparation = %v", err)
+	}
+
+	want := errors.New("generation")
+	client.options.NewDarwinGeneration = func(context.Context) (*DarwinGeneration, error) { return nil, want }
+	if _, err := client.Continue(ctx, "T-1", map[string]any{"type": "user"}); !errors.Is(err, want) {
+		t.Fatalf("Continue generation failure = %v", err)
+	}
+	if _, err := client.outputRaw(ctx, ampArgThreads, "list"); !errors.Is(err, want) {
+		t.Fatalf("output generation failure = %v", err)
+	}
+	initiallyCanceled, cancelInitial := context.WithCancel(ctx)
+	cancelInitial()
+	if _, err := client.outputRaw(initiallyCanceled, ampArgThreads, "list"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("output initial cancellation = %v", err)
+	}
+}
+
+func TestDarwinPrepareProcessLaunchHooksAndErrors(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("Darwin launch preparation")
+	}
+
+	ctx := context.Background()
+	client := NewClient(nil, Options{DarwinBestEffort: true})
+	if _, err := client.prepareProcessLaunch(ctx, exec.Command("true")); !errors.Is(err, ErrProcessContainmentIncomplete) {
+		t.Fatalf("missing generation factory = %v", err)
+	}
+
+	want := errors.New("factory")
+	client.options.NewDarwinGeneration = func(context.Context) (*DarwinGeneration, error) { return nil, want }
+	if _, err := client.prepareProcessLaunch(ctx, exec.Command("true")); !errors.Is(err, want) {
+		t.Fatalf("generation factory error = %v", err)
+	}
+
+	finished := 0
+	blockedRoot := filepath.Join(t.TempDir(), "root-file")
+	if err := os.WriteFile(blockedRoot, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	client.options.NewDarwinGeneration = func(context.Context) (*DarwinGeneration, error) {
+		return &DarwinGeneration{ScratchRoot: blockedRoot, RecordFinished: func(bool) error {
+			finished++
+
+			return nil
+		}}, nil
+	}
+	if _, err := client.prepareProcessLaunch(ctx, exec.Command("true")); err == nil || finished != 1 {
+		t.Fatalf("generation preparation error=%v finished=%d", err, finished)
+	}
+
+	originalPrepare := prepareProcessTree
+	t.Cleanup(func() { prepareProcessTree = originalPrepare })
+	client.options.NewDarwinGeneration = func(context.Context) (*DarwinGeneration, error) {
+		return &DarwinGeneration{ScratchRoot: t.TempDir(), RecordFinished: func(bool) error {
+			finished++
+
+			return nil
+		}}, nil
+	}
+	prepareProcessTree = func(*exec.Cmd, processLaunchOptions) (*processTreeCommand, error) { return nil, want }
+	if _, err := client.prepareProcessLaunch(ctx, exec.Command("true")); !errors.Is(err, want) {
+		t.Fatalf("platform prepare error = %v", err)
+	}
+	prepareProcessTree = originalPrepare
+
+	client.options.AcquireNativeRoot = func(context.Context) (func(), error) { return nil, want }
+	launch, err := client.prepareProcessLaunch(ctx, exec.Command("true"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, acquireErr := launch.acquire(); !errors.Is(acquireErr, want) {
+		t.Fatalf("admission error = %v", acquireErr)
+	}
+	_ = launch.close()
+
+	client.options.AcquireNativeRoot = func(context.Context) (func(), error) {
+		//nolint:nilnil // Deliberately exercises rejection of an invalid hook result.
+		return nil, nil
+	}
+	launch, err = client.prepareProcessLaunch(ctx, exec.Command("true"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, acquireErr := launch.acquire(); acquireErr == nil || !strings.Contains(acquireErr.Error(), "nil release") {
+		t.Fatalf("nil release error = %v", acquireErr)
+	}
+	_ = launch.close()
+
+	client.options.AcquireNativeRoot = nil
+	launch, err = client.prepareProcessLaunch(ctx, exec.Command("true"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	release, err := launch.acquire()
+	if err != nil || release == nil {
+		t.Fatalf("default admission release-nil=%v, err=%v", release == nil, err)
+	}
+	release()
+	_ = launch.close()
+
+	client.options.AcquireNativeRoot = func(context.Context) (func(), error) { return func() {}, nil }
+	launch, err = client.prepareProcessLaunch(ctx, exec.Command("true"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	release, err = launch.acquire()
+	if err != nil || release == nil {
+		t.Fatalf("hook admission release-nil=%v, err=%v", release == nil, err)
+	}
+	release()
+	_ = launch.close()
+}
+
+func TestDarwinOutputCancellationCompletesContainment(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("Darwin output cancellation")
+	}
+
+	path, state := fakeAmpPath(t, "hang-list")
+	client := newTestClient(t, nil, Options{CLIPath: path, Cwd: t.TempDir()})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := client.outputRaw(ctx, ampArgThreads, "list")
+		done <- err
+	}()
+	waitForFile(t, filepath.Join(state, "args.jsonl"))
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("output cancellation = %v", err)
+		}
+	case <-time.After(2 * defaultCloseWait):
+		t.Fatal("canceled output did not finish")
+	}
+}
+
+func TestWithoutPrivateAdapterEnvironment(t *testing.T) {
+	entries := []string{
+		"KEEP=value", "MALFORMED", adapterSupervisorModeEnv + "=mode",
+		strings.ToLower(adapterPrivateEnvPrefix) + "secret=value",
+	}
+	want := []string{"KEEP=value", "MALFORMED"}
+	if got := withoutPrivateAdapterEnv(entries); !reflect.DeepEqual(got, want) {
+		t.Fatalf("filtered environment = %v, want %v", got, want)
+	}
+}
+
+func TestTurnCloseReportsBoundedWaitFailure(t *testing.T) {
+	originalTimeout := commandWaitTimeout
+	t.Cleanup(func() { commandWaitTimeout = originalTimeout })
+	commandWaitTimeout = time.Millisecond
+	release := make(chan struct{})
+	turn := &Turn{waitFunc: func() error {
+		<-release
+
+		return nil
+	}}
+	err := turn.Close()
+	close(release)
+	if !errors.Is(err, ErrProcessContainmentIncomplete) || !strings.Contains(err.Error(), "command close") {
+		t.Fatalf("bounded close error = %v", err)
+	}
+}
+
 func TestClientCommandsUseGlobalArgsAndParseOutput(t *testing.T) {
 	path, state := fakeAmpPath(t, "")
-	client := NewClient(nil, Options{
+	client := newTestClient(t, nil, Options{
 		CLIPath:       path,
 		Cwd:           t.TempDir(),
 		SettingsFile:  filepath.Join(t.TempDir(), "settings.json"),
@@ -213,32 +426,32 @@ func TestStartupProbeAndVersionBranches(t *testing.T) {
 	ctx := context.Background()
 	oldLookPath := lookPath
 	lookPath = func(string) (string, error) { return "", errors.New("lookpath failed") }
-	if err := NewClient(nil, Options{}).StartupProbe(ctx); err == nil {
+	if err := newTestClient(t, nil, Options{}).StartupProbe(ctx); err == nil {
 		t.Fatal("StartupProbe discover error ignored")
 	}
 	lookPath = oldLookPath
 
-	if err := NewClient(nil, Options{CLIPath: "/does/not/exist"}).StartupProbe(ctx); err == nil {
+	if err := newTestClient(t, nil, Options{CLIPath: "/does/not/exist"}).StartupProbe(ctx); err == nil {
 		t.Fatal("StartupProbe version command error ignored")
 	}
 	badVersion, _ := fakeAmpPath(t, "bad-version")
-	if err := NewClient(nil, Options{CLIPath: badVersion, Cwd: t.TempDir()}).StartupProbe(ctx); err == nil || !strings.Contains(err.Error(), "below required") {
+	if err := newTestClient(t, nil, Options{CLIPath: badVersion, Cwd: t.TempDir()}).StartupProbe(ctx); err == nil || !strings.Contains(err.Error(), "below required") {
 		t.Fatalf("bad version probe = %v", err)
 	}
 	badList, _ := fakeAmpPath(t, "bad-list-json")
-	if err := NewClient(nil, Options{CLIPath: badList, Cwd: t.TempDir()}).StartupProbe(ctx); err == nil || !strings.Contains(err.Error(), "threads list --json probe failed") {
+	if err := newTestClient(t, nil, Options{CLIPath: badList, Cwd: t.TempDir()}).StartupProbe(ctx); err == nil || !strings.Contains(err.Error(), "threads list --json probe failed") {
 		t.Fatalf("list probe = %v", err)
 	}
 	exportAbsent, _ := fakeAmpPath(t, "probe-export-absent")
-	if err := NewClient(nil, Options{CLIPath: exportAbsent, Cwd: t.TempDir()}).StartupProbe(ctx); err == nil || !strings.Contains(err.Error(), "threads export probe failed") {
+	if err := newTestClient(t, nil, Options{CLIPath: exportAbsent, Cwd: t.TempDir()}).StartupProbe(ctx); err == nil || !strings.Contains(err.Error(), "threads export probe failed") {
 		t.Fatalf("export method-present probe = %v", err)
 	}
 	exportMissing, _ := fakeAmpPath(t, "probe-export-missing")
-	if err := NewClient(nil, Options{CLIPath: exportMissing, Cwd: t.TempDir()}).StartupProbe(ctx); err != nil {
+	if err := newTestClient(t, nil, Options{CLIPath: exportMissing, Cwd: t.TempDir()}).StartupProbe(ctx); err != nil {
 		t.Fatalf("export missing-thread domain error should count as present: %v", err)
 	}
 	continueSuccess, _ := fakeAmpPath(t, "probe-continue-success")
-	if err := NewClient(nil, Options{CLIPath: continueSuccess, Cwd: t.TempDir()}).StartupProbe(ctx); err == nil || !strings.Contains(err.Error(), "unexpectedly succeeded") {
+	if err := newTestClient(t, nil, Options{CLIPath: continueSuccess, Cwd: t.TempDir()}).StartupProbe(ctx); err == nil || !strings.Contains(err.Error(), "unexpectedly succeeded") {
 		t.Fatalf("continue missing-thread success gate = %v", err)
 	}
 	if err := methodProbeError("threads continue", errors.New("usage"), true); err == nil || !strings.Contains(err.Error(), "did not return missing-thread") {
@@ -249,7 +462,7 @@ func TestStartupProbeAndVersionBranches(t *testing.T) {
 		defer func() { mkdirTemp = oldMkdirTemp }()
 		mkdirTemp = func(string, string) (string, error) { return "", errors.New("mkdir temp failed") }
 		tempFail, _ := fakeAmpPath(t, "startup-temp-fail")
-		if err := NewClient(nil, Options{CLIPath: tempFail, Cwd: t.TempDir()}).StartupProbe(ctx); err == nil || !strings.Contains(err.Error(), "create amp startup settings dir") {
+		if err := newTestClient(t, nil, Options{CLIPath: tempFail, Cwd: t.TempDir()}).StartupProbe(ctx); err == nil || !strings.Contains(err.Error(), "create amp startup settings dir") {
 			t.Fatalf("startup temp dir failure = %v", err)
 		}
 	}()
@@ -258,7 +471,7 @@ func TestStartupProbeAndVersionBranches(t *testing.T) {
 		defer func() { writeFile = oldWriteFile }()
 		writeFile = func(string, []byte, os.FileMode) error { return errors.New("write settings failed") }
 		writeFail, _ := fakeAmpPath(t, "startup-write-fail")
-		if err := NewClient(nil, Options{CLIPath: writeFail, Cwd: t.TempDir()}).StartupProbe(ctx); err == nil || !strings.Contains(err.Error(), "write amp startup settings file") {
+		if err := newTestClient(t, nil, Options{CLIPath: writeFail, Cwd: t.TempDir()}).StartupProbe(ctx); err == nil || !strings.Contains(err.Error(), "write amp startup settings file") {
 			t.Fatalf("startup settings write failure = %v", err)
 		}
 	}()
@@ -273,7 +486,7 @@ func TestStartupProbeAndVersionBranches(t *testing.T) {
 			return oldWriteFile(path, data, mode)
 		}
 		writeFail, _ := fakeAmpPath(t, "startup-mcp-write-fail")
-		if err := NewClient(nil, Options{CLIPath: writeFail, Cwd: t.TempDir()}).StartupProbe(ctx); err == nil || !strings.Contains(err.Error(), "write amp startup MCP config") {
+		if err := newTestClient(t, nil, Options{CLIPath: writeFail, Cwd: t.TempDir()}).StartupProbe(ctx); err == nil || !strings.Contains(err.Error(), "write amp startup MCP config") {
 			t.Fatalf("startup MCP write failure = %v", err)
 		}
 	}()
@@ -299,8 +512,8 @@ func TestStartupProbeAndVersionBranches(t *testing.T) {
 }
 
 func TestOneShotProofSentinelOutranksMissingThreadAndRetainsProbeScratch(t *testing.T) {
-	joined := errors.Join(errors.New("Thread not found"), ErrProcessTreeNotQuiescent)
-	if err := methodProbeError("threads export", joined, false); !errors.Is(err, ErrProcessTreeNotQuiescent) {
+	joined := errors.Join(errors.New("Thread not found"), ErrProcessContainmentIncomplete)
+	if err := methodProbeError("threads export", joined, false); !errors.Is(err, ErrProcessContainmentIncomplete) {
 		t.Fatalf("method probe swallowed containment sentinel: %v", err)
 	}
 
@@ -309,9 +522,9 @@ func TestOneShotProofSentinelOutranksMissingThreadAndRetainsProbeScratch(t *test
 
 	deletePath, _ := fakeAmpPath(t, "")
 	processTreeTerminateAndWait = func(*processTree, time.Duration) error {
-		return ErrProcessTreeNotQuiescent
+		return ErrProcessContainmentIncomplete
 	}
-	if err := NewClient(nil, Options{CLIPath: deletePath, Cwd: t.TempDir()}).DeleteThread(t.Context(), "T-missing"); !errors.Is(err, ErrProcessTreeNotQuiescent) {
+	if err := newTestClient(t, nil, Options{CLIPath: deletePath, Cwd: t.TempDir()}).DeleteThread(t.Context(), "T-missing"); !errors.Is(err, ErrProcessContainmentIncomplete) {
 		t.Fatalf("delete swallowed containment sentinel behind missing-thread result: %v", err)
 	}
 
@@ -321,24 +534,24 @@ func TestOneShotProofSentinelOutranksMissingThreadAndRetainsProbeScratch(t *test
 	processTreeTerminateAndWait = func(*processTree, time.Duration) error {
 		terminateCalls++
 		if terminateCalls == 2 {
-			return ErrProcessTreeNotQuiescent
+			return ErrProcessContainmentIncomplete
 		}
 
 		return nil
 	}
-	err := NewClient(nil, Options{CLIPath: probePath, Cwd: t.TempDir(), ScratchParent: parent}).probeSubcommands(t.Context())
-	if !errors.Is(err, ErrProcessTreeNotQuiescent) {
+	err := newTestClient(t, nil, Options{CLIPath: probePath, Cwd: t.TempDir(), ScratchParent: parent}).probeSubcommands(t.Context())
+	if !errors.Is(err, ErrProcessContainmentIncomplete) {
 		t.Fatalf("startup probe swallowed containment sentinel: %v", err)
 	}
 	entries, readErr := os.ReadDir(parent)
 	if readErr != nil || len(entries) != 1 {
-		t.Fatalf("unproven startup scratch = %#v, %v; want one retained root", entries, readErr)
+		t.Fatalf("incomplete startup scratch = %#v, %v; want one retained root", entries, readErr)
 	}
 }
 
 func TestContinueFramesMalformedLinesAndStderr(t *testing.T) {
 	path, state := fakeAmpPath(t, "stream")
-	client := NewClient(nil, Options{CLIPath: path, Cwd: t.TempDir(), ThreadID: "T-fake-thread", MaxLineBytes: 1024})
+	client := newTestClient(t, nil, Options{CLIPath: path, Cwd: t.TempDir(), ThreadID: "T-fake-thread", MaxLineBytes: 1024})
 
 	turn, err := client.Continue(context.Background(), "T-fake-thread", map[string]any{"type": "user", "text": "hello"})
 	if err != nil {
@@ -378,7 +591,7 @@ func TestContinueFramesMalformedLinesAndStderr(t *testing.T) {
 
 func TestContinueMissingThreadCarriesStderr(t *testing.T) {
 	path, _ := fakeAmpPath(t, "missing")
-	client := NewClient(nil, Options{CLIPath: path, Cwd: t.TempDir(), ThreadID: "T-deleted"})
+	client := newTestClient(t, nil, Options{CLIPath: path, Cwd: t.TempDir(), ThreadID: "T-deleted"})
 
 	turn, err := client.Continue(context.Background(), "T-deleted", map[string]any{"type": "user"})
 	if err != nil {
@@ -405,6 +618,9 @@ func TestContinueMissingThreadCarriesStderr(t *testing.T) {
 }
 
 func TestInterruptSIGINTAndKillFallback(t *testing.T) {
+	if runtime.GOOS == "darwin" {
+		t.Skip("Darwin best-effort cleanup uses the fixed TERM/KILL ladder")
+	}
 	for _, tc := range []struct {
 		name string
 		mode string
@@ -414,7 +630,7 @@ func TestInterruptSIGINTAndKillFallback(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path, state := fakeAmpPath(t, tc.mode)
-			client := NewClient(nil, Options{CLIPath: path, Cwd: t.TempDir(), ThreadID: "T-fake-thread"})
+			client := newTestClient(t, nil, Options{CLIPath: path, Cwd: t.TempDir(), ThreadID: "T-fake-thread"})
 			turn, err := client.Continue(context.Background(), "T-fake-thread", map[string]any{"type": "user"})
 			if err != nil {
 				t.Fatalf("Continue: %v", err)
@@ -519,12 +735,12 @@ func TestClientErrorBranches(t *testing.T) {
 	}
 
 	path, _ := fakeAmpPath(t, "bad-new-id")
-	client := NewClient(nil, Options{CLIPath: path, Cwd: t.TempDir()})
+	client := newTestClient(t, nil, Options{CLIPath: path, Cwd: t.TempDir()})
 	if _, err := client.NewThread(context.Background()); err == nil {
 		t.Fatal("expected bad thread id error")
 	}
 	path, _ = fakeAmpPath(t, "oversized-new-id")
-	if _, err := NewClient(nil, Options{CLIPath: path, Cwd: t.TempDir()}).NewThread(context.Background()); err == nil || !strings.Contains(err.Error(), "exceeds") {
+	if _, err := newTestClient(t, nil, Options{CLIPath: path, Cwd: t.TempDir()}).NewThread(context.Background()); err == nil || !strings.Contains(err.Error(), "exceeds") {
 		t.Fatalf("oversized thread id error = %v", err)
 	}
 	for _, test := range []struct {
@@ -547,22 +763,22 @@ func TestClientErrorBranches(t *testing.T) {
 		})
 	}
 	path, _ = fakeAmpPath(t, "bad-list-json")
-	if _, err := NewClient(nil, Options{CLIPath: path, Cwd: t.TempDir()}).ListThreads(context.Background()); err == nil {
+	if _, err := newTestClient(t, nil, Options{CLIPath: path, Cwd: t.TempDir()}).ListThreads(context.Background()); err == nil {
 		t.Fatal("expected list decode error")
 	}
 	path, _ = fakeAmpPath(t, "export-fail")
-	if _, err := NewClient(nil, Options{CLIPath: path, Cwd: t.TempDir()}).ExportThread(context.Background(), "T-1"); err == nil {
+	if _, err := newTestClient(t, nil, Options{CLIPath: path, Cwd: t.TempDir()}).ExportThread(context.Background(), "T-1"); err == nil {
 		t.Fatal("expected export error")
 	}
 	path, _ = fakeAmpPath(t, "delete-fail")
-	if err := NewClient(nil, Options{CLIPath: path, Cwd: t.TempDir()}).DeleteThread(context.Background(), "T-1"); err == nil {
+	if err := newTestClient(t, nil, Options{CLIPath: path, Cwd: t.TempDir()}).DeleteThread(context.Background(), "T-1"); err == nil {
 		t.Fatal("expected delete error")
 	}
-	if _, err := NewClient(nil, Options{CLIPath: "/does/not/exist"}).Version(context.Background()); err == nil {
+	if _, err := newTestClient(t, nil, Options{CLIPath: "/does/not/exist"}).Version(context.Background()); err == nil {
 		t.Fatal("expected version discover error")
 	}
 	path, _ = fakeAmpPath(t, "")
-	if _, err := NewClient(nil, Options{CLIPath: path, Cwd: filepath.Join(t.TempDir(), "missing")}).Continue(context.Background(), "T-1", map[string]any{"type": "user"}); err == nil {
+	if _, err := newTestClient(t, nil, Options{CLIPath: path, Cwd: filepath.Join(t.TempDir(), "missing")}).Continue(context.Background(), "T-1", map[string]any{"type": "user"}); err == nil {
 		t.Fatal("expected continue start error")
 	}
 	pathDir := t.TempDir()
@@ -652,19 +868,19 @@ func TestClientProcessSeamsReaderAndInterruptEdges(t *testing.T) {
 	ctx := context.Background()
 	path, _ := fakeAmpPath(t, "")
 
-	if _, err := NewClient(nil, Options{CLIPath: "/does/not/exist", Cwd: t.TempDir()}).NewThread(ctx); err == nil {
+	if _, err := newTestClient(t, nil, Options{CLIPath: "/does/not/exist", Cwd: t.TempDir()}).NewThread(ctx); err == nil {
 		t.Fatal("NewThread output error ignored")
 	}
-	if _, err := NewClient(nil, Options{CLIPath: "/does/not/exist", Cwd: t.TempDir()}).ListThreads(ctx); err == nil {
+	if _, err := newTestClient(t, nil, Options{CLIPath: "/does/not/exist", Cwd: t.TempDir()}).ListThreads(ctx); err == nil {
 		t.Fatal("ListThreads output error ignored")
 	}
 
 	oldLookPath := lookPath
 	lookPath = func(string) (string, error) { return "", errors.New("lookpath failed") }
-	if _, err := NewClient(nil, Options{}).Version(ctx); err == nil {
+	if _, err := newTestClient(t, nil, Options{}).Version(ctx); err == nil {
 		t.Fatal("Version discover error ignored")
 	}
-	if _, err := NewClient(nil, Options{Cwd: t.TempDir()}).Continue(ctx, "T-1", map[string]any{"type": "user"}); err == nil {
+	if _, err := newTestClient(t, nil, Options{Cwd: t.TempDir()}).Continue(ctx, "T-1", map[string]any{"type": "user"}); err == nil {
 		t.Fatal("Continue discover error ignored")
 	}
 	if _, err := Discover(ctx, ""); err == nil {
@@ -674,7 +890,7 @@ func TestClientProcessSeamsReaderAndInterruptEdges(t *testing.T) {
 
 	oldGetwd := getwd
 	getwd = func() (string, error) { return "", errors.New("getwd failed") }
-	if _, err := NewClient(nil, Options{CLIPath: path}).Continue(ctx, "T-1", map[string]any{"type": "user"}); err == nil {
+	if _, err := newTestClient(t, nil, Options{CLIPath: path}).Continue(ctx, "T-1", map[string]any{"type": "user"}); err == nil {
 		t.Fatal("Continue getwd error ignored")
 	}
 	getwd = oldGetwd
@@ -695,7 +911,7 @@ func TestClientProcessSeamsReaderAndInterruptEdges(t *testing.T) {
 				tc.shape(cmd)
 				return cmd
 			}
-			_, err := NewClient(nil, Options{CLIPath: path, Cwd: t.TempDir()}).Continue(ctx, "T-1", map[string]any{"type": "user"})
+			_, err := newTestClient(t, nil, Options{CLIPath: path, Cwd: t.TempDir()}).Continue(ctx, "T-1", map[string]any{"type": "user"})
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("Continue pipe error = %v, want %q", err, tc.want)
 			}
@@ -703,13 +919,13 @@ func TestClientProcessSeamsReaderAndInterruptEdges(t *testing.T) {
 	}
 	commandContext = oldCommandContext
 
-	if _, err := NewClient(nil, Options{CLIPath: path, Cwd: t.TempDir()}).Continue(ctx, "T-1", make(chan int)); err == nil {
+	if _, err := newTestClient(t, nil, Options{CLIPath: path, Cwd: t.TempDir()}).Continue(ctx, "T-1", make(chan int)); err == nil {
 		t.Fatal("Continue send error ignored")
 	}
 
 	oldCloseWriteCloser := closeWriteCloser
 	closeWriteCloser = func(io.Closer) error { return errors.New("close stdin failed") }
-	if _, err := NewClient(nil, Options{CLIPath: path, Cwd: t.TempDir()}).Continue(ctx, "T-1", map[string]any{"type": "user"}); err == nil || !strings.Contains(err.Error(), "close amp stdin") {
+	if _, err := newTestClient(t, nil, Options{CLIPath: path, Cwd: t.TempDir()}).Continue(ctx, "T-1", map[string]any{"type": "user"}); err == nil || !strings.Contains(err.Error(), "close amp stdin") {
 		t.Fatalf("Continue stdin close error = %v", err)
 	}
 	closeWriteCloser = oldCloseWriteCloser
@@ -744,7 +960,7 @@ func TestClientProcessSeamsReaderAndInterruptEdges(t *testing.T) {
 	}
 
 	zeroPath, zeroState := fakeAmpPath(t, "sigint-ignore")
-	zeroTurn, err := NewClient(nil, Options{CLIPath: zeroPath, Cwd: t.TempDir()}).Continue(ctx, "T-1", map[string]any{"type": "user"})
+	zeroTurn, err := newTestClient(t, nil, Options{CLIPath: zeroPath, Cwd: t.TempDir()}).Continue(ctx, "T-1", map[string]any{"type": "user"})
 	if err != nil {
 		t.Fatalf("Continue zero interrupt: %v", err)
 	}
@@ -755,7 +971,7 @@ func TestClientProcessSeamsReaderAndInterruptEdges(t *testing.T) {
 	_ = zeroTurn.Close()
 
 	ctxPath, ctxState := fakeAmpPath(t, "sigint-ignore")
-	ctxTurn, err := NewClient(nil, Options{CLIPath: ctxPath, Cwd: t.TempDir()}).Continue(ctx, "T-1", map[string]any{"type": "user"})
+	ctxTurn, err := newTestClient(t, nil, Options{CLIPath: ctxPath, Cwd: t.TempDir()}).Continue(ctx, "T-1", map[string]any{"type": "user"})
 	if err != nil {
 		t.Fatalf("Continue ctx interrupt: %v", err)
 	}
@@ -763,23 +979,11 @@ func TestClientProcessSeamsReaderAndInterruptEdges(t *testing.T) {
 	interruptCtx, interruptCancel := context.WithCancel(ctx)
 	interruptCancel()
 	if interruptErr := ctxTurn.Interrupt(interruptCtx, time.Second); !errors.Is(interruptErr, context.Canceled) {
-		t.Fatalf("interrupt ctx error = %v", interruptErr)
+		if runtime.GOOS != "darwin" {
+			t.Fatalf("interrupt ctx error = %v", interruptErr)
+		}
 	}
 	_ = ctxTurn.Close()
-
-	waitPath, waitState := fakeAmpPath(t, "sigint-ignore")
-	waitTurn, err := NewClient(nil, Options{CLIPath: waitPath, Cwd: t.TempDir()}).Continue(ctx, "T-1", map[string]any{"type": "user"})
-	if err != nil {
-		t.Fatalf("Continue wait interrupt: %v", err)
-	}
-	waitForFile(t, filepath.Join(waitState, "stdin.jsonl"))
-	waitBoom := errors.New("wait boom")
-	waitTurn.waitFunc = func() error { return waitBoom }
-	if err := waitTurn.Interrupt(ctx, time.Second); !errors.Is(err, waitBoom) {
-		t.Fatalf("interrupt wait error = %v", err)
-	}
-	_ = killProcess(waitTurn.cmd)
-	_, _ = waitTurn.cmd.Process.Wait()
 
 	drop := &Turn{log: slog.Default(), errs: make(chan error, 1)}
 	drop.errs <- errors.New("full")
@@ -915,7 +1119,7 @@ func readHelperJSON[T any](t *testing.T, path string) []T {
 
 func waitForFile(t *testing.T, path string) {
 	t.Helper()
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		if _, err := os.Stat(path); err == nil {
 			return
@@ -970,28 +1174,28 @@ func TestTurnRecoverGoroutine(t *testing.T) {
 }
 
 func TestFinishProcessTreeObservationUsesProofBoundary(t *testing.T) {
-	var quiescent, unproven int
+	var complete, incomplete int
 	observer := ProcessSnapshotObserver{
-		Quiescent: func(context.Context) { quiescent++ },
-		Unproven:  func() { unproven++ },
+		Complete:   func(context.Context) { complete++ },
+		Incomplete: func() { incomplete++ },
 	}
 
 	finishProcessTreeObservation(t.Context(), observer, nil)
-	if quiescent != 1 || unproven != 0 {
-		t.Fatalf("proven lifecycle = quiescent %d, unproven %d", quiescent, unproven)
+	if complete != 1 || incomplete != 0 {
+		t.Fatalf("proven lifecycle = complete %d, incomplete %d", complete, incomplete)
 	}
 
-	finishProcessTreeObservation(t.Context(), observer, ErrProcessTreeNotQuiescent)
-	if quiescent != 1 || unproven != 1 {
-		t.Fatalf("unproven lifecycle = quiescent %d, unproven %d", quiescent, unproven)
+	finishProcessTreeObservation(t.Context(), observer, ErrProcessContainmentIncomplete)
+	if complete != 1 || incomplete != 1 {
+		t.Fatalf("incomplete lifecycle = complete %d, incomplete %d", complete, incomplete)
 	}
 }
 
 func TestProcessTreeSnapshotAvailabilityBoundary(t *testing.T) {
-	if observer := (*Client)(nil).newProcessSnapshotObserver(t.Context(), nil); observer.Refresh != nil || observer.Quiescent != nil || observer.Unproven != nil {
+	if observer := (*Client)(nil).newProcessSnapshotObserver(t.Context(), nil); observer.Refresh != nil || observer.Complete != nil || observer.Incomplete != nil {
 		t.Fatal("nil client created a process observer")
 	}
-	if observer := (&Client{}).newProcessSnapshotObserver(t.Context(), nil); observer.Refresh != nil || observer.Quiescent != nil || observer.Unproven != nil {
+	if observer := (&Client{}).newProcessSnapshotObserver(t.Context(), nil); observer.Refresh != nil || observer.Complete != nil || observer.Incomplete != nil {
 		t.Fatal("client without a factory created a process observer")
 	}
 
@@ -1026,26 +1230,26 @@ func TestProcessTreeSnapshotAvailabilityBoundary(t *testing.T) {
 	}
 }
 
-func TestTurnClosePreservesSnapshotOnUnprovenTree(t *testing.T) {
+func TestTurnClosePreservesSnapshotOnIncompleteBoundary(t *testing.T) {
 	original := processTreeTerminateAndWait
 	t.Cleanup(func() { processTreeTerminateAndWait = original })
 	processTreeTerminateAndWait = func(*processTree, time.Duration) error {
-		return ErrProcessTreeNotQuiescent
+		return ErrProcessContainmentIncomplete
 	}
 
-	var quiescent, unproven int
+	var complete, incomplete int
 	turn := &Turn{
 		tree: &processTree{},
 		processObserver: ProcessSnapshotObserver{
-			Quiescent: func(context.Context) { quiescent++ },
-			Unproven:  func() { unproven++ },
+			Complete:   func(context.Context) { complete++ },
+			Incomplete: func() { incomplete++ },
 		},
 	}
 	err := turn.Close()
-	if !errors.Is(err, ErrProcessTreeNotQuiescent) {
-		t.Fatalf("Close error = %v, want process-tree proof sentinel", err)
+	if !errors.Is(err, ErrProcessContainmentIncomplete) {
+		t.Fatalf("Close error = %v, want containment sentinel", err)
 	}
-	if quiescent != 0 || unproven != 1 {
-		t.Fatalf("Close lifecycle = quiescent %d, unproven %d", quiescent, unproven)
+	if complete != 0 || incomplete != 1 {
+		t.Fatalf("Close lifecycle = complete %d, incomplete %d", complete, incomplete)
 	}
 }

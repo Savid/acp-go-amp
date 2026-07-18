@@ -44,17 +44,45 @@ native diagnostics cannot leak into the protocol stream.
 ## Native-process containment
 
 Linux starts every Amp command — version/readiness probes, thread lifecycle
-commands, and prompts — below a dedicated child subreaper. Descendants that
-detach with `setsid(2)` are reparented into that boundary, terminated, and
-reaped. The helper does not treat an empty `/proc` snapshot as proof; only a
-kernel `wait4(2)` result of `ECHILD` proves that no child remains. Windows
-assigns every command tree to a Job Object and proves that its active-process
-count reached zero. Cancellation, timeout, and successful completion all cross
-the same proof fence.
+commands, and prompts — below an authoritative child subreaper. Descendants
+that detach with `setsid(2)` are reparented, terminated, and reaped until
+`wait4(2)` reports `ECHILD`. Windows assigns every command tree to an
+authoritative Job Object and waits for its active-process count to reach zero.
+Cancellation, timeout, and successful completion all cross the same selected
+boundary. An incomplete boundary surfaces
+`ampacp.ErrProcessContainmentIncomplete`; reachable native-root and scratch
+resources are retained, and the parent-side wait remains bounded.
 
-If proof fails, the adapter surfaces `ampacp.ErrProcessTreeUnproven` and does
-not release native-root or session-scratch resources that the tree may still
-reach. Platforms without either containment backend fail session startup and
-native operations closed. The parent-side proof wait is bounded so `Close` and
-`Serve` return the sentinel instead of hanging; while a Linux helper has not
-yet proved `ECHILD`, it remains alive and continues containment attempts.
+Darwin fails closed unless the operator explicitly supplies
+`-darwin-best-effort-containment` or
+`WithDarwinBestEffortContainment`. The opt-in creates a fresh real writable
+generation root for every native launch, starts the direct child as its own
+process-group leader, reaps that child exactly once, sends group `SIGTERM`,
+escalates to `SIGKILL` after 500 ms, and polls the original group for one fixed
+five-second total deadline. It records `containment=best_effort` and emits an
+unconditional warning.
+
+This Darwin boundary does not contain descendants that call `setsid(2)` or
+otherwise escape the original group. Such processes can become zombies or
+continue running. Inherited runtime markers are correlation, not ownership;
+they can be scrubbed, and an empty scan is not evidence of absence. A negative
+PID signal also targets a numeric PGID rather than an identity-bound handle, so
+PGID reuse can cause collateral signalling. Native-root permits do not bound
+escaped provider work, and provider-descendant snapshot metrics are suppressed
+instead of publishing a misleading count or zero.
+
+Operators can inspect retained records without mutation and explicitly clean a
+selected runtime:
+
+```sh
+acp-go-amp containment diagnose -scratch-dir /path/to/scratch
+acp-go-amp containment cleanup -scratch-dir /path/to/scratch -runtime-id <id> -force
+```
+
+Cleanup signals only individually revalidated same-uid marker-correlated PIDs;
+it never treats a recorded PID or PGID as signal authority. Ambiguity retains
+the generation root and returns a non-zero status. Its fixed five-second budget
+starts before the first process enumeration. PID revalidation and signalling
+are separate operations: reuse in that gap can still signal unrelated same-uid
+work. These commands remain best-effort diagnostics, not a claim that
+marker-scrubbing escapees are absent.

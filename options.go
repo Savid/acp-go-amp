@@ -3,7 +3,11 @@ package ampacp
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log/slog"
+	"runtime"
+	"strings"
 	"time"
 
 	nativeamp "github.com/savid/acp-go-amp/internal/amp"
@@ -11,6 +15,15 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 )
+
+const (
+	platformDarwin   = "darwin"
+	platformLinux    = "linux"
+	platformWindows  = "windows"
+	privateEnvPrefix = "ACP_" + "GO_AMP_INTERNAL_"
+)
+
+var runtimeGOOS = runtime.GOOS
 
 // RuntimeResourceKind identifies the lifecycle scope consuming a host-managed resource.
 type RuntimeResourceKind string
@@ -29,6 +42,14 @@ const (
 	RuntimeProcessProviderDescendant RuntimeProcessKind = "provider_descendant"
 )
 
+type RuntimeContainmentMode string
+
+const (
+	RuntimeContainmentAuthoritative RuntimeContainmentMode = "authoritative"
+	RuntimeContainmentBestEffort    RuntimeContainmentMode = "best_effort"
+	RuntimeContainmentUnavailable   RuntimeContainmentMode = "unavailable"
+)
+
 type RuntimeStartupStage string
 
 const (
@@ -45,6 +66,7 @@ type RuntimeResourceHooks struct {
 	ObserveProcess         func(context.Context, RuntimeProcessKind, int64)
 	ObserveProcessSnapshot func(context.Context, RuntimeProcessKind, int)
 	ObserveStartupStage    func(context.Context, RuntimeResourceKind, RuntimeStartupStage, time.Duration, error)
+	ObserveContainment     func(context.Context, RuntimeContainmentMode)
 }
 
 const (
@@ -93,13 +115,14 @@ type Options struct {
 	MeterProvider     metric.MeterProvider
 	TextMapPropagator propagation.TextMapPropagator
 
-	SessionStore            SessionStore
-	SessionStoreLoadTimeout time.Duration
-	ConcurrencyLimits       ConcurrencyLimits
-	SeedFiles               map[string]string
-	TurnTimeout             time.Duration
-	RuntimeResourceHooks    RuntimeResourceHooks
-	runtime                 runtimeOptions
+	SessionStore                SessionStore
+	SessionStoreLoadTimeout     time.Duration
+	ConcurrencyLimits           ConcurrencyLimits
+	SeedFiles                   map[string]string
+	TurnTimeout                 time.Duration
+	RuntimeResourceHooks        RuntimeResourceHooks
+	DarwinBestEffortContainment bool
+	runtime                     runtimeOptions
 }
 
 type runtimeOptions struct {
@@ -114,6 +137,7 @@ type runtimeOptions struct {
 	maxJSONLineBytes     int
 	startupProbe         func(context.Context, *nativeamp.Client) error
 	newThread            func(context.Context, *nativeamp.Client) (string, error)
+	continueThread       func(context.Context, *nativeamp.Client, string, any) (*nativeamp.Turn, error)
 	exportThread         func(context.Context, *nativeamp.Client, string) (json.RawMessage, error)
 	// newTurnTimer builds the per-turn deadline channel. It is a seam so tests
 	// can drive the timeout branch deterministically against a coincident
@@ -147,6 +171,9 @@ func applyOptions(opts []Option) Options {
 			},
 			newThread: func(ctx context.Context, client *nativeamp.Client) (string, error) {
 				return client.NewThread(ctx)
+			},
+			continueThread: func(ctx context.Context, client *nativeamp.Client, threadID string, input any) (*nativeamp.Turn, error) {
+				return client.Continue(ctx, threadID, input)
 			},
 			exportThread: func(ctx context.Context, client *nativeamp.Client, threadID string) (json.RawMessage, error) {
 				return client.ExportThread(ctx, threadID)
@@ -228,6 +255,12 @@ func WithHome(path string) Option {
 func WithScratchDir(dir string) Option {
 	return func(options *Options) {
 		options.ScratchDir = dir
+	}
+}
+
+func WithDarwinBestEffortContainment() Option {
+	return func(options *Options) {
+		options.DarwinBestEffortContainment = true
 	}
 }
 
@@ -425,4 +458,35 @@ func cloneAnySlice(in []any) []any {
 	}
 
 	return out
+}
+
+func containmentMode(options Options) RuntimeContainmentMode {
+	if options.DarwinBestEffortContainment && runtimeGOOS != platformDarwin {
+		return RuntimeContainmentUnavailable
+	}
+
+	switch runtimeGOOS {
+	case platformLinux, platformWindows:
+		return RuntimeContainmentAuthoritative
+	case platformDarwin:
+		if options.DarwinBestEffortContainment {
+			return RuntimeContainmentBestEffort
+		}
+	}
+
+	return RuntimeContainmentUnavailable
+}
+
+func validateContainmentOptions(options Options) error {
+	if options.DarwinBestEffortContainment && runtimeGOOS != platformDarwin {
+		return errors.New("darwin best-effort containment is supported only on darwin")
+	}
+
+	for key := range options.Env {
+		if strings.HasPrefix(strings.ToUpper(key), privateEnvPrefix) {
+			return fmt.Errorf("environment key %q uses the reserved %s prefix", key, privateEnvPrefix)
+		}
+	}
+
+	return nil
 }

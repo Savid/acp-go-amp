@@ -3,6 +3,7 @@
 package amp
 
 import (
+	"errors"
 	"fmt"
 	"os/exec"
 	"time"
@@ -15,16 +16,19 @@ func (*processTree) descendantCount() (int, bool) { return 0, false }
 func configureCommand(*exec.Cmd) {}
 
 func startProcessTree(launch *processTreeCommand) (*processTree, error) {
-	launch.close()
-
-	return nil, fmt.Errorf("%w: platform containment backend unavailable", ErrProcessTreeNotQuiescent)
+	return nil, errors.Join(
+		fmt.Errorf("%w: platform containment backend unavailable", ErrProcessContainmentIncomplete),
+		launch.close(),
+	)
 }
 
-func (*processTree) interrupt() error { return ErrProcessTreeNotQuiescent }
-func (*processTree) kill() error      { return ErrProcessTreeNotQuiescent }
+func (*processTree) commandWait() *commandWait { return nil }
+
+func (*processTree) interrupt() error { return ErrProcessContainmentIncomplete }
+func (*processTree) kill() error      { return ErrProcessContainmentIncomplete }
 func (*processTree) terminateAndWait(time.Duration) error {
-	return ErrProcessTreeNotQuiescent
+	return ErrProcessContainmentIncomplete
 }
 
-func interruptProcess(*exec.Cmd) error { return ErrProcessTreeNotQuiescent }
-func killProcess(*exec.Cmd) error      { return ErrProcessTreeNotQuiescent }
+func interruptProcess(*exec.Cmd) error { return ErrProcessContainmentIncomplete }
+func killProcess(*exec.Cmd) error      { return ErrProcessContainmentIncomplete }

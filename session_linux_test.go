@@ -25,7 +25,7 @@ func TestCancelContainsDescendantBeforeReturn(t *testing.T) {
 
 	state := newPromptTurnState()
 	state.setTurn(turn)
-	agent := NewAgent()
+	agent := newTestAgent()
 	agent.options.runtime.nativeCancelTimeout = 100 * time.Millisecond
 	agent.options.runtime.nativeCloseTurnWait = time.Second
 	session := &agentSession{agent: agent, activePrompt: state}
@@ -42,7 +42,7 @@ func TestCancelContainsDescendantBeforeReturn(t *testing.T) {
 
 func TestTurnTimeoutContainsDescendantBeforeReturn(t *testing.T) {
 	path, stateDir := fakeAgentAmpPath(t, "sigint-descendant")
-	agent := NewAgent(
+	agent := newTestAgent(
 		WithExecutablePath(path),
 		WithScratchDir(t.TempDir()),
 		WithTurnTimeout(100*time.Millisecond),

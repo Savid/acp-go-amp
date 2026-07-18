@@ -46,7 +46,7 @@ func TestActiveOmittedEnvMeansDefaultEnv(t *testing.T) {
 		WithSessionAmpOptions(NewAmpOptions(WithAmpMode("high"))),
 	}
 
-	agent := NewAgent(
+	agent := newTestAgent(
 		WithExecutablePath(path),
 		WithScratchDir(t.TempDir()),
 		WithEnv(map[string]string{"AMP_API_KEY": "default"}),
@@ -66,7 +66,7 @@ func TestActiveOmittedEnvMeansDefaultEnv(t *testing.T) {
 		t.Fatalf("active resume omitted env = %v, want env mismatch", resumeErr)
 	}
 
-	defaultAgent := NewAgent(
+	defaultAgent := newTestAgent(
 		WithExecutablePath(path),
 		WithScratchDir(t.TempDir()),
 		WithEnv(map[string]string{"AMP_API_KEY": "default"}),
@@ -88,7 +88,7 @@ func TestColdLoadOmittedEnvBuildsDefaultEnv(t *testing.T) {
 	path, _ := fakeAgentAmpPath(t, "")
 	store := NewInMemorySessionStore()
 	cwd := t.TempDir()
-	created := NewAgent(
+	created := newTestAgent(
 		WithExecutablePath(path),
 		WithScratchDir(t.TempDir()),
 		WithSessionStore(store),
@@ -104,7 +104,7 @@ func TestColdLoadOmittedEnvBuildsDefaultEnv(t *testing.T) {
 		t.Fatalf("Close created agent: %v", closeErr)
 	}
 
-	restored := NewAgent(
+	restored := newTestAgent(
 		WithExecutablePath(path),
 		WithScratchDir(t.TempDir()),
 		WithSessionStore(store),
@@ -128,7 +128,7 @@ func TestColdLoadOmittedEnvBuildsDefaultEnv(t *testing.T) {
 
 func TestPromptErrorAfterCallerContextCancelInterrupts(t *testing.T) {
 	path, state := fakeAgentAmpPath(t, "delayed-error")
-	agent := NewAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()))
+	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()))
 	resp, err := agent.NewSession(context.Background(), NewSessionRequest(t.TempDir()))
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
@@ -154,6 +154,41 @@ func TestPromptErrorAfterCallerContextCancelInterrupts(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("prompt error after caller cancel did not return")
+	}
+}
+
+func TestSessionPromptErrorAfterContextErrInterrupts(t *testing.T) {
+	path, state := fakeAgentAmpPath(t, "delayed-error")
+	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()))
+	resp, err := agent.NewSession(context.Background(), NewSessionRequest(t.TempDir()))
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	session, err := agent.session(resp.SessionId)
+	if err != nil {
+		t.Fatalf("session: %v", err)
+	}
+
+	promptCtx := &manualErrContext{}
+	resultCh := make(chan acp.PromptResponse, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		result, promptErr := session.Prompt(promptCtx, TextPromptRequest(resp.SessionId, "test-turn", "cancel before error"))
+		resultCh <- result
+		errCh <- promptErr
+	}()
+
+	waitForPath(t, filepath.Join(state, "continue-ready"))
+	promptCtx.cancel()
+
+	select {
+	case promptErr := <-errCh:
+		result := <-resultCh
+		if promptErr != nil || result.StopReason != acp.StopReasonCancelled {
+			t.Fatalf("session prompt error after context error = %#v, %v", result, promptErr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("session prompt error after context error did not return")
 	}
 }
 

@@ -11,6 +11,10 @@ import (
 )
 
 func (a *Agent) validateSessionStartOptions(options AmpOptions) error {
+	if a.configurationErr != nil {
+		return acp.NewInvalidParams(map[string]any{jsonFieldError: a.configurationErr.Error()})
+	}
+
 	// Amp has no native config/auth root, so any configured Home is rejected
 	// fail-closed on every session-establishing path (new/load/resume) with the
 	// uniform unsupported "home" field error. Ephemeral state lives under
@@ -33,6 +37,12 @@ func (a *Agent) validateSessionStartOptions(options AmpOptions) error {
 
 	if options.Mode != "" && !slices.Contains(validModes(), options.Mode) {
 		return acp.NewInvalidParams(map[string]any{jsonFieldField: "_meta.amp.options.mode"})
+	}
+
+	for key := range options.Env {
+		if strings.HasPrefix(strings.ToUpper(key), privateEnvPrefix) {
+			return acp.NewInvalidParams(map[string]any{jsonFieldField: "_meta.amp.options.env." + key})
+		}
 	}
 
 	return nil

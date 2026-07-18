@@ -34,7 +34,7 @@ func TestMessageIdentityMatchesLiveResponseReplayAndContinuation(t *testing.T) {
 	store := NewInMemorySessionStore()
 	cwd := t.TempDir()
 
-	firstAgent := NewAgent(
+	firstAgent := newTestAgent(
 		WithExecutablePath(path),
 		WithScratchDir(t.TempDir()),
 		WithSessionStore(store),
@@ -69,7 +69,7 @@ func TestMessageIdentityMatchesLiveResponseReplayAndContinuation(t *testing.T) {
 	require.NoError(t, firstAgent.Close())
 	firstCleanup()
 
-	restoredAgent := NewAgent(
+	restoredAgent := newTestAgent(
 		WithExecutablePath(path),
 		WithScratchDir(t.TempDir()),
 		WithSessionStore(store),
@@ -108,7 +108,7 @@ func TestResumePublishesTerminalMessageIdentityWithoutHistory(t *testing.T) {
 	})
 	expectedID := ampMessageIdentity(sessionID, 2, mainFrame)
 
-	agent := NewAgent(
+	agent := newTestAgent(
 		WithExecutablePath(path),
 		WithScratchDir(t.TempDir()),
 		WithSessionStore(store),
@@ -134,7 +134,7 @@ func TestResumePublishesTerminalMessageIdentityWithoutHistory(t *testing.T) {
 	require.ErrorContains(t, err, "identity delivery failed")
 	require.Contains(t, agent.sessions, sessionID, "an active session survives lifecycle delivery failure")
 
-	failingAgent := NewAgent(
+	failingAgent := newTestAgent(
 		WithExecutablePath(path),
 		WithScratchDir(t.TempDir()),
 		WithSessionStore(store),
@@ -147,7 +147,7 @@ func TestResumePublishesTerminalMessageIdentityWithoutHistory(t *testing.T) {
 	require.NotContains(t, failingAgent.sessions, sessionID, "failed cold resume must roll back its materialized session")
 	require.NoError(t, failingAgent.Close())
 
-	connectionlessAgent := NewAgent(
+	connectionlessAgent := newTestAgent(
 		WithExecutablePath(path),
 		WithScratchDir(t.TempDir()),
 		WithSessionStore(store),
@@ -166,7 +166,7 @@ func TestResumeIdentityEmptyAndMalformedTranscript(t *testing.T) {
 	putStoredSession(t, emptyStore, "T-resume-empty", cwd, []SessionStoreEntry{
 		json.RawMessage(`{"type":"result","subtype":"success","is_error":false,"session_id":"T-resume-empty"}`),
 	})
-	emptyAgent := NewAgent(
+	emptyAgent := newTestAgent(
 		WithExecutablePath(path),
 		WithScratchDir(t.TempDir()),
 		WithSessionStore(emptyStore),
@@ -182,7 +182,7 @@ func TestResumeIdentityEmptyAndMalformedTranscript(t *testing.T) {
 	putStoredSession(t, malformedStore, "T-resume-malformed", cwd, []SessionStoreEntry{
 		json.RawMessage(`{`),
 	})
-	malformedAgent := NewAgent(
+	malformedAgent := newTestAgent(
 		WithExecutablePath(path),
 		WithScratchDir(t.TempDir()),
 		WithSessionStore(malformedStore),
@@ -283,14 +283,14 @@ func TestAmpMessageMetaPreservesSiblingKeys(t *testing.T) {
 func TestTranscriptIdentityStateFailsClosed(t *testing.T) {
 	ctx := context.Background()
 
-	withoutStore := &agentSession{agent: NewAgent()}
+	withoutStore := &agentSession{agent: newTestAgent()}
 	entries, err := withoutStore.loadTranscript(ctx)
 	require.NoError(t, err)
 	require.Nil(t, entries)
 
 	driftStore := NewInMemorySessionStore()
 	require.NoError(t, driftStore.Append(ctx, SessionKey{SessionID: "T-drift", Subpath: transcriptSubpath}, []SessionStoreEntry{json.RawMessage(`{"type":"result"}`)}))
-	driftSession := &agentSession{agent: NewAgent(WithSessionStore(driftStore)), id: "T-drift"}
+	driftSession := &agentSession{agent: newTestAgent(WithSessionStore(driftStore)), id: "T-drift"}
 	err = driftSession.persistAfterTurn(ctx, nil)
 	require.ErrorContains(t, err, "amp transcript frame count drift")
 
@@ -308,7 +308,7 @@ func TestTranscriptIdentityStateFailsClosed(t *testing.T) {
 	}))
 	wantErr := errors.New("transcript unavailable")
 	failingStore := &transcriptLoadErrorStore{InMemorySessionStore: baseStore, err: wantErr}
-	agent := NewAgent(
+	agent := newTestAgent(
 		WithExecutablePath(path),
 		WithScratchDir(t.TempDir()),
 		WithSessionStore(failingStore),

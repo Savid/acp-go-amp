@@ -123,7 +123,7 @@ func turnSupervisorBootstrap() {
 	turnSupervisorExit(0)
 }
 
-func prepareProcessTreeCommand(native *exec.Cmd) (*processTreeCommand, error) {
+func prepareProcessTreeCommand(native *exec.Cmd, _ processLaunchOptions) (*processTreeCommand, error) {
 	config := turnSupervisorConfig{
 		Path: native.Path,
 		Args: append([]string(nil), native.Args...),
@@ -287,17 +287,16 @@ func runTurnSupervisor(configInput io.Reader, controlInput io.Reader, readyOutpu
 	if err := native.Start(); err != nil {
 		return fmt.Errorf("start supervised Amp native root: %w", err)
 	}
+	waitDone := make(chan error, 1)
+	go func() { waitDone <- native.Wait() }()
 
 	if _, err := io.WriteString(readyOutput, turnSupervisorReady); err != nil {
 		_ = turnSupervisorSignalGroup(native.Process.Pid, syscall.SIGKILL)
-		waitErr := native.Wait()
+		waitErr := <-waitDone
 		containErr := turnSupervisorContain(turnSupervisorProcessID(), native.Process.Pid)
 
 		return errors.Join(fmt.Errorf("publish Amp native supervisor readiness: %w", err), containErr, waitErr)
 	}
-
-	waitDone := make(chan error, 1)
-	go func() { waitDone <- native.Wait() }()
 
 	controlDone := make(chan struct{})
 
@@ -336,7 +335,7 @@ func runTurnSupervisor(configInput io.Reader, controlInput io.Reader, readyOutpu
 }
 
 // awaitLinuxSupervisorContainment never lets the dedicated subreaper exit on
-// an unproven tree. The adapter retains the managed-root permit when its bounded
+// an incomplete tree. The adapter retains the managed-root permit when its bounded
 // parent-side wait expires; meanwhile the helper keeps retrying until it can
 // truthfully publish completion by exiting.
 func awaitLinuxSupervisorContainment(supervisorPID int, nativePID int) error {
@@ -363,20 +362,20 @@ func containLinuxSupervisorDescendants(supervisorPID int, nativePID int) error {
 		case errors.Is(waitErr, unix.ECHILD):
 			return nil
 		case waitErr != nil:
-			return fmt.Errorf("%w: reap supervised Amp descendants: %v", ErrProcessTreeNotQuiescent, waitErr)
+			return fmt.Errorf("%w: reap supervised Amp descendants: %v", ErrProcessContainmentIncomplete, waitErr)
 		case waited < 0:
-			return fmt.Errorf("%w: invalid supervised Amp wait result %d", ErrProcessTreeNotQuiescent, waited)
+			return fmt.Errorf("%w: invalid supervised Amp wait result %d", ErrProcessContainmentIncomplete, waited)
 		}
 
 		descendants, err := turnSupervisorDescendants(supervisorPID)
 		if err != nil {
-			return fmt.Errorf("%w: enumerate supervised Amp descendants: %v", ErrProcessTreeNotQuiescent, err)
+			return fmt.Errorf("%w: enumerate supervised Amp descendants: %v", ErrProcessContainmentIncomplete, err)
 		}
 
 		for _, descendant := range descendants {
 			if descendant.state != 'Z' {
 				if err := turnSupervisorSignalPID(descendant, syscall.SIGKILL); err != nil {
-					return fmt.Errorf("%w: kill supervised Amp descendant %d: %v", ErrProcessTreeNotQuiescent, descendant.pid, err)
+					return fmt.Errorf("%w: kill supervised Amp descendant %d: %v", ErrProcessContainmentIncomplete, descendant.pid, err)
 				}
 			}
 		}

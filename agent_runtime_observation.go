@@ -15,6 +15,7 @@ import (
 type providerProcessSnapshotTracker struct {
 	mu         sync.Mutex
 	hooks      RuntimeResourceHooks
+	enabled    bool
 	nextID     uint64
 	roots      map[uint64]providerProcessRootSnapshot
 	last       int
@@ -32,10 +33,11 @@ type providerProcessRootObservation struct {
 	id      uint64
 }
 
-func newProviderProcessSnapshotTracker(hooks RuntimeResourceHooks) *providerProcessSnapshotTracker {
+func newProviderProcessSnapshotTracker(hooks RuntimeResourceHooks, enabled bool) *providerProcessSnapshotTracker {
 	return &providerProcessSnapshotTracker{
-		hooks: hooks,
-		roots: make(map[uint64]providerProcessRootSnapshot),
+		hooks:   hooks,
+		enabled: enabled,
+		roots:   make(map[uint64]providerProcessRootSnapshot),
 	}
 }
 
@@ -43,14 +45,14 @@ func (a *Agent) newProcessSnapshotObserver(ctx context.Context, inventory native
 	root := a.providerProcesses.start(ctx, inventory)
 
 	return nativeamp.ProcessSnapshotObserver{
-		Refresh:   root.refresh,
-		Quiescent: root.quiescent,
-		Unproven:  root.unproven,
+		Refresh:    root.refresh,
+		Complete:   root.complete,
+		Incomplete: root.incomplete,
 	}
 }
 
 func (t *providerProcessSnapshotTracker) start(ctx context.Context, inventory nativeamp.ProcessInventory) *providerProcessRootObservation {
-	if t == nil {
+	if t == nil || !t.enabled {
 		return nil
 	}
 
@@ -90,7 +92,7 @@ func (o *providerProcessRootObservation) refresh(ctx context.Context) {
 	}
 }
 
-func (o *providerProcessRootObservation) quiescent(ctx context.Context) {
+func (o *providerProcessRootObservation) complete(ctx context.Context) {
 	if o == nil || o.tracker == nil {
 		return
 	}
@@ -112,7 +114,7 @@ func (o *providerProcessRootObservation) quiescent(ctx context.Context) {
 	}
 }
 
-func (o *providerProcessRootObservation) unproven() {
+func (o *providerProcessRootObservation) incomplete() {
 	if o == nil || o.tracker == nil {
 		return
 	}
@@ -122,7 +124,7 @@ func (o *providerProcessRootObservation) unproven() {
 	publish := false
 
 	if root, ok := t.roots[o.id]; ok {
-		// Once quiescence is unproven, even a previously observed count is no
+		// Once authoritative containment is incomplete, a previous count is no
 		// longer an absolute inventory. Retain the root as unknown so later
 		// roots cannot manufacture a lower aggregate or a false zero.
 		root.inventory = nil
@@ -195,8 +197,8 @@ func (t *providerProcessSnapshotTracker) snapshotLocked() (int, bool) {
 		total += count
 	}
 
-	// A zero while roots remain registered has not crossed their proven
-	// quiescence boundary. Only the empty tracker may publish zero.
+	// A zero while roots remain registered has not crossed their authoritative
+	// completion boundary. Only the empty tracker may publish zero.
 	if total == 0 {
 		return 0, false
 	}
@@ -262,6 +264,14 @@ func instrumentRuntimeResourceHooks(hooks RuntimeResourceHooks, observe *observe
 
 		if externalStage != nil {
 			externalStage(ctx, lifecycle, stage, elapsed, err)
+		}
+	}
+	externalContainment := hooks.ObserveContainment
+	hooks.ObserveContainment = func(ctx context.Context, mode RuntimeContainmentMode) {
+		observe.ObserveRuntimeContainment(ctx, string(mode))
+
+		if externalContainment != nil {
+			externalContainment(ctx, mode)
 		}
 	}
 

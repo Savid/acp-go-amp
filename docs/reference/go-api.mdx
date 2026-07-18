@@ -19,18 +19,22 @@ import ampacp "github.com/savid/acp-go-amp"
 | `ampacp.NewAgent(opts ...Option) *Agent` | Construct an agent you drive directly. |
 | `ampacp.Serve(ctx, input, output, opts ...Option) error` | Serve ACP over the given streams. |
 
-`ErrProcessTreeUnproven` is the stable `errors.Is` discriminator returned
-when shutdown cannot prove that every Amp descendant exited. `Serve` returns
-an `Agent.Close` error carrying this sentinel even when the stream loop would
+`ErrProcessContainmentIncomplete` is the stable `errors.Is` discriminator for
+an incomplete selected containment boundary. `Serve` preserves an
+`Agent.Close` error carrying this sentinel even when the stream loop would
 otherwise return normally or with context cancellation. A host that receives
-it must retain or quarantine any resources the native process tree may still
-reach. Every native command has the same fence: Linux proves a dedicated
-per-command subreaper empty (including descendants detached with `setsid(2)`)
-only after `wait4(2)` reports `ECHILD`, and Windows proves its Job Object empty.
-Session startup and native operations fail with this sentinel on platforms
-without either containment backend. Parent-side proof waits are bounded, so
-`Close` and `Serve` return the sentinel and retain reachable resources rather
-than waiting forever.
+it must retain or quarantine resources the native process may still reach.
+
+Linux uses an authoritative per-command subreaper, including for descendants
+detached with `setsid(2)`; Windows uses an authoritative Job Object. Darwin is
+`unavailable` and fails native launches closed by default. The explicit
+`WithDarwinBestEffortContainment` option selects bounded process-group cleanup,
+not authoritative descendant containment: a detached descendant can survive,
+markers can be scrubbed, an empty correlation scan is not proof of absence,
+and signalling a numeric PGID has a reuse/collateral-signal race. Other
+unsupported platforms fail closed. `Agent.ContainmentMode()` and
+`RuntimeResourceHooks.ObserveContainment` report `authoritative`,
+`best_effort`, or `unavailable`.
 
 ## Common options
 
@@ -47,6 +51,7 @@ than waiting forever.
 | `WithSeedFiles` | Relative-path → contents written into each session's isolated native `HOME` before `amp` launches. See [Seed files](/docs/features/models-config#seed-files). Accepted but inert for model routing — Amp is locked to its hosted backend. |
 | `WithTurnTimeout` | Optional per-turn deadline (default `0`, no deadline); on expiry the turn fails with `cause: "timeout"`. |
 | `WithRuntimeResourceHooks` | Host admission hooks for native roots and adapter scratch roots. |
+| `WithDarwinBestEffortContainment` | Darwin-only explicit opt-in to bounded process-group cleanup with escaped-descendant and PGID-reuse limitations. Invalid on other platforms. |
 | `WithTracerProvider`, `WithMeterProvider`, `WithTextMapPropagator`, `WithLogger` | Observability providers. |
 
 ## Amp per-session options
@@ -80,11 +85,13 @@ surface and does not advertise or stamp `acp-go.dev/route`, so it intentionally
 ignores the nonce and `CancelRequest` remains structural.
 
 `RuntimeResourceHooks` supplies `AcquireNativeRoot`, `ReserveScratchRoot`,
-`ObserveProcess`, `ObserveProcessSnapshot`, and `ObserveStartupStage`.
+`ObserveProcess`, `ObserveProcessSnapshot`, `ObserveStartupStage`, and
+`ObserveContainment`.
 Admission callbacks receive `runtime`, `session`, `prompt`, or `discovery`; nil
 callbacks keep standalone use unbounded. Amp reserves its per-session settings
 root before creation and acquires a native permit for every startup probe,
 thread command, and prompt process before launch. Amp is lockless, so it never
-reports home-lock supervisors. Process snapshots are emitted only for a proven
-containment inventory; startup observations name `spawn`, `readiness`,
+reports home-lock supervisors. Provider-descendant snapshots are emitted only
+under authoritative containment and are suppressed for the entire Darwin
+best-effort lifetime, including zero. Startup observations name `spawn`, `readiness`,
 `configuration`, or `session` and carry the stage error.

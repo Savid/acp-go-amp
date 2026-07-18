@@ -24,18 +24,20 @@ type Agent struct {
 	closeOnce     sync.Once
 	closeErr      error
 
-	mu                   sync.Mutex
-	closed               bool
-	conn                 agentClient
-	sessions             map[acp.SessionId]*agentSession
-	deleted              map[acp.SessionId]struct{}
-	pendingNativeDeletes map[acp.SessionId]struct{}
-	pending              int
-	clientCalls          chan struct{}
-	providerProcesses    *providerProcessSnapshotTracker
-	lifecycleProofErr    error
+	mu                      sync.Mutex
+	closed                  bool
+	conn                    agentClient
+	sessions                map[acp.SessionId]*agentSession
+	deleted                 map[acp.SessionId]struct{}
+	pendingNativeDeletes    map[acp.SessionId]struct{}
+	pending                 int
+	clientCalls             chan struct{}
+	providerProcesses       *providerProcessSnapshotTracker
+	lifecycleContainmentErr error
 
-	activeLimitErr error
+	activeLimitErr   error
+	containmentMode  RuntimeContainmentMode
+	configurationErr error
 }
 
 var newAgentForServe = NewAgent
@@ -66,7 +68,18 @@ func NewAgent(opts ...Option) *Agent {
 		Version:        options.AgentVersion,
 	})
 	options.RuntimeResourceHooks = instrumentRuntimeResourceHooks(options.RuntimeResourceHooks, observe)
-	providerProcesses := newProviderProcessSnapshotTracker(options.RuntimeResourceHooks)
+	mode := containmentMode(options)
+
+	providerProcesses := newProviderProcessSnapshotTracker(options.RuntimeResourceHooks, mode == RuntimeContainmentAuthoritative)
+	if options.RuntimeResourceHooks.ObserveContainment != nil {
+		options.RuntimeResourceHooks.ObserveContainment(context.Background(), mode)
+	}
+
+	if mode == RuntimeContainmentBestEffort {
+		log.Warn("Darwin best-effort process containment is enabled; escaped descendants may survive, numeric PGID reuse can cause collateral signalling, marker correlation is not ownership, markers can be scrubbed, and native-root permits do not bound escaped provider work",
+			slog.String("containment", string(mode)),
+		)
+	}
 
 	return &Agent{
 		options:              options,
@@ -80,7 +93,17 @@ func NewAgent(opts ...Option) *Agent {
 		providerProcesses:    providerProcesses,
 		lifecycleDone:        make(chan struct{}),
 		activeLimitErr:       validateConcurrencyLimits(options.ConcurrencyLimits),
+		containmentMode:      mode,
+		configurationErr:     validateContainmentOptions(options),
 	}
+}
+
+func (a *Agent) ContainmentMode() RuntimeContainmentMode {
+	if a == nil {
+		return RuntimeContainmentUnavailable
+	}
+
+	return a.containmentMode
 }
 
 func Serve(ctx context.Context, input io.Reader, output io.Writer, opts ...Option) (returnErr error) {
@@ -132,10 +155,10 @@ func (a *Agent) Close() error {
 		}
 
 		a.sessions = map[acp.SessionId]*agentSession{}
-		proofErr := a.lifecycleProofErr
+		boundaryErr := a.lifecycleContainmentErr
 		a.mu.Unlock()
 
-		closeErr := proofErr
+		closeErr := boundaryErr
 		for _, session := range sessions {
 			closeErr = errors.Join(closeErr, session.Close(context.Background()))
 		}
@@ -151,8 +174,8 @@ func (a *Agent) Initialize(ctx context.Context, params acp.InitializeRequest) (r
 	_, finish := a.observe.StartACPRequest(ctx, acp.AgentMethodInitialize)
 	defer func() { finish(err) }()
 
-	if a.activeLimitErr != nil {
-		return acp.InitializeResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldError: a.activeLimitErr.Error()})
+	if configurationErr := errors.Join(a.activeLimitErr, a.configurationErr); configurationErr != nil {
+		return acp.InitializeResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldError: configurationErr.Error()})
 	}
 
 	title := a.options.AgentTitle

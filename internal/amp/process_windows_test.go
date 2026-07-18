@@ -36,7 +36,7 @@ func TestWindowsJobContainsNativeDescendant(t *testing.T) {
 	native.Stdout = io.Discard
 	native.Stderr = io.Discard
 
-	launch, err := prepareProcessTreeCommand(native)
+	launch, err := prepareProcessTreeCommand(native, processLaunchOptions{})
 	if err != nil {
 		t.Fatalf("prepare contained command: %v", err)
 	}

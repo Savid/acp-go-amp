@@ -104,7 +104,7 @@ type agentSession struct {
 	closed                bool
 	poisonCause           string
 	nativeMissingCause    string
-	scratchQuiescenceErr  error
+	scratchContainmentErr error
 	unsyncedFrames        []SessionStoreEntry
 	transcriptFrames      int
 	turn                  chan struct{}
@@ -213,11 +213,11 @@ func newAgentSession(ctx context.Context, agent *Agent, id acp.SessionId, cwd st
 }
 
 func (s *agentSession) client() *amp.Client {
-	return s.clientWithEnv(s.env, "")
+	return s.clientWithEnv(s.env, "", RuntimeResourceSession)
 }
 
-func (s *agentSession) clientWithEnv(env map[string]string, mcpConfigPath string) *amp.Client {
-	return amp.NewClient(s.agent.log, amp.Options{
+func (s *agentSession) clientWithEnv(env map[string]string, mcpConfigPath string, kind RuntimeResourceKind) *amp.Client {
+	options := amp.Options{
 		CLIPath:                    s.agent.options.ExecutablePath,
 		Cwd:                        s.cwd,
 		SettingsFile:               s.settingsFile,
@@ -228,7 +228,11 @@ func (s *agentSession) clientWithEnv(env map[string]string, mcpConfigPath string
 		MaxLineBytes:               s.agent.options.runtime.maxJSONLineBytes,
 		OnGoroutinePanic:           s.agent.onNativeGoroutinePanic,
 		NewProcessSnapshotObserver: s.agent.newProcessSnapshotObserver,
-	})
+		WritableRoot:               s.settingsDir,
+	}
+	s.agent.configureNativeClient(&options, kind)
+
+	return amp.NewClient(s.agent.log, options)
 }
 
 func (s *agentSession) acquireTurn(ctx context.Context) (func(), error) {
@@ -332,7 +336,7 @@ func (s *agentSession) Close(ctx context.Context) error {
 
 	err := s.interruptState(context.Background(), state)
 
-	proofErr := s.scratchQuiescenceError()
+	boundaryErr := s.scratchContainmentError()
 	if state != nil {
 		waitCtx, cancelWait := context.WithTimeout(
 			context.WithoutCancel(ctx),
@@ -342,11 +346,11 @@ func (s *agentSession) Close(ctx context.Context) error {
 
 		cancelWait()
 
-		s.recordScratchQuiescence(closeErr)
-		proofErr = errors.Join(proofErr, closeErr)
+		s.recordScratchContainment(closeErr)
+		boundaryErr = errors.Join(boundaryErr, closeErr)
 	}
 
-	return finalizeSessionScratch(err, proofErr, s.settingsDir, s.scratchRootRelease)
+	return finalizeSessionScratch(err, boundaryErr, s.settingsDir, s.scratchRootRelease)
 }
 
 func (s *agentSession) Delete(ctx context.Context) error {
@@ -360,9 +364,9 @@ func (s *agentSession) Delete(ctx context.Context) error {
 	}
 
 	interruptErr := s.interruptState(context.Background(), state)
-	s.recordScratchQuiescence(interruptErr)
+	s.recordScratchContainment(interruptErr)
 
-	proofErr := errors.Join(s.scratchQuiescenceError(), interruptErr)
+	boundaryErr := errors.Join(s.scratchContainmentError(), interruptErr)
 	if state != nil {
 		waitCtx, cancelWait := context.WithTimeout(
 			context.WithoutCancel(ctx),
@@ -372,31 +376,24 @@ func (s *agentSession) Delete(ctx context.Context) error {
 
 		cancelWait()
 
-		s.recordScratchQuiescence(closeErr)
+		s.recordScratchContainment(closeErr)
 		interruptErr = errors.Join(interruptErr, closeErr)
-		proofErr = errors.Join(proofErr, closeErr)
+		boundaryErr = errors.Join(boundaryErr, closeErr)
 	}
 
-	if !amp.ProcessTreeQuiescent(proofErr) {
-		return finalizeSessionScratch(interruptErr, proofErr, s.settingsDir, s.scratchRootRelease)
-	}
-
-	nativeRelease, acquireErr := acquireNativeRoot(ctx, s.agent.options.RuntimeResourceHooks, RuntimeResourceSession)
-	if acquireErr != nil {
-		return finalizeSessionScratch(errors.Join(interruptErr, acquireErr), proofErr, s.settingsDir, s.scratchRootRelease)
+	if !amp.ProcessContainmentComplete(boundaryErr) {
+		return finalizeSessionScratch(interruptErr, boundaryErr, s.settingsDir, s.scratchRootRelease)
 	}
 
 	deleteErr := s.client().DeleteThread(ctx, string(s.id))
+	s.recordScratchContainment(deleteErr)
 
-	releaseNativeRootWhenQuiescent(nativeRelease, deleteErr)
-	s.recordScratchQuiescence(deleteErr)
-
-	return finalizeSessionScratch(errors.Join(interruptErr, deleteErr), errors.Join(proofErr, deleteErr), s.settingsDir, s.scratchRootRelease)
+	return finalizeSessionScratch(errors.Join(interruptErr, deleteErr), errors.Join(boundaryErr, deleteErr), s.settingsDir, s.scratchRootRelease)
 }
 
-func finalizeSessionScratch(runtimeErr, proofErr error, settingsDir string, scratchRelease func()) error {
-	if !amp.ProcessTreeQuiescent(proofErr) {
-		return errors.Join(runtimeErr, proofErr)
+func finalizeSessionScratch(runtimeErr, boundaryErr error, settingsDir string, scratchRelease func()) error {
+	if !amp.ProcessContainmentComplete(boundaryErr) {
+		return errors.Join(runtimeErr, boundaryErr)
 	}
 
 	var removeErr error
@@ -411,26 +408,26 @@ func finalizeSessionScratch(runtimeErr, proofErr error, settingsDir string, scra
 	return errors.Join(runtimeErr, removeErr)
 }
 
-func (s *agentSession) recordScratchQuiescence(err error) {
-	if amp.ProcessTreeQuiescent(err) {
+func (s *agentSession) recordScratchContainment(err error) {
+	if amp.ProcessContainmentComplete(err) {
 		return
 	}
 
 	s.mu.Lock()
-	s.scratchQuiescenceErr = errors.Join(s.scratchQuiescenceErr, err)
+	s.scratchContainmentErr = errors.Join(s.scratchContainmentErr, err)
 	s.mu.Unlock()
 }
 
-func (s *agentSession) scratchQuiescenceError() error {
+func (s *agentSession) scratchContainmentError() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	return s.scratchQuiescenceErr
+	return s.scratchContainmentErr
 }
 
 func (s *agentSession) verifyContinuable(ctx context.Context) error {
-	if proofErr := s.scratchQuiescenceError(); proofErr != nil {
-		return proofErr
+	if boundaryErr := s.scratchContainmentError(); boundaryErr != nil {
+		return boundaryErr
 	}
 
 	timeout := s.agent.options.runtime.nativeCommandTimeout
@@ -438,18 +435,11 @@ func (s *agentSession) verifyContinuable(ctx context.Context) error {
 	probeCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	nativeRelease, err := acquireNativeRoot(probeCtx, s.agent.options.RuntimeResourceHooks, RuntimeResourceSession)
-	if err != nil {
-		return err
-	}
-
 	_, exportErr := s.agent.options.runtime.exportThread(probeCtx, s.client(), string(s.id))
-
-	releaseNativeRootWhenQuiescent(nativeRelease, exportErr)
-	s.recordScratchQuiescence(exportErr)
+	s.recordScratchContainment(exportErr)
 
 	if exportErr != nil {
-		if !amp.ProcessTreeQuiescent(exportErr) {
+		if !amp.ProcessContainmentComplete(exportErr) {
 			return nativeInternalError(exportErr)
 		}
 
@@ -479,8 +469,8 @@ func (s *agentSession) ready() error {
 		return acp.NewInternalError(map[string]any{jsonFieldError: "native_state_missing", keyDetail: s.nativeMissingCause})
 	}
 
-	if s.scratchQuiescenceErr != nil {
-		return s.scratchQuiescenceErr
+	if s.scratchContainmentErr != nil {
+		return s.scratchContainmentErr
 	}
 
 	if s.closed {

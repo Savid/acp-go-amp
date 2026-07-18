@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"runtime"
 	"strings"
 
 	ampacp "github.com/savid/acp-go-amp"
@@ -17,6 +18,9 @@ var serve = ampacp.Serve
 var exit = os.Exit
 var shutdownOpenTelemetry = shutdownTelemetry
 var agentVersion = version
+var runtimeGOOS = runtime.GOOS
+
+const platformDarwin = "darwin"
 
 func main() {
 	if code := run(context.Background(), os.Args[1:], os.Stdin, os.Stdout, os.Stderr); code != 0 {
@@ -25,14 +29,19 @@ func main() {
 }
 
 func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer) int {
+	if len(args) > 0 && args[0] == "containment" {
+		return runContainment(args[1:], stdout, stderr)
+	}
+
 	var (
-		path        string
-		home        string
-		model       string
-		scratchDir  string
-		debug       bool
-		showVersion bool
-		seedFiles   = seedFileFlag{}
+		path             string
+		home             string
+		model            string
+		scratchDir       string
+		debug            bool
+		showVersion      bool
+		darwinBestEffort bool
+		seedFiles        = seedFileFlag{}
 	)
 
 	flags := flag.NewFlagSet("acp-go-amp", flag.ContinueOnError)
@@ -43,9 +52,16 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 	flags.StringVar(&scratchDir, "scratch-dir", "", "parent directory for ephemeral session scratch; empty means the system temp directory")
 	flags.BoolVar(&debug, "debug", false, "enable debug logging")
 	flags.BoolVar(&showVersion, "version", false, "print adapter version and exit")
+	flags.BoolVar(&darwinBestEffort, "darwin-best-effort-containment", false, "accept Darwin process-group containment and its escaped-descendant and PGID-reuse risks")
 	flags.Var(&seedFiles, "seed-file", "seed file as <relpath>=<hostpath>, written into each session's isolated native root; repeatable")
 
 	if err := flags.Parse(args); err != nil {
+		return 2
+	}
+
+	if darwinBestEffort && runtimeGOOS != platformDarwin {
+		_, _ = fmt.Fprintln(stderr, "acp-go-amp: -darwin-best-effort-containment is valid only on darwin")
+
 		return 2
 	}
 
@@ -79,6 +95,10 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 
 	logger = telemetry.logger
 
+	if darwinBestEffort {
+		_, _ = fmt.Fprintln(stderr, "WARNING containment=best_effort: escaped descendants may survive; numeric PGID reuse can cause collateral signalling; marker correlation is not ownership; markers can be scrubbed; native-root permits do not bound escaped provider work")
+	}
+
 	signals := forwardedSignals()
 	receivedSignals := make(chan os.Signal, 1)
 
@@ -100,6 +120,10 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 		ampacp.WithLogger(logger),
 		ampacp.WithAgentVersion(agentVer),
 	)
+	if darwinBestEffort {
+		serveOptions = append(serveOptions, ampacp.WithDarwinBestEffortContainment())
+	}
+
 	if len(seeds) > 0 {
 		serveOptions = append(serveOptions, ampacp.WithSeedFiles(seeds))
 	}

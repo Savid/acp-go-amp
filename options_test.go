@@ -137,3 +137,33 @@ func TestCloneHelpersAndDeepClone(t *testing.T) {
 		t.Fatalf("fork servers = %#v", forkReq.McpServers)
 	}
 }
+
+func TestContainmentModeAndValidationAcrossPlatforms(t *testing.T) {
+	originalGOOS := runtimeGOOS
+	t.Cleanup(func() { runtimeGOOS = originalGOOS })
+
+	runtimeGOOS = platformLinux
+	if got := containmentMode(Options{}); got != RuntimeContainmentAuthoritative {
+		t.Fatalf("Linux mode = %q", got)
+	}
+	if got := containmentMode(Options{DarwinBestEffortContainment: true}); got != RuntimeContainmentUnavailable {
+		t.Fatalf("off-Darwin opt-in mode = %q", got)
+	}
+	if err := validateContainmentOptions(Options{DarwinBestEffortContainment: true}); err == nil {
+		t.Fatal("off-Darwin opt-in was accepted")
+	}
+
+	runtimeGOOS = platformDarwin
+	if got := containmentMode(Options{DarwinBestEffortContainment: true}); got != RuntimeContainmentBestEffort {
+		t.Fatalf("Darwin opt-in mode = %q", got)
+	}
+	if got := containmentMode(Options{}); got != RuntimeContainmentUnavailable {
+		t.Fatalf("Darwin default mode = %q", got)
+	}
+	if err := validateContainmentOptions(Options{Env: map[string]string{"acp_go_amp_internal_bad": "value"}}); err == nil {
+		t.Fatal("reserved private environment was accepted")
+	}
+	if err := validateContainmentOptions(Options{}); err != nil {
+		t.Fatal(err)
+	}
+}

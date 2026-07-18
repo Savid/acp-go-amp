@@ -57,13 +57,13 @@ func TestRequestBuildersAndCallForkSession(t *testing.T) {
 		t.Fatalf("list request = %#v", listReq)
 	}
 
-	successConn, cleanup := forkClientConnection(t, extensionAgent{Agent: NewAgent(), responseID: "T-child", fail: false})
+	successConn, cleanup := forkClientConnection(t, extensionAgent{Agent: newTestAgent(), responseID: "T-child", fail: false})
 	defer cleanup()
 	resp, err := CallForkSession(context.Background(), successConn, acp.UnstableForkSessionRequest{SessionId: "T-1", Cwd: "/tmp/cwd"})
 	if err != nil || resp.SessionId != "T-child" {
 		t.Fatalf("CallForkSession success = %#v, %v", resp, err)
 	}
-	errorConn, cleanup := forkClientConnection(t, extensionAgent{Agent: NewAgent(), fail: true})
+	errorConn, cleanup := forkClientConnection(t, extensionAgent{Agent: newTestAgent(), fail: true})
 	defer cleanup()
 	if _, err := CallForkSession(context.Background(), errorConn, acp.UnstableForkSessionRequest{SessionId: "T-1", Cwd: "/tmp/cwd"}); err == nil {
 		t.Fatal("CallForkSession error succeeded")

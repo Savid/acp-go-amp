@@ -17,21 +17,9 @@ func reserveScratchRoot(ctx context.Context, hooks RuntimeResourceHooks, kind Ru
 	return acquireRuntimeResource(ctx, hooks.ReserveScratchRoot, kind, "scratch root")
 }
 
-func releaseNativeRootWhenQuiescent(release func(), err error) {
-	if nativeamp.ProcessTreeQuiescent(err) {
-		release()
-	}
-}
-
-func releaseScratchRootWhenQuiescent(release func(), err error) {
-	if nativeamp.ProcessTreeQuiescent(err) {
-		release()
-	}
-}
-
 func nativeInternalError(err error) error {
 	requestErr := acp.NewInternalError(map[string]any{jsonFieldError: err.Error()})
-	if errors.Is(err, nativeamp.ErrProcessTreeNotQuiescent) {
+	if errors.Is(err, nativeamp.ErrProcessContainmentIncomplete) {
 		return errors.Join(requestErr, err)
 	}
 
@@ -41,8 +29,8 @@ func nativeInternalError(err error) error {
 // beginLifecycleOperation registers a request that may own a native process
 // before an active session exists. Agent.Close closes admission, cancels the
 // returned context, and waits for every registered operation before it snapshots
-// sessions. The finish callback records an unproven-tree sentinel before
-// releasing the wait fence so Close and Serve cannot report quiescence falsely.
+// sessions. The finish callback records an incomplete-boundary sentinel before
+// releasing the wait fence so Close and Serve cannot report completion falsely.
 func (a *Agent) beginLifecycleOperation(ctx context.Context) (context.Context, func(error), error) {
 	a.mu.Lock()
 	if a.closed {
@@ -73,9 +61,9 @@ func (a *Agent) beginLifecycleOperation(ctx context.Context) (context.Context, f
 			close(stopShutdown)
 			cancel()
 
-			if errors.Is(err, nativeamp.ErrProcessTreeNotQuiescent) {
+			if errors.Is(err, nativeamp.ErrProcessContainmentIncomplete) {
 				a.mu.Lock()
-				a.lifecycleProofErr = errors.Join(a.lifecycleProofErr, err)
+				a.lifecycleContainmentErr = errors.Join(a.lifecycleContainmentErr, err)
 				a.mu.Unlock()
 			}
 

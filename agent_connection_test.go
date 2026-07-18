@@ -12,7 +12,7 @@ import (
 
 func TestLocalAgentConnectionHandleDispatch(t *testing.T) {
 	ctx := context.Background()
-	conn := &localAgentConnection{agent: NewAgent()}
+	conn := &localAgentConnection{agent: newTestAgent()}
 
 	// Every non-initialize method is rejected until initialize succeeds.
 	_, reqErr := conn.handle(ctx, acp.AgentMethodSessionNew, json.RawMessage(`{}`))
@@ -77,7 +77,7 @@ func TestLocalAgentConnectionHandleDispatch(t *testing.T) {
 
 func TestLocalAgentConnectionClosedWinsBeforeDispatchAndDecode(t *testing.T) {
 	ctx := context.Background()
-	agent := NewAgent()
+	agent := newTestAgent()
 	if err := agent.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +104,7 @@ func TestLocalAgentConnectionClosedWinsBeforeDispatchAndDecode(t *testing.T) {
 }
 
 func TestLocalAgentConnectionNotifyExtensionValidatesMethod(t *testing.T) {
-	conn := &localAgentConnection{agent: NewAgent()}
+	conn := &localAgentConnection{agent: newTestAgent()}
 
 	if err := conn.NotifyExtension(context.Background(), "", nil); err == nil {
 		t.Fatal("empty extension method accepted")

@@ -3,6 +3,7 @@
 package amp
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os/exec"
@@ -15,8 +16,12 @@ import (
 )
 
 type processTree struct {
-	mu  sync.Mutex
-	job windows.Handle
+	mu            sync.Mutex
+	job           windows.Handle
+	waiter        *commandWait
+	releaseNative func()
+	finishOnce    sync.Once
+	finishErr     error
 }
 
 type jobBasicAccountingInformation struct {
@@ -61,11 +66,16 @@ func configureCommand(cmd *exec.Cmd) {
 
 func startProcessTree(launch *processTreeCommand) (*processTree, error) {
 	cmd := launch.cmd
+	releaseNative, err := launch.acquire()
+	if err != nil {
+		return nil, errors.Join(err, launch.close())
+	}
 	job, err := windows.CreateJobObject(nil, nil)
 	if err != nil {
-		launch.close()
+		releaseNative()
+		closeErr := launch.close()
 
-		return nil, fmt.Errorf("create amp containment job: %w", err)
+		return nil, errors.Join(fmt.Errorf("create amp containment job: %w", err), closeErr)
 	}
 
 	limits := windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION{}
@@ -77,17 +87,22 @@ func startProcessTree(launch *processTreeCommand) (*processTree, error) {
 		uint32(unsafe.Sizeof(limits)),
 	); err != nil {
 		_ = windows.CloseHandle(job)
+		releaseNative()
+		closeErr := launch.close()
 
-		return nil, fmt.Errorf("configure amp containment job: %w", err)
+		return nil, errors.Join(fmt.Errorf("configure amp containment job: %w", err), closeErr)
 	}
 
 	if err := cmd.Start(); err != nil {
 		_ = windows.CloseHandle(job)
-		launch.close()
+		releaseNative()
+		closeErr := launch.close()
 
-		return nil, err
+		return nil, errors.Join(err, closeErr)
 	}
+	launch.started = true
 	launch.releaseInherited()
+	waiter := newCommandWait(cmd.Wait)
 
 	var assignErr error
 	if err := cmd.Process.WithHandle(func(handle uintptr) {
@@ -96,24 +111,44 @@ func startProcessTree(launch *processTreeCommand) (*processTree, error) {
 		assignErr = err
 	}
 	if assignErr != nil {
-		return nil, abortSuspendedProcess(cmd, job, fmt.Errorf("assign amp process to containment job: %w", assignErr))
+		return nil, abortSuspendedProcess(&processTree{job: job, waiter: waiter, releaseNative: releaseNative}, fmt.Errorf("assign amp process to containment job: %w", assignErr))
 	}
 
 	if err := resumeProcessThreads(uint32(cmd.Process.Pid)); err != nil {
-		return nil, abortSuspendedProcess(cmd, job, fmt.Errorf("resume contained amp process: %w", err))
+		return nil, abortSuspendedProcess(&processTree{job: job, waiter: waiter, releaseNative: releaseNative}, fmt.Errorf("resume contained amp process: %w", err))
 	}
 	launch.control = nil
 
-	return &processTree{job: job}, nil
+	return &processTree{job: job, waiter: waiter, releaseNative: releaseNative}, nil
 }
 
-func abortSuspendedProcess(cmd *exec.Cmd, job windows.Handle, cause error) error {
-	tree := &processTree{job: job}
+func abortSuspendedProcess(tree *processTree, cause error) error {
 	terminateErr := tree.kill()
-	waitErr := cmd.Wait()
-	quiescenceErr := tree.terminateAndWait(defaultCloseWait)
+	waitErr, _ := tree.waiter.await(context.Background())
+	containmentErr := tree.terminateAndWait(defaultCloseWait)
 
-	return errors.Join(cause, terminateErr, waitErr, quiescenceErr)
+	return errors.Join(cause, terminateErr, waitErr, containmentErr)
+}
+
+func (t *processTree) commandWait() *commandWait {
+	if t == nil {
+		return nil
+	}
+
+	return t.waiter
+}
+
+func (t *processTree) finish(err error) error {
+	if t == nil {
+		return err
+	}
+	t.finishOnce.Do(func() {
+		if ProcessContainmentComplete(err) && t.releaseNative != nil {
+			t.releaseNative()
+		}
+	})
+
+	return errors.Join(err, t.finishErr)
 }
 
 func resumeProcessThreads(pid uint32) error {
@@ -183,7 +218,7 @@ func (t *processTree) terminateAndWait(timeout time.Duration) error {
 		return nil
 	}
 	if err := t.kill(); err != nil {
-		return fmt.Errorf("%w: terminate Windows job: %w", ErrProcessTreeNotQuiescent, err)
+		return t.finish(fmt.Errorf("%w: terminate Windows job: %w", ErrProcessContainmentIncomplete, err))
 	}
 
 	deadline := time.NewTimer(timeout)
@@ -197,7 +232,7 @@ func (t *processTree) terminateAndWait(timeout time.Duration) error {
 		if job == 0 {
 			t.mu.Unlock()
 
-			return nil
+			return t.finish(nil)
 		}
 
 		var info jobBasicAccountingInformation
@@ -217,15 +252,15 @@ func (t *processTree) terminateAndWait(timeout time.Duration) error {
 		t.mu.Unlock()
 
 		if err != nil {
-			return fmt.Errorf("%w: inspect Windows job: %w", ErrProcessTreeNotQuiescent, err)
+			return t.finish(fmt.Errorf("%w: inspect Windows job: %w", ErrProcessContainmentIncomplete, err))
 		}
 		if info.ActiveProcesses == 0 {
-			return nil
+			return t.finish(nil)
 		}
 
 		select {
 		case <-deadline.C:
-			return fmt.Errorf("%w: Windows job remained active", ErrProcessTreeNotQuiescent)
+			return t.finish(fmt.Errorf("%w: Windows job remained active", ErrProcessContainmentIncomplete))
 		case <-ticker.C:
 		}
 	}

@@ -16,6 +16,8 @@ import (
 	"github.com/savid/acp-go-amp/internal/amp"
 )
 
+var newLifecycleAgentSession = newAgentSession
+
 func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (resp acp.NewSessionResponse, err error) {
 	ctx, finish := a.observe.StartACPRequest(ctx, acp.AgentMethodSessionNew)
 	defer func() { finish(err) }()
@@ -46,24 +48,9 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (r
 		return acp.NewSessionResponse{}, err
 	}
 
-	discoveryRelease, err := acquireNativeRoot(ctx, a.options.RuntimeResourceHooks, RuntimeResourceDiscovery)
-	if err != nil {
-		return acp.NewSessionResponse{}, err
-	}
-
-	discoveryScratchRelease, err := reserveScratchRoot(ctx, a.options.RuntimeResourceHooks, RuntimeResourceDiscovery)
-	if err != nil {
-		discoveryRelease()
-
-		return acp.NewSessionResponse{}, err
-	}
-
 	readinessStarted := time.Now()
 	startErr := a.ensureStartup(ctx, params.Cwd, meta)
 	observeRuntimeStartupStage(ctx, a.options.RuntimeResourceHooks, RuntimeResourceDiscovery, RuntimeStartupReadiness, readinessStarted, startErr)
-
-	releaseNativeRootWhenQuiescent(discoveryRelease, startErr)
-	releaseScratchRootWhenQuiescent(discoveryScratchRelease, startErr)
 
 	if startErr != nil {
 		return acp.NewSessionResponse{}, startErr
@@ -73,20 +60,11 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (r
 		return acp.NewSessionResponse{}, slotErr
 	}
 
-	probeSession, err := newAgentSession(ctx, a, "", params.Cwd, meta, mcpConfig, params.AdditionalDirectories)
+	probeSession, err := newLifecycleAgentSession(ctx, a, "", params.Cwd, meta, mcpConfig, params.AdditionalDirectories)
 	if err != nil {
 		a.releaseSessionSlot("")
 
 		return acp.NewSessionResponse{}, err
-	}
-
-	nativeRelease, err := acquireNativeRoot(ctx, a.options.RuntimeResourceHooks, RuntimeResourceSession)
-	if err != nil {
-		a.releaseSessionSlot("")
-
-		closeErr := probeSession.Close(context.Background())
-
-		return acp.NewSessionResponse{}, errors.Join(err, closeErr)
 	}
 
 	// Amp thread creation is an authenticated remote operation and has been
@@ -100,11 +78,9 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (r
 	cancelSession()
 	observeRuntimeStartupStage(ctx, a.options.RuntimeResourceHooks, RuntimeResourceSession, RuntimeStartupSession, sessionStarted, err)
 
-	releaseNativeRootWhenQuiescent(nativeRelease, err)
-
 	if err != nil {
 		a.releaseSessionSlot("")
-		probeSession.recordScratchQuiescence(err)
+		probeSession.recordScratchContainment(err)
 		closeErr := probeSession.Close(context.Background())
 
 		return acp.NewSessionResponse{}, errors.Join(nativeInternalError(err), closeErr)
@@ -351,8 +327,18 @@ func encodeListCursor(offset int) string {
 }
 
 func (a *Agent) Prompt(ctx context.Context, params acp.PromptRequest) (resp acp.PromptResponse, err error) {
+	requestCtx := ctx
+
 	ctx, finishReq := a.observe.StartACPRequest(ctx, acp.AgentMethodSessionPrompt)
 	defer func() { finishReq(err) }()
+
+	var lifecycleErr error
+
+	ctx, finishLifecycle, err := a.beginLifecycleOperation(ctx)
+	if err != nil {
+		return acp.PromptResponse{}, err
+	}
+	defer func() { finishLifecycle(errors.Join(err, lifecycleErr)) }()
 
 	session, err := a.session(params.SessionId)
 	if err != nil {
@@ -363,6 +349,11 @@ func (a *Agent) Prompt(ctx context.Context, params acp.PromptRequest) (resp acp.
 	defer func() { finish(promptResultForObserver(resp, err, a.options.DefaultModel)) }()
 
 	resp, err = session.Prompt(ctx, params)
+	if requestCtx.Err() != nil && err != nil {
+		lifecycleErr = err
+		resp = cancelledPromptResponse(resp.Usage, params.MessageId)
+		err = nil
+	}
 
 	return resp, err
 }
@@ -538,24 +529,9 @@ func (a *Agent) loadOrResume(ctx context.Context, sessionID acp.SessionId, cwd s
 		return nil, nil, false, err
 	}
 
-	discoveryRelease, err := acquireNativeRoot(ctx, a.options.RuntimeResourceHooks, RuntimeResourceDiscovery)
-	if err != nil {
-		return nil, nil, false, err
-	}
-
-	discoveryScratchRelease, err := reserveScratchRoot(ctx, a.options.RuntimeResourceHooks, RuntimeResourceDiscovery)
-	if err != nil {
-		discoveryRelease()
-
-		return nil, nil, false, err
-	}
-
 	readinessStarted := time.Now()
 	startErr := a.ensureStartup(ctx, cwd, meta)
 	observeRuntimeStartupStage(ctx, a.options.RuntimeResourceHooks, RuntimeResourceDiscovery, RuntimeStartupReadiness, readinessStarted, startErr)
-
-	releaseNativeRootWhenQuiescent(discoveryRelease, startErr)
-	releaseScratchRootWhenQuiescent(discoveryScratchRelease, startErr)
 
 	if startErr != nil {
 		return nil, nil, false, startErr
@@ -597,7 +573,7 @@ func (a *Agent) loadOrResume(ctx context.Context, sessionID acp.SessionId, cwd s
 		meta.options.Mode = manifest.Mode
 	}
 
-	session, err := newAgentSession(ctx, a, sessionID, cwd, meta, mcpConfig, additionalDirs)
+	session, err := newLifecycleAgentSession(ctx, a, sessionID, cwd, meta, mcpConfig, additionalDirs)
 	if err != nil {
 		return nil, nil, false, err
 	}
@@ -830,19 +806,19 @@ func (a *Agent) pendingNativeDeleteIDs() []acp.SessionId {
 }
 
 func (a *Agent) retryPendingNativeDeletes(ctx context.Context) error {
-	var proofErr error
+	var boundaryErr error
 
 	for _, id := range a.pendingNativeDeleteIDs() {
 		if err := a.retryPendingNativeDelete(ctx, id); err != nil {
 			a.log.DebugContext(ctx, "retry amp native delete failed", slog.String(jsonFieldSessionID, string(id)), slog.String(jsonFieldError, err.Error()))
 
-			if errors.Is(err, ErrProcessTreeUnproven) {
-				proofErr = errors.Join(proofErr, err)
+			if errors.Is(err, ErrProcessContainmentIncomplete) {
+				boundaryErr = errors.Join(boundaryErr, err)
 			}
 		}
 	}
 
-	return proofErr
+	return boundaryErr
 }
 
 func (a *Agent) retryPendingNativeDelete(ctx context.Context, id acp.SessionId) error {
@@ -904,7 +880,7 @@ func (a *Agent) ensureStartup(ctx context.Context, cwd string, meta parsedSessio
 		return acp.NewInternalError(map[string]any{jsonFieldError: err.Error()})
 	}
 
-	client := amp.NewClient(a.log, amp.Options{
+	options := amp.Options{
 		CLIPath:                    a.options.ExecutablePath,
 		Cwd:                        cwd,
 		Env:                        env,
@@ -912,7 +888,10 @@ func (a *Agent) ensureStartup(ctx context.Context, cwd string, meta parsedSessio
 		MaxLineBytes:               a.options.runtime.maxJSONLineBytes,
 		OnGoroutinePanic:           a.onNativeGoroutinePanic,
 		NewProcessSnapshotObserver: a.newProcessSnapshotObserver,
-	})
+	}
+	a.configureNativeClient(&options, RuntimeResourceDiscovery)
+
+	client := amp.NewClient(a.log, options)
 	if err := a.options.runtime.startupProbe(ctx, client); err != nil {
 		return nativeInternalError(err)
 	}

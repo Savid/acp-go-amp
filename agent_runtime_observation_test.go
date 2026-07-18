@@ -18,7 +18,7 @@ func TestProviderProcessSnapshotTrackerAggregatesProvenRoots(t *testing.T) {
 			require.Equal(t, RuntimeProcessProviderDescendant, kind)
 			snapshots = append(snapshots, count)
 		},
-	})
+	}, true)
 
 	firstCount := 2
 	first := tracker.start(t.Context(), func() (int, bool) { return firstCount, true })
@@ -31,29 +31,29 @@ func TestProviderProcessSnapshotTrackerAggregatesProvenRoots(t *testing.T) {
 	// would incorrectly publish 5 here after the live inventory became 4.
 	firstCount = 4
 	second.refresh(t.Context())
-	first.quiescent(t.Context())
-	second.quiescent(t.Context())
+	first.complete(t.Context())
+	second.complete(t.Context())
 
 	require.Equal(t, []int{2, 5, 7, 3, 0}, snapshots)
 }
 
-func TestProviderProcessSnapshotTrackerUnprovenRootPreservesLastNonzero(t *testing.T) {
+func TestProviderProcessSnapshotTrackerIncompleteRootPreservesLastNonzero(t *testing.T) {
 	var snapshots []int
 	tracker := newProviderProcessSnapshotTracker(RuntimeResourceHooks{
 		ObserveProcessSnapshot: func(_ context.Context, _ RuntimeProcessKind, count int) {
 			snapshots = append(snapshots, count)
 		},
-	})
+	}, true)
 
-	unproven := tracker.start(t.Context(), func() (int, bool) { return 4, true })
-	unproven.refresh(t.Context())
-	unproven.unproven()
+	incomplete := tracker.start(t.Context(), func() (int, bool) { return 4, true })
+	incomplete.refresh(t.Context())
+	incomplete.incomplete()
 
 	other := tracker.start(t.Context(), func() (int, bool) { return 1, true })
 	other.refresh(t.Context())
-	other.quiescent(t.Context())
+	other.complete(t.Context())
 
-	require.Equal(t, []int{4}, snapshots, "unproven containment must suppress lower totals and zero")
+	require.Equal(t, []int{4}, snapshots, "incomplete containment must suppress lower totals and zero")
 }
 
 func TestProviderProcessSnapshotTrackerConcurrentLifecycle(t *testing.T) {
@@ -65,7 +65,7 @@ func TestProviderProcessSnapshotTrackerConcurrentLifecycle(t *testing.T) {
 		ObserveProcessSnapshot: func(_ context.Context, _ RuntimeProcessKind, count int) {
 			snapshots = append(snapshots, count)
 		},
-	})
+	}, true)
 	observations := make([]*providerProcessRootObservation, roots)
 	for i := range observations {
 		observations[i] = tracker.start(context.Background(), func() (int, bool) { return 1, available })
@@ -86,7 +86,7 @@ func TestProviderProcessSnapshotTrackerConcurrentLifecycle(t *testing.T) {
 		group.Add(1)
 		go func() {
 			defer group.Done()
-			observation.quiescent(context.Background())
+			observation.complete(context.Background())
 		}()
 	}
 	group.Wait()
@@ -101,7 +101,7 @@ func TestProviderProcessSnapshotTrackerHookReentryPublishesFreshAggregate(t *tes
 	var reentered bool
 	var second *providerProcessRootObservation
 
-	tracker := newProviderProcessSnapshotTracker(RuntimeResourceHooks{})
+	tracker := newProviderProcessSnapshotTracker(RuntimeResourceHooks{}, true)
 	tracker.hooks.ObserveProcessSnapshot = func(ctx context.Context, _ RuntimeProcessKind, count int) {
 		snapshots = append(snapshots, count)
 		if !reentered {
@@ -123,36 +123,36 @@ func TestProviderProcessSnapshotTrackerDefensiveAndDuplicateBoundaries(t *testin
 
 	var nilObservation *providerProcessRootObservation
 	nilObservation.refresh(ctx)
-	nilObservation.quiescent(ctx)
-	nilObservation.unproven()
+	nilObservation.complete(ctx)
+	nilObservation.incomplete()
 	(&providerProcessRootObservation{}).refresh(ctx)
-	(&providerProcessRootObservation{}).quiescent(ctx)
-	(&providerProcessRootObservation{}).unproven()
+	(&providerProcessRootObservation{}).complete(ctx)
+	(&providerProcessRootObservation{}).incomplete()
 
 	var snapshots []int
 	tracker := newProviderProcessSnapshotTracker(RuntimeResourceHooks{
 		ObserveProcessSnapshot: func(_ context.Context, _ RuntimeProcessKind, count int) {
 			snapshots = append(snapshots, count)
 		},
-	})
+	}, true)
 	root := tracker.start(ctx, func() (int, bool) { return 2, true })
 	root.refresh(ctx)
 	root.refresh(ctx)
-	root.quiescent(ctx)
+	root.complete(ctx)
 	root.refresh(ctx)
-	root.quiescent(ctx)
-	root.unproven()
+	root.complete(ctx)
+	root.incomplete()
 
 	require.Equal(t, []int{2, 0}, snapshots)
 
 	unavailable := tracker.start(ctx, nil)
 	unavailable.refresh(ctx)
-	unavailable.unproven()
-	negative := newProviderProcessSnapshotTracker(RuntimeResourceHooks{}).start(ctx, func() (int, bool) { return -1, true })
+	unavailable.incomplete()
+	negative := newProviderProcessSnapshotTracker(RuntimeResourceHooks{}, true).start(ctx, func() (int, bool) { return -1, true })
 	negative.refresh(ctx)
-	unknown := newProviderProcessSnapshotTracker(RuntimeResourceHooks{}).start(ctx, func() (int, bool) { return 0, false })
+	unknown := newProviderProcessSnapshotTracker(RuntimeResourceHooks{}, true).start(ctx, func() (int, bool) { return 0, false })
 	unknown.refresh(ctx)
-	zero := newProviderProcessSnapshotTracker(RuntimeResourceHooks{}).start(ctx, func() (int, bool) { return 0, true })
+	zero := newProviderProcessSnapshotTracker(RuntimeResourceHooks{}, true).start(ctx, func() (int, bool) { return 0, true })
 	zero.refresh(ctx)
 
 	entries, err := (&agentSession{agent: &Agent{}}).loadTranscript(ctx)
@@ -165,6 +165,7 @@ func TestRuntimeObservationHooksComposeExactLifetimes(t *testing.T) {
 	var processDelta int64
 	var snapshot int
 	var stage RuntimeStartupStage
+	var containment RuntimeContainmentMode
 	hooks := instrumentRuntimeResourceHooks(RuntimeResourceHooks{
 		AcquireNativeRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
 			return func() { releases++ }, nil
@@ -178,6 +179,7 @@ func TestRuntimeObservationHooksComposeExactLifetimes(t *testing.T) {
 		ObserveStartupStage: func(_ context.Context, _ RuntimeResourceKind, got RuntimeStartupStage, _ time.Duration, _ error) {
 			stage = got
 		},
+		ObserveContainment: func(_ context.Context, got RuntimeContainmentMode) { containment = got },
 	}, observer.New(observer.Config{}))
 
 	release, err := hooks.AcquireNativeRoot(t.Context(), RuntimeResourceSession)
@@ -189,9 +191,11 @@ func TestRuntimeObservationHooksComposeExactLifetimes(t *testing.T) {
 	observeRuntimeProcess(t.Context(), hooks, RuntimeProcessHomeLockSupervisor, 2)
 	observeRuntimeProcessSnapshot(t.Context(), hooks, RuntimeProcessProviderDescendant, 3)
 	observeRuntimeStartupStage(t.Context(), hooks, RuntimeResourceRuntime, RuntimeStartupReadiness, time.Now(), nil)
+	hooks.ObserveContainment(t.Context(), RuntimeContainmentBestEffort)
 	require.Equal(t, int64(2), processDelta)
 	require.Equal(t, 3, snapshot)
 	require.Equal(t, RuntimeStartupReadiness, stage)
+	require.Equal(t, RuntimeContainmentBestEffort, containment)
 
 	wantErr := errors.New("full")
 	rejected := instrumentRuntimeResourceHooks(RuntimeResourceHooks{

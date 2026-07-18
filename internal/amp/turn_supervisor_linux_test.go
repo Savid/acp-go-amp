@@ -208,19 +208,19 @@ func (c *recordingWriteCloser) Close() error {
 func TestPrepareTurnSupervisorBranches(t *testing.T) {
 	restoreTurnSupervisorSeams(t)
 
-	if _, err := prepareProcessTreeCommand(&exec.Cmd{}); err == nil {
+	if _, err := prepareProcessTreeCommand(&exec.Cmd{}, processLaunchOptions{}); err == nil {
 		t.Fatal("incomplete native command was accepted")
 	}
 
 	native := exec.Command("true")
 	turnSupervisorMemfd = func(string, int) (int, error) { return 0, errors.New("memfd") }
-	if _, err := prepareProcessTreeCommand(native); err == nil {
+	if _, err := prepareProcessTreeCommand(native, processLaunchOptions{}); err == nil {
 		t.Fatal("memfd failure was ignored")
 	}
 
 	turnSupervisorMemfd = unix.MemfdCreate
 	turnSupervisorWriteConfig = func(io.WriteSeeker, turnSupervisorConfig) error { return errors.New("write") }
-	if _, err := prepareProcessTreeCommand(native); err == nil {
+	if _, err := prepareProcessTreeCommand(native, processLaunchOptions{}); err == nil {
 		t.Fatal("config write failure was ignored")
 	}
 	turnSupervisorWriteConfig = writeTurnSupervisorConfig
@@ -234,7 +234,7 @@ func TestPrepareTurnSupervisorBranches(t *testing.T) {
 
 		return os.Pipe()
 	}
-	if _, err := prepareProcessTreeCommand(native); err == nil {
+	if _, err := prepareProcessTreeCommand(native, processLaunchOptions{}); err == nil {
 		t.Fatal("control pipe failure was ignored")
 	}
 
@@ -247,18 +247,18 @@ func TestPrepareTurnSupervisorBranches(t *testing.T) {
 
 		return os.Pipe()
 	}
-	if _, err := prepareProcessTreeCommand(native); err == nil {
+	if _, err := prepareProcessTreeCommand(native, processLaunchOptions{}); err == nil {
 		t.Fatal("readiness pipe failure was ignored")
 	}
 
 	turnSupervisorPipe = os.Pipe
 	turnSupervisorExecutable = func() (string, error) { return "", errors.New("executable") }
-	if _, err := prepareProcessTreeCommand(native); err == nil {
+	if _, err := prepareProcessTreeCommand(native, processLaunchOptions{}); err == nil {
 		t.Fatal("executable failure was ignored")
 	}
 
 	turnSupervisorExecutable = os.Executable
-	launch, err := prepareProcessTreeCommand(native)
+	launch, err := prepareProcessTreeCommand(native, processLaunchOptions{})
 	if err != nil {
 		t.Fatalf("prepare supervisor: %v", err)
 	}
@@ -500,7 +500,7 @@ func TestContainLinuxSupervisorDescendantsBranches(t *testing.T) {
 
 	turnSupervisorWait4 = func(int, *unix.WaitStatus, int, *unix.Rusage) (int, error) { return 0, nil }
 	turnSupervisorDescendants = func(int) ([]linuxProcessIdentity, error) { return nil, errors.New("list") }
-	if err := containLinuxSupervisorDescendants(1, 2); !errors.Is(err, ErrProcessTreeNotQuiescent) {
+	if err := containLinuxSupervisorDescendants(1, 2); !errors.Is(err, ErrProcessContainmentIncomplete) {
 		t.Fatalf("list failure = %v", err)
 	}
 
@@ -537,14 +537,14 @@ func TestContainLinuxSupervisorDescendantsBranches(t *testing.T) {
 	turnSupervisorWait4 = func(int, *unix.WaitStatus, int, *unix.Rusage) (int, error) {
 		return -1, unix.EPERM
 	}
-	if err := containLinuxSupervisorDescendants(1, 2); !errors.Is(err, ErrProcessTreeNotQuiescent) {
+	if err := containLinuxSupervisorDescendants(1, 2); !errors.Is(err, ErrProcessContainmentIncomplete) {
 		t.Fatalf("wait failure = %v", err)
 	}
 
 	turnSupervisorWait4 = func(int, *unix.WaitStatus, int, *unix.Rusage) (int, error) {
 		return -1, nil
 	}
-	if err := containLinuxSupervisorDescendants(1, 2); !errors.Is(err, ErrProcessTreeNotQuiescent) {
+	if err := containLinuxSupervisorDescendants(1, 2); !errors.Is(err, ErrProcessContainmentIncomplete) {
 		t.Fatalf("invalid wait result = %v", err)
 	}
 
@@ -552,7 +552,7 @@ func TestContainLinuxSupervisorDescendantsBranches(t *testing.T) {
 	turnSupervisorWait4 = func(int, *unix.WaitStatus, int, *unix.Rusage) (int, error) { return 0, nil }
 	turnSupervisorDescendants = func(int) ([]linuxProcessIdentity, error) { return []linuxProcessIdentity{descendant}, nil }
 	turnSupervisorSignalPID = func(linuxProcessIdentity, syscall.Signal) error { return errors.New("kill") }
-	if err := containLinuxSupervisorDescendants(1, 2); !errors.Is(err, ErrProcessTreeNotQuiescent) {
+	if err := containLinuxSupervisorDescendants(1, 2); !errors.Is(err, ErrProcessContainmentIncomplete) {
 		t.Fatalf("kill failure = %v", err)
 	}
 
@@ -697,9 +697,9 @@ func TestSignalLinuxIdentityBranches(t *testing.T) {
 	}
 }
 
-func TestTurnInterruptPropagatesTreeProofFailure(t *testing.T) {
+func TestTurnInterruptPropagatesTreeContainmentFailure(t *testing.T) {
 	path, state := fakeAmpPath(t, "sigint-ignore")
-	turn, err := NewClient(nil, Options{CLIPath: path, Cwd: t.TempDir()}).Continue(
+	turn, err := newTestClient(t, nil, Options{CLIPath: path, Cwd: t.TempDir()}).Continue(
 		context.Background(), "T-1", map[string]any{"type": "user"},
 	)
 	if err != nil {
@@ -708,13 +708,13 @@ func TestTurnInterruptPropagatesTreeProofFailure(t *testing.T) {
 	waitForFile(t, filepath.Join(state, "stdin.jsonl"))
 
 	original := processTreeTerminateAndWait
-	processTreeTerminateAndWait = func(*processTree, time.Duration) error { return ErrProcessTreeNotQuiescent }
+	processTreeTerminateAndWait = func(*processTree, time.Duration) error { return ErrProcessContainmentIncomplete }
 	err = turn.Interrupt(context.Background(), 10*time.Millisecond)
 	processTreeTerminateAndWait = original
-	if !errors.Is(err, ErrProcessTreeNotQuiescent) {
+	if !errors.Is(err, ErrProcessContainmentIncomplete) {
 		t.Fatalf("Interrupt error = %v, want proof sentinel", err)
 	}
-	if err := turn.Close(); errors.Is(err, ErrProcessTreeNotQuiescent) {
+	if err := turn.Close(); errors.Is(err, ErrProcessContainmentIncomplete) {
 		t.Fatalf("Close retained stale proof sentinel: %v", err)
 	}
 }
@@ -732,7 +732,7 @@ func TestOneShotSupervisorContainsTreeAfterAdapterDeath(t *testing.T) {
 		result := make(chan error, 1)
 
 		go func() {
-			_, err := NewClient(nil, Options{
+			_, err := newTestClient(t, nil, Options{
 				CLIPath: path,
 				Cwd:     filepath.Dir(path),
 				Env:     map[string]string{"AMP_CHILD_PID_FILE": filepath.Join(state, "child.pid")},
@@ -802,7 +802,7 @@ func TestOneShotSupervisorContainsTreeAfterAdapterDeath(t *testing.T) {
 	}
 }
 
-func TestTurnCloseBoundsPersistentSupervisorProofFailure(t *testing.T) {
+func TestTurnCloseBoundsPersistentSupervisorContainmentFailure(t *testing.T) {
 	originalProof := processTreeTerminateAndWait
 	originalKill := syscallKill
 	t.Cleanup(func() {
@@ -811,12 +811,12 @@ func TestTurnCloseBoundsPersistentSupervisorProofFailure(t *testing.T) {
 	})
 
 	processTreeTerminateAndWait = func(*processTree, time.Duration) error {
-		return ErrProcessTreeNotQuiescent
+		return ErrProcessContainmentIncomplete
 	}
 	syscallKill = func(int, syscall.Signal) error { return nil }
 
 	releaseWait := make(chan struct{})
-	unproven := 0
+	incomplete := 0
 	turn := &Turn{
 		cmd:  &exec.Cmd{Process: &os.Process{Pid: 12345}},
 		tree: &processTree{pgid: 12345, supervised: true},
@@ -825,7 +825,7 @@ func TestTurnCloseBoundsPersistentSupervisorProofFailure(t *testing.T) {
 
 			return nil
 		},
-		processObserver: ProcessSnapshotObserver{Unproven: func() { unproven++ }},
+		processObserver: ProcessSnapshotObserver{Incomplete: func() { incomplete++ }},
 	}
 
 	started := time.Now()
@@ -833,14 +833,14 @@ func TestTurnCloseBoundsPersistentSupervisorProofFailure(t *testing.T) {
 	elapsed := time.Since(started)
 	close(releaseWait)
 
-	if !errors.Is(err, ErrProcessTreeNotQuiescent) {
+	if !errors.Is(err, ErrProcessContainmentIncomplete) {
 		t.Fatalf("Close error = %v, want proof sentinel", err)
 	}
 	if elapsed > time.Second {
 		t.Fatalf("Close blocked on persistent supervisor proof for %s", elapsed)
 	}
-	if unproven != 1 {
-		t.Fatalf("unproven observations = %d, want 1", unproven)
+	if incomplete != 1 {
+		t.Fatalf("incomplete observations = %d, want 1", incomplete)
 	}
 }
 
@@ -857,10 +857,10 @@ func TestPreparedCommandAndClientErrorBranches(t *testing.T) {
 		commandWaitTimeout = originalWaitTimeout
 	})
 
-	prepareProcessTree = func(*exec.Cmd) (*processTreeCommand, error) {
+	prepareProcessTree = func(_ *exec.Cmd, _ processLaunchOptions) (*processTreeCommand, error) {
 		return nil, errors.New("prepare")
 	}
-	client := NewClient(nil, Options{CLIPath: path, Cwd: t.TempDir()})
+	client := newTestClient(t, nil, Options{CLIPath: path, Cwd: t.TempDir()})
 	if _, err := client.Continue(t.Context(), "T-1", map[string]any{"type": "user"}); err == nil {
 		t.Fatal("Continue prepare failure was ignored")
 	}
@@ -877,7 +877,7 @@ func TestPreparedCommandAndClientErrorBranches(t *testing.T) {
 		{name: "stderr", shape: func(cmd *exec.Cmd) { cmd.Stderr = io.Discard }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			prepareProcessTree = func(cmd *exec.Cmd) (*processTreeCommand, error) {
+			prepareProcessTree = func(cmd *exec.Cmd, _ processLaunchOptions) (*processTreeCommand, error) {
 				test.shape(cmd)
 
 				return &processTreeCommand{cmd: cmd}, nil
@@ -890,9 +890,9 @@ func TestPreparedCommandAndClientErrorBranches(t *testing.T) {
 
 	prepareProcessTree = originalPrepare
 	processTreeTerminateAndWait = func(*processTree, time.Duration) error {
-		return ErrProcessTreeNotQuiescent
+		return ErrProcessContainmentIncomplete
 	}
-	if _, err := client.outputRaw(t.Context(), "threads", "list"); !errors.Is(err, ErrProcessTreeNotQuiescent) {
+	if _, err := client.outputRaw(t.Context(), "threads", "list"); !errors.Is(err, ErrProcessContainmentIncomplete) {
 		t.Fatalf("empty-stderr proof failure = %v", err)
 	}
 
@@ -925,12 +925,12 @@ func TestPreparedCommandAndClientErrorBranches(t *testing.T) {
 		t.Fatal(err)
 	}
 	launch = &processTreeCommand{cmd: exec.Command("sh", "-c", "exit 0"), ready: ready}
-	if _, err := startProcessTree(launch); !errors.Is(err, ErrProcessTreeNotQuiescent) {
+	if _, err := startProcessTree(launch); !errors.Is(err, ErrProcessContainmentIncomplete) {
 		t.Fatalf("failed-launch wait timeout = %v", err)
 	}
 }
 
-func TestOneShotWaitTimeoutReportsUnprovenTree(t *testing.T) {
+func TestOneShotWaitTimeoutReportsIncompleteBoundary(t *testing.T) {
 	path, _ := fakeAmpPath(t, "")
 	originalWait := newCommandWait
 	originalWaitTimeout := commandWaitTimeout
@@ -946,21 +946,21 @@ func TestOneShotWaitTimeoutReportsUnprovenTree(t *testing.T) {
 	}
 	commandWaitTimeout = time.Millisecond
 
-	unproven := 0
-	client := NewClient(nil, Options{
+	incomplete := 0
+	client := newTestClient(t, nil, Options{
 		CLIPath: path,
 		Cwd:     t.TempDir(),
 		NewProcessSnapshotObserver: func(context.Context, ProcessInventory) ProcessSnapshotObserver {
-			return ProcessSnapshotObserver{Unproven: func() { unproven++ }}
+			return ProcessSnapshotObserver{Incomplete: func() { incomplete++ }}
 		},
 	})
 	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
 	defer cancel()
-	if _, err := client.outputRaw(ctx, "version"); !errors.Is(err, ErrProcessTreeNotQuiescent) {
+	if _, err := client.outputRaw(ctx, "version"); !errors.Is(err, ErrProcessContainmentIncomplete) {
 		t.Fatalf("one-shot wait timeout = %v", err)
 	}
-	if unproven != 1 {
-		t.Fatalf("one-shot unproven observations = %d, want 1", unproven)
+	if incomplete != 1 {
+		t.Fatalf("one-shot incomplete observations = %d, want 1", incomplete)
 	}
 }
 
@@ -975,21 +975,21 @@ func TestCommandWaitNilAndCloseWaitTimeout(t *testing.T) {
 	t.Cleanup(func() { commandWaitTimeout = originalTimeout })
 
 	release := make(chan struct{})
-	unproven := 0
+	incomplete := 0
 	turn := &Turn{
 		waitFunc: func() error {
 			<-release
 
 			return nil
 		},
-		processObserver: ProcessSnapshotObserver{Unproven: func() { unproven++ }},
+		processObserver: ProcessSnapshotObserver{Incomplete: func() { incomplete++ }},
 	}
 	err := turn.Close()
 	close(release)
-	if !errors.Is(err, ErrProcessTreeNotQuiescent) {
+	if !errors.Is(err, ErrProcessContainmentIncomplete) {
 		t.Fatalf("Close wait timeout = %v", err)
 	}
-	if unproven != 1 {
-		t.Fatalf("Close timeout unproven observations = %d, want 1", unproven)
+	if incomplete != 1 {
+		t.Fatalf("Close timeout incomplete observations = %d, want 1", incomplete)
 	}
 }

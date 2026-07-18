@@ -35,7 +35,7 @@ func TestHandleAgentGoroutinePanicBranches(t *testing.T) {
 	if agentLogger(nil) != nil {
 		t.Fatal("nil agent logger returned non-nil")
 	}
-	agent := NewAgent()
+	agent := newTestAgent()
 	if agentLogger(agent) != agent.log {
 		t.Fatal("agent logger mismatch")
 	}
@@ -43,7 +43,7 @@ func TestHandleAgentGoroutinePanicBranches(t *testing.T) {
 
 func TestOnNativeGoroutinePanicLogs(t *testing.T) {
 	var buf bytes.Buffer
-	agent := NewAgent(WithLogger(slog.New(slog.NewTextHandler(&buf, nil))))
+	agent := newTestAgent(WithLogger(slog.New(slog.NewTextHandler(&buf, nil))))
 
 	agent.onNativeGoroutinePanic(context.Background(), "native goroutine", "native boom")
 

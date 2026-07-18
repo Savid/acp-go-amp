@@ -20,31 +20,31 @@ import (
 func TestAgentLifecycleErrorBranches(t *testing.T) {
 	ctx := context.Background()
 	path, _ := fakeAgentAmpPath(t, "")
-	if _, err := NewAgent(WithExecutablePath(path)).NewSession(ctx, acp.NewSessionRequest{Meta: map[string]any{"amp": "bad"}}); err == nil {
+	if _, err := newTestAgent(WithExecutablePath(path)).NewSession(ctx, acp.NewSessionRequest{Meta: map[string]any{"amp": "bad"}}); err == nil {
 		t.Fatal("bad meta accepted")
 	}
-	if _, err := NewAgent(WithExecutablePath(path), WithDefaultModel("model")).NewSession(ctx, NewSessionRequest(t.TempDir())); err == nil {
+	if _, err := newTestAgent(WithExecutablePath(path), WithDefaultModel("model")).NewSession(ctx, NewSessionRequest(t.TempDir())); err == nil {
 		t.Fatal("default model accepted at session start")
 	}
-	if _, err := NewAgent(WithExecutablePath(path)).NewSession(ctx, NewSessionRequest(t.TempDir(), WithSessionMCPServers(acp.McpServer{Sse: &acp.McpServerSseInline{Name: "s", Url: "u"}}))); err == nil {
+	if _, err := newTestAgent(WithExecutablePath(path)).NewSession(ctx, NewSessionRequest(t.TempDir(), WithSessionMCPServers(acp.McpServer{Sse: &acp.McpServerSseInline{Name: "s", Url: "u"}}))); err == nil {
 		t.Fatal("sse mcp accepted")
 	}
 	fileHome := filepath.Join(t.TempDir(), "home-file")
 	if err := os.WriteFile(fileHome, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := NewAgent(WithExecutablePath(path), WithScratchDir(fileHome)).NewSession(ctx, NewSessionRequest(t.TempDir())); err == nil {
+	if _, err := newTestAgent(WithExecutablePath(path), WithScratchDir(fileHome)).NewSession(ctx, NewSessionRequest(t.TempDir())); err == nil {
 		t.Fatal("file scratch dir accepted")
 	}
 	badPath, _ := fakeAgentAmpPath(t, "bad-new-id")
-	if _, err := NewAgent(WithExecutablePath(badPath), WithScratchDir(t.TempDir())).NewSession(ctx, NewSessionRequest(t.TempDir())); err == nil {
+	if _, err := newTestAgent(WithExecutablePath(badPath), WithScratchDir(t.TempDir())).NewSession(ctx, NewSessionRequest(t.TempDir())); err == nil {
 		t.Fatal("bad native thread id accepted")
 	}
 	storeErr := &errorStore{loadErr: errors.New("load failed")}
-	if _, err := NewAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()), WithSessionStore(storeErr)).NewSession(ctx, NewSessionRequest(t.TempDir())); err == nil {
+	if _, err := newTestAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()), WithSessionStore(storeErr)).NewSession(ctx, NewSessionRequest(t.TempDir())); err == nil {
 		t.Fatal("persist load error ignored")
 	}
-	limited := NewAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()), WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1}))
+	limited := newTestAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()), WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1}))
 	if _, err := limited.NewSession(ctx, NewSessionRequest(t.TempDir())); err != nil {
 		t.Fatalf("first limited NewSession: %v", err)
 	}
@@ -73,7 +73,7 @@ func TestLoadResumeManifestAndConfigBranches(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	agent := NewAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()), WithSessionStore(store), WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 2}))
+	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()), WithSessionStore(store), WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 2}))
 	client, cleanup := attachRecordingClient(t, agent)
 	defer cleanup()
 	if _, err := agent.LoadSession(ctx, LoadSessionRequest("T-load", cwd, WithSessionRawEvents(true))); err != nil {
@@ -126,7 +126,7 @@ func TestLoadResumeManifestAndConfigBranches(t *testing.T) {
 		}); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := NewAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()), WithSessionStore(badStore)).LoadSession(ctx, LoadSessionRequest("T-bad", cwd)); err == nil {
+		if _, err := newTestAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()), WithSessionStore(badStore)).LoadSession(ctx, LoadSessionRequest("T-bad", cwd)); err == nil {
 			t.Fatal("bad transcript replay accepted")
 		}
 	}
@@ -134,7 +134,7 @@ func TestLoadResumeManifestAndConfigBranches(t *testing.T) {
 
 func TestLoadManifestErrorsAndListFilters(t *testing.T) {
 	ctx := context.Background()
-	agent := NewAgent()
+	agent := newTestAgent()
 	if _, err := agent.loadManifest(ctx, "T-missing"); err == nil {
 		t.Fatal("missing manifest accepted")
 	}
@@ -147,7 +147,7 @@ func TestLoadManifestErrorsAndListFilters(t *testing.T) {
 		if err := store.Replace(ctx, SessionKey{SessionID: "T-bad", Subpath: SessionStoreMainSubpath}, []SessionStoreReplacement{{Key: SessionKey{SessionID: "T-bad", Subpath: SessionStoreMainSubpath}, Entries: []SessionStoreEntry{entry}}}); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := NewAgent(WithSessionStore(store)).loadManifest(ctx, "T-bad"); err == nil {
+		if _, err := newTestAgent(WithSessionStore(store)).loadManifest(ctx, "T-bad"); err == nil {
 			t.Fatalf("bad manifest accepted: %s", entry)
 		}
 	}
@@ -159,11 +159,11 @@ func TestLoadManifestErrorsAndListFilters(t *testing.T) {
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := NewAgent(WithSessionStore(overlongStore)).loadManifest(ctx, overlongID); err == nil {
+	if _, err := newTestAgent(WithSessionStore(overlongStore)).loadManifest(ctx, overlongID); err == nil {
 		t.Fatal("overlong stored thread id admitted")
 	}
 	errStore := &errorStore{listErr: errors.New("list failed")}
-	if _, err := NewAgent(WithSessionStore(errStore)).ListSessions(ctx, acp.ListSessionsRequest{}); err == nil {
+	if _, err := newTestAgent(WithSessionStore(errStore)).ListSessions(ctx, acp.ListSessionsRequest{}); err == nil {
 		t.Fatal("list error ignored")
 	}
 	store := NewInMemorySessionStore()
@@ -171,7 +171,7 @@ func TestLoadManifestErrorsAndListFilters(t *testing.T) {
 	if err := store.Replace(ctx, SessionKey{SessionID: "T-list", Subpath: SessionStoreMainSubpath}, []SessionStoreReplacement{{Key: SessionKey{SessionID: "T-list", Subpath: SessionStoreMainSubpath}, Entries: []SessionStoreEntry{manifest}}}); err != nil {
 		t.Fatal(err)
 	}
-	resp, err := NewAgent(WithSessionStore(store)).ListSessions(ctx, acp.ListSessionsRequest{Cwd: acp.Ptr("/other")})
+	resp, err := newTestAgent(WithSessionStore(store)).ListSessions(ctx, acp.ListSessionsRequest{Cwd: acp.Ptr("/other")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +183,7 @@ func TestLoadManifestErrorsAndListFilters(t *testing.T) {
 func TestRemainingAgentBranches(t *testing.T) {
 	ctx := context.Background()
 	path, _ := fakeAgentAmpPath(t, "")
-	agent := NewAgent(WithExecutablePath(path))
+	agent := newTestAgent(WithExecutablePath(path))
 	if _, err := newAgentSession(ctx, agent, acp.SessionId("T-"+strings.Repeat("x", ampnative.MaxThreadIDBytes)), t.TempDir(), parsedSessionMeta{}, "", nil); err == nil {
 		t.Fatal("overlong thread id admitted")
 	}
@@ -208,10 +208,10 @@ func TestRemainingAgentBranches(t *testing.T) {
 	if err := store.Replace(ctx, SessionKey{SessionID: "T-file", Subpath: ""}, []SessionStoreReplacement{{Key: SessionKey{SessionID: "T-file", Subpath: ""}, Entries: []SessionStoreEntry{manifest}}}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := NewAgent(WithExecutablePath(path), WithScratchDir(fileHome), WithSessionStore(store)).LoadSession(ctx, LoadSessionRequest("T-file", t.TempDir())); err == nil {
+	if _, err := newTestAgent(WithExecutablePath(path), WithScratchDir(fileHome), WithSessionStore(store)).LoadSession(ctx, LoadSessionRequest("T-file", t.TempDir())); err == nil {
 		t.Fatal("load with file scratch dir accepted")
 	}
-	activeLimited := NewAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()), WithSessionStore(store), WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 0}))
+	activeLimited := newTestAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()), WithSessionStore(store), WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 0}))
 	activeLimited.options.ConcurrencyLimits.MaxActiveSessions = 0
 	if _, _, _, err := activeLimited.loadOrResume(ctx, "T-file", t.TempDir(), nil, nil, nil); err != nil {
 		t.Fatalf("loadOrResume direct: %v", err)
@@ -275,7 +275,7 @@ func TestPromptInputAndEmitBranches(t *testing.T) {
 	if _, err := promptInput([]acp.ContentBlock{acp.ResourceBlock(acp.EmbeddedResourceResource{})}); err == nil {
 		t.Fatal("empty embedded resource accepted")
 	}
-	session := &agentSession{agent: NewAgent(), id: "T-emit", rawEvents: true}
+	session := &agentSession{agent: newTestAgent(), id: "T-emit", rawEvents: true}
 	if err := session.emitUsage(context.Background(), nil); err != nil {
 		t.Fatal(err)
 	}
@@ -345,7 +345,7 @@ func newClosedAgentConnection(t *testing.T) *localAgentConnection {
 	t.Helper()
 	c2aR, c2aW := io.Pipe()
 	a2cR, a2cW := io.Pipe()
-	conn := newLocalAgentConnection(NewAgent(), a2cW, c2aR)
+	conn := newLocalAgentConnection(newTestAgent(), a2cW, c2aR)
 	_ = a2cR.Close()
 	t.Cleanup(func() {
 		_ = c2aW.Close()
@@ -423,7 +423,7 @@ func TestActiveLoadResumeValidation(t *testing.T) {
 	ctx := context.Background()
 	path, _ := fakeAgentAmpPath(t, "")
 	cwd := t.TempDir()
-	agent := NewAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()))
+	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()))
 	resp, err := agent.NewSession(ctx, NewSessionRequest(cwd))
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
@@ -476,7 +476,7 @@ func TestMirrorUnsyncedRetention(t *testing.T) {
 	path, _ := fakeAgentAmpPath(t, "")
 	cwd := t.TempDir()
 	store := &flakyReplaceStore{InMemorySessionStore: NewInMemorySessionStore()}
-	agent := NewAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()), WithSessionStore(store))
+	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()), WithSessionStore(store))
 	resp, err := agent.NewSession(ctx, NewSessionRequest(cwd))
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
@@ -512,7 +512,7 @@ func TestMirrorUnsyncedRetention(t *testing.T) {
 	}
 
 	// Load replay on a fresh agent must succeed and see the retained turns.
-	restored := NewAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()), WithSessionStore(store))
+	restored := newTestAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()), WithSessionStore(store))
 	if _, err := restored.LoadSession(ctx, LoadSessionRequest(id, cwd)); err != nil {
 		t.Fatalf("load replay after retention: %v", err)
 	}
@@ -521,7 +521,7 @@ func TestMirrorUnsyncedRetention(t *testing.T) {
 // TestCancelAlreadyCancelledBranch deterministically covers Cancel
 // on an already-cancelled active prompt returning nil without re-interrupting.
 func TestCancelAlreadyCancelledBranch(t *testing.T) {
-	session := &agentSession{agent: NewAgent()}
+	session := &agentSession{agent: newTestAgent()}
 	state := newPromptTurnState()
 	state.cancel()
 	session.setActivePrompt(state)
@@ -572,12 +572,12 @@ func TestSessionDirectBranches(t *testing.T) {
 	if err := os.WriteFile(fileScratch, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := newAgentSession(t.Context(), NewAgent(WithScratchDir(fileScratch)), "T-1", "", parsedSessionMeta{}, "", nil); err == nil {
+	if _, err := newAgentSession(t.Context(), newTestAgent(WithScratchDir(fileScratch)), "T-1", "", parsedSessionMeta{}, "", nil); err == nil {
 		t.Fatal("newAgentSession with file scratch dir succeeded")
 	}
 
 	path, _ := fakeAgentAmpPath(t, "")
-	agent := NewAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()))
+	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()))
 	session, err := newAgentSession(t.Context(), agent, "T-1", t.TempDir(), parsedSessionMeta{rawEvent: true}, "", nil)
 	if err != nil {
 		t.Fatal(err)

@@ -21,7 +21,7 @@ func ExampleServe_initialize() {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- Serve(ctx, clientToAgentReader, agentToClientWriter)
+		done <- serveTest(ctx, clientToAgentReader, agentToClientWriter)
 	}()
 
 	_, _ = fmt.Fprintln(clientToAgentWriter, `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}`)

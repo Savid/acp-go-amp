@@ -26,7 +26,10 @@ unsupported: a non-empty value fails session start.
 `-debug` writes adapter logs to stderr; ACP JSON-RPC stays on stdout only. Amp
 `mode` is an ACP session config option, not a command flag. The
 serve-mode flags are `-path`, `-scratch-dir`, `-home`, `-model`, `-seed-file`,
-`-debug`, and `-version` — see the [CLI reference](/docs/reference/cli) for each.
+`-darwin-best-effort-containment`, `-debug`, and `-version` — see the
+[CLI reference](/docs/reference/cli) for each. Darwin fails native launches
+closed unless that best-effort flag is supplied; read its residual risks before
+enabling it.
 
 ## Embedded
 
@@ -43,6 +46,7 @@ err := ampacp.Serve(ctx, input, output,
 
 Every command flag has an option equivalent (`-path` ↔ `WithExecutablePath`,
 `-scratch-dir` ↔ `WithScratchDir`, `-home` ↔ `WithHome` (unsupported),
-`-seed-file` ↔ `WithSeedFiles`), plus embed-only options such as
+`-seed-file` ↔ `WithSeedFiles`, `-darwin-best-effort-containment` ↔
+`WithDarwinBestEffortContainment`), plus embed-only options such as
 `WithSessionStore` and the OpenTelemetry providers. See the
 [Go API](/docs/reference/go-api) for the full set.

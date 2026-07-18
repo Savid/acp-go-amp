@@ -115,7 +115,7 @@ func (s *promptTurnState) awaitCompletion(ctx context.Context) error {
 
 		return s.closeErr
 	case <-ctx.Done():
-		return fmt.Errorf("%w: wait for active Amp turn cleanup: %v", amp.ErrProcessTreeNotQuiescent, ctx.Err())
+		return fmt.Errorf("%w: wait for active Amp turn cleanup: %v", amp.ErrProcessContainmentIncomplete, ctx.Err())
 	}
 }
 
@@ -172,20 +172,14 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (re
 	}
 
 	s.agent.observe.RecordAmpProcessStart(continueCtx)
-	promptClient := s.clientWithEnv(s.agent.observe.InjectTraceEnv(continueCtx, s.env), mcpConfigPath)
-
-	nativeRelease, err := acquireNativeRoot(continueCtx, s.agent.options.RuntimeResourceHooks, RuntimeResourcePrompt)
-	if err != nil {
-		return acp.PromptResponse{}, err
-	}
+	promptClient := s.clientWithEnv(s.agent.observe.InjectTraceEnv(continueCtx, s.env), mcpConfigPath, RuntimeResourcePrompt)
 
 	spawnStarted := time.Now()
-	turn, err := promptClient.Continue(continueCtx, string(s.id), input)
+	turn, err := s.agent.options.runtime.continueThread(continueCtx, promptClient, string(s.id), input)
 	observeRuntimeStartupStage(continueCtx, s.agent.options.RuntimeResourceHooks, RuntimeResourcePrompt, RuntimeStartupSpawn, spawnStarted, err)
 
 	if err != nil {
-		releaseNativeRootWhenQuiescent(nativeRelease, err)
-		s.recordScratchQuiescence(err)
+		s.recordScratchContainment(err)
 
 		if state.isCancelled() {
 			return cancelledPromptResponse(nil, params.MessageId), nil
@@ -197,8 +191,8 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (re
 	defer func() {
 		closeErr := turn.Close()
 		state.complete(closeErr)
-		s.recordScratchQuiescence(closeErr)
-		resp, returnErr = finalizeNativePrompt(resp, returnErr, closeErr, nativeRelease)
+		s.recordScratchContainment(closeErr)
+		resp, returnErr = finalizeNativePrompt(resp, returnErr, closeErr)
 	}()
 
 	state.setTurn(turn)
@@ -319,11 +313,8 @@ func finalizeNativePrompt(
 	resp acp.PromptResponse,
 	returnErr error,
 	closeErr error,
-	release func(),
 ) (acp.PromptResponse, error) {
-	releaseNativeRootWhenQuiescent(release, closeErr)
-
-	if !amp.ProcessTreeQuiescent(closeErr) {
+	if !amp.ProcessContainmentComplete(closeErr) {
 		return acp.PromptResponse{}, errors.Join(returnErr, closeErr)
 	}
 
@@ -441,10 +432,6 @@ func (s *agentSession) emitMessage(ctx context.Context, msg amp.Message, live bo
 	return nil
 }
 
-// parentToolUseTag returns the delegated-agent provenance id to stamp on every
-// update derived from the frame, both live and during session/load replay. The
-// transcript preserves the native parent_tool_use_id, so replay can reproduce
-// the same attribution without adapter-owned state.
 func parentToolUseTag(frameID string) string {
 	return frameID
 }
@@ -836,7 +823,7 @@ func isNativeMissingError(err error) bool {
 		return false
 	}
 
-	if errors.Is(err, amp.ErrProcessTreeNotQuiescent) {
+	if errors.Is(err, amp.ErrProcessContainmentIncomplete) {
 		return false
 	}
 

@@ -1,4 +1,4 @@
-//go:build darwin || freebsd || openbsd
+//go:build freebsd || openbsd
 
 package amp
 
@@ -7,10 +7,10 @@ import (
 	"os/exec"
 )
 
-func prepareProcessTreeCommand(*exec.Cmd) (*processTreeCommand, error) {
+func prepareProcessTreeCommand(_ *exec.Cmd, _ processLaunchOptions) (*processTreeCommand, error) {
 	return nil, fmt.Errorf(
-		"%w: platform cannot prove Amp native-command descendants that escape a process group",
-		ErrProcessTreeNotQuiescent,
+		"%w: platform containment backend unavailable",
+		ErrProcessContainmentIncomplete,
 	)
 }
 

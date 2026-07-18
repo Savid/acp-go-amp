@@ -22,7 +22,7 @@ import (
 )
 
 func TestInitializeShape(t *testing.T) {
-	agent := NewAgent()
+	agent := newTestAgent()
 	resp, err := agent.Initialize(context.Background(), acp.InitializeRequest{})
 	if err != nil {
 		t.Fatal(err)
@@ -39,7 +39,7 @@ func TestInitializeShape(t *testing.T) {
 }
 
 func TestForkExtensionUnsupported(t *testing.T) {
-	agent := NewAgent()
+	agent := newTestAgent()
 	_, err := agent.HandleExtensionMethod(context.Background(), ForkSessionMethod, json.RawMessage(`{}`))
 	var reqErr *acp.RequestError
 	if !errors.As(err, &reqErr) {
@@ -154,7 +154,7 @@ func TestServeFakeAmpLifecycleStdoutCleanStoreReplayAndDelete(t *testing.T) {
 
 	// The stable ACP session/fork route must be method-not-found (-32601);
 	// asserted via raw method-name dispatch, never the SDK fork helper.
-	stableForkConn := &localAgentConnection{agent: NewAgent()}
+	stableForkConn := &localAgentConnection{agent: newTestAgent()}
 	stableForkConn.initialized.Store(true)
 	rawFork, rawForkErr := json.Marshal(ForkSessionRequest("T-agent-thread", cwd))
 	if rawForkErr != nil {
@@ -295,7 +295,7 @@ func TestAgentErrorAndConformanceBranches(t *testing.T) {
 		{Elicitation: &acp.ElicitationCapabilities{Url: &acp.ElicitationUrlCapabilities{}}},
 		{Elicitation: &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}}},
 	} {
-		resp, err := NewAgent().Initialize(ctx, acp.InitializeRequest{ClientCapabilities: caps})
+		resp, err := newTestAgent().Initialize(ctx, acp.InitializeRequest{ClientCapabilities: caps})
 		if err != nil {
 			t.Fatalf("Initialize: %v", err)
 		}
@@ -304,7 +304,7 @@ func TestAgentErrorAndConformanceBranches(t *testing.T) {
 		}
 	}
 
-	agent := NewAgent(
+	agent := newTestAgent(
 		WithAgentName("amp-test"),
 		WithAgentTitle("Amp Test"),
 		WithAgentVersion("v1.2.3"),
@@ -313,7 +313,7 @@ func TestAgentErrorAndConformanceBranches(t *testing.T) {
 	_, err := agent.Initialize(ctx, acp.InitializeRequest{})
 	requireRequestErrorCode(t, err, -32602)
 
-	agent = NewAgent()
+	agent = newTestAgent()
 	if _, err := agent.Authenticate(ctx, acp.AuthenticateRequest{MethodId: "none"}); err == nil {
 		t.Fatal("Authenticate succeeded")
 	}
@@ -359,20 +359,28 @@ func TestAgentErrorAndConformanceBranches(t *testing.T) {
 			t.Fatalf("%s: foreign meta applied options: %#v", tc.name, parsed)
 		}
 	}
-	if err := NewAgent(WithDefaultModel("gpt")).validateSessionStartOptions(AmpOptions{}); err == nil {
+	if err := newTestAgent(WithDefaultModel("gpt")).validateSessionStartOptions(AmpOptions{}); err == nil {
 		t.Fatal("default model accepted")
 	}
-	if err := NewAgent().validateSessionStartOptions(AmpOptions{Model: "gpt"}); err == nil {
+	if err := newTestAgent().validateSessionStartOptions(AmpOptions{Model: "gpt"}); err == nil {
 		t.Fatal("session model accepted")
 	}
-	if err := NewAgent().validateSessionStartOptions(AmpOptions{OutputSchema: map[string]any{"type": "object"}}); err == nil {
+	if err := newTestAgent().validateSessionStartOptions(AmpOptions{OutputSchema: map[string]any{"type": "object"}}); err == nil {
 		t.Fatal("output schema accepted")
 	}
-	if err := NewAgent().validateSessionStartOptions(AmpOptions{OutputSchema: map[string]any{}}); err == nil {
+	if err := newTestAgent().validateSessionStartOptions(AmpOptions{OutputSchema: map[string]any{}}); err == nil {
 		t.Fatal("empty output schema accepted")
 	}
-	if err := NewAgent().validateSessionStartOptions(AmpOptions{Mode: "large"}); err == nil {
+	if err := newTestAgent().validateSessionStartOptions(AmpOptions{Mode: "large"}); err == nil {
 		t.Fatal("hidden mode accepted")
+	}
+	configurationAgent := newTestAgent()
+	configurationAgent.configurationErr = errors.New("configuration")
+	if err := configurationAgent.validateSessionStartOptions(AmpOptions{}); err == nil {
+		t.Fatal("configuration error was ignored")
+	}
+	if err := newTestAgent().validateSessionStartOptions(AmpOptions{Env: map[string]string{"acp_go_amp_internal_bad": "value"}}); err == nil {
+		t.Fatal("reserved session environment was accepted")
 	}
 }
 
@@ -411,14 +419,14 @@ func TestUnknownSessionErrorShape(t *testing.T) {
 	ctx := context.Background()
 
 	// prompt resolves the session synchronously via a.session().
-	_, err := NewAgent().Prompt(ctx, TextPromptRequest("T-missing", "test-turn", "x"))
+	_, err := newTestAgent().Prompt(ctx, TextPromptRequest("T-missing", "test-turn", "x"))
 	requireUnknownSessionError(t, err)
 
 	// load/resume against an id absent from the store hit the manifest lookup
 	// and MUST emit the identical uniform unknown-session shape.
 	path, _ := fakeAgentAmpPath(t, "")
 	cwd := t.TempDir()
-	agent := NewAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()), WithSessionStore(NewInMemorySessionStore()))
+	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()), WithSessionStore(NewInMemorySessionStore()))
 	_, err = agent.LoadSession(ctx, LoadSessionRequest("T-missing", cwd))
 	requireUnknownSessionError(t, err)
 	_, err = agent.ResumeSession(ctx, ResumeSessionRequest("T-missing", cwd))
@@ -457,7 +465,7 @@ func TestNativeMissingThreadAndDeleteFailureTombstone(t *testing.T) {
 	ctx := context.Background()
 	missingPath, _ := fakeAgentAmpPath(t, "missing")
 	store := NewInMemorySessionStore()
-	agent := NewAgent(WithExecutablePath(missingPath), WithSessionStore(store), WithScratchDir(t.TempDir()))
+	agent := newTestAgent(WithExecutablePath(missingPath), WithSessionStore(store), WithScratchDir(t.TempDir()))
 	newResp, err := agent.NewSession(ctx, NewSessionRequest(t.TempDir()))
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
@@ -469,7 +477,7 @@ func TestNativeMissingThreadAndDeleteFailureTombstone(t *testing.T) {
 
 	deletePath, _ := fakeAgentAmpPath(t, "delete-fail")
 	deleteStore := NewInMemorySessionStore()
-	deleteAgent := NewAgent(WithExecutablePath(deletePath), WithSessionStore(deleteStore), WithScratchDir(t.TempDir()))
+	deleteAgent := newTestAgent(WithExecutablePath(deletePath), WithSessionStore(deleteStore), WithScratchDir(t.TempDir()))
 	deleteResp, err := deleteAgent.NewSession(ctx, NewSessionRequest(t.TempDir()))
 	if err != nil {
 		t.Fatalf("NewSession delete: %v", err)
@@ -571,7 +579,7 @@ func startTestServe(t *testing.T, opts ...Option) (*acp.ClientSideConnection, *r
 	a2cR, a2cW := io.Pipe()
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- Serve(ctx, c2aR, a2cW, opts...)
+		errCh <- serveTest(ctx, c2aR, a2cW, opts...)
 	}()
 	client := &recordingClient{}
 	conn := acp.NewClientSideConnection(client, c2aW, a2cR)
@@ -976,7 +984,7 @@ func readHelperJSON[T any](t *testing.T, path string) []T {
 // parameter validation runs.
 func TestClosedAgentRejectsCallsBeforeDispatch(t *testing.T) {
 	ctx := context.Background()
-	agent := NewAgent()
+	agent := newTestAgent()
 	if err := agent.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
@@ -1021,19 +1029,19 @@ func TestServeReturnsOnPreCancelledContext(t *testing.T) {
 		_ = a2cW.Close()
 	}()
 
-	if err := Serve(ctx, c2aR, a2cW); !errors.Is(err, context.Canceled) {
+	if err := serveTest(ctx, c2aR, a2cW); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Serve pre-cancelled = %v", err)
 	}
 }
 
-func TestServeReturnsProcessTreeProofErrorFromClose(t *testing.T) {
-	agent := NewAgent()
+func TestServeReturnsProcessTreeContainmentErrorFromClose(t *testing.T) {
+	agent := newTestAgent()
 	session := &agentSession{
 		agent: agent,
-		id:    "T-unproven",
+		id:    "T-incomplete",
 		turn:  make(chan struct{}, 1),
 	}
-	session.recordScratchQuiescence(ErrProcessTreeUnproven)
+	session.recordScratchContainment(ErrProcessContainmentIncomplete)
 	agent.sessions[session.id] = session
 
 	started := make(chan struct{})
@@ -1052,11 +1060,11 @@ func TestServeReturnsProcessTreeProofErrorFromClose(t *testing.T) {
 		_ = inputWriter.Close()
 	})
 	errCh := make(chan error, 1)
-	go func() { errCh <- Serve(ctx, input, io.Discard) }()
+	go func() { errCh <- serveTest(ctx, input, io.Discard) }()
 	<-started
 	cancel()
 	err := <-errCh
-	if !errors.Is(err, ErrProcessTreeUnproven) {
-		t.Fatalf("Serve close proof error = %v", err)
+	if !errors.Is(err, ErrProcessContainmentIncomplete) {
+		t.Fatalf("Serve close containment error = %v", err)
 	}
 }

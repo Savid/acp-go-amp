@@ -44,7 +44,7 @@ func TestActiveLoadResumeSemantics(t *testing.T) {
 			WithSessionRawEvents(raw),
 		}
 	}
-	agent := NewAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()))
+	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()))
 	resp, newErr := agent.NewSession(ctx, NewSessionRequest(cwd, requestOptions(false)...))
 	if newErr != nil {
 		t.Fatalf("NewSession: %v", newErr)
@@ -105,7 +105,7 @@ func TestActiveLoadRetriesMirrorBeforeReplay(t *testing.T) {
 	path, _ := fakeAgentAmpPath(t, "")
 	cwd := t.TempDir()
 	store := &flakyReplaceStore{InMemorySessionStore: NewInMemorySessionStore()}
-	agent := NewAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()), WithSessionStore(store))
+	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()), WithSessionStore(store))
 	client, cleanup := attachRecordingClient(t, agent)
 	defer cleanup()
 	resp, err := agent.NewSession(ctx, NewSessionRequest(cwd))
@@ -136,7 +136,7 @@ func TestActiveLoadVerifiesContinuability(t *testing.T) {
 	ctx := context.Background()
 	path, _ := fakeAgentAmpPath(t, "missing-export")
 	cwd := t.TempDir()
-	agent := NewAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()), WithSessionStore(NewInMemorySessionStore()))
+	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()), WithSessionStore(NewInMemorySessionStore()))
 	resp, err := agent.NewSession(ctx, NewSessionRequest(cwd))
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
@@ -153,7 +153,7 @@ func TestActiveLoadPropagatesContinuabilityFailure(t *testing.T) {
 	ctx := context.Background()
 	path, _ := fakeAgentAmpPath(t, "export-fail")
 	cwd := t.TempDir()
-	agent := NewAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()), WithSessionStore(NewInMemorySessionStore()))
+	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()), WithSessionStore(NewInMemorySessionStore()))
 	resp, err := agent.NewSession(ctx, NewSessionRequest(cwd))
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
@@ -181,7 +181,7 @@ func isMismatchField(err error, field string) bool {
 
 func TestNewSessionFailsFastWithoutAPIKey(t *testing.T) {
 	t.Setenv("AMP_API_KEY", "")
-	agent := NewAgent(WithScratchDir(t.TempDir()))
+	agent := newTestAgent(WithScratchDir(t.TempDir()))
 	_, err := agent.NewSession(context.Background(), NewSessionRequest(t.TempDir()))
 	if err == nil || !strings.Contains(err.Error(), "AMP_API_KEY") {
 		t.Fatalf("missing key error = %v", err)
@@ -190,7 +190,7 @@ func TestNewSessionFailsFastWithoutAPIKey(t *testing.T) {
 
 func TestNewSessionFailsFastWithEmptyAPIKeyOverride(t *testing.T) {
 	t.Setenv("AMP_API_KEY", "process-key")
-	agent := NewAgent(
+	agent := newTestAgent(
 		WithScratchDir(t.TempDir()),
 		WithEnv(map[string]string{"AMP_API_KEY": ""}),
 	)
@@ -202,7 +202,7 @@ func TestNewSessionFailsFastWithEmptyAPIKeyOverride(t *testing.T) {
 
 func TestNewSessionAcceptsProcessEnvAPIKey(t *testing.T) {
 	path, _ := fakeAgentAmpPath(t, "")
-	agent := NewAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()))
+	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()))
 	resp, err := agent.NewSession(context.Background(), NewSessionRequest(t.TempDir()))
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
@@ -218,12 +218,12 @@ func TestSessionSlotFilesystemServeAndCloseEdges(t *testing.T) {
 	previousWriteFile := writeFile
 	writeFile = func(string, []byte, os.FileMode) error { return errors.New("write settings failed") }
 	t.Cleanup(func() { writeFile = previousWriteFile })
-	if _, err := newAgentSession(t.Context(), NewAgent(WithScratchDir(t.TempDir())), "T-write", t.TempDir(), parsedSessionMeta{}, "", nil); err == nil {
+	if _, err := newAgentSession(t.Context(), newTestAgent(WithScratchDir(t.TempDir())), "T-write", t.TempDir(), parsedSessionMeta{}, "", nil); err == nil {
 		t.Fatal("settings write failure was ignored")
 	}
 	writeFile = previousWriteFile
 
-	limited := NewAgent(WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1}))
+	limited := newTestAgent(WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1}))
 	if err := limited.reserveSessionSlot(); err != nil {
 		t.Fatalf("reserve first slot: %v", err)
 	}
@@ -239,7 +239,7 @@ func TestSessionSlotFilesystemServeAndCloseEdges(t *testing.T) {
 
 	inputR, inputW := io.Pipe()
 	errCh := make(chan error, 1)
-	go func() { errCh <- Serve(ctx, inputR, io.Discard) }()
+	go func() { errCh <- serveTest(ctx, inputR, io.Discard) }()
 	_ = inputW.Close()
 	select {
 	case err := <-errCh:
@@ -250,7 +250,7 @@ func TestSessionSlotFilesystemServeAndCloseEdges(t *testing.T) {
 		t.Fatal("Serve did not exit after peer close")
 	}
 
-	agent := NewAgent()
+	agent := newTestAgent()
 	agent.sessions["T-close"] = &agentSession{agent: agent, id: "T-close", turn: make(chan struct{}, 1)}
 	if err := agent.Close(); err != nil {
 		t.Fatalf("Close with live session: %v", err)
@@ -266,7 +266,7 @@ func TestLoadReplayDeleteAndConfigEdges(t *testing.T) {
 	putStoredSession(t, store, "T-load-edge", cwd, []SessionStoreEntry{
 		json.RawMessage(`{"type":"assistant","message":{"content":[{"type":"text","text":"stored"}]},"session_id":"T-load-edge"}`),
 	})
-	agent := NewAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()), WithSessionStore(store))
+	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()), WithSessionStore(store))
 	agent.markDeleted("T-load-edge")
 	listResp, err := agent.ListSessions(ctx, ListSessionsRequest())
 	if err != nil {
@@ -277,18 +277,18 @@ func TestLoadReplayDeleteAndConfigEdges(t *testing.T) {
 	}
 
 	deleteErr := errors.New("delete store failed")
-	if _, deleteGotErr := NewAgent(WithSessionStore(&errorStore{deleteErr: deleteErr})).UnstableDeleteSession(ctx, DeleteSessionRequest("T-delete-store")); !errors.Is(deleteGotErr, deleteErr) {
+	if _, deleteGotErr := newTestAgent(WithSessionStore(&errorStore{deleteErr: deleteErr})).UnstableDeleteSession(ctx, DeleteSessionRequest("T-delete-store")); !errors.Is(deleteGotErr, deleteErr) {
 		t.Fatalf("delete store error = %v", deleteGotErr)
 	}
 
 	loadErr := errors.New("load manifest failed")
-	if _, loadGotErr := NewAgent(WithSessionStore(&errorStore{loadErr: loadErr})).loadManifest(ctx, "T-any"); !errors.Is(loadGotErr, loadErr) {
+	if _, loadGotErr := newTestAgent(WithSessionStore(&errorStore{loadErr: loadErr})).loadManifest(ctx, "T-any"); !errors.Is(loadGotErr, loadErr) {
 		t.Fatalf("loadManifest store error = %v", loadGotErr)
 	}
 
 	badReplay := NewInMemorySessionStore()
 	putStoredSession(t, badReplay, "T-bad-replay", cwd, []SessionStoreEntry{json.RawMessage(`{`)})
-	badReplayAgent := NewAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()), WithSessionStore(badReplay))
+	badReplayAgent := newTestAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()), WithSessionStore(badReplay))
 	if _, replayErr := badReplayAgent.LoadSession(ctx, LoadSessionRequest("T-bad-replay", cwd)); replayErr == nil {
 		t.Fatal("bad transcript replay succeeded")
 	}
@@ -297,11 +297,11 @@ func TestLoadReplayDeleteAndConfigEdges(t *testing.T) {
 	}
 
 	replayLoadErr := errors.New("transcript load failed")
-	replayAgent := NewAgent(WithSessionStore(&errorStore{loadErr: replayLoadErr}))
+	replayAgent := newTestAgent(WithSessionStore(&errorStore{loadErr: replayLoadErr}))
 	if replayGotErr := (&agentSession{agent: replayAgent, id: "T-replay"}).replayTranscript(ctx); !errors.Is(replayGotErr, replayLoadErr) {
 		t.Fatalf("replay load error = %v", replayGotErr)
 	}
-	nilStoreAgent := NewAgent()
+	nilStoreAgent := newTestAgent()
 	nilStoreAgent.store = nil
 	if replayErr := (&agentSession{agent: nilStoreAgent, id: "T-replay"}).replayTranscript(ctx); replayErr != nil {
 		t.Fatalf("nil-store replay: %v", replayErr)
@@ -311,7 +311,7 @@ func TestLoadReplayDeleteAndConfigEdges(t *testing.T) {
 	putStoredSession(t, updateErrStore, "T-update-error", cwd, []SessionStoreEntry{
 		json.RawMessage(`{"type":"assistant","message":{"content":[{"type":"text","text":"stored"}]},"session_id":"T-update-error"}`),
 	})
-	updateAgent := NewAgent(WithSessionStore(updateErrStore))
+	updateAgent := newTestAgent(WithSessionStore(updateErrStore))
 	updateAgent.setConnection(newClosedAgentConnection(t))
 	if replayErr := (&agentSession{agent: updateAgent, id: "T-update-error"}).replayTranscript(ctx); replayErr == nil {
 		t.Fatal("replay update failure was ignored")
@@ -319,13 +319,13 @@ func TestLoadReplayDeleteAndConfigEdges(t *testing.T) {
 
 	validStore := NewInMemorySessionStore()
 	putStoredSession(t, validStore, "T-meta", cwd, nil)
-	if _, loadErr := NewAgent(WithSessionStore(validStore)).LoadSession(ctx, LoadSessionRequest("T-meta", cwd, WithSessionMeta(map[string]any{"amp": "bad"}))); loadErr == nil {
+	if _, loadErr := newTestAgent(WithSessionStore(validStore)).LoadSession(ctx, LoadSessionRequest("T-meta", cwd, WithSessionMeta(map[string]any{"amp": "bad"}))); loadErr == nil {
 		t.Fatal("load bad meta accepted after manifest")
 	}
-	if _, resumeErr := NewAgent(WithSessionStore(validStore), WithDefaultModel("model")).ResumeSession(ctx, ResumeSessionRequest("T-meta", cwd)); resumeErr == nil {
+	if _, resumeErr := newTestAgent(WithSessionStore(validStore), WithDefaultModel("model")).ResumeSession(ctx, ResumeSessionRequest("T-meta", cwd)); resumeErr == nil {
 		t.Fatal("resume default model accepted after manifest")
 	}
-	if _, loadErr := NewAgent(WithSessionStore(validStore)).LoadSession(ctx, LoadSessionRequest("T-meta", cwd, WithSessionMCPServers(acp.McpServer{}))); loadErr == nil {
+	if _, loadErr := newTestAgent(WithSessionStore(validStore)).LoadSession(ctx, LoadSessionRequest("T-meta", cwd, WithSessionMCPServers(acp.McpServer{}))); loadErr == nil {
 		t.Fatal("empty MCP transport accepted after manifest")
 	}
 
@@ -337,7 +337,7 @@ func TestLoadReplayDeleteAndConfigEdges(t *testing.T) {
 	}
 
 	replaceErr := errors.New("replace failed")
-	configAgent := NewAgent(WithExecutablePath("/does/not/exist"), WithSessionStore(&errorStore{replaceErr: replaceErr}))
+	configAgent := newTestAgent(WithExecutablePath("/does/not/exist"), WithSessionStore(&errorStore{replaceErr: replaceErr}))
 	configSession := &agentSession{agent: configAgent, id: "T-config", mode: "medium", turn: make(chan struct{}, 1)}
 	if err := configSession.setConfig(ctx, configMode, "low"); !errors.Is(err, replaceErr) {
 		t.Fatalf("setConfig replace error = %v", err)
@@ -348,23 +348,23 @@ func TestPromptAndPersistenceEdges(t *testing.T) {
 	ctx := context.Background()
 	path, _ := fakeAgentAmpPath(t, "")
 
-	closed := &agentSession{agent: NewAgent(), id: "T-closed", closed: true, turn: make(chan struct{}, 1)}
+	closed := &agentSession{agent: newTestAgent(), id: "T-closed", closed: true, turn: make(chan struct{}, 1)}
 	if _, err := closed.Prompt(ctx, TextPromptRequest("T-closed", "test-turn", "x")); !errors.Is(err, errSessionClosed) {
 		t.Fatalf("closed prompt = %v", err)
 	}
 
-	busy := &agentSession{agent: NewAgent(), id: "T-busy", turn: make(chan struct{}, 1)}
+	busy := &agentSession{agent: newTestAgent(), id: "T-busy", turn: make(chan struct{}, 1)}
 	busy.turn <- struct{}{}
 	if _, err := busy.Prompt(ctx, TextPromptRequest("T-busy", "test-turn", "x")); err == nil || !strings.Contains(err.Error(), "backpressure") {
 		t.Fatalf("busy prompt = %v", err)
 	}
 
-	badInput := &agentSession{agent: NewAgent(), id: "T-input", turn: make(chan struct{}, 1)}
+	badInput := &agentSession{agent: newTestAgent(), id: "T-input", turn: make(chan struct{}, 1)}
 	if _, err := badInput.Prompt(ctx, acp.PromptRequest{SessionId: "T-input", Prompt: []acp.ContentBlock{acp.AudioBlock("audio", "audio/wav")}}); err == nil {
 		t.Fatal("unsupported prompt input accepted")
 	}
 
-	continueErr := &agentSession{agent: NewAgent(WithExecutablePath("/does/not/exist")), id: "T-continue", cwd: t.TempDir(), turn: make(chan struct{}, 1)}
+	continueErr := &agentSession{agent: newTestAgent(WithExecutablePath("/does/not/exist")), id: "T-continue", cwd: t.TempDir(), turn: make(chan struct{}, 1)}
 	if _, err := continueErr.Prompt(ctx, TextPromptRequest("T-continue", "test-turn", "x")); err == nil {
 		t.Fatal("native continue error ignored")
 	}
@@ -380,7 +380,7 @@ func TestPromptAndPersistenceEdges(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			modePath, _ := fakeAgentAmpPath(t, tc.mode)
-			agent := NewAgent(WithExecutablePath(modePath), WithScratchDir(t.TempDir()))
+			agent := newTestAgent(WithExecutablePath(modePath), WithScratchDir(t.TempDir()))
 			newResp, err := agent.NewSession(ctx, NewSessionRequest(t.TempDir()))
 			if err != nil {
 				t.Fatalf("NewSession: %v", err)
@@ -392,7 +392,7 @@ func TestPromptAndPersistenceEdges(t *testing.T) {
 		})
 	}
 
-	updateAgent := NewAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()))
+	updateAgent := newTestAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()))
 	updateResp, err := updateAgent.NewSession(ctx, NewSessionRequest(t.TempDir()))
 	if err != nil {
 		t.Fatalf("NewSession update: %v", err)
@@ -402,7 +402,7 @@ func TestPromptAndPersistenceEdges(t *testing.T) {
 		t.Fatal("session update failure was ignored")
 	}
 
-	persistAgent := NewAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()))
+	persistAgent := newTestAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()))
 	persistResp, err := persistAgent.NewSession(ctx, NewSessionRequest(t.TempDir()))
 	if err != nil {
 		t.Fatalf("NewSession persist: %v", err)
@@ -414,7 +414,7 @@ func TestPromptAndPersistenceEdges(t *testing.T) {
 	}
 
 	cancelPath, state := fakeAgentAmpPath(t, "hang")
-	cancelAgent := NewAgent(WithExecutablePath(cancelPath), WithScratchDir(t.TempDir()))
+	cancelAgent := newTestAgent(WithExecutablePath(cancelPath), WithScratchDir(t.TempDir()))
 	cancelResp, err := cancelAgent.NewSession(ctx, NewSessionRequest(t.TempDir()))
 	if err != nil {
 		t.Fatalf("NewSession cancel: %v", err)
@@ -439,14 +439,14 @@ func TestPromptAndPersistenceEdges(t *testing.T) {
 		t.Fatal("cancel prompt did not return")
 	}
 
-	nilStoreAgent := NewAgent()
+	nilStoreAgent := newTestAgent()
 	nilStoreAgent.store = nil
 	nilStoreSession := &agentSession{agent: nilStoreAgent, id: "T-nil-store"}
 	if persistErr := nilStoreSession.persistAfterTurn(ctx, []SessionStoreEntry{json.RawMessage(`{"type":"result"}`)}); persistErr != nil {
 		t.Fatalf("nil-store persist: %v", persistErr)
 	}
 	atomicStore := &recordingStore{}
-	atomicSession := &agentSession{agent: NewAgent(WithSessionStore(atomicStore)), id: "T-atomic"}
+	atomicSession := &agentSession{agent: newTestAgent(WithSessionStore(atomicStore)), id: "T-atomic"}
 	if persistErr := atomicSession.persistAfterTurn(ctx, []SessionStoreEntry{json.RawMessage(`{"type":"result"}`)}); persistErr != nil {
 		t.Fatalf("atomic persist: %v", persistErr)
 	}
@@ -460,7 +460,7 @@ func TestPromptAndPersistenceEdges(t *testing.T) {
 
 func TestEmitAndRawEventEdges(t *testing.T) {
 	ctx := context.Background()
-	agent := NewAgent()
+	agent := newTestAgent()
 	session := &agentSession{agent: agent, id: "T-emit", rawEvents: true}
 
 	if err := session.emitRawEvent(ctx, "off", fakeAmpMessage{raw: map[string]any{"type": strings.Repeat("x", rawEventMaxBytes)}}); err != nil {
@@ -713,7 +713,7 @@ func TestLaunchNeverUsesRemovedEffortFlag(t *testing.T) {
 func TestReconcileNativeConfigEmitFailureAbortsTurn(t *testing.T) {
 	ctx := context.Background()
 	path, _ := fakeAgentAmpPath(t, "reconcile-config")
-	agent := NewAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()))
+	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()))
 	newResp, err := agent.NewSession(ctx, NewSessionRequest(t.TempDir()))
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
@@ -748,7 +748,7 @@ func TestListSessionsMergePaginationAndCwd(t *testing.T) {
 	path, _ := fakeAgentAmpPath(t, "")
 	store := NewInMemorySessionStore()
 	cwd := t.TempDir()
-	agent := NewAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()), WithSessionStore(store))
+	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()), WithSessionStore(store))
 
 	// One active session, whose id also exists in the store (dedupe), one
 	// store-only session in another cwd, and one store-only empty-cwd session.
@@ -863,12 +863,45 @@ func TestPaginateSessionInfosCursorEdges(t *testing.T) {
 // TestSessionStoreTimeoutFallback pins the load-timeout resolution: a
 // non-positive configured timeout falls back to the package default.
 func TestSessionStoreTimeoutFallback(t *testing.T) {
-	agent := NewAgent(WithSessionStoreLoadTimeout(-1))
+	agent := newTestAgent(WithSessionStoreLoadTimeout(-1))
 	if got := agent.sessionStoreLoadTimeout(); got != defaultSessionStoreTimeout {
 		t.Fatalf("fallback timeout = %v", got)
 	}
-	agent = NewAgent(WithSessionStoreLoadTimeout(time.Minute))
+	agent = newTestAgent(WithSessionStoreLoadTimeout(time.Minute))
 	if got := agent.sessionStoreLoadTimeout(); got != time.Minute {
 		t.Fatalf("configured timeout = %v", got)
+	}
+}
+
+func TestLifecycleSessionConstructionErrorsPropagate(t *testing.T) {
+	originalNew := newLifecycleAgentSession
+	t.Cleanup(func() { newLifecycleAgentSession = originalNew })
+	want := errors.New("construct session")
+	newLifecycleAgentSession = func(context.Context, *Agent, acp.SessionId, string, parsedSessionMeta, string, []string) (*agentSession, error) {
+		return nil, want
+	}
+
+	path, _ := fakeAgentAmpPath(t, "")
+	store := NewInMemorySessionStore()
+	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()), WithSessionStore(store))
+	cwd := t.TempDir()
+	if _, err := agent.NewSession(t.Context(), NewSessionRequest(cwd)); !errors.Is(err, want) {
+		t.Fatalf("new-session construction error = %v", err)
+	}
+
+	sessionID := acp.SessionId("T-load-construction")
+	manifest, err := json.Marshal(ampManifest{
+		Format: SessionStoreFormat, ThreadID: string(sessionID), Cwd: cwd,
+		CreatedAtUnixMilli: 1, UpdatedAtUnixMilli: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	main := SessionKey{SessionID: string(sessionID), Subpath: SessionStoreMainSubpath}
+	if err := store.Replace(t.Context(), main, []SessionStoreReplacement{{Key: main, Entries: []SessionStoreEntry{manifest}}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := agent.loadOrResume(t.Context(), sessionID, cwd, nil, nil, nil); !errors.Is(err, want) {
+		t.Fatalf("load-session construction error = %v", err)
 	}
 }

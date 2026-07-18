@@ -25,6 +25,12 @@ with an error, the tail is included in the adapter error detail when available.
 Raw events can be enabled per session for stream-JSON diagnostics but are off by
 default — see [Raw events](/docs/features/raw-events).
 
+The `acp_go_amp.runtime.containment` gauge records one point with
+`containment=authoritative|best_effort|unavailable`. Darwin best-effort also
+emits an unconditional structured warning. `ObserveContainment` exposes the
+same mode to embedding hosts. Provider-descendant snapshots are authoritative
+only and are entirely suppressed in best-effort mode, including zero.
+
 ## Troubleshooting
 
 | Symptom | Likely cause | Where to look |

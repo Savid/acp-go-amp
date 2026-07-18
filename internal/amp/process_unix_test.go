@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -48,6 +49,9 @@ func TestSignalProcessGroupErrors(t *testing.T) {
 }
 
 func TestOutputWaitsForDescendantTreeQuiescence(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("authoritative escaped-descendant containment is Linux-only")
+	}
 	dir := t.TempDir()
 	pidFile := filepath.Join(dir, "child.pid")
 	script := filepath.Join(dir, "amp")
@@ -56,7 +60,7 @@ func TestOutputWaitsForDescendantTreeQuiescence(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	client := NewClient(nil, Options{
+	client := newTestClient(t, nil, Options{
 		CLIPath: script,
 		Cwd:     dir,
 		Env:     map[string]string{"AMP_CHILD_PID_FILE": pidFile},
@@ -79,6 +83,9 @@ func TestOutputWaitsForDescendantTreeQuiescence(t *testing.T) {
 }
 
 func TestOutputCancellationTerminatesContainedTree(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("authoritative escaped-descendant containment is Linux-only")
+	}
 	dir := t.TempDir()
 	pidFile := filepath.Join(dir, "child.pid")
 	script := filepath.Join(dir, "amp")
@@ -87,7 +94,7 @@ func TestOutputCancellationTerminatesContainedTree(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	client := NewClient(nil, Options{
+	client := newTestClient(t, nil, Options{
 		CLIPath: script,
 		Cwd:     dir,
 		Env:     map[string]string{"AMP_CHILD_PID_FILE": pidFile},
@@ -119,7 +126,10 @@ func TestOutputCancellationTerminatesContainedTree(t *testing.T) {
 	}
 }
 
-func TestProcessTreeQuiescenceFailureBranches(t *testing.T) {
+func TestAuthoritativeProcessTreeFailureBranches(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("authoritative process-tree branch coverage is Linux-only")
+	}
 	originalKill := syscallKill
 	t.Cleanup(func() { syscallKill = originalKill })
 
@@ -129,13 +139,13 @@ func TestProcessTreeQuiescenceFailureBranches(t *testing.T) {
 	if err := signalProcessGroupID(0, syscall.SIGKILL); err != nil {
 		t.Fatalf("zero process group: %v", err)
 	}
-	if !ProcessTreeQuiescent(nil) || ProcessTreeQuiescent(ErrProcessTreeNotQuiescent) {
-		t.Fatal("process-tree quiescence classification mismatch")
+	if !ProcessContainmentComplete(nil) || ProcessContainmentComplete(ErrProcessContainmentIncomplete) {
+		t.Fatal("process containment classification mismatch")
 	}
 
 	tree := &processTree{pgid: 12345}
 	syscallKill = func(int, syscall.Signal) error { return syscall.EPERM }
-	if err := tree.terminateAndWait(time.Millisecond); !errors.Is(err, ErrProcessTreeNotQuiescent) {
+	if err := tree.terminateAndWait(time.Millisecond); !errors.Is(err, ErrProcessContainmentIncomplete) {
 		t.Fatalf("terminate failure = %v", err)
 	}
 
@@ -149,7 +159,7 @@ func TestProcessTreeQuiescenceFailureBranches(t *testing.T) {
 		return nil
 	}
 	if err := tree.terminateAndWait(time.Second); err != nil {
-		t.Fatalf("quiescent group: %v", err)
+		t.Fatalf("complete group: %v", err)
 	}
 	if calls != 2 {
 		t.Fatalf("syscall calls = %d, want kill plus probe", calls)
@@ -162,7 +172,7 @@ func TestProcessTreeQuiescenceFailureBranches(t *testing.T) {
 
 		return nil
 	}
-	if err := tree.terminateAndWait(time.Second); !errors.Is(err, ErrProcessTreeNotQuiescent) {
+	if err := tree.terminateAndWait(time.Second); !errors.Is(err, ErrProcessContainmentIncomplete) {
 		t.Fatalf("probe failure = %v", err)
 	}
 
@@ -173,7 +183,7 @@ func TestProcessTreeQuiescenceFailureBranches(t *testing.T) {
 
 		return nil
 	}
-	if err := tree.terminateAndWait(time.Millisecond); !errors.Is(err, ErrProcessTreeNotQuiescent) {
+	if err := tree.terminateAndWait(time.Millisecond); !errors.Is(err, ErrProcessContainmentIncomplete) {
 		t.Fatalf("live group timeout = %v", err)
 	}
 }

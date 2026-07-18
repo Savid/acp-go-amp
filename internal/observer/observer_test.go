@@ -120,6 +120,10 @@ func TestObserverRecordsACPRequestsAndProcessStarts(t *testing.T) {
 	observer.AddActiveSession(ctx, -1)
 	observer.RecordRawEventEmitFailure(ctx, errors.New("emit failed"))
 	observer.RecordRawEventEmitFailure(ctx, nil)
+	observer.ObserveRuntimeContainment(ctx, "best_effort")
+	observer.ObserveRuntimeContainment(ctx, "")
+	(*Observer)(nil).ObserveRuntimeContainment(ctx, "best_effort")
+	(&Observer{}).ObserveRuntimeContainment(ctx, "best_effort")
 
 	var metrics metricdata.ResourceMetrics
 	if err := reader.Collect(context.Background(), &metrics); err != nil {
@@ -145,6 +149,9 @@ func TestObserverRecordsACPRequestsAndProcessStarts(t *testing.T) {
 	}
 	if got := int64MetricSum(metrics, "acp_go_amp.session.active"); got != 0 {
 		t.Fatalf("active session sum = %d, want 0", got)
+	}
+	if got := int64GaugeSum(metrics, "acp_go_amp.runtime.containment"); got != 1 {
+		t.Fatalf("containment gauge = %d, want 1", got)
 	}
 	if got := histogramMetricCount(metrics, "acp_go_amp.session.prompt.duration"); got != 2 {
 		t.Fatalf("prompt duration count = %d, want 2", got)
@@ -228,6 +235,26 @@ func int64MetricSum(metrics metricdata.ResourceMetrics, name string) int64 {
 	}
 
 	return sum
+}
+
+func int64GaugeSum(metrics metricdata.ResourceMetrics, name string) int64 {
+	var total int64
+	for _, scope := range metrics.ScopeMetrics {
+		for _, metric := range scope.Metrics {
+			if metric.Name != name {
+				continue
+			}
+			data, ok := metric.Data.(metricdata.Gauge[int64])
+			if !ok {
+				continue
+			}
+			for _, point := range data.DataPoints {
+				total += point.Value
+			}
+		}
+	}
+
+	return total
 }
 
 func histogramMetricCount(metrics metricdata.ResourceMetrics, name string) uint64 {

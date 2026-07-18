@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -62,6 +63,31 @@ func TestRunPassesContractFlags(t *testing.T) {
 	}
 	if got.TextMapPropagator == nil {
 		t.Fatal("TextMapPropagator is nil")
+	}
+}
+
+func TestRunDarwinBestEffortFlag(t *testing.T) {
+	var got ampacp.Options
+	originalServe := serve
+	t.Cleanup(func() { serve = originalServe })
+	serve = func(_ context.Context, _ io.Reader, _ io.Writer, opts ...ampacp.Option) error {
+		for _, option := range opts {
+			option(&got)
+		}
+
+		return nil
+	}
+	var stderr bytes.Buffer
+	code := run(context.Background(), []string{"-darwin-best-effort-containment"}, bytes.NewBuffer(nil), bytes.NewBuffer(nil), &stderr)
+	if runtime.GOOS == "darwin" {
+		if code != 0 || !got.DarwinBestEffortContainment || !strings.Contains(stderr.String(), "containment=best_effort") {
+			t.Fatalf("code=%d options=%#v stderr=%q", code, got, stderr.String())
+		}
+
+		return
+	}
+	if code != 2 || got.DarwinBestEffortContainment {
+		t.Fatalf("off-Darwin code=%d options=%#v", code, got)
 	}
 }
 

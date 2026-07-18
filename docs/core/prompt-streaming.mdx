@@ -44,25 +44,20 @@ text and is sent to Amp unchanged.
 `session/cancel` sends an interrupt to the active prompt boundary. On Linux,
 every native command, including each turn, runs below its own child subreaper.
 It adopts and terminates the whole descendant tree even when a native tool
-escapes the original process group with `setsid(2)`. An empty `/proc` snapshot
-is not accepted as proof: the helper reaps children until `wait4(2)` reports
-`ECHILD`. On Windows, the command is assigned to a Job Object and the adapter
-waits for its active-process count to reach zero. If graceful interruption
-exceeds the configured native cancel timeout, the entire boundary is
-terminated.
+escapes the original process group with `setsid(2)`, and reaps until `ECHILD`.
+On Windows, the command is assigned to a Job Object and the adapter waits for
+its active-process count to reach zero. These are authoritative boundaries.
 
-Prompt settlement is fenced by that containment proof. A successful turn, a
-cancelled turn, and a turn-timeout failure are not returned from
-`session/prompt` until every process in the turn boundary has exited. If the
-adapter cannot prove quiescence, it returns an error matching
-`ampacp.ErrProcessTreeUnproven` instead of the otherwise terminal result and
-retains resources that the unproven tree may still reach. The parent-side wait
-is bounded; while a Linux subtree remains unproven, its dedicated helper stays
-alive and keeps attempting containment rather than making `Close` wait forever.
+Prompt settlement is fenced by the selected containment result. If it is
+incomplete, the adapter returns an error matching
+`ampacp.ErrProcessContainmentIncomplete` and retains resources the native
+process may still reach. The wait is bounded.
 
-On platforms without the Linux subreaper or Windows Job Object backend,
-session startup and native operations fail closed rather than launching a turn
-with partial containment.
+Darwin fails native launches closed by default. With the explicit best-effort
+opt-in, the adapter reaps the direct child and runs the fixed TERM/KILL ladder
+against its original process group. It does not wait for or claim absence of a
+`setsid(2)` escapee, so escaped processes or zombies may survive a settled
+prompt. Other unsupported platforms fail closed.
 
 A successful prompt returns exactly one terminal result, and this adapter
 emits only two of the ACP stop reasons: `end_turn` for a completed turn and

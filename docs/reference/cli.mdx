@@ -15,6 +15,7 @@ subprocess; stdout is reserved for JSON-RPC and diagnostics go to stderr.
 | `-home` | Native config/auth root. Accepted on the adapter surface; non-empty values fail session start because Amp has no such root — its per-session isolated HOME/XDG state lives under `-scratch-dir` instead. |
 | `-model` | Default model. Accepted on the adapter surface; non-empty values fail session start because Amp has no ACP model config option. |
 | `-seed-file` | Repeatable `<relpath>=<hostpath>`. Reads the host file and writes its contents to `<relpath>` inside each session's isolated native `HOME` before `amp` launches. See [Seed files](/docs/features/models-config#seed-files). |
+| `-darwin-best-effort-containment` | Darwin-only explicit opt-in to bounded process-group cleanup. Warns unconditionally; detached descendants can survive and numeric PGID reuse can cause collateral signalling. |
 | `-debug` | Write adapter debug logs to stderr. |
 | `-version` | Print adapter version and exit. |
 
@@ -22,6 +23,23 @@ subprocess; stdout is reserved for JSON-RPC and diagnostics go to stderr.
 backend, so seeds cannot repoint it at a custom LLM endpoint. Amp `mode` is a
 session config option, not a serve-mode flag — see
 [Models and config](/docs/features/models-config).
+
+## Darwin containment operations
+
+The command also provides two Darwin-only operational subcommands:
+
+```sh
+acp-go-amp containment diagnose -scratch-dir <parent>
+acp-go-amp containment cleanup -scratch-dir <parent> -runtime-id <id> -force
+```
+
+Both write one JSON object to stdout. Diagnose is read-only. Cleanup acts only
+on the selected record, signals individually revalidated marker-correlated
+PIDs, and retains the root on ambiguity. Its fixed five-second deadline begins
+before enumeration. A PID can be reused between revalidation and signalling,
+so cleanup can affect unrelated same-uid work. Correlation is not ownership or
+proof of absence; inherited markers can be scrubbed. Usage errors exit 2,
+operational errors exit 1, and success exits 0.
 
 ## Stream handling
 

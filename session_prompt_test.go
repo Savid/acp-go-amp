@@ -166,7 +166,7 @@ func TestWithParentToolUseMetaPreservesSiblingKeys(t *testing.T) {
 // stay untagged.
 func TestEmitMessageTagsDelegatedFrames(t *testing.T) {
 	ctx := context.Background()
-	agent := NewAgent()
+	agent := newTestAgent()
 	client, cleanup := attachRecordingClient(t, agent)
 	defer cleanup()
 
@@ -235,7 +235,7 @@ func TestEmitMessageTagsDelegatedFrames(t *testing.T) {
 // provenance from the byte-verbatim native frame as the live turn.
 func TestEmitMessageReplayPreservesDelegatedTags(t *testing.T) {
 	ctx := context.Background()
-	agent := NewAgent()
+	agent := newTestAgent()
 	client, cleanup := attachRecordingClient(t, agent)
 	defer cleanup()
 
@@ -316,7 +316,7 @@ func TestTurnFailureProviderError(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path, _ := fakeAgentAmpPath(t, tc.mode)
-			agent := NewAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()))
+			agent := newTestAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()))
 			resp, err := agent.NewSession(ctx, NewSessionRequest(t.TempDir()))
 			if err != nil {
 				t.Fatalf("NewSession: %v", err)
@@ -337,7 +337,7 @@ func TestTurnFailureProviderError(t *testing.T) {
 func TestTurnFailureFallsBackToResultField(t *testing.T) {
 	ctx := context.Background()
 	path, _ := fakeAgentAmpPath(t, "result-only-in-result")
-	agent := NewAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()))
+	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()))
 	resp, err := agent.NewSession(ctx, NewSessionRequest(t.TempDir()))
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
@@ -360,7 +360,7 @@ func TestTurnFailureTransportRecoversCause(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path, _ := fakeAgentAmpPath(t, tc.mode)
-			agent := NewAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()))
+			agent := newTestAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()))
 			resp, err := agent.NewSession(ctx, NewSessionRequest(t.TempDir()))
 			if err != nil {
 				t.Fatalf("NewSession: %v", err)
@@ -376,7 +376,7 @@ func TestTurnFailureTransportRecoversCause(t *testing.T) {
 func TestTurnFailureProcessDeathIsRetriable(t *testing.T) {
 	ctx := context.Background()
 	path, _ := fakeAgentAmpPath(t, "delayed-error")
-	agent := NewAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()))
+	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()))
 	resp, err := agent.NewSession(ctx, NewSessionRequest(t.TempDir()))
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
@@ -397,7 +397,7 @@ func TestTurnFailureProcessDeathIsRetriable(t *testing.T) {
 func TestTurnFailureMalformedLineNotFatal(t *testing.T) {
 	ctx := context.Background()
 	path, _ := fakeAgentAmpPath(t, "malformed-only")
-	agent := NewAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()))
+	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()))
 	resp, err := agent.NewSession(ctx, NewSessionRequest(t.TempDir()))
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
@@ -417,7 +417,7 @@ func TestTurnFailureMalformedLineNotFatal(t *testing.T) {
 func TestTurnFailureCancelNotConflated(t *testing.T) {
 	ctx := context.Background()
 	path, state := fakeAgentAmpPath(t, "delayed-error")
-	agent := NewAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()))
+	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()))
 	agent.options.runtime.nativeCancelTimeout = 50 * time.Millisecond
 	resp, err := agent.NewSession(ctx, NewSessionRequest(t.TempDir()))
 	if err != nil {
@@ -450,7 +450,7 @@ func TestTurnFailureCancelNotConflated(t *testing.T) {
 func TestTurnFailureTimeout(t *testing.T) {
 	ctx := context.Background()
 	path, _ := fakeAgentAmpPath(t, "hang")
-	agent := NewAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()), WithTurnTimeout(150*time.Millisecond))
+	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()), WithTurnTimeout(150*time.Millisecond))
 	agent.options.runtime.nativeCancelTimeout = 50 * time.Millisecond
 	resp, err := agent.NewSession(ctx, NewSessionRequest(t.TempDir()))
 	if err != nil {
@@ -485,7 +485,7 @@ func TestTurnFailureTimeout(t *testing.T) {
 func TestTurnFailureCancelWinsOnTimeoutCoincidence(t *testing.T) {
 	ctx := context.Background()
 	path, _ := fakeAgentAmpPath(t, "hang")
-	agent := NewAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()), WithTurnTimeout(time.Hour))
+	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()), WithTurnTimeout(time.Hour))
 	agent.options.runtime.nativeCancelTimeout = 50 * time.Millisecond
 	resp, err := agent.NewSession(ctx, NewSessionRequest(t.TempDir()))
 	if err != nil {
@@ -604,7 +604,7 @@ func usageUpdates(client *recordingClient) []*acp.SessionUsageUpdate {
 // if size were ever fabricated from `used` or dropped.
 func TestUsageUpdateSizeIsContextWindowNotUsed(t *testing.T) {
 	ctx := context.Background()
-	agent := NewAgent()
+	agent := newTestAgent()
 	client, cleanup := attachRecordingClient(t, agent)
 	defer cleanup()
 	session := &agentSession{agent: agent, id: "T-usage"}
@@ -661,7 +661,7 @@ func TestPromptInputFailClosedShapes(t *testing.T) {
 // with no native payload is skipped without consuming a sequence, so the next
 // real event still starts at 1.
 func TestEmitRawEventNilPayloadSkipsSequence(t *testing.T) {
-	agent := NewAgent()
+	agent := newTestAgent()
 	client, cleanup := attachRecordingClient(t, agent)
 	defer cleanup()
 

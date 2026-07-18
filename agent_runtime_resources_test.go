@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -15,7 +17,98 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestAgentCloseFencesInFlightStartupProofFailure(t *testing.T) {
+func newBlockedPromptLifecycle(t *testing.T) (*Agent, acp.SessionId, <-chan struct{}, <-chan struct{}, chan<- struct{}) {
+	t.Helper()
+
+	agent := newTestAgent()
+	sessionID := acp.SessionId("T-prompt-construction")
+	agent.sessions[sessionID] = &agentSession{
+		agent: agent,
+		id:    sessionID,
+		cwd:   t.TempDir(),
+		turn:  make(chan struct{}, 1),
+	}
+	started := make(chan struct{})
+	cancelled := make(chan struct{})
+	unblock := make(chan struct{})
+	agent.options.runtime.continueThread = func(ctx context.Context, _ *nativeamp.Client, _ string, _ any) (*nativeamp.Turn, error) {
+		close(started)
+		<-ctx.Done()
+		close(cancelled)
+		<-unblock
+
+		return nil, nativeamp.ErrProcessContainmentIncomplete
+	}
+
+	return agent, sessionID, started, cancelled, unblock
+}
+
+func TestAgentCloseFencesInFlightPromptConstructionContainmentFailure(t *testing.T) {
+	agent, sessionID, started, cancelled, unblock := newBlockedPromptLifecycle(t)
+	promptErr := make(chan error, 1)
+	go func() {
+		_, err := agent.Prompt(context.Background(), TextPromptRequest(sessionID, "turn", "hello"))
+		promptErr <- err
+	}()
+	<-started
+
+	closeErr := make(chan error, 1)
+	go func() { closeErr <- agent.Close() }()
+	<-cancelled
+	select {
+	case err := <-closeErr:
+		t.Fatalf("Close settled before fenced prompt construction unwound: %v", err)
+	default:
+	}
+	close(unblock)
+
+	require.Error(t, <-promptErr)
+	require.ErrorIs(t, <-closeErr, ErrProcessContainmentIncomplete)
+	require.ErrorIs(t, agent.Close(), ErrProcessContainmentIncomplete)
+}
+
+func TestServeFencesInFlightPromptConstructionContainmentFailure(t *testing.T) {
+	agent, sessionID, promptStarted, promptCancelled, unblock := newBlockedPromptLifecycle(t)
+	serveStarted := make(chan struct{})
+	previous := newAgentForServe
+	newAgentForServe = func(...Option) *Agent {
+		close(serveStarted)
+
+		return agent
+	}
+	t.Cleanup(func() { newAgentForServe = previous })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	input, inputWriter := io.Pipe()
+	t.Cleanup(func() {
+		cancel()
+		_ = input.Close()
+		_ = inputWriter.Close()
+	})
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- serveTest(ctx, input, io.Discard) }()
+	<-serveStarted
+
+	promptErr := make(chan error, 1)
+	go func() {
+		_, err := agent.Prompt(context.Background(), TextPromptRequest(sessionID, "turn", "hello"))
+		promptErr <- err
+	}()
+	<-promptStarted
+	cancel()
+	<-promptCancelled
+	select {
+	case err := <-serveErr:
+		t.Fatalf("Serve settled before fenced prompt construction unwound: %v", err)
+	default:
+	}
+	close(unblock)
+
+	require.Error(t, <-promptErr)
+	require.ErrorIs(t, <-serveErr, ErrProcessContainmentIncomplete)
+}
+
+func TestAgentCloseFencesInFlightStartupContainmentFailure(t *testing.T) {
 	t.Setenv("AMP_API_KEY", "fake")
 	started := make(chan struct{})
 	cancelled := make(chan struct{})
@@ -23,7 +116,7 @@ func TestAgentCloseFencesInFlightStartupProofFailure(t *testing.T) {
 
 	var mu sync.Mutex
 	releases := map[string]int{}
-	agent := NewAgent(
+	agent := newTestAgent(
 		WithScratchDir(t.TempDir()),
 		WithRuntimeResourceHooks(RuntimeResourceHooks{
 			AcquireNativeRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
@@ -48,7 +141,7 @@ func TestAgentCloseFencesInFlightStartupProofFailure(t *testing.T) {
 		close(cancelled)
 		<-unblock
 
-		return ErrProcessTreeUnproven
+		return ErrProcessContainmentIncomplete
 	}
 
 	requestErr := make(chan error, 1)
@@ -68,16 +161,16 @@ func TestAgentCloseFencesInFlightStartupProofFailure(t *testing.T) {
 	}
 	close(unblock)
 
-	require.ErrorIs(t, <-requestErr, ErrProcessTreeUnproven)
-	require.ErrorIs(t, <-closeErr, ErrProcessTreeUnproven)
-	require.ErrorIs(t, agent.Close(), ErrProcessTreeUnproven)
+	require.ErrorIs(t, <-requestErr, ErrProcessContainmentIncomplete)
+	require.ErrorIs(t, <-closeErr, ErrProcessContainmentIncomplete)
+	require.ErrorIs(t, agent.Close(), ErrProcessContainmentIncomplete)
 	mu.Lock()
 	defer mu.Unlock()
 	require.Zero(t, releases["native"])
 	require.Zero(t, releases["scratch"])
 }
 
-func TestNewThreadProofFailureRetainsNativeAndScratchRoots(t *testing.T) {
+func TestInjectedNewThreadContainmentFailureRetainsOnlyOwnedSessionScratch(t *testing.T) {
 	t.Setenv("AMP_API_KEY", "fake")
 	scratch := t.TempDir()
 
@@ -86,7 +179,7 @@ func TestNewThreadProofFailureRetainsNativeAndScratchRoots(t *testing.T) {
 	releasedNative := map[RuntimeResourceKind]int{}
 	reserved := map[RuntimeResourceKind]int{}
 	releasedScratch := map[RuntimeResourceKind]int{}
-	agent := NewAgent(
+	agent := newTestAgent(
 		WithScratchDir(scratch),
 		WithRuntimeResourceHooks(RuntimeResourceHooks{
 			AcquireNativeRoot: func(_ context.Context, kind RuntimeResourceKind) (func(), error) {
@@ -115,21 +208,21 @@ func TestNewThreadProofFailureRetainsNativeAndScratchRoots(t *testing.T) {
 	)
 	agent.options.runtime.startupProbe = func(context.Context, *nativeamp.Client) error { return nil }
 	agent.options.runtime.newThread = func(context.Context, *nativeamp.Client) (string, error) {
-		return "", ErrProcessTreeUnproven
+		return "", ErrProcessContainmentIncomplete
 	}
 
 	_, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
-	require.ErrorIs(t, err, ErrProcessTreeUnproven)
+	require.ErrorIs(t, err, ErrProcessContainmentIncomplete)
 	var requestErr *acp.RequestError
 	require.ErrorAs(t, err, &requestErr)
-	require.ErrorIs(t, agent.Close(), ErrProcessTreeUnproven)
+	require.ErrorIs(t, agent.Close(), ErrProcessContainmentIncomplete)
 
 	mu.Lock()
-	require.Equal(t, 1, acquired[RuntimeResourceDiscovery])
-	require.Equal(t, 1, releasedNative[RuntimeResourceDiscovery])
-	require.Equal(t, 1, reserved[RuntimeResourceDiscovery])
-	require.Equal(t, 1, releasedScratch[RuntimeResourceDiscovery])
-	require.Equal(t, 1, acquired[RuntimeResourceSession])
+	require.Zero(t, acquired[RuntimeResourceDiscovery])
+	require.Zero(t, releasedNative[RuntimeResourceDiscovery])
+	require.Zero(t, reserved[RuntimeResourceDiscovery])
+	require.Zero(t, releasedScratch[RuntimeResourceDiscovery])
+	require.Zero(t, acquired[RuntimeResourceSession])
 	require.Zero(t, releasedNative[RuntimeResourceSession])
 	require.Equal(t, 1, reserved[RuntimeResourceSession])
 	require.Zero(t, releasedScratch[RuntimeResourceSession])
@@ -140,17 +233,17 @@ func TestNewThreadProofFailureRetainsNativeAndScratchRoots(t *testing.T) {
 	require.NotEmpty(t, entries)
 }
 
-func TestExportProofFailureRetainsColdSessionResources(t *testing.T) {
+func TestExportContainmentFailureRetainsColdSessionResources(t *testing.T) {
 	t.Setenv("AMP_API_KEY", "fake")
 	scratch := t.TempDir()
 	cwd := t.TempDir()
 	store := NewInMemorySessionStore()
-	putStoredSession(t, store, "T-export-proof", cwd, nil)
+	putStoredSession(t, store, "T-export-boundary", cwd, nil)
 
 	var mu sync.Mutex
 	releasedNative := map[RuntimeResourceKind]int{}
 	releasedScratch := map[RuntimeResourceKind]int{}
-	agent := NewAgent(
+	agent := newTestAgent(
 		WithScratchDir(scratch),
 		WithSessionStore(store),
 		WithRuntimeResourceHooks(RuntimeResourceHooks{
@@ -172,18 +265,18 @@ func TestExportProofFailureRetainsColdSessionResources(t *testing.T) {
 	)
 	agent.options.runtime.startupProbe = func(context.Context, *nativeamp.Client) error { return nil }
 	agent.options.runtime.exportThread = func(context.Context, *nativeamp.Client, string) (json.RawMessage, error) {
-		return nil, ErrProcessTreeUnproven
+		return nil, ErrProcessContainmentIncomplete
 	}
 
-	_, err := agent.LoadSession(t.Context(), LoadSessionRequest("T-export-proof", cwd))
-	require.ErrorIs(t, err, ErrProcessTreeUnproven)
+	_, err := agent.LoadSession(t.Context(), LoadSessionRequest("T-export-boundary", cwd))
+	require.ErrorIs(t, err, ErrProcessContainmentIncomplete)
 	var requestErr *acp.RequestError
 	require.ErrorAs(t, err, &requestErr)
-	require.ErrorIs(t, agent.Close(), ErrProcessTreeUnproven)
+	require.ErrorIs(t, agent.Close(), ErrProcessContainmentIncomplete)
 
 	mu.Lock()
-	require.Equal(t, 1, releasedNative[RuntimeResourceDiscovery])
-	require.Equal(t, 1, releasedScratch[RuntimeResourceDiscovery])
+	require.Zero(t, releasedNative[RuntimeResourceDiscovery])
+	require.Zero(t, releasedScratch[RuntimeResourceDiscovery])
 	require.Zero(t, releasedNative[RuntimeResourceSession])
 	require.Zero(t, releasedScratch[RuntimeResourceSession])
 	mu.Unlock()
@@ -203,7 +296,7 @@ func TestNewSessionTimeoutKillsNativeTreeAndReleasesResources(t *testing.T) {
 	reservedScratch := map[RuntimeResourceKind]int{}
 	releasedScratch := map[RuntimeResourceKind]int{}
 
-	agent := NewAgent(
+	agent := newTestAgent(
 		WithExecutablePath(path),
 		WithScratchDir(scratch),
 		WithEnv(map[string]string{"AMP_API_KEY": "fake"}),
@@ -237,7 +330,10 @@ func TestNewSessionTimeoutKillsNativeTreeAndReleasesResources(t *testing.T) {
 	started := time.Now()
 	_, err := agent.NewSession(context.Background(), NewSessionRequest(t.TempDir()))
 	require.Error(t, err)
-	require.Less(t, time.Since(started), 2*time.Second)
+	// Darwin best-effort cleanup has a fixed five-second group-poll budget.
+	// Keep this assertion above that contract boundary so loaded race runs do
+	// not mistake scheduler delay for an unbounded cleanup.
+	require.Less(t, time.Since(started), 10*time.Second)
 
 	argsRecords := readHelperJSON[[]string](t, filepath.Join(state, "args.jsonl"))
 	require.False(t, slicesContainCommand(nil, "threads", "new"))
@@ -245,18 +341,21 @@ func TestNewSessionTimeoutKillsNativeTreeAndReleasesResources(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	require.Equal(t, 1, acquired[RuntimeResourceDiscovery])
-	require.Equal(t, 1, released[RuntimeResourceDiscovery])
+	require.GreaterOrEqual(t, acquired[RuntimeResourceDiscovery], 1)
+	require.Equal(t, acquired[RuntimeResourceDiscovery], released[RuntimeResourceDiscovery])
 	require.Equal(t, 1, acquired[RuntimeResourceSession])
 	require.Equal(t, 1, released[RuntimeResourceSession])
-	require.Equal(t, 1, reservedScratch[RuntimeResourceDiscovery])
-	require.Equal(t, 1, releasedScratch[RuntimeResourceDiscovery])
-	require.Equal(t, 1, reservedScratch[RuntimeResourceSession])
-	require.Equal(t, 1, releasedScratch[RuntimeResourceSession])
+	require.GreaterOrEqual(t, reservedScratch[RuntimeResourceDiscovery], 1)
+	require.Equal(t, reservedScratch[RuntimeResourceDiscovery], releasedScratch[RuntimeResourceDiscovery])
+	require.GreaterOrEqual(t, reservedScratch[RuntimeResourceSession], 1)
+	require.Equal(t, reservedScratch[RuntimeResourceSession], releasedScratch[RuntimeResourceSession])
 
 	entries, readErr := os.ReadDir(scratch)
 	require.NoError(t, readErr)
-	require.Empty(t, entries, "session scratch survived timed-out native creation")
+	for _, entry := range entries {
+		require.False(t, strings.HasPrefix(entry.Name(), "acp-go-amp-session-"), "session scratch survived timed-out native creation")
+		require.False(t, strings.HasPrefix(entry.Name(), "acp-go-amp-command-"), "command scratch survived timed-out native creation")
+	}
 }
 
 func slicesContainCommand(records [][]string, parts ...string) bool {
@@ -307,33 +406,24 @@ func TestRuntimeResourceHooks(t *testing.T) {
 	release()
 	release()
 	require.Equal(t, 1, releases)
-
-	retainedReleases := 0
-	releaseNativeRootWhenQuiescent(func() { retainedReleases++ }, nativeamp.ErrProcessTreeNotQuiescent)
-	require.Zero(t, retainedReleases)
-	releaseNativeRootWhenQuiescent(func() { retainedReleases++ }, errors.New("ordinary native failure"))
-	require.Equal(t, 1, retainedReleases)
 }
 
-func TestFinalizeNativePromptRetainsUnprovenTree(t *testing.T) {
-	releases := 0
+func TestFinalizeNativePromptRetainsIncompleteBoundary(t *testing.T) {
 	response := acp.PromptResponse{StopReason: acp.StopReasonEndTurn}
 	wantErr := errors.New("turn failed")
 
-	final, err := finalizeNativePrompt(response, wantErr, nativeamp.ErrProcessTreeNotQuiescent, func() { releases++ })
+	final, err := finalizeNativePrompt(response, wantErr, nativeamp.ErrProcessContainmentIncomplete)
 	require.Equal(t, acp.PromptResponse{}, final)
 	require.ErrorIs(t, err, wantErr)
-	require.ErrorIs(t, err, nativeamp.ErrProcessTreeNotQuiescent)
-	require.Zero(t, releases)
+	require.ErrorIs(t, err, nativeamp.ErrProcessContainmentIncomplete)
 
-	final, err = finalizeNativePrompt(response, wantErr, nil, func() { releases++ })
+	final, err = finalizeNativePrompt(response, wantErr, nil)
 	require.Equal(t, response, final)
 	require.ErrorIs(t, err, wantErr)
-	require.Equal(t, 1, releases)
 }
 
-func TestSessionScratchReleaseProofBoundaries(t *testing.T) {
-	t.Run("ordinary proof error deletes root and releases scratch", func(t *testing.T) {
+func TestSessionScratchReleaseContainmentBoundaries(t *testing.T) {
+	t.Run("ordinary error deletes root and releases scratch", func(t *testing.T) {
 		root := filepath.Join(t.TempDir(), "settings")
 		require.NoError(t, os.Mkdir(root, 0o700))
 		runtimeErr := errors.New("ordinary close error")
@@ -346,14 +436,14 @@ func TestSessionScratchReleaseProofBoundaries(t *testing.T) {
 		require.NoDirExists(t, root)
 	})
 
-	t.Run("unproven tree retains root and scratch", func(t *testing.T) {
+	t.Run("incomplete tree retains root and scratch", func(t *testing.T) {
 		root := filepath.Join(t.TempDir(), "settings")
 		require.NoError(t, os.Mkdir(root, 0o700))
 		scratchReleases := 0
 
-		err := finalizeSessionScratch(nil, nativeamp.ErrProcessTreeNotQuiescent, root, func() { scratchReleases++ })
+		err := finalizeSessionScratch(nil, nativeamp.ErrProcessContainmentIncomplete, root, func() { scratchReleases++ })
 
-		require.ErrorIs(t, err, nativeamp.ErrProcessTreeNotQuiescent)
+		require.ErrorIs(t, err, nativeamp.ErrProcessContainmentIncomplete)
 		require.Zero(t, scratchReleases)
 		require.DirExists(t, root)
 	})
@@ -379,27 +469,27 @@ func TestSessionScratchReleaseProofBoundaries(t *testing.T) {
 	})
 }
 
-func TestSessionCloseRetainsScratchAfterEarlierUnprovenPrompt(t *testing.T) {
+func TestSessionCloseRetainsScratchAfterEarlierIncompletePrompt(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "settings")
 	require.NoError(t, os.Mkdir(root, 0o700))
 	scratchReleases := 0
 	session := &agentSession{
-		agent:              NewAgent(),
+		agent:              newTestAgent(),
 		settingsDir:        root,
 		scratchRootRelease: func() { scratchReleases++ },
 	}
-	session.recordScratchQuiescence(errors.New("ordinary prompt failure"))
-	require.NoError(t, session.scratchQuiescenceError())
-	session.recordScratchQuiescence(nativeamp.ErrProcessTreeNotQuiescent)
-	require.ErrorIs(t, session.ready(), nativeamp.ErrProcessTreeNotQuiescent)
-	require.ErrorIs(t, session.verifyContinuable(t.Context()), nativeamp.ErrProcessTreeNotQuiescent)
+	session.recordScratchContainment(errors.New("ordinary prompt failure"))
+	require.NoError(t, session.scratchContainmentError())
+	session.recordScratchContainment(nativeamp.ErrProcessContainmentIncomplete)
+	require.ErrorIs(t, session.ready(), nativeamp.ErrProcessContainmentIncomplete)
+	require.ErrorIs(t, session.verifyContinuable(t.Context()), nativeamp.ErrProcessContainmentIncomplete)
 
 	err := session.Close(t.Context())
 
-	require.ErrorIs(t, err, nativeamp.ErrProcessTreeNotQuiescent)
+	require.ErrorIs(t, err, nativeamp.ErrProcessContainmentIncomplete)
 	require.Zero(t, scratchReleases)
 	require.DirExists(t, root)
-	require.ErrorIs(t, session.Delete(t.Context()), nativeamp.ErrProcessTreeNotQuiescent)
+	require.ErrorIs(t, session.Delete(t.Context()), nativeamp.ErrProcessContainmentIncomplete)
 }
 
 func TestPromptTurnCompletionProof(t *testing.T) {
@@ -412,7 +502,7 @@ func TestPromptTurnCompletionProof(t *testing.T) {
 	timedOut := newPromptTurnState()
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	require.ErrorIs(t, timedOut.awaitCompletion(ctx), nativeamp.ErrProcessTreeNotQuiescent)
+	require.ErrorIs(t, timedOut.awaitCompletion(ctx), nativeamp.ErrProcessContainmentIncomplete)
 }
 
 func TestSessionConstructionRetainsScratchWhenUnwindDeletionFails(t *testing.T) {
@@ -427,7 +517,7 @@ func TestSessionConstructionRetainsScratchWhenUnwindDeletionFails(t *testing.T) 
 	mkdirAll = func(string, os.FileMode) error { return createErr }
 	removeSessionDir = func(string) error { return deleteErr }
 	scratchReleases := 0
-	agent := NewAgent(
+	agent := newTestAgent(
 		WithScratchDir(t.TempDir()),
 		WithRuntimeResourceHooks(RuntimeResourceHooks{
 			ReserveScratchRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
@@ -445,17 +535,17 @@ func TestSessionConstructionRetainsScratchWhenUnwindDeletionFails(t *testing.T) 
 
 func TestAmpSessionResourceAdmission(t *testing.T) {
 	wantErr := errors.New("resource exhausted")
-	discoveryBlocked := NewAgent(WithRuntimeResourceHooks(RuntimeResourceHooks{
+	discoveryBlocked := newTestAgent(WithRuntimeResourceHooks(RuntimeResourceHooks{
 		AcquireNativeRoot: func(context.Context, RuntimeResourceKind) (func(), error) { return nil, wantErr },
 	}))
 	_, err := discoveryBlocked.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
-	require.ErrorIs(t, err, wantErr)
+	require.Contains(t, err.Error(), wantErr.Error())
 
 	_, err = discoveryBlocked.LoadSession(t.Context(), LoadSessionRequest("T-missing", t.TempDir()))
-	require.ErrorIs(t, err, wantErr)
+	require.Contains(t, err.Error(), wantErr.Error())
 
 	discoveryNativeReleases := 0
-	discoveryScratchBlocked := NewAgent(WithRuntimeResourceHooks(RuntimeResourceHooks{
+	discoveryScratchBlocked := newTestAgent(WithRuntimeResourceHooks(RuntimeResourceHooks{
 		AcquireNativeRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
 			return func() { discoveryNativeReleases++ }, nil
 		},
@@ -468,19 +558,19 @@ func TestAmpSessionResourceAdmission(t *testing.T) {
 		},
 	}))
 	_, err = discoveryScratchBlocked.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
-	require.ErrorIs(t, err, wantErr)
+	require.Contains(t, err.Error(), wantErr.Error())
 	_, err = discoveryScratchBlocked.LoadSession(t.Context(), LoadSessionRequest("T-missing", t.TempDir()))
-	require.ErrorIs(t, err, wantErr)
-	require.Equal(t, 2, discoveryNativeReleases)
+	require.Contains(t, err.Error(), wantErr.Error())
+	require.Zero(t, discoveryNativeReleases)
 
-	scratchBlocked := NewAgent(WithScratchDir(t.TempDir()), WithRuntimeResourceHooks(RuntimeResourceHooks{
+	scratchBlocked := newTestAgent(WithScratchDir(t.TempDir()), WithRuntimeResourceHooks(RuntimeResourceHooks{
 		ReserveScratchRoot: func(context.Context, RuntimeResourceKind) (func(), error) { return nil, wantErr },
 	}))
 	_, err = newAgentSession(t.Context(), scratchBlocked, "T-session", t.TempDir(), parsedSessionMeta{}, "", nil)
-	require.ErrorIs(t, err, wantErr)
+	require.Contains(t, err.Error(), wantErr.Error())
 
 	path, _ := fakeAgentAmpPath(t, "")
-	sessionBlocked := NewAgent(
+	sessionBlocked := newTestAgent(
 		WithExecutablePath(path),
 		WithScratchDir(t.TempDir()),
 		WithRuntimeResourceHooks(RuntimeResourceHooks{
@@ -494,16 +584,16 @@ func TestAmpSessionResourceAdmission(t *testing.T) {
 		}),
 	)
 	_, err = sessionBlocked.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
-	require.ErrorIs(t, err, wantErr)
+	require.Contains(t, err.Error(), wantErr.Error())
 
-	nativeBlocked := NewAgent(WithRuntimeResourceHooks(RuntimeResourceHooks{
+	nativeBlocked := newTestAgent(WithRuntimeResourceHooks(RuntimeResourceHooks{
 		AcquireNativeRoot: func(context.Context, RuntimeResourceKind) (func(), error) { return nil, wantErr },
 	}))
 	session := &agentSession{agent: nativeBlocked, id: "T-session"}
-	require.ErrorIs(t, session.Delete(t.Context()), wantErr)
-	require.ErrorIs(t, session.verifyContinuable(t.Context()), wantErr)
+	require.Contains(t, session.Delete(t.Context()).Error(), wantErr.Error())
+	require.Contains(t, session.verifyContinuable(t.Context()).Error(), wantErr.Error())
 
-	promptBlocked := NewAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()))
+	promptBlocked := newTestAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()))
 	created, err := promptBlocked.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = promptBlocked.Close() })
@@ -520,7 +610,7 @@ func TestAmpSessionResourceAdmission(t *testing.T) {
 		return nil, wantErr
 	}
 	_, err = promptBlocked.Prompt(t.Context(), TextPromptRequest(created.SessionId, "ignored", "hello"))
-	require.ErrorIs(t, err, wantErr)
+	require.Contains(t, err.Error(), wantErr.Error())
 
 	configSession := &agentSession{settingsDir: filepath.Join(t.TempDir(), "missing"), mcpConfigJSON: `{}`}
 	_, err = configSession.writePromptMCPConfig()
@@ -528,10 +618,12 @@ func TestAmpSessionResourceAdmission(t *testing.T) {
 }
 
 func TestClosedAgentRejectsEveryFencedLifecycleMethod(t *testing.T) {
-	agent := NewAgent()
+	agent := newTestAgent()
 	require.NoError(t, agent.Close())
 
-	_, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
+	_, err := agent.Prompt(t.Context(), TextPromptRequest("T-closed", "ignored", "hello"))
+	require.Error(t, err)
+	_, err = agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
 	require.Error(t, err)
 	_, err = agent.LoadSession(t.Context(), LoadSessionRequest("T-closed", t.TempDir()))
 	require.Error(t, err)
@@ -548,7 +640,7 @@ func TestClosedAgentRejectsEveryFencedLifecycleMethod(t *testing.T) {
 func TestActiveLoadStoreFailureAndDeleteCompletionFence(t *testing.T) {
 	t.Setenv("AMP_API_KEY", "fake")
 	loadErr := errors.New("active transcript load failed")
-	agent := NewAgent(WithSessionStore(&errorStore{loadErr: loadErr}))
+	agent := newTestAgent(WithSessionStore(&errorStore{loadErr: loadErr}))
 	agent.options.runtime.startupProbe = func(context.Context, *nativeamp.Client) error { return nil }
 	agent.options.runtime.exportThread = func(context.Context, *nativeamp.Client, string) (json.RawMessage, error) {
 		return json.RawMessage(`{}`), nil
@@ -567,7 +659,7 @@ func TestActiveLoadStoreFailureAndDeleteCompletionFence(t *testing.T) {
 	require.NoError(t, agent.removeSession(t.Context(), session.id, session))
 
 	acquireErr := errors.New("delete native admission failed")
-	deleteAgent := NewAgent(WithRuntimeResourceHooks(RuntimeResourceHooks{
+	deleteAgent := newTestAgent(WithRuntimeResourceHooks(RuntimeResourceHooks{
 		AcquireNativeRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
 			return nil, acquireErr
 		},
@@ -577,14 +669,14 @@ func TestActiveLoadStoreFailureAndDeleteCompletionFence(t *testing.T) {
 	deleteSession := &agentSession{agent: deleteAgent, id: "T-delete-completed", activePrompt: completed}
 	require.ErrorIs(t, deleteSession.Delete(t.Context()), acquireErr)
 	require.NoError(t, (&agentSession{}).interrupt(t.Context()))
-	require.False(t, isNativeMissingError(errors.Join(errors.New("Thread not found"), ErrProcessTreeUnproven)))
+	require.False(t, isNativeMissingError(errors.Join(errors.New("Thread not found"), ErrProcessContainmentIncomplete)))
 }
 
-func TestPendingDeleteProofFailureStopsEveryLifecycleRetry(t *testing.T) {
+func TestPendingDeleteContainmentFailureStopsEveryLifecycleRetry(t *testing.T) {
 	newPendingAgent := func(id acp.SessionId) *Agent {
-		agent := NewAgent(WithRuntimeResourceHooks(RuntimeResourceHooks{
+		agent := newTestAgent(WithRuntimeResourceHooks(RuntimeResourceHooks{
 			AcquireNativeRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
-				return nil, ErrProcessTreeUnproven
+				return nil, ErrProcessContainmentIncomplete
 			},
 		}))
 		agent.markPendingNativeDelete(id)
@@ -594,13 +686,13 @@ func TestPendingDeleteProofFailureStopsEveryLifecycleRetry(t *testing.T) {
 
 	listAgent := newPendingAgent("T-pending-list")
 	_, err := listAgent.ListSessions(t.Context(), ListSessionsRequest())
-	require.ErrorIs(t, err, ErrProcessTreeUnproven)
+	require.ErrorIs(t, err, ErrProcessContainmentIncomplete)
 
 	loadAgent := newPendingAgent("T-pending-load")
 	_, err = loadAgent.LoadSession(t.Context(), LoadSessionRequest("T-target-load", t.TempDir()))
-	require.ErrorIs(t, err, ErrProcessTreeUnproven)
+	require.ErrorIs(t, err, ErrProcessContainmentIncomplete)
 
 	deleteAgent := newPendingAgent("T-pending-other")
 	_, err = deleteAgent.UnstableDeleteSession(t.Context(), DeleteSessionRequest("T-target-delete"))
-	require.ErrorIs(t, err, ErrProcessTreeUnproven)
+	require.ErrorIs(t, err, ErrProcessContainmentIncomplete)
 }

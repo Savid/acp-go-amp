@@ -16,7 +16,7 @@ import (
 
 func TestCloseSessionCancelsActiveTurnAfterProcessExit(t *testing.T) {
 	path, state := fakeAgentAmpPath(t, "sigint-ignore")
-	agent := NewAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()))
+	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()))
 	agent.options.runtime.nativeCancelTimeout = 100 * time.Millisecond
 	agent.options.runtime.nativeCloseTurnWait = time.Second
 
@@ -92,7 +92,7 @@ func TestCloseSessionCancelsActiveTurnAfterProcessExit(t *testing.T) {
 
 func TestPromptContextCancelUsesInterruptLadder(t *testing.T) {
 	path, state := fakeAgentAmpPath(t, "sigint-ignore")
-	agent := NewAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()))
+	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()))
 	agent.options.runtime.nativeCancelTimeout = 50 * time.Millisecond
 	agent.options.runtime.nativeCloseTurnWait = time.Second
 

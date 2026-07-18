@@ -106,7 +106,7 @@ func oversizedMessage() fakeAmpMessage {
 // with the envelope intact.
 func TestRawEventOversizeEmitsMarker(t *testing.T) {
 	ctx := context.Background()
-	agent := NewAgent()
+	agent := newTestAgent()
 	client, cleanup := attachRecordingClient(t, agent)
 	defer cleanup()
 	session := &agentSession{agent: agent, id: "T-oversize", rawEvents: true}
@@ -202,7 +202,7 @@ func TestRawEventCompletePayloadBoundaryAndStructuralOverflow(t *testing.T) {
 }
 
 func TestRawEventStructuralFailureDoesNotConsumeSequence(t *testing.T) {
-	agent := NewAgent()
+	agent := newTestAgent()
 	client := &failThenRecordRawClient{}
 	agent.setConnection(client)
 	session := &agentSession{
@@ -236,7 +236,7 @@ func TestRawEventStructuralFailureDoesNotConsumeSequence(t *testing.T) {
 // oversized events in one session yields a contiguous 1..N sequence with no gaps.
 func TestRawEventContiguousPerSessionSequence(t *testing.T) {
 	ctx := context.Background()
-	agent := NewAgent()
+	agent := newTestAgent()
 	client, cleanup := attachRecordingClient(t, agent)
 	defer cleanup()
 	session := &agentSession{agent: agent, id: "T-seq", rawEvents: true}
@@ -264,7 +264,7 @@ func TestRawEventContiguousPerSessionSequence(t *testing.T) {
 
 func TestRawEventDeliveryFailureDoesNotConsumeSequence(t *testing.T) {
 	ctx := context.Background()
-	agent := NewAgent()
+	agent := newTestAgent()
 	client := &failThenRecordRawClient{fail: true}
 	agent.setConnection(client)
 	session := &agentSession{agent: agent, id: "T-delivery-seq", rawEvents: true}
@@ -295,7 +295,7 @@ func TestRawEventDeliveryFailureDoesNotConsumeSequence(t *testing.T) {
 // counter).
 func TestRawEventCrossSessionIsolation(t *testing.T) {
 	ctx := context.Background()
-	agent := NewAgent()
+	agent := newTestAgent()
 	client, cleanup := attachRecordingClient(t, agent)
 	defer cleanup()
 	sessionA := &agentSession{agent: agent, id: "T-A", rawEvents: true}
@@ -338,7 +338,7 @@ func TestRawEventCrossSessionIsolation(t *testing.T) {
 // JSON, including an over-limit event and one that fails to marshal.
 func TestRawEventAlwaysValidJSON(t *testing.T) {
 	ctx := context.Background()
-	agent := NewAgent()
+	agent := newTestAgent()
 	client, cleanup := attachRecordingClient(t, agent)
 	defer cleanup()
 	session := &agentSession{agent: agent, id: "T-valid", rawEvents: true}
@@ -384,7 +384,7 @@ func TestRawEventEmitFailureDoesNotFailTurn(t *testing.T) {
 	ctx := context.Background()
 	path, _ := fakeAgentAmpPath(t, "system-then-result")
 	reader := sdkmetric.NewManualReader()
-	agent := NewAgent(
+	agent := newTestAgent(
 		WithExecutablePath(path),
 		WithScratchDir(t.TempDir()),
 		WithMeterProvider(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))),
@@ -417,7 +417,7 @@ func TestRawEventEmitFailureDoesNotFailTurn(t *testing.T) {
 func TestRawEventDefaultOff(t *testing.T) {
 	ctx := context.Background()
 	path, _ := fakeAgentAmpPath(t, "")
-	agent := NewAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()))
+	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()))
 	client, cleanup := attachRecordingClient(t, agent)
 	defer cleanup()
 
