@@ -8,6 +8,8 @@ import (
 	nativeamp "github.com/savid/acp-go-amp/internal/amp"
 )
 
+var newDarwinGenerationRecord = nativeamp.NewDarwinGenerationRecord
+
 func (a *Agent) configureNativeClient(options *nativeamp.Options, kind RuntimeResourceKind) {
 	options.DarwinBestEffort = a.containmentMode == RuntimeContainmentBestEffort
 	options.AcquireNativeRoot = func(ctx context.Context) (func(), error) {
@@ -33,7 +35,7 @@ func (a *Agent) configureNativeClient(options *nativeamp.Options, kind RuntimeRe
 			return nil, fmt.Errorf("create Amp containment generation root: %w", err)
 		}
 
-		generation, err := nativeamp.NewDarwinGenerationRecord(parent, root, string(kind))
+		generation, err := newDarwinGenerationRecord(parent, root, string(kind))
 		if err != nil {
 			removeErr := removeSessionDir(root)
 			if removeErr == nil {

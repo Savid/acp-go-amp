@@ -376,6 +376,17 @@ func (c *Client) Continue(ctx context.Context, threadID string, input any) (*Tur
 	}
 
 	cmd = launch.cmd
+	if cmd.Stdin != nil {
+		return nil, errors.Join(errors.New("create amp stdin: exec: Stdin already set"), launch.close())
+	}
+
+	if cmd.Stdout != nil {
+		return nil, errors.Join(errors.New("create amp stdout: exec: Stdout already set"), launch.close())
+	}
+
+	if cmd.Stderr != nil {
+		return nil, errors.Join(errors.New("create amp stderr: exec: Stderr already set"), launch.close())
+	}
 
 	stdinReader, stdin, err := openPipe()
 	if err != nil {
@@ -504,6 +515,17 @@ func (c *Client) outputWithArgs(ctx context.Context, args ...string) ([]byte, er
 	}
 
 	cmd = launch.cmd
+	if cmd.Stdin != nil {
+		return nil, errors.Join(errors.New("create amp stdin: exec: Stdin already set"), launch.close())
+	}
+
+	if cmd.Stdout != nil {
+		return nil, errors.Join(errors.New("create amp stdout: exec: Stdout already set"), launch.close())
+	}
+
+	if cmd.Stderr != nil {
+		return nil, errors.Join(errors.New("create amp stderr: exec: Stderr already set"), launch.close())
+	}
 
 	var stdout, stderr bytes.Buffer
 

@@ -141,6 +141,49 @@ func awaitDarwinCommandWait(waiter *commandWait, timeout time.Duration) bool {
 	return completed
 }
 
+func validateBestEffortLaunch(launch *processTreeCommand, tree *processTree, beginWait func()) error {
+	if !launch.bestEffort {
+		return nil
+	}
+
+	pgid, pgidErr := syscallGetpgid(launch.cmd.Process.Pid)
+	if errors.Is(pgidErr, syscall.ESRCH) {
+		return errors.Join(
+			errors.New("amp launch exited before Darwin process-group identity validation"),
+			handleDarwinFastExit(launch, tree, beginWait),
+		)
+	}
+
+	if pgidErr != nil || pgid != launch.cmd.Process.Pid {
+		containmentErr := fmt.Errorf("%w: validate Darwin process-group leader pid=%d pgid=%d: %v", ErrProcessContainmentIncomplete, launch.cmd.Process.Pid, pgid, pgidErr)
+		launch.abortStartGate()
+
+		if tree.process != nil {
+			_ = tree.process.Signal(syscall.SIGTERM)
+		}
+
+		beginWait()
+
+		return errors.Join(containmentErr, abortUnvalidatedProcessTree(tree))
+	}
+
+	tree.pgid = pgid
+	if recordErr := tree.generation.started(launch.cmd.Process.Pid, pgid); recordErr != nil {
+		launch.abortStartGate()
+
+		return errors.Join(recordErr, tree.terminateAndWait(defaultCloseWait))
+	}
+
+	if gateErr := launch.releaseStartGate(); gateErr != nil {
+		return errors.Join(
+			fmt.Errorf("%w: release validated Darwin native launch: %v", ErrProcessContainmentIncomplete, gateErr),
+			tree.terminateAndWait(defaultCloseWait),
+		)
+	}
+
+	return nil
+}
+
 func handleDarwinFastExit(launch *processTreeCommand, tree *processTree, beginWait func()) error {
 	launch.abortStartGate()
 

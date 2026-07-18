@@ -74,6 +74,10 @@ func TestAgentContainmentModeAndObservation(t *testing.T) {
 }
 
 func TestConfigureNativeClientDarwinGenerationResources(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("Darwin generation registry is platform-specific")
+	}
+
 	originalMkdir := mkdirTemp
 	originalRemove := removeSessionDir
 	t.Cleanup(func() {
@@ -160,5 +164,99 @@ func TestConfigureNativeClientDarwinGenerationResources(t *testing.T) {
 	}
 	if releaseErr := generation.Release(true); releaseErr != nil || released != beforeRelease+1 {
 		t.Fatalf("complete release error=%v releases=%d", releaseErr, released)
+	}
+}
+
+func TestSimulatedDarwinContainmentConfiguration(t *testing.T) {
+	originalGOOS := runtimeGOOS
+	originalMkdir := mkdirTemp
+	originalRemove := removeSessionDir
+	originalRecord := newDarwinGenerationRecord
+	t.Cleanup(func() {
+		runtimeGOOS = originalGOOS
+		mkdirTemp = originalMkdir
+		removeSessionDir = originalRemove
+		newDarwinGenerationRecord = originalRecord
+	})
+	runtimeGOOS = platformDarwin
+
+	var logs bytes.Buffer
+	want := errors.New("resource failed")
+	agent := NewAgent(
+		WithDarwinBestEffortContainment(),
+		WithScratchDir(t.TempDir()),
+		WithLogger(slog.New(slog.NewJSONHandler(&logs, nil))),
+		WithRuntimeResourceHooks(RuntimeResourceHooks{
+			AcquireNativeRoot:  func(context.Context, RuntimeResourceKind) (func(), error) { return nil, want },
+			ReserveScratchRoot: func(context.Context, RuntimeResourceKind) (func(), error) { return nil, want },
+		}),
+	)
+	if agent.ContainmentMode() != RuntimeContainmentBestEffort || !strings.Contains(logs.String(), "escaped descendants may survive") {
+		t.Fatalf("simulated Darwin mode=%q logs=%q", agent.ContainmentMode(), logs.String())
+	}
+
+	var options nativeamp.Options
+	agent.configureNativeClient(&options, RuntimeResourcePrompt)
+	if _, err := options.AcquireNativeRoot(t.Context()); !errors.Is(err, want) {
+		t.Fatalf("native admission = %v", err)
+	}
+	if _, err := options.NewDarwinGeneration(t.Context()); !errors.Is(err, want) {
+		t.Fatalf("scratch reservation = %v", err)
+	}
+
+	released := 0
+	agent.options.RuntimeResourceHooks.ReserveScratchRoot = func(context.Context, RuntimeResourceKind) (func(), error) {
+		return func() { released++ }, nil
+	}
+	fileParent := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(fileParent, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	agent.options.ScratchDir = fileParent
+	agent.configureNativeClient(&options, RuntimeResourcePrompt)
+	if _, err := options.NewDarwinGeneration(t.Context()); err == nil || released != 1 {
+		t.Fatalf("scratch parent = %v, released=%d", err, released)
+	}
+
+	agent.options.ScratchDir = t.TempDir()
+	mkdirTemp = func(string, string) (string, error) { return "", want }
+	agent.configureNativeClient(&options, RuntimeResourcePrompt)
+	if _, err := options.NewDarwinGeneration(t.Context()); !errors.Is(err, want) || released != 2 {
+		t.Fatalf("generation root = %v, released=%d", err, released)
+	}
+	mkdirTemp = func(string, string) (string, error) { return t.TempDir(), nil }
+
+	newDarwinGenerationRecord = func(string, string, string) (*nativeamp.DarwinGeneration, error) { return nil, want }
+	removeSessionDir = func(string) error { return nil }
+	if _, err := options.NewDarwinGeneration(t.Context()); !errors.Is(err, want) || released != 3 {
+		t.Fatalf("generation record = %v, released=%d", err, released)
+	}
+	removeSessionDir = func(string) error { return want }
+	if _, err := options.NewDarwinGeneration(t.Context()); !errors.Is(err, want) || released != 3 {
+		t.Fatalf("record cleanup = %v, released=%d", err, released)
+	}
+
+	removeSessionDir = func(string) error { return nil }
+	newDarwinGenerationRecord = func(string, string, string) (*nativeamp.DarwinGeneration, error) {
+		return &nativeamp.DarwinGeneration{}, nil
+	}
+	generation, err := options.NewDarwinGeneration(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if releaseErr := generation.Release(false); releaseErr != nil || released != 3 {
+		t.Fatalf("incomplete release = %v, released=%d", releaseErr, released)
+	}
+	removeSessionDir = func(string) error { return want }
+	if releaseErr := generation.Release(true); !errors.Is(releaseErr, want) || released != 3 {
+		t.Fatalf("failed release = %v, released=%d", releaseErr, released)
+	}
+	removeSessionDir = func(string) error { return nil }
+	generation, err = options.NewDarwinGeneration(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := generation.Release(true); err != nil || released != 4 {
+		t.Fatalf("complete release = %v, released=%d", err, released)
 	}
 }

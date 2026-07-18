@@ -130,10 +130,6 @@ func TestFakeAmpHelper(t *testing.T) {
 }
 
 func TestDarwinClientLaunchPreparationAndPipeFailures(t *testing.T) {
-	if runtime.GOOS != "darwin" {
-		t.Skip("Darwin launch preparation")
-	}
-
 	path, _ := fakeAmpPath(t, "")
 	ctx := context.Background()
 	newGeneration := func(context.Context) (*DarwinGeneration, error) {
@@ -188,10 +184,6 @@ func TestDarwinClientLaunchPreparationAndPipeFailures(t *testing.T) {
 }
 
 func TestDarwinPrepareProcessLaunchHooksAndErrors(t *testing.T) {
-	if runtime.GOOS != "darwin" {
-		t.Skip("Darwin launch preparation")
-	}
-
 	ctx := context.Background()
 	client := NewClient(nil, Options{DarwinBestEffort: true})
 	if _, err := client.prepareProcessLaunch(ctx, exec.Command("true")); !errors.Is(err, ErrProcessContainmentIncomplete) {

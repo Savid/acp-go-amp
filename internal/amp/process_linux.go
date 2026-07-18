@@ -25,6 +25,7 @@ func (t *processTree) terminateAndWaitAuthoritative(timeout time.Duration) error
 	if t == nil {
 		return nil
 	}
+
 	t.cleanupOnce.Do(func() {
 		t.cleanupErr = t.runAuthoritativeCleanup(timeout)
 	})
@@ -65,13 +66,4 @@ func (t *processTree) runAuthoritativeCleanup(timeout time.Duration) error {
 	}
 }
 
-func abortUnvalidatedProcessTree(t *processTree) error {
-	return t.terminateAndWaitAuthoritative(defaultCloseWait)
-}
-
-func handleDarwinFastExit(launch *processTreeCommand, tree *processTree, beginWait func()) error {
-	launch.abortStartGate()
-	beginWait()
-
-	return abortUnvalidatedProcessTree(tree)
-}
+func validateBestEffortLaunch(*processTreeCommand, *processTree, func()) error { return nil }

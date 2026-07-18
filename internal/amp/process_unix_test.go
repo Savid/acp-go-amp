@@ -150,6 +150,7 @@ func TestAuthoritativeProcessTreeFailureBranches(t *testing.T) {
 	}
 
 	calls := 0
+	tree = &processTree{pgid: 12345}
 	syscallKill = func(_ int, signal syscall.Signal) error {
 		calls++
 		if signal == syscall.Signal(0) {
@@ -172,6 +173,7 @@ func TestAuthoritativeProcessTreeFailureBranches(t *testing.T) {
 
 		return nil
 	}
+	tree = &processTree{pgid: 12345}
 	if err := tree.terminateAndWait(time.Second); !errors.Is(err, ErrProcessContainmentIncomplete) {
 		t.Fatalf("probe failure = %v", err)
 	}
@@ -183,6 +185,7 @@ func TestAuthoritativeProcessTreeFailureBranches(t *testing.T) {
 
 		return nil
 	}
+	tree = &processTree{pgid: 12345}
 	if err := tree.terminateAndWait(time.Millisecond); !errors.Is(err, ErrProcessContainmentIncomplete) {
 		t.Fatalf("live group timeout = %v", err)
 	}

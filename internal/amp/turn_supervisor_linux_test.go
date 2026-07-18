@@ -817,14 +817,15 @@ func TestTurnCloseBoundsPersistentSupervisorContainmentFailure(t *testing.T) {
 
 	releaseWait := make(chan struct{})
 	incomplete := 0
-	turn := &Turn{
-		cmd:  &exec.Cmd{Process: &os.Process{Pid: 12345}},
-		tree: &processTree{pgid: 12345, supervised: true},
-		waitFunc: func() error {
-			<-releaseWait
+	waiter, beginWait := startPausedCommandWait(func() error {
+		<-releaseWait
 
-			return nil
-		},
+		return nil
+	})
+	beginWait()
+	turn := &Turn{
+		cmd:             &exec.Cmd{Process: &os.Process{Pid: 12345}},
+		tree:            &processTree{pgid: 12345, supervised: true, waiter: waiter},
 		processObserver: ProcessSnapshotObserver{Incomplete: func() { incomplete++ }},
 	}
 
@@ -848,12 +849,12 @@ func TestPreparedCommandAndClientErrorBranches(t *testing.T) {
 	path, _ := fakeAmpPath(t, "")
 	originalPrepare := prepareProcessTree
 	originalProof := processTreeTerminateAndWait
-	originalWait := newCommandWait
+	originalWait := startProcessTreeWait
 	originalWaitTimeout := commandWaitTimeout
 	t.Cleanup(func() {
 		prepareProcessTree = originalPrepare
 		processTreeTerminateAndWait = originalProof
-		newCommandWait = originalWait
+		startProcessTreeWait = originalWait
 		commandWaitTimeout = originalWaitTimeout
 	})
 
@@ -885,6 +886,14 @@ func TestPreparedCommandAndClientErrorBranches(t *testing.T) {
 			if _, err := client.Continue(t.Context(), "T-1", map[string]any{"type": "user"}); err == nil {
 				t.Fatal("prepared pipe conflict succeeded")
 			}
+			prepareProcessTree = func(cmd *exec.Cmd, _ processLaunchOptions) (*processTreeCommand, error) {
+				test.shape(cmd)
+
+				return &processTreeCommand{cmd: cmd}, nil
+			}
+			if _, err := client.outputRaw(t.Context(), "threads", "list"); err == nil {
+				t.Fatal("prepared one-shot pipe conflict succeeded")
+			}
 		})
 	}
 
@@ -915,10 +924,10 @@ func TestPreparedCommandAndClientErrorBranches(t *testing.T) {
 
 	processTreeTerminateAndWait = func(*processTree, time.Duration) error { return nil }
 	commandWaitTimeout = time.Millisecond
-	newCommandWait = func(wait func() error) *commandWait {
+	startProcessTreeWait = func(wait func() error) (*commandWait, func()) {
 		_ = startCommandWait(wait)
 
-		return &commandWait{done: make(chan struct{})}
+		return &commandWait{done: make(chan struct{})}, func() {}
 	}
 	ready, err := os.CreateTemp(t.TempDir(), "not-a-pipe")
 	if err != nil {
@@ -932,17 +941,17 @@ func TestPreparedCommandAndClientErrorBranches(t *testing.T) {
 
 func TestOneShotWaitTimeoutReportsIncompleteBoundary(t *testing.T) {
 	path, _ := fakeAmpPath(t, "")
-	originalWait := newCommandWait
+	originalWait := startProcessTreeWait
 	originalWaitTimeout := commandWaitTimeout
 	t.Cleanup(func() {
-		newCommandWait = originalWait
+		startProcessTreeWait = originalWait
 		commandWaitTimeout = originalWaitTimeout
 	})
 
-	newCommandWait = func(wait func() error) *commandWait {
+	startProcessTreeWait = func(wait func() error) (*commandWait, func()) {
 		_ = startCommandWait(wait)
 
-		return &commandWait{done: make(chan struct{})}
+		return &commandWait{done: make(chan struct{})}, func() {}
 	}
 	commandWaitTimeout = time.Millisecond
 

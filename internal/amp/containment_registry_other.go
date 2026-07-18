@@ -8,7 +8,7 @@ import (
 )
 
 func NewDarwinGenerationRecord(string, string, string) (*DarwinGeneration, error) {
-	return nil, errors.New("Darwin best-effort containment is unavailable on this platform")
+	return nil, errors.New("darwin best-effort containment is unavailable on this platform")
 }
 
 func DiagnoseDarwinContainment(string, io.Writer) error {

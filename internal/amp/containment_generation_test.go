@@ -168,6 +168,17 @@ func TestDarwinGenerationLifecycleHelpers(t *testing.T) {
 	if released != 1 {
 		t.Fatalf("release count = %d", released)
 	}
+	recorded := &DarwinGeneration{
+		RecordFinished: func(bool) error { return want },
+		Release: func(bool) error {
+			t.Fatal("release called after record failure")
+
+			return nil
+		},
+	}
+	if err := recorded.finish(true); !errors.Is(err, ErrProcessContainmentIncomplete) || !strings.Contains(err.Error(), want.Error()) {
+		t.Fatalf("record finish error = %v", err)
+	}
 }
 
 func TestDarwinGenerationFilesystemSeams(t *testing.T) {

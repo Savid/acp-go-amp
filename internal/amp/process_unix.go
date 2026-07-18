@@ -16,6 +16,7 @@ var (
 	syscallGetpgid       = syscall.Getpgid
 	syscallKill          = syscall.Kill
 	processTreeReadyWait = awaitProcessTreeReady
+	startProcessTreeWait = startPausedCommandWait
 )
 
 type processTree struct {
@@ -56,7 +57,7 @@ func startProcessTree(launch *processTreeCommand) (*processTree, error) {
 	launch.started = true
 
 	launch.releaseInherited()
-	waiter, beginWait := startPausedCommandWait(launch.cmd.Wait)
+	waiter, beginWait := startProcessTreeWait(launch.cmd.Wait)
 	tree := &processTree{
 		pgid:          launch.cmd.Process.Pid,
 		process:       launch.cmd.Process,
@@ -69,41 +70,8 @@ func startProcessTree(launch *processTreeCommand) (*processTree, error) {
 	}
 
 	launch.control = nil
-	if launch.bestEffort {
-		pgid, pgidErr := syscallGetpgid(launch.cmd.Process.Pid)
-		if errors.Is(pgidErr, syscall.ESRCH) {
-			return nil, errors.Join(
-				errors.New("amp launch exited before Darwin process-group identity validation"),
-				handleDarwinFastExit(launch, tree, beginWait),
-			)
-		}
-
-		if pgidErr != nil || pgid != launch.cmd.Process.Pid {
-			containmentErr := fmt.Errorf("%w: validate Darwin process-group leader pid=%d pgid=%d: %v", ErrProcessContainmentIncomplete, launch.cmd.Process.Pid, pgid, pgidErr)
-			launch.abortStartGate()
-
-			if tree.process != nil {
-				_ = tree.process.Signal(syscall.SIGTERM)
-			}
-
-			beginWait()
-
-			return nil, errors.Join(containmentErr, abortUnvalidatedProcessTree(tree))
-		}
-
-		tree.pgid = pgid
-		if recordErr := tree.generation.started(launch.cmd.Process.Pid, pgid); recordErr != nil {
-			launch.abortStartGate()
-
-			return nil, errors.Join(recordErr, tree.terminateAndWait(defaultCloseWait))
-		}
-
-		if gateErr := launch.releaseStartGate(); gateErr != nil {
-			return nil, errors.Join(
-				fmt.Errorf("%w: release validated Darwin native launch: %v", ErrProcessContainmentIncomplete, gateErr),
-				tree.terminateAndWait(defaultCloseWait),
-			)
-		}
+	if err := validateBestEffortLaunch(launch, tree, beginWait); err != nil {
+		return nil, err
 	}
 
 	beginWait()

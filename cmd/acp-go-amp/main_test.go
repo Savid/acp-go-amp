@@ -91,6 +91,30 @@ func TestRunDarwinBestEffortFlag(t *testing.T) {
 	}
 }
 
+func TestRunSimulatedDarwinBestEffortFlag(t *testing.T) {
+	originalGOOS := runtimeGOOS
+	originalServe := serve
+	t.Cleanup(func() {
+		runtimeGOOS = originalGOOS
+		serve = originalServe
+	})
+	runtimeGOOS = platformDarwin
+	selected := false
+	serve = func(_ context.Context, _ io.Reader, _ io.Writer, options ...ampacp.Option) error {
+		var configured ampacp.Options
+		for _, option := range options {
+			option(&configured)
+		}
+		selected = configured.DarwinBestEffortContainment
+
+		return nil
+	}
+	var stderr bytes.Buffer
+	if code := run(context.Background(), []string{"-darwin-best-effort-containment"}, strings.NewReader(""), io.Discard, &stderr); code != 0 || !selected || !strings.Contains(stderr.String(), "containment=best_effort") {
+		t.Fatalf("Darwin flag = %d, selected=%v stderr=%q", code, selected, stderr.String())
+	}
+}
+
 func TestRunSeedFiles(t *testing.T) {
 	originalServe := serve
 	originalAgentVersion := agentVersion

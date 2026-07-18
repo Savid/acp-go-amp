@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -117,5 +118,25 @@ func TestRunContainmentCleanupOperationalFailure(t *testing.T) {
 	}, &bytes.Buffer{}, &stderr)
 	if code != 1 || !strings.HasPrefix(stderr.String(), "acp-go-amp: ") || strings.Count(strings.TrimSpace(stderr.String()), "\n") != 0 {
 		t.Fatalf("cleanup = %d, stderr=%q", code, stderr.String())
+	}
+}
+
+func TestRunContainmentOperationalSuccess(t *testing.T) {
+	originalDiagnose := diagnoseContainment
+	originalCleanup := cleanupContainment
+	t.Cleanup(func() {
+		diagnoseContainment = originalDiagnose
+		cleanupContainment = originalCleanup
+	})
+	diagnoseContainment = func(string, io.Writer) error { return nil }
+	cleanupContainment = func(string, string, bool, io.Writer) error { return nil }
+
+	if code := runContainment([]string{"diagnose", "-scratch-dir", "scratch"}, io.Discard, io.Discard); code != 0 {
+		t.Fatalf("diagnose = %d", code)
+	}
+	if code := runContainment([]string{
+		"cleanup", "-scratch-dir", "scratch", "-runtime-id", strings.Repeat("a", 32), "-force",
+	}, io.Discard, io.Discard); code != 0 {
+		t.Fatalf("cleanup = %d", code)
 	}
 }

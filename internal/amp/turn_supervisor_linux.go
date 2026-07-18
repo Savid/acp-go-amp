@@ -287,6 +287,7 @@ func runTurnSupervisor(configInput io.Reader, controlInput io.Reader, readyOutpu
 	if err := native.Start(); err != nil {
 		return fmt.Errorf("start supervised Amp native root: %w", err)
 	}
+
 	waitDone := make(chan error, 1)
 	go func() { waitDone <- native.Wait() }()
 
