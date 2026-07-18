@@ -31,19 +31,5 @@ emits an unconditional structured warning. `ObserveContainment` exposes the
 same mode to embedding hosts. Provider-descendant snapshots are authoritative
 only and are entirely suppressed in best-effort mode, including zero.
 
-## Troubleshooting
-
-| Symptom | Likely cause | Where to look |
-|---|---|---|
-| Session start fails immediately | No `AMP_API_KEY` in the environment | [Authentication](/docs/features/authentication) |
-| Prompt fails with `amp_turn_failed` (`cause: "process_exit"`) | Native `amp` exited non-zero | `message` carries the exit status and stderr tail |
-| Prompt fails with `cause: "timeout"` | `WithTurnTimeout` deadline elapsed | Raise or unset the deadline; a timeout is a failure, not a cancel |
-| Prompt fails with `native_state_missing` | Server-side Amp thread is gone | Start a fresh session with `session/new`; a mirror cannot resurrect it |
-| Prompt blocked with `mirror_unsynced` | A prior store write failed | Restore the [session store](/docs/features/session-store) backend so the mirror can commit |
-| Session start rejects an MCP server | Unsupported transport or bad field | [MCP](/docs/features/mcp) — only stdio and HTTP are accepted |
-
-<Note>
-`native_state_missing` is terminal for that session: the native thread no longer
-exists, so continuation is impossible. Recovery is a fresh bootstrap — open a new
-session with `session/new` — not a retry of the same session.
-</Note>
+To map a specific failure signal to its cause, see
+[Troubleshooting](/docs/operations/troubleshooting).

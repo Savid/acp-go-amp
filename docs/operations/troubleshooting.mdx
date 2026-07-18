@@ -1,0 +1,74 @@
+---
+title: Troubleshooting
+description: Map common failure symptoms to their causes and the fail-closed behaviors behind them.
+---
+
+The adapter fails closed: when native state is lost, a store write does not
+commit, or a request asks for something Amp does not support, the operation
+returns a loud error instead of silently recreating state. This page maps the
+common symptoms to their causes and to the tests that pin each behavior.
+
+## Symptoms
+
+| Symptom | Likely cause | Where to look |
+|---|---|---|
+| Session start fails immediately | No `AMP_API_KEY` in the environment | [Authentication](/docs/features/authentication) |
+| Prompt fails with `amp_turn_failed` (`cause: "process_exit"`) | Native `amp` exited non-zero | `message` carries the exit status and stderr tail |
+| Prompt fails with `cause: "timeout"` | `WithTurnTimeout` deadline elapsed | Raise or unset the deadline; a timeout is a failure, not a cancel |
+| Prompt fails with `native_state_missing` | Server-side Amp thread is gone | Start a fresh session with `session/new`; a mirror cannot resurrect it |
+| Prompt blocked with `mirror_unsynced` | A prior store write failed | Restore the [session store](/docs/features/session-store) backend so the mirror can commit |
+| Session start rejects an MCP server | Unsupported transport or bad field | [MCP](/docs/features/mcp) — only stdio and HTTP are accepted |
+| `_amp/session/fork` returns an error | Amp has no fork surface | Fork requests are always rejected |
+| Session start or resume rejects a model | Amp does not support model selection | Remove the model option; the rejection is fail-closed |
+| Live integration tests fail without `AMP_API_KEY` | Credential missing from the test environment | Export `AMP_API_KEY`; live tests fail rather than skip |
+
+## Remote-thread loss
+
+Amp stores conversation threads on the server side, so the remote thread is the
+source of truth for continuation. When the thread behind a session no longer
+exists, the adapter surfaces one terminal `native_state_missing` error and
+records a durable tombstone for the lost state instead of silently rebuilding a
+thread from local transcript text. Loading a session verifies that the native
+thread is still continuable: when the thread is gone, the load replays the
+local transcript for display only, and the next prompt fails with
+`native_state_missing`. Reproduced by `TestActiveLoadVerifiesContinuability`
+(`agent_session_test.go`) and `TestNativeMissingThreadAndDeleteFailureTombstone`
+(`agent_test.go`).
+
+<Note>
+`native_state_missing` is terminal for that session: the native thread no longer
+exists, so continuation is impossible. Recovery is a fresh bootstrap — open a new
+session with `session/new` — not a retry of the same session.
+</Note>
+
+## Unsynced mirror
+
+The adapter mirrors the remote thread's stream-JSON frames into the session
+store. When a completed native turn's store write fails, the turn is retained
+in memory and the next prompt is blocked with a loud `mirror_unsynced` error;
+once the store recovers, the exact retained frames are durably re-committed
+before a new turn runs, so load replay still contains every turn. Reproduced by
+`TestMirrorUnsyncedRetention` (`session_test.go`).
+
+## Fork rejection
+
+The Amp CLI's remote-thread model has no fork primitive, so the adapter rejects
+the `_amp/session/fork` extension with the uniform unsupported error rather
+than emulating a fork it cannot honor. Reproduced by
+`TestForkExtensionUnsupported` (`agent_test.go`).
+
+## Model selection
+
+Amp does not support model selection. A default model configured on the agent
+rejects every session start, and a per-session model on any
+session-establishing path is rejected the same way — fail-closed with the
+uniform unsupported `model` field error, never silently ignored. Reproduced by
+`TestAgentLifecycleErrorBranches` and `TestRemainingAgentBranches`
+(`session_test.go`).
+
+## Live-test credentials
+
+The Amp CLI requires `AMP_API_KEY`. This repository's opted-in live integration
+tests fail — not skip — when the credential is missing, so a live suite never
+goes silently green over a credentials problem. Reproduced by
+`requireAmpAPIKey` (`integration/helpers_test.go`).

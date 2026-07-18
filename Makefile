@@ -104,6 +104,7 @@ docs-audit:
 	@test -f docs/features/raw-events.mdx
 	@test -f docs/operations/security.mdx
 	@test -f docs/operations/observability.mdx
+	@test -f docs/operations/troubleshooting.mdx
 	@test -f docs/reference/acp-methods.mdx
 	@test -f docs/reference/cli.mdx
 	@test -f docs/reference/go-api.mdx
