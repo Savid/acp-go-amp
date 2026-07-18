@@ -107,6 +107,10 @@ func (a *Agent) ContainmentMode() RuntimeContainmentMode {
 }
 
 func Serve(ctx context.Context, input io.Reader, output io.Writer, opts ...Option) (returnErr error) {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	agent := newAgentForServe(opts...)
 	defer func() {
 		if closeErr := agent.Close(); closeErr != nil {
@@ -116,10 +120,6 @@ func Serve(ctx context.Context, input io.Reader, output io.Writer, opts ...Optio
 
 	conn := newLocalAgentConnection(agent, output, input)
 	agent.setConnection(conn)
-
-	if err := ctx.Err(); err != nil {
-		return err
-	}
 
 	select {
 	case <-ctx.Done():

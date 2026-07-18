@@ -1019,6 +1019,14 @@ func TestClosedAgentRejectsCallsBeforeDispatch(t *testing.T) {
 func TestServeReturnsOnPreCancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
+	constructed := false
+	previous := newAgentForServe
+	newAgentForServe = func(...Option) *Agent {
+		constructed = true
+
+		return newTestAgent()
+	}
+	t.Cleanup(func() { newAgentForServe = previous })
 
 	c2aR, c2aW := io.Pipe()
 	a2cR, a2cW := io.Pipe()
@@ -1031,6 +1039,9 @@ func TestServeReturnsOnPreCancelledContext(t *testing.T) {
 
 	if err := serveTest(ctx, c2aR, a2cW); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Serve pre-cancelled = %v", err)
+	}
+	if constructed {
+		t.Fatal("Serve constructed an agent for a pre-cancelled context")
 	}
 }
 

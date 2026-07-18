@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-func TestLinuxProcessTreeRemainingHelpers(t *testing.T) {
+func TestLinuxProcessTreeContainmentHelpers(t *testing.T) {
 	if err := (&processTree{}).runAuthoritativeCleanup(time.Millisecond); err != nil {
 		t.Fatalf("empty cleanup = %v", err)
 	}
