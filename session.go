@@ -75,8 +75,12 @@ var (
 )
 
 type ampManifest struct {
-	Format             string `json:"format"`
-	ThreadID           string `json:"threadId"`
+	Format    string `json:"format"`
+	SessionID string `json:"sessionId"`
+	// NativeSessionID is the server-side Amp thread id. It is empty until the
+	// session's first prompt turn creates the thread and the wrapper adopts
+	// the id from the stream-json init frame.
+	NativeSessionID    string `json:"nativeSessionId,omitempty"`
 	Cwd                string `json:"cwd"`
 	Title              string `json:"title,omitempty"`
 	Mode               string `json:"mode,omitempty"`
@@ -85,8 +89,11 @@ type ampManifest struct {
 }
 
 type agentSession struct {
-	agent                 *Agent
-	id                    acp.SessionId
+	agent *Agent
+	id    acp.SessionId
+	// nativeID is the adopted server-side Amp thread id, empty until the
+	// first prompt turn creates the thread. Guarded by mu.
+	nativeID              string
 	cwd                   string
 	title                 string
 	mode                  string
@@ -115,10 +122,8 @@ type agentSession struct {
 }
 
 func newAgentSession(ctx context.Context, agent *Agent, id acp.SessionId, cwd string, meta parsedSessionMeta, mcpConfigJSON string, additionalDirs []string) (_ *agentSession, err error) {
-	if id != "" {
-		if validateErr := amp.ValidateThreadID(string(id)); validateErr != nil {
-			return nil, fmt.Errorf("invalid amp session id: %w", validateErr)
-		}
+	if validateErr := validateSessionID(string(id)); validateErr != nil {
+		return nil, fmt.Errorf("invalid amp session id: %w", validateErr)
 	}
 
 	now := time.Now().UnixMilli()
@@ -222,7 +227,6 @@ func (s *agentSession) clientWithEnv(env map[string]string, mcpConfigPath string
 		Cwd:                        s.cwd,
 		SettingsFile:               s.settingsFile,
 		Env:                        env,
-		ThreadID:                   string(s.id),
 		Mode:                       s.mode,
 		MCPConfigPath:              mcpConfigPath,
 		MaxLineBytes:               s.agent.options.runtime.maxJSONLineBytes,
@@ -385,7 +389,14 @@ func (s *agentSession) Delete(ctx context.Context) error {
 		return finalizeSessionScratch(interruptErr, boundaryErr, s.settingsDir, s.scratchRootRelease)
 	}
 
-	deleteErr := s.client().DeleteThread(ctx, string(s.id))
+	// A session whose first prompt never ran has no server-side thread, so
+	// there is nothing native to delete.
+	nativeID := s.nativeSessionID()
+	if nativeID == "" {
+		return finalizeSessionScratch(interruptErr, boundaryErr, s.settingsDir, s.scratchRootRelease)
+	}
+
+	deleteErr := s.client().DeleteThread(ctx, nativeID)
 	s.recordScratchContainment(deleteErr)
 
 	return finalizeSessionScratch(errors.Join(interruptErr, deleteErr), errors.Join(boundaryErr, deleteErr), s.settingsDir, s.scratchRootRelease)
@@ -430,12 +441,19 @@ func (s *agentSession) verifyContinuable(ctx context.Context) error {
 		return boundaryErr
 	}
 
+	// A session with no native thread yet is trivially continuable: its next
+	// prompt creates the thread, so there is nothing server-side to probe.
+	nativeID := s.nativeSessionID()
+	if nativeID == "" {
+		return nil
+	}
+
 	timeout := s.agent.options.runtime.nativeCommandTimeout
 
 	probeCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	_, exportErr := s.agent.options.runtime.exportThread(probeCtx, s.client(), string(s.id))
+	_, exportErr := s.agent.options.runtime.exportThread(probeCtx, s.client(), nativeID)
 	s.recordScratchContainment(exportErr)
 
 	if exportErr != nil {
@@ -486,13 +504,23 @@ func (s *agentSession) manifest() ampManifest {
 
 	return ampManifest{
 		Format:             SessionStoreFormat,
-		ThreadID:           string(s.id),
+		SessionID:          string(s.id),
+		NativeSessionID:    s.nativeID,
 		Cwd:                s.cwd,
 		Title:              s.title,
 		Mode:               s.mode,
 		UpdatedAtUnixMilli: s.updatedUnix,
 		CreatedAtUnixMilli: s.createdUnix,
 	}
+}
+
+// nativeSessionID returns the adopted server-side Amp thread id, or "" while
+// no thread exists yet.
+func (s *agentSession) nativeSessionID() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.nativeID
 }
 
 // persistAfterTurn durably commits the manifest plus the full transcript in one

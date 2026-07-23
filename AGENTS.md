@@ -35,8 +35,10 @@ stdio or embed the agent directly in Go.
   names substituted.
 - Do not add permission bridging, command catalogs, model config options, or
   fork behavior without a director ruling.
-- Keep process handling simple: one short-lived `amp threads continue` process
-  per prompt, isolated settings file, dedicated stdout/stderr pipes.
+- Keep process handling simple: one short-lived amp process per prompt — a
+  thread-less `amp -x` execute on the first prompt (which creates the
+  server-side thread), `amp threads continue` afterwards — with an isolated
+  settings file and dedicated stdout/stderr pipes.
 - Preserve raw Amp stream JSON bytes in the `transcript` store subpath.
 - Do not persist auth, settings, API keys, or other secrets.
 

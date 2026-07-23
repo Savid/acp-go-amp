@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -114,6 +115,10 @@ func TestActiveLoadRetriesMirrorBeforeReplay(t *testing.T) {
 	}
 	id := resp.SessionId
 
+	if _, err := agent.Prompt(ctx, TextPromptRequest(id, "test-turn", "seed thread")); err != nil {
+		t.Fatalf("seed prompt: %v", err)
+	}
+
 	store.failReplaces = 1
 	if _, err := agent.Prompt(ctx, TextPromptRequest(id, "test-turn", "persist after native success")); err == nil {
 		t.Fatal("prompt with failing persist returned no error")
@@ -141,6 +146,9 @@ func TestActiveLoadVerifiesContinuability(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
 	}
+	if _, err := agent.Prompt(ctx, TextPromptRequest(resp.SessionId, "test-turn", "seed thread")); err != nil {
+		t.Fatalf("seed prompt: %v", err)
+	}
 	if _, err := agent.LoadSession(ctx, LoadSessionRequest(resp.SessionId, cwd)); err != nil {
 		t.Fatalf("active LoadSession with missing native thread should replay only: %v", err)
 	}
@@ -157,6 +165,9 @@ func TestActiveLoadPropagatesContinuabilityFailure(t *testing.T) {
 	resp, err := agent.NewSession(ctx, NewSessionRequest(cwd))
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
+	}
+	if _, err := agent.Prompt(ctx, TextPromptRequest(resp.SessionId, "test-turn", "seed thread")); err != nil {
+		t.Fatalf("seed prompt: %v", err)
 	}
 	if _, err := agent.LoadSession(ctx, LoadSessionRequest(resp.SessionId, cwd)); err == nil || !strings.Contains(err.Error(), "export failed") {
 		t.Fatalf("active LoadSession export failure = %v, want export failed", err)
@@ -515,7 +526,7 @@ func TestStoreSortingAndTombstoneEdges(t *testing.T) {
 	store := NewInMemorySessionStore()
 	putStoredSession(t, store, "T-b", "/b", nil)
 	putStoredSession(t, store, "T-a", "/a", nil)
-	newer, err := json.Marshal(ampManifest{Format: SessionStoreFormat, ThreadID: "T-new", UpdatedAtUnixMilli: 3})
+	newer, err := json.Marshal(ampManifest{Format: SessionStoreFormat, SessionID: "T-new", NativeSessionID: "T-new", UpdatedAtUnixMilli: 3})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -526,7 +537,7 @@ func TestStoreSortingAndTombstoneEdges(t *testing.T) {
 	}
 	store.mu.Lock()
 	store.deleted[SessionKey{SessionID: "T-z", Subpath: SessionStoreMainSubpath}] = struct{}{}
-	store.entries[SessionKey{SessionID: "T-z", Subpath: SessionStoreMainSubpath}] = []SessionStoreEntry{json.RawMessage(`{"format":"amp-thread-mirror-v1","threadId":"T-z"}`)}
+	store.entries[SessionKey{SessionID: "T-z", Subpath: SessionStoreMainSubpath}] = []SessionStoreEntry{json.RawMessage(`{"format":"amp-thread-mirror-v1","sessionId":"T-z"}`)}
 	// Ordering follows the store-tracked updatedAt, newest first.
 	store.updatedAt[SessionKey{SessionID: "T-b", Subpath: SessionStoreMainSubpath}] = 1
 	store.updatedAt[SessionKey{SessionID: "T-a", Subpath: SessionStoreMainSubpath}] = 2
@@ -566,7 +577,8 @@ func putStoredSession(t *testing.T, store *InMemorySessionStore, id string, cwd 
 	t.Helper()
 	manifest, err := json.Marshal(ampManifest{
 		Format:             SessionStoreFormat,
-		ThreadID:           id,
+		SessionID:          id,
+		NativeSessionID:    id,
 		Cwd:                cwd,
 		Mode:               "medium",
 		CreatedAtUnixMilli: 1,
@@ -688,13 +700,31 @@ func TestLaunchNeverUsesRemovedEffortFlag(t *testing.T) {
 	}); promptErr != nil {
 		t.Fatalf("Prompt: %v", promptErr)
 	}
+	if _, promptErr := conn.Prompt(ctx, acp.PromptRequest{
+		SessionId: newResp.SessionId,
+		Prompt:    []acp.ContentBlock{acp.TextBlock("again")},
+	}); promptErr != nil {
+		t.Fatalf("second Prompt: %v", promptErr)
+	}
 
 	argsRecords := readHelperJSON[[]string](t, filepath.Join(state, "args.jsonl"))
-	var continueArgs []string
+	var executeArgs, continueArgs []string
 	for _, args := range argsRecords {
-		if slices.Contains(args, "continue") && slices.Contains(args, string(newResp.SessionId)) {
+		if !slices.Contains(args, "threads") && slices.Contains(args, "-x") {
+			executeArgs = args
+		}
+		if slices.Contains(args, "continue") && slices.Contains(args, "T-agent-thread") {
 			continueArgs = args
 		}
+	}
+	if executeArgs == nil {
+		t.Fatalf("no thread-less execute invocation recorded: %#v", argsRecords)
+	}
+	if !slices.Contains(executeArgs, "--no-archive-after-execute") {
+		t.Fatalf("execute launch missing --no-archive-after-execute: %#v", executeArgs)
+	}
+	if slices.Contains(executeArgs, "--effort") {
+		t.Fatalf("--effort passed on execute launch: %#v", executeArgs)
 	}
 	if continueArgs == nil {
 		t.Fatalf("no real continue invocation recorded: %#v", argsRecords)
@@ -891,7 +921,7 @@ func TestLifecycleSessionConstructionErrorsPropagate(t *testing.T) {
 
 	sessionID := acp.SessionId("T-load-construction")
 	manifest, err := json.Marshal(ampManifest{
-		Format: SessionStoreFormat, ThreadID: string(sessionID), Cwd: cwd,
+		Format: SessionStoreFormat, SessionID: string(sessionID), NativeSessionID: string(sessionID), Cwd: cwd,
 		CreatedAtUnixMilli: 1, UpdatedAtUnixMilli: 2,
 	})
 	if err != nil {
@@ -903,5 +933,32 @@ func TestLifecycleSessionConstructionErrorsPropagate(t *testing.T) {
 	}
 	if _, _, _, err := agent.loadOrResume(t.Context(), sessionID, cwd, nil, nil, nil); !errors.Is(err, want) {
 		t.Fatalf("load-session construction error = %v", err)
+	}
+}
+
+func TestZeroTurnSessionDeleteRunsNoNativeCommand(t *testing.T) {
+	ctx := context.Background()
+	path, state := fakeAgentAmpPath(t, "")
+	store := NewInMemorySessionStore()
+	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()), WithSessionStore(store))
+
+	resp, err := agent.NewSession(ctx, NewSessionRequest(t.TempDir()))
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	if out, versionErr := exec.Command(path, "version").CombinedOutput(); versionErr != nil {
+		t.Fatalf("seed fake amp recording: %v\n%s", versionErr, out)
+	}
+	before := len(readHelperJSON[[]string](t, filepath.Join(state, "args.jsonl")))
+
+	if _, err := agent.UnstableDeleteSession(ctx, DeleteSessionRequest(resp.SessionId)); err != nil {
+		t.Fatalf("zero-turn delete: %v", err)
+	}
+	after := readHelperJSON[[]string](t, filepath.Join(state, "args.jsonl"))
+	if len(after) != before {
+		t.Fatalf("zero-turn delete launched native commands: %#v", after[before:])
+	}
+	if _, loadErr := agent.LoadSession(ctx, LoadSessionRequest(resp.SessionId, "")); loadErr == nil {
+		t.Fatal("deleted zero-turn session loaded")
 	}
 }

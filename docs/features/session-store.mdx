@@ -33,7 +33,7 @@ under a separate fixed `60s` bound.
 
 | Subpath | Contents |
 |---|---|
-| main | Manifest: `threadId` (also the ACP session ID), `cwd`, `title`, selected `mode`, and Unix-millisecond create/update timestamps. |
+| main | Manifest: `sessionId` (the adapter-minted ACP session ID), `nativeSessionId` (the Amp thread ID, absent until the first prompt turn creates the thread), `cwd`, `title`, selected `mode`, and Unix-millisecond create/update timestamps. |
 | `transcript` | The full ordered Amp stream-JSON frame mirror for completed prompt turns. |
 
 Each completed turn publishes the manifest and full transcript together in

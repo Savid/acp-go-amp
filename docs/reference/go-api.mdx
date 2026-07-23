@@ -93,5 +93,7 @@ root before creation and acquires a native permit for every startup probe,
 thread command, and prompt process before launch. Amp is lockless, so it never
 reports home-lock supervisors. Provider-descendant snapshots are emitted only
 under authoritative containment and are suppressed for the entire Darwin
-best-effort lifetime, including zero. Startup observations name `spawn`, `readiness`,
-`configuration`, or `session` and carry the stage error.
+best-effort lifetime, including zero. Startup observations name `spawn`,
+`readiness`, `configuration`, or `session` and carry the stage error; `session`
+marks the thread-creating first-prompt spawn, `spawn` the continue spawn of
+later prompts.

@@ -182,7 +182,7 @@ func TestServeFakeAmpLifecycleStdoutCleanStoreReplayAndDelete(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
 	}
-	if newResp.SessionId != "T-agent-thread" {
+	if newResp.SessionId == "" || strings.HasPrefix(string(newResp.SessionId), "T-") {
 		t.Fatalf("session id = %q", newResp.SessionId)
 	}
 	messageID := "00000000-0000-4000-8000-000000000001"
@@ -270,15 +270,15 @@ func TestServeFakeAmpLifecycleStdoutCleanStoreReplayAndDelete(t *testing.T) {
 	}
 
 	argsRecords := readHelperJSON[[]string](t, filepath.Join(state, "args.jsonl"))
-	var continueArgs []string
+	var executeArgs []string
 	for _, args := range argsRecords {
-		if slices.Contains(args, "continue") {
-			continueArgs = args
+		if !slices.Contains(args, "threads") && slices.Contains(args, "-x") {
+			executeArgs = args
 		}
 	}
-	for _, want := range []string{"--no-ide", "--no-color", "--no-notifications", "--settings-file", "--mcp-config", "-m", "high", "threads", "continue", "T-agent-thread", "--stream-json", "--stream-json-input", "-x"} {
-		if !slices.Contains(continueArgs, want) {
-			t.Fatalf("continue args missing %q: %#v", want, continueArgs)
+	for _, want := range []string{"--no-ide", "--no-color", "--no-notifications", "--settings-file", "--mcp-config", "-m", "high", "--no-archive-after-execute", "--stream-json", "--stream-json-input", "-x"} {
+		if !slices.Contains(executeArgs, want) {
+			t.Fatalf("execute args missing %q: %#v", want, executeArgs)
 		}
 	}
 	stdin := readHelperJSON[string](t, filepath.Join(state, "stdin.jsonl"))
@@ -482,6 +482,9 @@ func TestNativeMissingThreadAndDeleteFailureTombstone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSession delete: %v", err)
 	}
+	if _, promptErr := deleteAgent.Prompt(ctx, TextPromptRequest(deleteResp.SessionId, "test-turn", "seed thread")); promptErr != nil {
+		t.Fatalf("seed prompt delete: %v", promptErr)
+	}
 	_, err = deleteAgent.UnstableDeleteSession(ctx, DeleteSessionRequest(deleteResp.SessionId))
 	if err == nil {
 		t.Fatal("expected native delete failure")
@@ -680,11 +683,6 @@ func fakeAgentAmpPath(t *testing.T, mode string) (string, string) {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("build fake amp: %v\n%s", err, out)
 	}
-	if mode != "block-new" {
-		if out, err := exec.Command(path, "threads", "new").CombinedOutput(); err != nil {
-			t.Fatalf("preflight fake amp: %v\n%s", err, out)
-		}
-	}
 	return path, state
 }
 
@@ -728,7 +726,7 @@ func main() {
 			os.Stdout.WriteString("0.0.1\n")
 			return
 		}
-		os.Stdout.WriteString("0.0.1783155105-gfake\n")
+		os.Stdout.WriteString("0.0.1784765892-gfake\n")
 		return
 	}
 	// Startup method-present probes use a known-missing thread id; answer with the
@@ -740,22 +738,17 @@ func main() {
 		}
 	}
 	threads := index(args, "threads")
-	if threads < 0 || threads+1 >= len(args) {
+	sub := ""
+	if threads >= 0 && threads+1 < len(args) {
+		sub = args[threads+1]
+	} else if index(args, "-x") >= 0 {
+		sub = "continue"
+	}
+	if sub == "" {
 		os.Stderr.WriteString("missing threads subcommand\n")
 		os.Exit(2)
 	}
-	switch args[threads+1] {
-	case "new":
-		if mode == "block-new" {
-			for {
-				time.Sleep(time.Hour)
-			}
-		}
-		if mode == "bad-new-id" {
-			os.Stdout.WriteString("not-a-thread\n")
-			return
-		}
-		os.Stdout.WriteString("T-agent-thread\n")
+	switch sub {
 	case "list":
 		if mode == "probe-list-fail" {
 			os.Stdout.WriteString("{\n")
@@ -791,6 +784,11 @@ func main() {
 		}
 		os.Stdout.WriteString("deleted\n")
 	case "continue":
+		if mode == "bad-adopt" {
+			os.Stdout.WriteString("{\"type\":\"system\",\"subtype\":\"init\",\"cwd\":\"/tmp/project\",\"session_id\":\"not-a-thread\"}\n")
+			os.Stdout.WriteString("{\"type\":\"result\",\"subtype\":\"success\",\"duration_ms\":1,\"is_error\":false,\"num_turns\":1,\"result\":\"late\",\"session_id\":\"not-a-thread\"}\n")
+			return
+		}
 		if mode == "block-stdin" {
 			record(state, "continue-started", "yes")
 			for {

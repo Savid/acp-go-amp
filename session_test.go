@@ -36,10 +36,6 @@ func TestAgentLifecycleErrorBranches(t *testing.T) {
 	if _, err := newTestAgent(WithExecutablePath(path), WithScratchDir(fileHome)).NewSession(ctx, NewSessionRequest(t.TempDir())); err == nil {
 		t.Fatal("file scratch dir accepted")
 	}
-	badPath, _ := fakeAgentAmpPath(t, "bad-new-id")
-	if _, err := newTestAgent(WithExecutablePath(badPath), WithScratchDir(t.TempDir())).NewSession(ctx, NewSessionRequest(t.TempDir())); err == nil {
-		t.Fatal("bad native thread id accepted")
-	}
 	storeErr := &errorStore{loadErr: errors.New("load failed")}
 	if _, err := newTestAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()), WithSessionStore(storeErr)).NewSession(ctx, NewSessionRequest(t.TempDir())); err == nil {
 		t.Fatal("persist load error ignored")
@@ -63,7 +59,7 @@ func TestLoadResumeManifestAndConfigBranches(t *testing.T) {
 	path, _ := fakeAgentAmpPath(t, "")
 	cwd := t.TempDir()
 	store := NewInMemorySessionStore()
-	manifest, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, ThreadID: "T-load", Cwd: cwd, Mode: "high", CreatedAtUnixMilli: 1, UpdatedAtUnixMilli: 2})
+	manifest, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, SessionID: "T-load", NativeSessionID: "T-load", Cwd: cwd, Mode: "high", CreatedAtUnixMilli: 1, UpdatedAtUnixMilli: 2})
 	if err := store.Replace(ctx, SessionKey{SessionID: "T-load", Subpath: SessionStoreMainSubpath}, []SessionStoreReplacement{
 		{Key: SessionKey{SessionID: "T-load", Subpath: SessionStoreMainSubpath}, Entries: []SessionStoreEntry{manifest}},
 		{Key: SessionKey{SessionID: "T-load", Subpath: transcriptSubpath}, Entries: []SessionStoreEntry{
@@ -141,7 +137,7 @@ func TestLoadManifestErrorsAndListFilters(t *testing.T) {
 	for _, entry := range []SessionStoreEntry{
 		json.RawMessage(`{`),
 		json.RawMessage(`{"format":"wrong","threadId":"T-bad"}`),
-		json.RawMessage(`{"format":"amp-thread-mirror-v1","threadId":"other"}`),
+		json.RawMessage(`{"format":"amp-thread-mirror-v1","sessionId":"other"}`),
 	} {
 		store := NewInMemorySessionStore()
 		if err := store.Replace(ctx, SessionKey{SessionID: "T-bad", Subpath: SessionStoreMainSubpath}, []SessionStoreReplacement{{Key: SessionKey{SessionID: "T-bad", Subpath: SessionStoreMainSubpath}, Entries: []SessionStoreEntry{entry}}}); err != nil {
@@ -152,7 +148,7 @@ func TestLoadManifestErrorsAndListFilters(t *testing.T) {
 		}
 	}
 	overlongID := acp.SessionId("T-" + strings.Repeat("x", ampnative.MaxThreadIDBytes))
-	overlong, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, ThreadID: string(overlongID)})
+	overlong, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, SessionID: string(overlongID), NativeSessionID: string(overlongID)})
 	overlongStore := NewInMemorySessionStore()
 	if err := overlongStore.Replace(ctx, SessionKey{SessionID: string(overlongID)}, []SessionStoreReplacement{{
 		Key: SessionKey{SessionID: string(overlongID)}, Entries: []SessionStoreEntry{overlong},
@@ -167,7 +163,7 @@ func TestLoadManifestErrorsAndListFilters(t *testing.T) {
 		t.Fatal("list error ignored")
 	}
 	store := NewInMemorySessionStore()
-	manifest, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, ThreadID: "T-list", Cwd: "/cwd", UpdatedAtUnixMilli: 0})
+	manifest, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, SessionID: "T-list", NativeSessionID: "T-list", Cwd: "/cwd", UpdatedAtUnixMilli: 0})
 	if err := store.Replace(ctx, SessionKey{SessionID: "T-list", Subpath: SessionStoreMainSubpath}, []SessionStoreReplacement{{Key: SessionKey{SessionID: "T-list", Subpath: SessionStoreMainSubpath}, Entries: []SessionStoreEntry{manifest}}}); err != nil {
 		t.Fatal(err)
 	}
@@ -204,7 +200,7 @@ func TestRemainingAgentBranches(t *testing.T) {
 		t.Fatal(err)
 	}
 	store := NewInMemorySessionStore()
-	manifest, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, ThreadID: "T-file", Cwd: t.TempDir()})
+	manifest, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, SessionID: "T-file", NativeSessionID: "T-file", Cwd: t.TempDir()})
 	if err := store.Replace(ctx, SessionKey{SessionID: "T-file", Subpath: ""}, []SessionStoreReplacement{{Key: SessionKey{SessionID: "T-file", Subpath: ""}, Entries: []SessionStoreEntry{manifest}}}); err != nil {
 		t.Fatal(err)
 	}
@@ -217,7 +213,7 @@ func TestRemainingAgentBranches(t *testing.T) {
 		t.Fatalf("loadOrResume direct: %v", err)
 	}
 	activeLimited.options.ConcurrencyLimits.MaxActiveSessions = 1
-	manifest2, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, ThreadID: "T-file-2", Cwd: t.TempDir()})
+	manifest2, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, SessionID: "T-file-2", NativeSessionID: "T-file-2", Cwd: t.TempDir()})
 	if err := store.Replace(ctx, SessionKey{SessionID: "T-file-2", Subpath: ""}, []SessionStoreReplacement{{Key: SessionKey{SessionID: "T-file-2", Subpath: ""}, Entries: []SessionStoreEntry{manifest2}}}); err != nil {
 		t.Fatal(err)
 	}
@@ -483,6 +479,10 @@ func TestMirrorUnsyncedRetention(t *testing.T) {
 	}
 	id := resp.SessionId
 
+	if _, err = agent.Prompt(ctx, TextPromptRequest(id, "test-turn", "seed thread")); err != nil {
+		t.Fatalf("seed prompt: %v", err)
+	}
+
 	// Fail the completed turn's persist and the first retry.
 	store.failReplaces = 2
 
@@ -507,8 +507,8 @@ func TestMirrorUnsyncedRetention(t *testing.T) {
 			results++
 		}
 	}
-	if results != 2 {
-		t.Fatalf("persisted transcript has %d result frames, want both turns (2)", results)
+	if results != 3 {
+		t.Fatalf("persisted transcript has %d result frames, want all three turns", results)
 	}
 
 	// Load replay on a fresh agent must succeed and see the retained turns.
@@ -536,7 +536,7 @@ func TestTombstoneCascade(t *testing.T) {
 	ctx := context.Background()
 	store := NewInMemorySessionStore()
 	main := SessionKey{SessionID: "T-cascade", Subpath: SessionStoreMainSubpath}
-	manifest, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, ThreadID: "T-cascade"})
+	manifest, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, SessionID: "T-cascade", NativeSessionID: "T-cascade"})
 	if err := store.Replace(ctx, main, []SessionStoreReplacement{{Key: main, Entries: []SessionStoreEntry{manifest}}}); err != nil {
 		t.Fatal(err)
 	}

@@ -93,9 +93,12 @@ storage, and OpenTelemetry providers. Amp has no native config/auth root, so
 
 ## What It Provides
 
-- ACP session lifecycle (create, prompt, cancel, close, list, load, resume),
-  using Amp thread IDs directly as ACP session IDs.
-- One short-lived `amp threads continue` process per prompt, run with
+- ACP session lifecycle (create, prompt, cancel, close, list, load, resume).
+  The adapter mints UUID session ids; the server-side Amp thread is created
+  lazily by the session's first prompt turn and recorded in the session
+  manifest, so a session that is never prompted never owns a remote thread.
+- One short-lived amp process per prompt — a thread-less `amp -x` execute on
+  the first prompt, `amp threads continue` afterwards — run with
   isolated native HOME/XDG state, an isolated settings file, and dedicated
   stdout/stderr pipes.
 - Native-process containment: Linux runs every Amp command under a

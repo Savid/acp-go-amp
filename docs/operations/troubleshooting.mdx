@@ -28,8 +28,8 @@ Amp stores conversation threads on the server side, so the remote thread is the
 source of truth for continuation. When the thread behind a session no longer
 exists, the adapter surfaces one terminal `native_state_missing` error and
 records a durable tombstone for the lost state instead of silently rebuilding a
-thread from local transcript text. Loading a session verifies that the native
-thread is still continuable: when the thread is gone, the load replays the
+thread from local transcript text. Loading a session verifies that any
+recorded native thread is still continuable: when the thread is gone, the load replays the
 local transcript for display only, and the next prompt fails with
 `native_state_missing`. Reproduced by `TestActiveLoadVerifiesContinuability`
 (`agent_session_test.go`) and `TestNativeMissingThreadAndDeleteFailureTombstone`

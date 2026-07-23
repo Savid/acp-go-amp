@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -123,18 +124,31 @@ func TestClientBackpressureAndSessionIDDrift(t *testing.T) {
 	}
 
 	path, _ := fakeAgentAmpPath(t, "session-drift")
-	driftAgent := newTestAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()))
-	resp, err := driftAgent.NewSession(context.Background(), NewSessionRequest(t.TempDir()))
-	if err != nil {
-		t.Fatalf("NewSession drift: %v", err)
+	driftStore := NewInMemorySessionStore()
+	driftCwd := t.TempDir()
+	putStoredSession(t, driftStore, "T-agent-thread", driftCwd, nil)
+	driftAgent := newTestAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()), WithSessionStore(driftStore))
+	if _, loadErr := driftAgent.LoadSession(context.Background(), LoadSessionRequest("T-agent-thread", driftCwd)); loadErr != nil {
+		t.Fatalf("LoadSession drift: %v", loadErr)
 	}
-	_, err = driftAgent.Prompt(context.Background(), TextPromptRequest(resp.SessionId, "test-turn", "x"))
+	_, err = driftAgent.Prompt(context.Background(), TextPromptRequest("T-agent-thread", "test-turn", "x"))
 	if err == nil || !strings.Contains(err.Error(), "native session_id drift") {
 		t.Fatalf("drift prompt error = %v", err)
 	}
-	_, err = driftAgent.Prompt(context.Background(), TextPromptRequest(resp.SessionId, "test-turn", "again"))
+	_, err = driftAgent.Prompt(context.Background(), TextPromptRequest("T-agent-thread", "test-turn", "again"))
 	if err == nil || !strings.Contains(err.Error(), "native session_id drift") {
 		t.Fatalf("poisoned prompt error = %v", err)
+	}
+
+	adoptPath, _ := fakeAgentAmpPath(t, "bad-adopt")
+	adoptAgent := newTestAgent(WithExecutablePath(adoptPath), WithScratchDir(t.TempDir()))
+	adoptResp, err := adoptAgent.NewSession(context.Background(), NewSessionRequest(t.TempDir()))
+	if err != nil {
+		t.Fatalf("NewSession adopt: %v", err)
+	}
+	_, err = adoptAgent.Prompt(context.Background(), TextPromptRequest(adoptResp.SessionId, "test-turn", "x"))
+	if err == nil || !strings.Contains(err.Error(), "native session_id invalid") {
+		t.Fatalf("invalid adopted id prompt error = %v", err)
 	}
 }
 
@@ -165,6 +179,9 @@ func TestDeleteOrderingRetryAndManifestShape(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSession fail once: %v", err)
 	}
+	if _, promptErr := failOnce.Prompt(ctx, TextPromptRequest(failOnceResp.SessionId, "test-turn", "seed thread")); promptErr != nil {
+		t.Fatalf("seed prompt fail once: %v", promptErr)
+	}
 	if _, deleteErr := failOnce.UnstableDeleteSession(ctx, DeleteSessionRequest(failOnceResp.SessionId)); deleteErr == nil {
 		t.Fatal("first native delete succeeded unexpectedly")
 	}
@@ -182,7 +199,7 @@ func TestDeleteOrderingRetryAndManifestShape(t *testing.T) {
 	}
 
 	pendingFailure := newTestAgent(WithExecutablePath("/does/not/exist"), WithScratchDir(t.TempDir()))
-	pendingFailure.markPendingNativeDelete("T-pending-failure")
+	pendingFailure.markPendingNativeDelete("T-pending-failure", "T-pending-native")
 	if _, deleteErr := pendingFailure.UnstableDeleteSession(ctx, DeleteSessionRequest("T-pending-failure")); deleteErr == nil {
 		t.Fatal("pending native delete retry failure was swallowed")
 	}
@@ -213,6 +230,9 @@ func TestDeleteUsesStoreAsSoleNativeAuthority(t *testing.T) {
 	path, state := fakeAgentAmpPath(t, "")
 	store := NewInMemorySessionStore()
 	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()), WithSessionStore(store))
+	if out, versionErr := exec.Command(path, "version").CombinedOutput(); versionErr != nil {
+		t.Fatalf("seed fake amp recording: %v\n%s", versionErr, out)
+	}
 	before := readHelperJSON[[]string](t, filepath.Join(state, "args.jsonl"))
 
 	for range 2 {
@@ -244,6 +264,9 @@ func TestDeleteUsesStoreAsSoleNativeAuthority(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSession known: %v", err)
 	}
+	if _, promptErr := agent.Prompt(ctx, TextPromptRequest(known.SessionId, "test-turn", "seed thread")); promptErr != nil {
+		t.Fatalf("seed prompt known: %v", promptErr)
+	}
 	if _, knownDeleteErr := agent.UnstableDeleteSession(ctx, DeleteSessionRequest(known.SessionId)); knownDeleteErr != nil {
 		t.Fatalf("known delete: %v", knownDeleteErr)
 	}
@@ -254,7 +277,7 @@ func TestDeleteUsesStoreAsSoleNativeAuthority(t *testing.T) {
 	records := readHelperJSON[[]string](t, filepath.Join(state, "args.jsonl"))
 	deleteCalls := 0
 	for _, args := range records {
-		if slicesContainCommand([][]string{args}, "threads", "delete", string(known.SessionId)) {
+		if slicesContainCommand([][]string{args}, "threads", "delete", "T-agent-thread") {
 			deleteCalls++
 		}
 	}
@@ -269,7 +292,7 @@ func TestDeleteUsesStoreAsSoleNativeAuthority(t *testing.T) {
 
 	nilStore := newTestAgent()
 	nilStore.store = nil
-	knownInNil, err := nilStore.storedSessionExists(ctx, "T-any")
+	_, knownInNil, err := nilStore.storedManifest(ctx, "T-any")
 	if err != nil || knownInNil {
 		t.Fatalf("nil store membership = %t, %v", knownInNil, err)
 	}
@@ -359,7 +382,7 @@ func TestRemainingBranches(t *testing.T) {
 	if err := os.WriteFile(fileHome, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := newTestAgent(WithScratchDir(fileHome)).deleteNativeThread(ctx, "T-file-home", nil); err == nil {
+	if err := newTestAgent(WithScratchDir(fileHome)).deleteNativeThread(ctx, "T-file-home", "T-file-home", nil); err == nil {
 		t.Fatal("deleteNativeThread ignored session creation error")
 	}
 	cancelCtx, cancel := context.WithCancel(ctx)

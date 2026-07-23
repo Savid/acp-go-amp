@@ -34,7 +34,7 @@ func TestFakeAmpHelper(t *testing.T) {
 			os.Stdout.WriteString("0.0.1\n")
 			os.Exit(0)
 		}
-		os.Stdout.WriteString("0.0.1783155105-gfake\n")
+		os.Stdout.WriteString(MinimumVersion + "-gfake\n")
 		os.Exit(0)
 	}
 	if len(args) > 0 && args[len(args)-1] == "--help" {
@@ -50,6 +50,12 @@ func TestFakeAmpHelper(t *testing.T) {
 		os.Exit(0)
 	}
 	threads := slices.Index(args, "threads")
+	if threads < 0 && slices.Contains(args, ampArgExecute) {
+		stdin, _ := io.ReadAll(os.Stdin)
+		recordHelperJSON(state, "stdin.jsonl", strings.TrimSpace(string(stdin)))
+		helperContinue(mode, state)
+		os.Exit(0)
+	}
 	if threads < 0 || threads+1 >= len(args) {
 		os.Stderr.WriteString("missing threads subcommand\n")
 		os.Exit(2)
@@ -66,16 +72,6 @@ func TestFakeAmpHelper(t *testing.T) {
 	}
 
 	switch args[threads+1] {
-	case "new":
-		if mode == "bad-new-id" {
-			os.Stdout.WriteString("not-a-thread\n")
-			os.Exit(0)
-		}
-		if mode == "oversized-new-id" {
-			os.Stdout.WriteString("T-" + strings.Repeat("x", MaxThreadIDBytes) + "\n")
-			os.Exit(0)
-		}
-		os.Stdout.WriteString("\x1b[32mT-fake-thread\x1b[0m\n")
 	case "list":
 		if mode == "hang-list" {
 			for {
@@ -340,7 +336,7 @@ func TestClientCommandsUseGlobalArgsAndParseOutput(t *testing.T) {
 	})
 	ctx := context.Background()
 
-	if version, err := client.Version(ctx); err != nil || version != "0.0.1783155105-gfake" {
+	if version, err := client.Version(ctx); err != nil || version != MinimumVersion+"-gfake" {
 		t.Fatalf("Version = %q, %v", version, err)
 	}
 	if err := client.StartupProbe(ctx); err != nil {
@@ -357,7 +353,7 @@ func TestClientCommandsUseGlobalArgsAndParseOutput(t *testing.T) {
 	if len(startupContinue) == 0 {
 		t.Fatalf("startup continue probe not recorded: %#v", records)
 	}
-	for _, want := range []string{"--settings-file", "--mcp-config", "-m", "medium", "--stream-json", "--stream-json-input", "-x"} {
+	for _, want := range []string{"--settings-file", "--mcp-config", "-m", "medium", "--stream-json", "--stream-json-input", "-x", ampArgNoArchiveAfterExecute} {
 		if !slices.Contains(startupContinue, want) {
 			t.Fatalf("startup continue probe missing %q: %#v", want, startupContinue)
 		}
@@ -372,9 +368,6 @@ func TestClientCommandsUseGlobalArgsAndParseOutput(t *testing.T) {
 	}
 	if err := client.StartupProbe(ctx); err != nil {
 		t.Fatalf("StartupProbe cached: %v", err)
-	}
-	if id, err := client.NewThread(ctx); err != nil || id != "T-fake-thread" {
-		t.Fatalf("NewThread = %q, %v", id, err)
 	}
 	threads, err := client.ListThreads(ctx)
 	if err != nil {
@@ -483,7 +476,7 @@ func TestStartupProbeAndVersionBranches(t *testing.T) {
 		}
 	}()
 
-	if !versionAtLeast("0.0.1783155106-gx", MinimumVersion) {
+	if !versionAtLeast("0.0.1784765893-gx", MinimumVersion) {
 		t.Fatal("newer version rejected")
 	}
 	if versionAtLeast("0.0.1", MinimumVersion) {
@@ -543,7 +536,7 @@ func TestOneShotProofSentinelOutranksMissingThreadAndRetainsProbeScratch(t *test
 
 func TestContinueFramesMalformedLinesAndStderr(t *testing.T) {
 	path, state := fakeAmpPath(t, "stream")
-	client := newTestClient(t, nil, Options{CLIPath: path, Cwd: t.TempDir(), ThreadID: "T-fake-thread", MaxLineBytes: 1024})
+	client := newTestClient(t, nil, Options{CLIPath: path, Cwd: t.TempDir(), MaxLineBytes: 1024})
 
 	turn, err := client.Continue(context.Background(), "T-fake-thread", map[string]any{"type": "user", "text": "hello"})
 	if err != nil {
@@ -583,7 +576,7 @@ func TestContinueFramesMalformedLinesAndStderr(t *testing.T) {
 
 func TestContinueMissingThreadCarriesStderr(t *testing.T) {
 	path, _ := fakeAmpPath(t, "missing")
-	client := newTestClient(t, nil, Options{CLIPath: path, Cwd: t.TempDir(), ThreadID: "T-deleted"})
+	client := newTestClient(t, nil, Options{CLIPath: path, Cwd: t.TempDir()})
 
 	turn, err := client.Continue(context.Background(), "T-deleted", map[string]any{"type": "user"})
 	if err != nil {
@@ -622,7 +615,7 @@ func TestInterruptSIGINTAndKillFallback(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path, state := fakeAmpPath(t, tc.mode)
-			client := newTestClient(t, nil, Options{CLIPath: path, Cwd: t.TempDir(), ThreadID: "T-fake-thread"})
+			client := newTestClient(t, nil, Options{CLIPath: path, Cwd: t.TempDir()})
 			turn, err := client.Continue(context.Background(), "T-fake-thread", map[string]any{"type": "user"})
 			if err != nil {
 				t.Fatalf("Continue: %v", err)
@@ -726,15 +719,6 @@ func TestClientErrorBranches(t *testing.T) {
 		}
 	}
 
-	path, _ := fakeAmpPath(t, "bad-new-id")
-	client := newTestClient(t, nil, Options{CLIPath: path, Cwd: t.TempDir()})
-	if _, err := client.NewThread(context.Background()); err == nil {
-		t.Fatal("expected bad thread id error")
-	}
-	path, _ = fakeAmpPath(t, "oversized-new-id")
-	if _, err := newTestClient(t, nil, Options{CLIPath: path, Cwd: t.TempDir()}).NewThread(context.Background()); err == nil || !strings.Contains(err.Error(), "exceeds") {
-		t.Fatalf("oversized thread id error = %v", err)
-	}
 	for _, test := range []struct {
 		name string
 		id   string
@@ -754,7 +738,7 @@ func TestClientErrorBranches(t *testing.T) {
 			}
 		})
 	}
-	path, _ = fakeAmpPath(t, "bad-list-json")
+	path, _ := fakeAmpPath(t, "bad-list-json")
 	if _, err := newTestClient(t, nil, Options{CLIPath: path, Cwd: t.TempDir()}).ListThreads(context.Background()); err == nil {
 		t.Fatal("expected list decode error")
 	}
@@ -860,9 +844,6 @@ func TestClientProcessSeamsReaderAndInterruptEdges(t *testing.T) {
 	ctx := context.Background()
 	path, _ := fakeAmpPath(t, "")
 
-	if _, err := newTestClient(t, nil, Options{CLIPath: "/does/not/exist", Cwd: t.TempDir()}).NewThread(ctx); err == nil {
-		t.Fatal("NewThread output error ignored")
-	}
 	if _, err := newTestClient(t, nil, Options{CLIPath: "/does/not/exist", Cwd: t.TempDir()}).ListThreads(ctx); err == nil {
 		t.Fatal("ListThreads output error ignored")
 	}

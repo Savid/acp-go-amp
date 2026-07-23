@@ -3,25 +3,34 @@ title: Sessions
 description: The mental model for how ACP sessions map onto Amp threads and move through their lifecycle.
 ---
 
-An ACP session in this adapter *is* an Amp thread. ACP session IDs are native
-Amp thread IDs such as `T-...`, so there is no separate identifier space to
-reconcile. Durable state lives on the Amp server side; the adapter keeps only a
-local mirror for display and continuity.
+An ACP session wraps at most one Amp thread. The adapter mints its own UUID
+session IDs; the native thread ID (`T-...`) is created by the session's first
+prompt turn and recorded in the manifest as `nativeSessionId`. A session that
+is never prompted never owns a server-side thread. Durable state lives on the
+Amp server side; the adapter keeps only a local mirror for display and
+continuity.
 
 ## Lifecycle
 
-- `session/new` calls `amp threads new`, persists an initial manifest, and
-  returns the select config option for `mode`. No prompt tokens are
-  spent creating the empty thread.
-- `session/load` reads the store manifest and transcript, verifies that the
-  server-side Amp thread can still be addressed, recreates the adapter session
-  with a fresh isolated native home, and replays stored frames to the client.
+- `session/new` mints the session id and persists an initial manifest, then
+  returns the select config option for `mode`. No Amp process runs, so no
+  server-side thread exists until the first prompt.
+- The first `session/prompt` runs a thread-less `amp -x` execute: amp creates
+  the thread, reports its id on the init frame, and the adapter records it in
+  the manifest immediately. Later prompts run `amp threads continue` against
+  the recorded thread.
+- `session/load` reads the store manifest and transcript, verifies that any
+  recorded server-side Amp thread can still be addressed, recreates the
+  adapter session with a fresh isolated native home, and replays stored frames
+  to the client.
 - `session/resume` performs the same continuability check without replaying
   history.
 - `session/delete` writes the store tombstone first, closes any active local
-  session, then calls `amp threads delete`. A native delete failure is returned
-  after the local session is already hidden from list/load/resume, and cleanup
-  is retried by later list/load/resume/delete calls.
+  session, then calls `amp threads delete` when the manifest records a native
+  thread; a session with no recorded thread deletes locally only. A native
+  delete failure is returned after the local session is already hidden from
+  list/load/resume, and cleanup is retried by later list/load/resume/delete
+  calls.
 - `session/close` stops accepting new prompts for the local session and removes
   its isolated native home. It does not delete the server-side Amp thread.
 

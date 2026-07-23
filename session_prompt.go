@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -174,9 +175,22 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (re
 	s.agent.observe.RecordAmpProcessStart(continueCtx)
 	promptClient := s.clientWithEnv(s.agent.observe.InjectTraceEnv(continueCtx, s.env), mcpConfigPath, RuntimeResourcePrompt)
 
+	// The first prompt runs a thread-less `amp -x` execute: amp creates the
+	// server-side thread only now, so a session that is never prompted never
+	// owns a remote thread. Later prompts continue the adopted thread.
+	nativeID := s.nativeSessionID()
+
+	var turn *amp.Turn
+
 	spawnStarted := time.Now()
-	turn, err := s.agent.options.runtime.continueThread(continueCtx, promptClient, string(s.id), input)
-	observeRuntimeStartupStage(continueCtx, s.agent.options.RuntimeResourceHooks, RuntimeResourcePrompt, RuntimeStartupSpawn, spawnStarted, err)
+
+	if nativeID == "" {
+		turn, err = s.agent.options.runtime.executeThread(continueCtx, promptClient, input)
+		observeRuntimeStartupStage(continueCtx, s.agent.options.RuntimeResourceHooks, RuntimeResourcePrompt, RuntimeStartupSession, spawnStarted, err)
+	} else {
+		turn, err = s.agent.options.runtime.continueThread(continueCtx, promptClient, nativeID, input)
+		observeRuntimeStartupStage(continueCtx, s.agent.options.RuntimeResourceHooks, RuntimeResourcePrompt, RuntimeStartupSpawn, spawnStarted, err)
+	}
 
 	if err != nil {
 		s.recordScratchContainment(err)
@@ -246,7 +260,7 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (re
 				}, nil
 			}
 
-			if err := s.validateFrameSessionID(msg, state); err != nil {
+			if err := s.validateFrameSessionID(ctx, msg, state); err != nil {
 				return acp.PromptResponse{}, err
 			}
 
@@ -570,9 +584,21 @@ func (s *agentSession) emitRawEvent(ctx context.Context, source string, msg amp.
 	return nil
 }
 
-func (s *agentSession) validateFrameSessionID(msg amp.Message, state *promptTurnState) error {
+func (s *agentSession) validateFrameSessionID(ctx context.Context, msg amp.Message, state *promptTurnState) error {
 	got := frameSessionID(msg)
-	if got == "" || got == string(s.id) {
+	if got == "" {
+		return nil
+	}
+
+	s.mu.Lock()
+	native := s.nativeID
+	s.mu.Unlock()
+
+	if native == "" {
+		return s.adoptNativeSessionID(ctx, got, state)
+	}
+
+	if got == native {
 		return nil
 	}
 
@@ -581,7 +607,34 @@ func (s *agentSession) validateFrameSessionID(msg amp.Message, state *promptTurn
 		_ = s.interruptState(context.Background(), state)
 	}
 
-	return s.poison(fmt.Sprintf("native session_id drift: got %q, want %q", got, s.id))
+	return s.poison(fmt.Sprintf("native session_id drift: got %q, want %q", got, native))
+}
+
+// adoptNativeSessionID records the thread id amp minted for the session's
+// first execute turn and persists the manifest immediately: waiting for turn
+// end would leave a freshly created server-side thread unrecorded — and
+// therefore undeletable — if the process died mid-turn. A persist failure
+// does not abort the turn; the turn-end persist commits the same manifest and
+// fails the prompt loudly if the store is still down.
+func (s *agentSession) adoptNativeSessionID(ctx context.Context, threadID string, state *promptTurnState) error {
+	if err := amp.ValidateThreadID(threadID); err != nil {
+		if state != nil {
+			state.cancel()
+			_ = s.interruptState(context.Background(), state)
+		}
+
+		return s.poison(fmt.Sprintf("native session_id invalid: %v", err))
+	}
+
+	s.mu.Lock()
+	s.nativeID = threadID
+	s.mu.Unlock()
+
+	if err := s.persistAfterTurn(ctx, nil); err != nil {
+		s.agent.log.DebugContext(ctx, "persist adopted amp thread id failed", slog.String(jsonFieldSessionID, string(s.id)), slog.String(jsonFieldError, err.Error()))
+	}
+
+	return nil
 }
 
 func promptInput(blocks []acp.ContentBlock) (map[string]any, error) {

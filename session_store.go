@@ -7,8 +7,6 @@ import (
 	"sort"
 	"sync"
 	"time"
-
-	"github.com/savid/acp-go-amp/internal/amp"
 )
 
 const (
@@ -357,7 +355,7 @@ func manifestFromStoreEntry(entry json.RawMessage) (ampManifest, bool) {
 		return ampManifest{}, false
 	}
 
-	if manifest.Format != SessionStoreFormat || amp.ValidateThreadID(manifest.ThreadID) != nil {
+	if manifest.Format != SessionStoreFormat || manifest.SessionID == "" || !validNativeSessionID(manifest.NativeSessionID) {
 		return ampManifest{}, false
 	}
 

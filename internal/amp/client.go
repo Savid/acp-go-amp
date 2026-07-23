@@ -20,7 +20,10 @@ import (
 )
 
 const (
-	MinimumVersion              = "0.0.1783155105"
+	// MinimumVersion is the oldest amp CLI verified to support the wrapper's
+	// full flag surface, including thread-less `-x --stream-json-input` turns
+	// and --no-archive-after-execute.
+	MinimumVersion              = "0.0.1784765892"
 	maxCapturedStderrBytes      = 64 * 1024
 	defaultCloseKillAfter       = 500 * time.Millisecond
 	defaultCloseWait            = 5 * time.Second
@@ -33,6 +36,10 @@ const (
 	ampArgNoNotifications       = "--no-notifications"
 	ampArgSettingsFile          = "--settings-file"
 	ampArgMCPConfig             = "--mcp-config"
+	ampArgStreamJSON            = "--stream-json"
+	ampArgStreamJSONInput       = "--stream-json-input"
+	ampArgExecute               = "-x"
+	ampArgNoArchiveAfterExecute = "--no-archive-after-execute"
 	adapterSupervisorModeEnv    = "ACP_GO_AMP_INTERNAL_NATIVE_SUPERVISOR"
 	adapterOneShotDeathPhaseEnv = "ACP_GO_AMP_TEST_ONE_SHOT_DEATH_PHASE"
 	adapterOneShotDeathPathEnv  = "ACP_GO_AMP_TEST_ONE_SHOT_DEATH_PATH"
@@ -71,7 +78,6 @@ type Options struct {
 	// system temp directory itself.
 	ScratchParent string
 	Env           map[string]string
-	ThreadID      string
 	Mode          string
 	MCPConfigPath string
 	MaxLineBytes  int
@@ -226,7 +232,11 @@ func (c *Client) probeSubcommands(ctx context.Context) (returnErr error) {
 	}
 
 	continueClient.options.Mode = "medium"
-	continueArgs := []string{ampArgThreads, ampThreadContinue, startupProbeThreadID, "--stream-json", "--stream-json-input", "-x"}
+	// --no-archive-after-execute rides on the probe so an amp build that does
+	// not parse the flag fails startup closed instead of failing the first
+	// prompt: the missing-thread domain error still proves the flag was
+	// accepted, and no extra process or token is spent.
+	continueArgs := []string{ampArgThreads, ampThreadContinue, startupProbeThreadID, ampArgStreamJSON, ampArgStreamJSONInput, ampArgExecute, ampArgNoArchiveAfterExecute}
 
 	probes := []struct {
 		name                 string
@@ -292,20 +302,6 @@ func isMissingThreadMessage(msg string) bool {
 	return strings.Contains(msg, "does not exist") || strings.Contains(msg, "Thread not found")
 }
 
-func (c *Client) NewThread(ctx context.Context) (string, error) {
-	out, err := c.output(ctx, ampArgThreads, "new")
-	if err != nil {
-		return "", err
-	}
-
-	threadID := strings.TrimSpace(stripANSI(string(out)))
-	if err := ValidateThreadID(threadID); err != nil {
-		return "", fmt.Errorf("amp threads new returned invalid id: %w", err)
-	}
-
-	return threadID, nil
-}
-
 func (c *Client) ListThreads(ctx context.Context) ([]ThreadSummary, error) {
 	out, err := c.output(ctx, ampArgThreads, "list", "--json")
 	if err != nil {
@@ -339,13 +335,29 @@ func (c *Client) DeleteThread(ctx context.Context, threadID string) error {
 }
 
 func (c *Client) Continue(ctx context.Context, threadID string, input any) (*Turn, error) {
+	args := c.globalArgs()
+	args = append(args, ampArgThreads, ampThreadContinue, threadID, ampArgStreamJSON, ampArgStreamJSONInput, ampArgExecute)
+
+	return c.startTurn(ctx, args, input)
+}
+
+// Execute launches a thread-less `amp -x` turn: amp mints the server-side
+// thread itself and reports its id on the stream-json init frame, so no
+// remote thread exists until a prompt actually runs. --no-archive-after-execute
+// keeps the minted thread visible in amp's thread list, matching the
+// visibility of interactively created threads.
+func (c *Client) Execute(ctx context.Context, input any) (*Turn, error) {
+	args := c.globalArgs()
+	args = append(args, ampArgNoArchiveAfterExecute, ampArgStreamJSON, ampArgStreamJSONInput, ampArgExecute)
+
+	return c.startTurn(ctx, args, input)
+}
+
+func (c *Client) startTurn(ctx context.Context, args []string, input any) (*Turn, error) {
 	path, err := Discover(ctx, c.options.CLIPath)
 	if err != nil {
 		return nil, err
 	}
-
-	args := c.globalArgs()
-	args = append(args, ampArgThreads, ampThreadContinue, threadID, "--stream-json", "--stream-json-input", "-x")
 
 	cmd := commandContext(context.Background(), path, args...)
 

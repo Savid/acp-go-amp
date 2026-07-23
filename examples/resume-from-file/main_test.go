@@ -125,7 +125,7 @@ func TestRunUsesInferredValuesAndLoadedSession(t *testing.T) {
 			t.Fatalf("manifest json: %v", unmarshalErr)
 		}
 
-		if manifest["format"] != ampacp.SessionStoreFormat || manifest["threadId"] != sessionID {
+		if manifest["format"] != ampacp.SessionStoreFormat || manifest["sessionId"] != sessionID || manifest["nativeSessionId"] != "T-1" {
 			t.Fatalf("manifest = %v", manifest)
 		}
 

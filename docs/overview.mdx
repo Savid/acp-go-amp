@@ -17,8 +17,8 @@ Each ACP method resolves to a concrete Amp operation:
 
 | ACP method | Amp behavior |
 |---|---|
-| `session/new` | Creates an Amp thread (`amp threads new`); spends no prompt tokens. |
-| `session/prompt` | Continues that thread with `amp threads continue --stream-json`. |
+| `session/new` | Mints the session id and persists the manifest; no Amp process runs and no server-side thread exists yet. |
+| `session/prompt` | First turn runs a thread-less `amp -x --stream-json` that creates the Amp thread; later turns run `amp threads continue --stream-json`. |
 | `session/load` | Replays stored transcript frames for display. |
 | `session/resume` | Restores adapter state without replaying history. |
 | `session/delete` | Tombstones the local store first, then deletes the Amp thread. |

@@ -56,7 +56,10 @@ const (
 	RuntimeStartupSpawn         RuntimeStartupStage = "spawn"
 	RuntimeStartupReadiness     RuntimeStartupStage = "readiness"
 	RuntimeStartupConfiguration RuntimeStartupStage = "configuration"
-	RuntimeStartupSession       RuntimeStartupStage = "session"
+	// RuntimeStartupSession marks the thread-creating first-prompt spawn: amp
+	// mints the server-side thread lazily on a session's first `-x` turn, and
+	// session/new performs no native work of its own.
+	RuntimeStartupSession RuntimeStartupStage = "session"
 )
 
 // RuntimeResourceHooks lets an embedding host enforce native-root and scratch-root limits.
@@ -80,7 +83,6 @@ const (
 	defaultNativeCancelTimeout   = 5 * time.Second
 	defaultNativeCloseTurnWait   = 5 * time.Second
 	defaultNativeCommandTimeout  = 30 * time.Second
-	defaultNativeSessionTimeout  = 2 * time.Minute
 	defaultNativePromptLineLimit = 10 * 1024 * 1024
 )
 
@@ -129,16 +131,13 @@ type runtimeOptions struct {
 	nativeCancelTimeout  time.Duration
 	nativeCloseTurnWait  time.Duration
 	nativeCommandTimeout time.Duration
-	// nativeSessionTimeout bounds Amp's authenticated remote thread creation.
-	// It is intentionally longer than the ordinary command bound because the
-	// native service can take close to a minute to create an otherwise healthy
-	// thread.
-	nativeSessionTimeout time.Duration
 	maxJSONLineBytes     int
 	startupProbe         func(context.Context, *nativeamp.Client) error
-	newThread            func(context.Context, *nativeamp.Client) (string, error)
-	continueThread       func(context.Context, *nativeamp.Client, string, any) (*nativeamp.Turn, error)
-	exportThread         func(context.Context, *nativeamp.Client, string) (json.RawMessage, error)
+	// executeThread launches the thread-less `amp -x` turn that lazily creates
+	// the server-side thread on a session's first prompt.
+	executeThread  func(context.Context, *nativeamp.Client, any) (*nativeamp.Turn, error)
+	continueThread func(context.Context, *nativeamp.Client, string, any) (*nativeamp.Turn, error)
+	exportThread   func(context.Context, *nativeamp.Client, string) (json.RawMessage, error)
 	// newTurnTimer builds the per-turn deadline channel. It is a seam so tests
 	// can drive the timeout branch deterministically against a coincident
 	// cancel; production always uses a real time.Timer.
@@ -163,14 +162,13 @@ func applyOptions(opts []Option) Options {
 			nativeCancelTimeout:  defaultNativeCancelTimeout,
 			nativeCloseTurnWait:  defaultNativeCloseTurnWait,
 			nativeCommandTimeout: defaultNativeCommandTimeout,
-			nativeSessionTimeout: defaultNativeSessionTimeout,
 			maxJSONLineBytes:     defaultNativePromptLineLimit,
 			newTurnTimer:         newRealTurnTimer,
 			startupProbe: func(ctx context.Context, client *nativeamp.Client) error {
 				return client.StartupProbe(ctx)
 			},
-			newThread: func(ctx context.Context, client *nativeamp.Client) (string, error) {
-				return client.NewThread(ctx)
+			executeThread: func(ctx context.Context, client *nativeamp.Client, input any) (*nativeamp.Turn, error) {
+				return client.Execute(ctx, input)
 			},
 			continueThread: func(ctx context.Context, client *nativeamp.Client, threadID string, input any) (*nativeamp.Turn, error) {
 				return client.Continue(ctx, threadID, input)

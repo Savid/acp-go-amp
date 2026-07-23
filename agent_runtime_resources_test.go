@@ -8,10 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/coder/acp-go-sdk"
 	nativeamp "github.com/savid/acp-go-amp/internal/amp"
@@ -24,10 +22,11 @@ func newBlockedPromptLifecycle(t *testing.T) (*Agent, acp.SessionId, <-chan stru
 	agent := newTestAgent()
 	sessionID := acp.SessionId("T-prompt-construction")
 	agent.sessions[sessionID] = &agentSession{
-		agent: agent,
-		id:    sessionID,
-		cwd:   t.TempDir(),
-		turn:  make(chan struct{}, 1),
+		agent:    agent,
+		id:       sessionID,
+		nativeID: string(sessionID),
+		cwd:      t.TempDir(),
+		turn:     make(chan struct{}, 1),
 	}
 	started := make(chan struct{})
 	cancelled := make(chan struct{})
@@ -171,7 +170,7 @@ func TestAgentCloseFencesInFlightStartupContainmentFailure(t *testing.T) {
 	require.Zero(t, releases["scratch"])
 }
 
-func TestInjectedNewThreadContainmentFailureRetainsOnlyOwnedSessionScratch(t *testing.T) {
+func TestInjectedExecuteContainmentFailureRetainsOnlyOwnedSessionScratch(t *testing.T) {
 	t.Setenv("AMP_API_KEY", "fake")
 	scratch := t.TempDir()
 
@@ -208,12 +207,14 @@ func TestInjectedNewThreadContainmentFailureRetainsOnlyOwnedSessionScratch(t *te
 		}),
 	)
 	agent.options.runtime.startupProbe = func(context.Context, *nativeamp.Client) error { return nil }
-	agent.options.runtime.newThread = func(context.Context, *nativeamp.Client) (string, error) {
-		return "", ErrProcessContainmentIncomplete
+	agent.options.runtime.executeThread = func(context.Context, *nativeamp.Client, any) (*nativeamp.Turn, error) {
+		return nil, ErrProcessContainmentIncomplete
 	}
 
-	_, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
-	require.ErrorIs(t, err, ErrProcessContainmentIncomplete)
+	resp, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
+	require.NoError(t, err)
+
+	_, err = agent.Prompt(t.Context(), TextPromptRequest(resp.SessionId, "test-turn", "boom"))
 	var requestErr *acp.RequestError
 	require.ErrorAs(t, err, &requestErr)
 	require.ErrorIs(t, agent.Close(), ErrProcessContainmentIncomplete)
@@ -285,82 +286,6 @@ func TestExportContainmentFailureRetainsColdSessionResources(t *testing.T) {
 	entries, readErr := os.ReadDir(scratch)
 	require.NoError(t, readErr)
 	require.NotEmpty(t, entries)
-}
-
-func TestNewSessionTimeoutKillsNativeTreeAndReleasesResources(t *testing.T) {
-	path, state := fakeAgentAmpPath(t, "block-new")
-	scratch := t.TempDir()
-
-	var mu sync.Mutex
-	acquired := map[RuntimeResourceKind]int{}
-	released := map[RuntimeResourceKind]int{}
-	reservedScratch := map[RuntimeResourceKind]int{}
-	releasedScratch := map[RuntimeResourceKind]int{}
-
-	agent := newTestAgent(
-		WithExecutablePath(path),
-		WithScratchDir(scratch),
-		WithEnv(map[string]string{"AMP_API_KEY": "fake"}),
-		WithRuntimeResourceHooks(RuntimeResourceHooks{
-			AcquireNativeRoot: func(_ context.Context, kind RuntimeResourceKind) (func(), error) {
-				mu.Lock()
-				acquired[kind]++
-				mu.Unlock()
-
-				return func() {
-					mu.Lock()
-					released[kind]++
-					mu.Unlock()
-				}, nil
-			},
-			ReserveScratchRoot: func(_ context.Context, kind RuntimeResourceKind) (func(), error) {
-				mu.Lock()
-				reservedScratch[kind]++
-				mu.Unlock()
-
-				return func() {
-					mu.Lock()
-					releasedScratch[kind]++
-					mu.Unlock()
-				}, nil
-			},
-		}),
-	)
-	agent.options.runtime.nativeSessionTimeout = 50 * time.Millisecond
-
-	started := time.Now()
-	_, err := agent.NewSession(context.Background(), NewSessionRequest(t.TempDir()))
-	require.Error(t, err)
-	// Darwin best-effort cleanup has a fixed five-second group-poll budget.
-	// Keep this assertion above that contract boundary so loaded race runs do
-	// not mistake scheduler delay for an unbounded cleanup.
-	require.Less(t, time.Since(started), 10*time.Second)
-
-	argsRecords := readHelperJSON[[]string](t, filepath.Join(state, "args.jsonl"))
-	require.False(t, slicesContainCommand(nil, "threads", "new"))
-	require.True(t, slicesContainCommand(argsRecords, "threads", "new"), "missing blocked threads new invocation: %#v", argsRecords)
-
-	mu.Lock()
-	defer mu.Unlock()
-	require.GreaterOrEqual(t, acquired[RuntimeResourceDiscovery], 1)
-	require.Equal(t, acquired[RuntimeResourceDiscovery], released[RuntimeResourceDiscovery])
-	require.Equal(t, 1, acquired[RuntimeResourceSession])
-	require.Equal(t, 1, released[RuntimeResourceSession])
-	if runtime.GOOS == "darwin" {
-		require.GreaterOrEqual(t, reservedScratch[RuntimeResourceDiscovery], 1)
-	} else {
-		require.Zero(t, reservedScratch[RuntimeResourceDiscovery])
-	}
-	require.Equal(t, reservedScratch[RuntimeResourceDiscovery], releasedScratch[RuntimeResourceDiscovery])
-	require.GreaterOrEqual(t, reservedScratch[RuntimeResourceSession], 1)
-	require.Equal(t, reservedScratch[RuntimeResourceSession], releasedScratch[RuntimeResourceSession])
-
-	entries, readErr := os.ReadDir(scratch)
-	require.NoError(t, readErr)
-	for _, entry := range entries {
-		require.False(t, strings.HasPrefix(entry.Name(), "acp-go-amp-session-"), "session scratch survived timed-out native creation")
-		require.False(t, strings.HasPrefix(entry.Name(), "acp-go-amp-command-"), "command scratch survived timed-out native creation")
-	}
 }
 
 func slicesContainCommand(records [][]string, parts ...string) bool {
@@ -579,26 +504,16 @@ func TestAmpSessionResourceAdmission(t *testing.T) {
 	require.Contains(t, err.Error(), wantErr.Error())
 
 	path, _ := fakeAgentAmpPath(t, "")
-	sessionBlocked := newTestAgent(
-		WithExecutablePath(path),
-		WithScratchDir(t.TempDir()),
-		WithRuntimeResourceHooks(RuntimeResourceHooks{
-			AcquireNativeRoot: func(_ context.Context, kind RuntimeResourceKind) (func(), error) {
-				if kind == RuntimeResourceSession {
-					return nil, wantErr
-				}
-
-				return func() {}, nil
-			},
-		}),
-	)
-	_, err = sessionBlocked.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
-	require.Contains(t, err.Error(), wantErr.Error())
-
 	nativeBlocked := newTestAgent(WithRuntimeResourceHooks(RuntimeResourceHooks{
-		AcquireNativeRoot: func(context.Context, RuntimeResourceKind) (func(), error) { return nil, wantErr },
+		AcquireNativeRoot: func(_ context.Context, kind RuntimeResourceKind) (func(), error) {
+			if kind == RuntimeResourceSession {
+				return nil, wantErr
+			}
+
+			return func() {}, nil
+		},
 	}))
-	session := &agentSession{agent: nativeBlocked, id: "T-session"}
+	session := &agentSession{agent: nativeBlocked, id: "T-session", nativeID: "T-session"}
 	require.Contains(t, session.Delete(t.Context()).Error(), wantErr.Error())
 	require.Contains(t, session.verifyContinuable(t.Context()).Error(), wantErr.Error())
 
@@ -675,7 +590,7 @@ func TestActiveLoadStoreFailureAndDeleteCompletionFence(t *testing.T) {
 	}))
 	completed := newPromptTurnState()
 	completed.complete(nil)
-	deleteSession := &agentSession{agent: deleteAgent, id: "T-delete-completed", activePrompt: completed}
+	deleteSession := &agentSession{agent: deleteAgent, id: "T-delete-completed", nativeID: "T-delete-completed", activePrompt: completed}
 	require.ErrorIs(t, deleteSession.Delete(t.Context()), acquireErr)
 	require.NoError(t, (&agentSession{}).interrupt(t.Context()))
 	require.False(t, isNativeMissingError(errors.Join(errors.New("Thread not found"), ErrProcessContainmentIncomplete)))
@@ -688,7 +603,7 @@ func TestPendingDeleteContainmentFailureStopsEveryLifecycleRetry(t *testing.T) {
 				return nil, ErrProcessContainmentIncomplete
 			},
 		}))
-		agent.markPendingNativeDelete(id)
+		agent.markPendingNativeDelete(id, "T-pending-native")
 
 		return agent
 	}

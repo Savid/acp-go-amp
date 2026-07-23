@@ -13,14 +13,14 @@ method-not-found rather than partial behavior.
 | `initialize` | Advertises `_meta.amp.rawEvent` and `_meta.amp.sessionStore`. |
 | `authenticate` | Rejects caller method IDs; Amp owns auth. |
 | `logout` | Present. |
-| `session/new` | Creates an Amp thread. |
+| `session/new` | Mints the session id and persists the manifest; the Amp thread is created by the first prompt. |
 | `session/load` | Replays stored transcript frames. |
 | `session/resume` | Restores state without replay. |
 | `session/list` | Lists active and mirrored sessions, paginated by an opaque `cursor` with pages of 50 and `nextCursor`. |
 | `session/prompt` | Continues the thread with one streamed turn. |
 | `session/cancel` | Interrupts the active prompt process. |
 | `session/close` | Closes the local session. |
-| `session/delete` | Tombstones locally, then deletes the Amp thread. |
+| `session/delete` | Tombstones locally, then deletes the Amp thread when one was created. |
 | `session/set_config_option` | Updates `mode`. |
 
 ## Unsupported and rejected

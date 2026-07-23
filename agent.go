@@ -24,12 +24,14 @@ type Agent struct {
 	closeOnce     sync.Once
 	closeErr      error
 
-	mu                      sync.Mutex
-	closed                  bool
-	conn                    agentClient
-	sessions                map[acp.SessionId]*agentSession
-	deleted                 map[acp.SessionId]struct{}
-	pendingNativeDeletes    map[acp.SessionId]struct{}
+	mu       sync.Mutex
+	closed   bool
+	conn     agentClient
+	sessions map[acp.SessionId]*agentSession
+	deleted  map[acp.SessionId]struct{}
+	// pendingNativeDeletes maps a tombstoned session to the native thread id
+	// whose server-side delete still needs to be retried.
+	pendingNativeDeletes    map[acp.SessionId]string
 	pending                 int
 	clientCalls             chan struct{}
 	providerProcesses       *providerProcessSnapshotTracker
@@ -88,7 +90,7 @@ func NewAgent(opts ...Option) *Agent {
 		observe:              observe,
 		sessions:             make(map[acp.SessionId]*agentSession),
 		deleted:              make(map[acp.SessionId]struct{}),
-		pendingNativeDeletes: make(map[acp.SessionId]struct{}),
+		pendingNativeDeletes: make(map[acp.SessionId]string),
 		clientCalls:          make(chan struct{}, maxConcurrentClientCalls(options.ConcurrencyLimits)),
 		providerProcesses:    providerProcesses,
 		lifecycleDone:        make(chan struct{}),

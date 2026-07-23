@@ -4,6 +4,7 @@ package integration
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -124,12 +125,7 @@ func TestLiveThreadTurn(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	client := amp.NewClient(slog.Default(), amp.Options{SettingsFile: settings, Mode: "medium"})
-	thread, err := client.NewThread(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = client.DeleteThread(context.Background(), thread) }()
-	turn, err := client.Continue(ctx, thread, map[string]any{
+	turn, err := client.Execute(ctx, map[string]any{
 		"type": "user",
 		"message": map[string]any{
 			"role": "user",
@@ -142,12 +138,24 @@ func TestLiveThreadTurn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var gotResult bool
+	var (
+		thread    string
+		gotResult bool
+	)
 	for msg := range turn.Messages() {
-		if result, ok := msg.(*amp.ResultMessage); ok {
-			gotResult = strings.Contains(result.Result, "acp-go-amp-live-ok")
+		switch typed := msg.(type) {
+		case *amp.SystemMessage:
+			if thread == "" {
+				thread = typed.SessionID
+			}
+		case *amp.ResultMessage:
+			gotResult = strings.Contains(typed.Result, "acp-go-amp-live-ok")
 		}
 	}
+	if thread == "" {
+		t.Fatal("execute stream carried no thread id")
+	}
+	defer func() { _ = client.DeleteThread(context.Background(), thread) }()
 	if !gotResult {
 		t.Fatal("missing expected live result")
 	}
@@ -177,7 +185,7 @@ func TestLiveRestoreAfterLocalStateWipe(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	threadID := string(newResp.SessionId)
+	threadID := ""
 	cleanupEnv := env
 	defer func() {
 		if threadID != "" {
@@ -190,6 +198,20 @@ func TestLiveRestoreAfterLocalStateWipe(t *testing.T) {
 	if promptErr != nil {
 		t.Fatalf("seed prompt: %v", promptErr)
 	}
+	manifests, manifestErr := store.Load(ctx, ampacp.SessionKey{SessionID: string(newResp.SessionId), Subpath: ampacp.SessionStoreMainSubpath})
+	if manifestErr != nil || len(manifests) == 0 {
+		t.Fatalf("load manifest: %d entries, %v", len(manifests), manifestErr)
+	}
+	var manifest struct {
+		NativeSessionID string `json:"nativeSessionId"`
+	}
+	if unmarshalErr := json.Unmarshal(manifests[len(manifests)-1], &manifest); unmarshalErr != nil {
+		t.Fatalf("decode manifest: %v", unmarshalErr)
+	}
+	if manifest.NativeSessionID == "" {
+		t.Fatal("seed turn recorded no native thread id")
+	}
+	threadID = manifest.NativeSessionID
 	seedMessageID, ok := ampMessageID(seedResponse.Meta)
 	if !ok {
 		t.Fatalf("seed response missing _meta.amp.messageId: %#v", seedResponse.Meta)

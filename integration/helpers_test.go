@@ -390,7 +390,7 @@ func fakeAmpBinary(t *testing.T) string {
 	path := filepath.Join(t.TempDir(), "amp")
 	script := `#!/bin/sh
 if [ "$1" = "version" ]; then
-  echo "0.0.1783155105-gfake"
+  echo "0.0.1784765892-gfake"
   exit 0
 fi
 last=""
@@ -411,8 +411,12 @@ for arg in "$@"; do
   if [ "$prev" = "threads" ]; then sub="$arg"; break; fi
   prev="$arg"
 done
+if [ -z "$sub" ]; then
+  for arg in "$@"; do
+    if [ "$arg" = "-x" ]; then sub="continue"; break; fi
+  done
+fi
 case "$sub" in
-  new) echo "T-smoke-thread" ;;
   list) echo '[]' ;;
   export) echo '{"thread":"T-smoke-thread"}' ;;
   delete) echo "deleted" ;;

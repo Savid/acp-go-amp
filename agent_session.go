@@ -60,48 +60,35 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (r
 		return acp.NewSessionResponse{}, slotErr
 	}
 
-	probeSession, err := newLifecycleAgentSession(ctx, a, "", params.Cwd, meta, mcpConfig, params.AdditionalDirectories)
+	sessionID, err := newSessionID()
+	if err != nil {
+		a.releaseSessionSlot("")
+
+		return acp.NewSessionResponse{}, acp.NewInternalError(map[string]any{jsonFieldError: err.Error()})
+	}
+
+	session, err := newLifecycleAgentSession(ctx, a, acp.SessionId(sessionID), params.Cwd, meta, mcpConfig, params.AdditionalDirectories)
 	if err != nil {
 		a.releaseSessionSlot("")
 
 		return acp.NewSessionResponse{}, err
 	}
 
-	// Amp thread creation is an authenticated remote operation and has been
-	// observed taking close to a minute during healthy startup. Give it its own
-	// generous hard bound so an unbounded ACP request can never leave an
-	// interactive or stalled `threads new` process alive indefinitely.
-	sessionCtx, cancelSession := context.WithTimeout(ctx, a.options.runtime.nativeSessionTimeout)
-	sessionStarted := time.Now()
-	threadID, err := a.options.runtime.newThread(sessionCtx, probeSession.client())
-
-	cancelSession()
-	observeRuntimeStartupStage(ctx, a.options.RuntimeResourceHooks, RuntimeResourceSession, RuntimeStartupSession, sessionStarted, err)
-
-	if err != nil {
-		a.releaseSessionSlot("")
-		probeSession.recordScratchContainment(err)
-		closeErr := probeSession.Close(context.Background())
-
-		return acp.NewSessionResponse{}, errors.Join(nativeInternalError(err), closeErr)
-	}
-
-	probeSession.id = acp.SessionId(threadID)
-	if persistErr := probeSession.persistAfterTurn(ctx, nil); persistErr != nil {
+	if persistErr := session.persistAfterTurn(ctx, nil); persistErr != nil {
 		a.releaseSessionSlot("")
 
-		deleteErr := probeSession.Delete(context.Background())
+		closeErr := session.Close(context.Background())
 
-		return acp.NewSessionResponse{}, errors.Join(persistErr, deleteErr)
+		return acp.NewSessionResponse{}, errors.Join(persistErr, closeErr)
 	}
 
 	a.mu.Lock()
-	a.sessions[probeSession.id] = probeSession
+	a.sessions[session.id] = session
 	a.pending--
 	a.mu.Unlock()
 	a.observe.AddActiveSession(ctx, 1)
 
-	return acp.NewSessionResponse{SessionId: probeSession.id, ConfigOptions: probeSession.configOptions()}, nil
+	return acp.NewSessionResponse{SessionId: session.id, ConfigOptions: session.configOptions()}, nil
 }
 
 func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) (resp acp.LoadSessionResponse, err error) {
@@ -422,10 +409,15 @@ func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDe
 		return acp.UnstableDeleteSessionResponse{}, retryErr
 	}
 
-	stored, err := a.storedSessionExists(ctx, params.SessionId)
+	// The native thread id must be captured before the store row is deleted:
+	// once the manifest is gone it is the only remaining record of which
+	// server-side thread this session owns.
+	manifest, stored, err := a.storedManifest(ctx, params.SessionId)
 	if err != nil {
 		return acp.UnstableDeleteSessionResponse{}, err
 	}
+
+	nativeID := manifest.NativeSessionID
 
 	if a.store != nil {
 		deleteCtx, cancelDelete := a.sessionStoreWriteContext(ctx)
@@ -446,6 +438,8 @@ func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDe
 
 	if session != nil {
 		a.observe.AddActiveSession(ctx, -1)
+
+		nativeID = session.nativeSessionID()
 	}
 
 	if !stored {
@@ -456,8 +450,10 @@ func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDe
 		return acp.UnstableDeleteSessionResponse{}, session.Close(ctx)
 	}
 
-	if err := a.deleteNativeThread(ctx, params.SessionId, session); err != nil {
-		a.markPendingNativeDelete(params.SessionId)
+	if err := a.deleteNativeThread(ctx, params.SessionId, nativeID, session); err != nil {
+		if nativeID != "" {
+			a.markPendingNativeDelete(params.SessionId, nativeID)
+		}
 
 		return acp.UnstableDeleteSessionResponse{}, err
 	}
@@ -578,6 +574,7 @@ func (a *Agent) loadOrResume(ctx context.Context, sessionID acp.SessionId, cwd s
 		return nil, nil, false, err
 	}
 
+	session.nativeID = manifest.NativeSessionID
 	session.title = manifest.Title
 	session.createdUnix = manifest.CreatedAtUnixMilli
 
@@ -672,7 +669,7 @@ func (a *Agent) loadManifest(ctx context.Context, sessionID acp.SessionId) (ampM
 		return ampManifest{}, acp.NewInternalError(map[string]any{jsonFieldError: err.Error()})
 	}
 
-	if manifest.Format != SessionStoreFormat || manifest.ThreadID != string(sessionID) || amp.ValidateThreadID(manifest.ThreadID) != nil {
+	if manifest.Format != SessionStoreFormat || manifest.SessionID != string(sessionID) || !validNativeSessionID(manifest.NativeSessionID) {
 		return ampManifest{}, acp.NewInternalError(map[string]any{jsonFieldError: "invalid amp session manifest"})
 	}
 
@@ -770,11 +767,14 @@ func (a *Agent) isDeleted(id acp.SessionId) (struct{}, bool) {
 	return value, ok
 }
 
-func (a *Agent) markPendingNativeDelete(id acp.SessionId) {
+// markPendingNativeDelete queues a failed native thread delete for retry. The
+// native thread id rides in the queue because the store row is already gone by
+// the time a delete can fail, so it cannot be re-derived later.
+func (a *Agent) markPendingNativeDelete(id acp.SessionId, nativeID string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	a.pendingNativeDeletes[id] = struct{}{}
+	a.pendingNativeDeletes[id] = nativeID
 }
 
 func (a *Agent) clearPendingNativeDelete(id acp.SessionId) {
@@ -822,7 +822,11 @@ func (a *Agent) retryPendingNativeDeletes(ctx context.Context) error {
 }
 
 func (a *Agent) retryPendingNativeDelete(ctx context.Context, id acp.SessionId) error {
-	if err := a.deleteNativeThread(ctx, id, nil); err != nil {
+	a.mu.Lock()
+	nativeID := a.pendingNativeDeletes[id]
+	a.mu.Unlock()
+
+	if err := a.deleteNativeThread(ctx, id, nativeID, nil); err != nil {
 		return err
 	}
 
@@ -831,9 +835,13 @@ func (a *Agent) retryPendingNativeDelete(ctx context.Context, id acp.SessionId) 
 	return nil
 }
 
-func (a *Agent) storedSessionExists(ctx context.Context, id acp.SessionId) (bool, error) {
+// storedManifest loads the durable main-key row for a session. A stored row
+// whose last entry is not a valid manifest still reports stored=true with a
+// zero manifest, so the store row remains deletable while the native thread id
+// is treated as unknown.
+func (a *Agent) storedManifest(ctx context.Context, id acp.SessionId) (ampManifest, bool, error) {
 	if a.store == nil {
-		return false, nil
+		return ampManifest{}, false, nil
 	}
 
 	loadCtx, cancelLoad := a.sessionStoreLoadContext(ctx)
@@ -842,21 +850,36 @@ func (a *Agent) storedSessionExists(ctx context.Context, id acp.SessionId) (bool
 	cancelLoad()
 
 	if err != nil {
-		return false, err
+		return ampManifest{}, false, err
 	}
 
-	return len(entries) != 0, nil
+	if len(entries) == 0 {
+		return ampManifest{}, false, nil
+	}
+
+	manifest, ok := manifestFromStoreEntry(entries[len(entries)-1])
+	if !ok {
+		return ampManifest{}, true, nil
+	}
+
+	return manifest, true, nil
 }
 
-func (a *Agent) deleteNativeThread(ctx context.Context, id acp.SessionId, session *agentSession) error {
+func (a *Agent) deleteNativeThread(ctx context.Context, id acp.SessionId, nativeID string, session *agentSession) error {
 	if session != nil {
 		return session.Delete(ctx)
+	}
+
+	if nativeID == "" {
+		return nil
 	}
 
 	tmp, err := newAgentSession(ctx, a, id, "", parsedSessionMeta{}, "", nil)
 	if err != nil {
 		return err
 	}
+
+	tmp.nativeID = nativeID
 
 	return tmp.Delete(ctx)
 }

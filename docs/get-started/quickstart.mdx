@@ -33,7 +33,7 @@ repo-relative, so you run them from a checkout.
     ```
   </Step>
   <Step title="Run the minimal client">
-    This launches the agent, creates an Amp thread, and sends one prompt (the
+    This launches the agent, opens a session, and sends one prompt (the
     prompt argument is optional):
 
     ```sh
@@ -46,8 +46,8 @@ repo-relative, so you run them from a checkout.
 
 The example prints Amp's streamed reply to stdout and exits `0`. A greeting
 derived from your prompt confirms the whole path worked: session creation, the
-native `amp threads continue` launch, the prompt turn, and stream-JSON mapping
-back through ACP.
+thread-creating native `amp -x` launch, the prompt turn, and stream-JSON
+mapping back through ACP.
 
 If you instead launch the raw command for an ACP host to drive, it blocks on
 stdin waiting for JSON-RPC frames and writes ACP frames only to stdout; add

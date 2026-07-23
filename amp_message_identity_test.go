@@ -298,9 +298,10 @@ func TestTranscriptIdentityStateFailsClosed(t *testing.T) {
 	cwd := t.TempDir()
 	baseStore := NewInMemorySessionStore()
 	manifest, marshalErr := json.Marshal(ampManifest{
-		Format:   SessionStoreFormat,
-		ThreadID: "T-agent-thread",
-		Cwd:      cwd,
+		Format:          SessionStoreFormat,
+		SessionID:       "T-agent-thread",
+		NativeSessionID: "T-agent-thread",
+		Cwd:             cwd,
 	})
 	require.NoError(t, marshalErr)
 	require.NoError(t, baseStore.Replace(ctx, SessionKey{SessionID: "T-agent-thread"}, []SessionStoreReplacement{

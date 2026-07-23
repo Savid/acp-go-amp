@@ -125,13 +125,13 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 		return err
 	}
 
-	entries, inferredSessionID, inferredCwd, err := readTranscriptJSONL(*sessionFile)
+	entries, nativeSessionID, inferredCwd, err := readTranscriptJSONL(*sessionFile)
 	if err != nil {
 		return err
 	}
 
 	if *sessionID == "" {
-		*sessionID = inferredSessionID
+		*sessionID = nativeSessionID
 	}
 
 	if *sessionID == "" {
@@ -152,7 +152,8 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 	now := time.Now().UnixMilli()
 	manifest, _ := json.Marshal(map[string]any{
 		"format":             ampacp.SessionStoreFormat,
-		"threadId":           *sessionID,
+		"sessionId":          *sessionID,
+		"nativeSessionId":    nativeSessionID,
 		"cwd":                *cwd,
 		"createdAtUnixMilli": now,
 		"updatedAtUnixMilli": now,
