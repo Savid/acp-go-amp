@@ -1,11 +1,17 @@
 ---
 title: Raw Events
-description: Opt into verbatim Amp stream-JSON notifications for diagnostics, with safe truncation guarantees.
+description: Opt into sanitized Amp stream-JSON notifications for diagnostics, with safe truncation guarantees.
 ---
 
 Raw events surface every live-turn Amp stream-JSON frame as an
 `_amp/rawEvent` notification, for diagnostics and deep debugging. They are
 opt-in per session and never required for normal replay.
+
+Ordinary frames retain their native fields. Before an image-bearing tool-result
+frame reaches this channel, the adapter replaces embedded image data or a
+remote attachment URI with a stable canonical artifact reference. Raw events
+therefore never contain an image's base64 or unredacted signed URL; typed
+`session/update` content remains the authoritative image delivery.
 
 ## Enable per session
 

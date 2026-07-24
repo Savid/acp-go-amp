@@ -14,6 +14,12 @@ import (
 func TestOptionsAndAmpOptions(t *testing.T) {
 	store := NewInMemorySessionStore()
 	logger := slog.New(slog.DiscardHandler)
+	imageLimits := ImageLimits{
+		MaxInputBytesPerImage:     1,
+		MaxInputBytesPerPrompt:    2,
+		MaxOutputBytesPerImage:    3,
+		MaxOutputBytesPerToolCall: 4,
+	}
 	options := applyOptions([]Option{
 		WithLogger(logger),
 		WithAgentName("name"),
@@ -33,6 +39,7 @@ func TestOptionsAndAmpOptions(t *testing.T) {
 		WithSessionStore(store),
 		WithSessionStoreLoadTimeout(time.Second),
 		WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 2, MaxConcurrentClientCalls: 4}),
+		WithImageLimits(imageLimits),
 		WithTurnTimeout(90 * time.Second),
 		nil,
 	})
@@ -47,6 +54,9 @@ func TestOptionsAndAmpOptions(t *testing.T) {
 	}
 	if options.TurnTimeout != 90*time.Second {
 		t.Fatalf("turn timeout = %s", options.TurnTimeout)
+	}
+	if options.ImageLimits != imageLimits {
+		t.Fatalf("image limits = %#v", options.ImageLimits)
 	}
 	env := map[string]string{"A": "B"}
 	ampOptions := NewAmpOptions(
@@ -75,6 +85,32 @@ func TestOptionsAndAmpOptions(t *testing.T) {
 	}
 	if cloneStringMap(nil) != nil || cloneAnyMap(nil) != nil {
 		t.Fatal("nil clone changed")
+	}
+}
+
+func TestImageLimitDefaultsAndValidation(t *testing.T) {
+	want := ImageLimits{
+		MaxInputBytesPerImage:     defaultImageLimitBytes,
+		MaxInputBytesPerPrompt:    defaultImageLimitBytes,
+		MaxOutputBytesPerImage:    defaultImageLimitBytes,
+		MaxOutputBytesPerToolCall: defaultImageLimitBytes,
+	}
+	if got := applyOptions(nil).ImageLimits; got != want {
+		t.Fatalf("default image limits = %#v, want %#v", got, want)
+	}
+
+	for _, limits := range []ImageLimits{
+		{MaxInputBytesPerImage: -1},
+		{MaxInputBytesPerPrompt: -1},
+		{MaxOutputBytesPerImage: -1},
+		{MaxOutputBytesPerToolCall: -1},
+	} {
+		if err := validateImageLimits(limits); err == nil {
+			t.Fatalf("negative image limits accepted: %#v", limits)
+		}
+	}
+	if err := validateImageLimits(ImageLimits{}); err != nil {
+		t.Fatalf("zero image limits rejected: %v", err)
 	}
 }
 

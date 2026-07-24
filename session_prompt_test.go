@@ -14,6 +14,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+const validPNGBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+
 func TestPromptInputResourceBlocks(t *testing.T) {
 	payload, err := promptInput([]acp.ContentBlock{
 		acp.ResourceLinkBlock("notes.md", "file:///tmp/notes.md"),
@@ -645,10 +647,14 @@ func TestPromptInputFailClosedShapes(t *testing.T) {
 	requireInvalidParamsData(t, err, map[string]any{jsonFieldError: valUnsupported, jsonFieldField: fieldPrompt})
 
 	_, err = promptInput([]acp.ContentBlock{acp.ImageBlock("", "image/png")})
-	requireInvalidParamsData(t, err, map[string]any{jsonFieldField: "prompt.image", jsonFieldError: "missing image data or uri"})
+	requireInvalidParamsData(t, err, map[string]any{
+		jsonFieldField: "prompt.image",
+		jsonFieldError: imageErrorMissingData,
+		"index":        0,
+	})
 
 	// An image with data still forwards as base64 source content.
-	input, err := promptInput([]acp.ContentBlock{acp.ImageBlock("aGk=", "image/png")})
+	input, err := promptInput([]acp.ContentBlock{acp.ImageBlock(validPNGBase64, "image/png")})
 	if err != nil {
 		t.Fatalf("image prompt input: %v", err)
 	}

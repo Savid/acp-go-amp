@@ -15,6 +15,8 @@ common symptoms to their causes and to the tests that pin each behavior.
 | Session start fails immediately | No `AMP_API_KEY` in the environment | [Authentication](/docs/features/authentication) |
 | Prompt fails with `amp_turn_failed` (`cause: "process_exit"`) | Native `amp` exited non-zero | `message` carries the exit status and stderr tail |
 | Prompt fails with `cause: "timeout"` | `WithTurnTimeout` deadline elapsed | Raise or unset the deadline; a timeout is a failure, not a cancel |
+| Prompt is rejected with `field: "prompt.image"` | Invalid, animated, oversize, or native-envelope-breaking image input | Inspect `error`, `index`, `sizeBytes`, and `maxBytes`; see [Image input](/docs/features/models-config#image-input) |
+| Prompt fails with `stage: "image_output"` | Native image output could not be validated, stored, or represented | Inspect `reason`; `storage_failed` can indicate an expired or corrupt replay artifact |
 | Prompt fails with `native_state_missing` | Server-side Amp thread is gone | Start a fresh session with `session/new`; a mirror cannot resurrect it |
 | Prompt blocked with `mirror_unsynced` | A prior store write failed | Restore the [session store](/docs/features/session-store) backend so the mirror can commit |
 | Session start rejects an MCP server | Unsupported transport or bad field | [MCP](/docs/features/mcp) — only stdio and HTTP are accepted |
@@ -40,6 +42,19 @@ local transcript for display only, and the next prompt fails with
 exists, so continuation is impossible. Recovery is a fresh bootstrap — open a new
 session with `session/new` — not a retry of the same session.
 </Note>
+
+## Image failures
+
+Input image failures are `-32602` and happen before Amp starts. Amp's native
+input ceiling is 5,138,022 decoded bytes per image and 8,000 pixels per
+dimension even when the matching `ImageLimits` field is zero.
+
+Output representation failures are `-32603` with
+`error: "amp_turn_failed"`, `cause: "transport"`,
+`stage: "image_output"`, and a `reason`. A missing or expired canonical
+artifact makes load replay fail as `storage_failed`; retrying replay cannot
+restore swept bytes. See [Updates](/docs/reference/updates#output-failures) for
+the complete taxonomy.
 
 ## Unsynced mirror
 

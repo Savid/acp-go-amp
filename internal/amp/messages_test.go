@@ -42,6 +42,25 @@ func TestParseResult(t *testing.T) {
 	}
 }
 
+func TestParseToolResultPreservesStructuredContent(t *testing.T) {
+	msg, err := ParseJSONLine([]byte(`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"TU-1","content":[{"type":"image","data":"aGVsbG8="}]}]},"session_id":"T-1"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	user, ok := msg.(*UserMessage)
+	if !ok {
+		t.Fatalf("message = %T", msg)
+	}
+	result, ok := user.Content[0].(ToolResultBlock)
+	if !ok {
+		t.Fatalf("content = %#v", user.Content)
+	}
+	items, ok := result.Content.([]any)
+	if !ok || len(items) != 1 {
+		t.Fatalf("structured content = %#v", result.Content)
+	}
+}
+
 func TestParseAllMessageShapesAndAccessors(t *testing.T) {
 	tests := []struct {
 		name string

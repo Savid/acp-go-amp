@@ -88,8 +88,9 @@ func main() {
 
 See [Go API docs](docs/reference/go-api.mdx) for options such as the Amp
 executable path, the ephemeral scratch directory (`WithScratchDir`), session
-storage, and OpenTelemetry providers. Amp has no native config/auth root, so
-`WithHome`/`-home` is unsupported and rejects at session start.
+storage, image byte limits (`WithImageLimits`), and OpenTelemetry providers.
+Amp has no native config/auth root, so `WithHome`/`-home` is unsupported and
+rejects at session start.
 
 ## What It Provides
 
@@ -110,8 +111,11 @@ storage, and OpenTelemetry providers. Amp has no native config/auth root, so
   cannot prove escaped descendants absent, and retains a numeric PGID-reuse
   collateral-signalling risk.
 - Prompt streaming for assistant messages, tool calls, and thread results.
+- Embedded static PNG, JPEG, GIF, and WebP prompt input with structural
+  validation before Amp starts. Native inline tool images become typed ACP
+  images; remote Painter attachments become resource links without fetching.
 - Stable wrapper-derived message UUIDs on main-agent chunks and terminal prompt
-  responses, replayed from the byte-verbatim Amp transcript mirror.
+  responses, replayed from the durable Amp transcript mirror.
 - MCP stdio and streamable HTTP configuration; other MCP transports are
   rejected because Amp exposes no supported path for them.
 - No ACP slash-command advertisement; `/review`, `/plan`, and similar text is
@@ -120,12 +124,13 @@ storage, and OpenTelemetry providers. Amp has no native config/auth root, so
   permission, so the adapter never sends `session/request_permission`.
 - No fork surface; `_amp/session/fork` is unsupported and `session/fork`
   returns method-not-found.
-- Durable mirroring through a host-provided `SessionStore`; stored rows are raw
-  Amp stream JSON frames kept under a `transcript` subpath.
+- Durable mirroring through a host-provided `SessionStore`; ordinary frames are
+  retained under `transcript`, while image-bearing tool frames use canonical
+  artifact references backed by `_artifacts/images/` records.
 - Native continuation requires the live server-side Amp thread and
   `AMP_API_KEY`; when it is gone, `session/load` still replays local display
   history and a later prompt returns the `native_state_missing` terminal error.
-- Optional raw Amp stream notifications through `_amp/rawEvent`, plus
+- Optional sanitized Amp stream notifications through `_amp/rawEvent`, plus
   OpenTelemetry telemetry that records no prompt or tool secrets by default.
 
 ## Docs

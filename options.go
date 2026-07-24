@@ -84,6 +84,7 @@ const (
 	defaultNativeCloseTurnWait   = 5 * time.Second
 	defaultNativeCommandTimeout  = 30 * time.Second
 	defaultNativePromptLineLimit = 10 * 1024 * 1024
+	defaultImageLimitBytes       = 6 * 1024 * 1024
 )
 
 // Option configures an Agent.
@@ -93,6 +94,14 @@ type Option func(*Options)
 type ConcurrencyLimits struct {
 	MaxActiveSessions        int
 	MaxConcurrentClientCalls int
+}
+
+// ImageLimits configures decoded image byte limits.
+type ImageLimits struct {
+	MaxInputBytesPerImage     int64
+	MaxInputBytesPerPrompt    int64
+	MaxOutputBytesPerImage    int64
+	MaxOutputBytesPerToolCall int64
 }
 
 // Options contains package-level agent configuration.
@@ -120,6 +129,7 @@ type Options struct {
 	SessionStore                SessionStore
 	SessionStoreLoadTimeout     time.Duration
 	ConcurrencyLimits           ConcurrencyLimits
+	ImageLimits                 ImageLimits
 	SeedFiles                   map[string]string
 	TurnTimeout                 time.Duration
 	RuntimeResourceHooks        RuntimeResourceHooks
@@ -158,6 +168,12 @@ func applyOptions(opts []Option) Options {
 		AgentTitle:              defaultAgentTitle,
 		AgentVersion:            defaultAgentVersion,
 		SessionStoreLoadTimeout: defaultSessionStoreTimeout,
+		ImageLimits: ImageLimits{
+			MaxInputBytesPerImage:     defaultImageLimitBytes,
+			MaxInputBytesPerPrompt:    defaultImageLimitBytes,
+			MaxOutputBytesPerImage:    defaultImageLimitBytes,
+			MaxOutputBytesPerToolCall: defaultImageLimitBytes,
+		},
 		runtime: runtimeOptions{
 			nativeCancelTimeout:  defaultNativeCancelTimeout,
 			nativeCloseTurnWait:  defaultNativeCloseTurnWait,
@@ -328,6 +344,13 @@ func WithConcurrencyLimits(limits ConcurrencyLimits) Option {
 	}
 }
 
+// WithImageLimits sets decoded image byte limits.
+func WithImageLimits(limits ImageLimits) Option {
+	return func(options *Options) {
+		options.ImageLimits = limits
+	}
+}
+
 // WithTurnTimeout sets a per-turn native deadline. The default of 0 means no
 // deadline. When positive, a prompt turn that has not completed within the
 // duration aborts the native turn and returns the uniform turn-failure error
@@ -487,4 +510,19 @@ func validateContainmentOptions(options Options) error {
 	}
 
 	return nil
+}
+
+func validateImageLimits(limits ImageLimits) error {
+	switch {
+	case limits.MaxInputBytesPerImage < 0:
+		return errors.New("max input bytes per image must be non-negative")
+	case limits.MaxInputBytesPerPrompt < 0:
+		return errors.New("max input bytes per prompt must be non-negative")
+	case limits.MaxOutputBytesPerImage < 0:
+		return errors.New("max output bytes per image must be non-negative")
+	case limits.MaxOutputBytesPerToolCall < 0:
+		return errors.New("max output bytes per tool call must be non-negative")
+	default:
+		return nil
+	}
 }

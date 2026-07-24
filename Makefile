@@ -127,6 +127,10 @@ docs-audit:
 	@rg -q 'never sends `session/request_permission`' docs/features/permissions.mdx
 	@rg -q 'does not set the native allow-all setting' docs/features/permissions.mdx
 	@rg -q 'does not advertise Amp elicitation metadata' docs/features/elicitation.mdx
+	@rg -q 'promptCapabilities.image: true' docs/reference/meta.mdx
+	@rg -q '5,138,022 decoded bytes per image' docs/features/models-config.mdx
+	@rg -q '_artifacts/images/<digest>.json' docs/features/session-store.mdx
+	@rg -q 'MaxOutputBytesPerToolCall' docs/reference/go-api.mdx
 
 ## audit: run local checks
 audit: fmt-check lint build test coverage-check test-cross-compile tidy vuln modernize-check docs-audit

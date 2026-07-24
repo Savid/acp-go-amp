@@ -37,8 +37,8 @@ continuity.
 ## Server-side state and the local mirror
 
 Because state is server-side, the adapter cannot rebuild a thread from local
-history. The transcript mirror exists to replay display frames on load and to
-back raw-event fidelity — not to recreate native state. Continuation always
+history. The transcript mirror and canonical image records exist to replay
+display updates on load — not to recreate native state. Continuation always
 requires the live server-side Amp thread and `AMP_API_KEY`; if the thread is
 gone, load still replays local history but the next prompt returns a terminal
 `native_state_missing` error. See

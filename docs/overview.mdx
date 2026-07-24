@@ -29,7 +29,10 @@ The adapter is a thin translation layer between ACP and the local `amp` CLI. It
 owns the ACP surface:
 
 - ACP session lifecycle and prompt streaming into ACP session updates.
-- The local transcript mirror, MCP forwarding, and raw-event diagnostics.
+- Embedded image validation, native image tool-result mapping, and durable
+  artifact replay.
+- The local transcript mirror, MCP forwarding, and sanitized raw-event
+  diagnostics.
 - The intentionally small public contract: the `mode` config option,
   stdio/HTTP MCP setup, raw events, a session-store mirror, and Amp thread
   lifecycle.

@@ -96,7 +96,7 @@ func NewAgent(opts ...Option) *Agent {
 		lifecycleDone:        make(chan struct{}),
 		activeLimitErr:       validateConcurrencyLimits(options.ConcurrencyLimits),
 		containmentMode:      mode,
-		configurationErr:     validateContainmentOptions(options),
+		configurationErr:     errors.Join(validateContainmentOptions(options), validateImageLimits(options.ImageLimits)),
 	}
 }
 
@@ -178,6 +178,10 @@ func (a *Agent) Initialize(ctx context.Context, params acp.InitializeRequest) (r
 
 	if configurationErr := errors.Join(a.activeLimitErr, a.configurationErr); configurationErr != nil {
 		return acp.InitializeResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldError: configurationErr.Error()})
+	}
+
+	if sweepErr := a.sweepExpiredImageArtifacts(ctx); sweepErr != nil {
+		a.log.WarnContext(ctx, "image artifact sweep failed", slog.String(jsonFieldError, sweepErr.Error()))
 	}
 
 	title := a.options.AgentTitle

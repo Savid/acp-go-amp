@@ -240,10 +240,10 @@ func TestPromptInputAndEmitBranches(t *testing.T) {
 	title, mime, desc := "Title", "text/plain", "desc"
 	payload, err := promptInput([]acp.ContentBlock{
 		acp.TextBlock("text"),
-		acp.ImageBlock("aW1n", "image/png"),
+		acp.ImageBlock(validPNGBase64, "image/png"),
 		{ResourceLink: &acp.ContentBlockResourceLink{Name: "n", Uri: "file:///x", Title: &title, MimeType: &mime, Description: &desc}},
 		acp.ResourceBlock(acp.EmbeddedResourceResource{TextResourceContents: &acp.TextResourceContents{Uri: "file:///t", Text: "body", MimeType: &mime}}),
-		acp.ResourceBlock(acp.EmbeddedResourceResource{BlobResourceContents: &acp.BlobResourceContents{Uri: "file:///i", Blob: "aW1n", MimeType: acp.Ptr("image/png")}}),
+		acp.ResourceBlock(acp.EmbeddedResourceResource{BlobResourceContents: &acp.BlobResourceContents{Uri: "file:///i", Blob: validPNGBase64, MimeType: acp.Ptr("image/png")}}),
 		acp.ResourceBlock(acp.EmbeddedResourceResource{BlobResourceContents: &acp.BlobResourceContents{Uri: "file:///b", Blob: "YmxvYg==", MimeType: &mime}}),
 	})
 	if err != nil {

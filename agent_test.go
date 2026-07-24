@@ -38,6 +38,44 @@ func TestInitializeShape(t *testing.T) {
 	}
 }
 
+func TestAgentMetaCarriesNoModelCapabilitiesArray(t *testing.T) {
+	resp, err := newTestAgent().Initialize(context.Background(), acp.InitializeRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ampMeta, ok := resp.AgentCapabilities.Meta[ampMetaKey].(map[string]any)
+	if !ok {
+		t.Fatalf("amp meta = %#v", resp.AgentCapabilities.Meta[ampMetaKey])
+	}
+
+	if len(ampMeta) != 2 {
+		t.Fatalf("amp meta keys = %v", ampMeta)
+	}
+
+	for _, key := range []string{metaRawEventKey, "sessionStore"} {
+		if _, present := ampMeta[key]; !present {
+			t.Fatalf("amp meta missing %q", key)
+		}
+	}
+
+	encodedMeta, err := json.Marshal(resp.AgentCapabilities.Meta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encodedMeta), `"capabilities"`) {
+		t.Fatalf("amp meta carries a capabilities array: %s", encodedMeta)
+	}
+
+	encodedOptions, err := json.Marshal((&agentSession{mode: validModes()[0]}).configOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encodedOptions), `"capabilities"`) {
+		t.Fatalf("config options carry a capabilities array: %s", encodedOptions)
+	}
+}
+
 func TestForkExtensionUnsupported(t *testing.T) {
 	agent := newTestAgent()
 	_, err := agent.HandleExtensionMethod(context.Background(), ForkSessionMethod, json.RawMessage(`{}`))
@@ -311,6 +349,10 @@ func TestAgentErrorAndConformanceBranches(t *testing.T) {
 		WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: -1}),
 	)
 	_, err := agent.Initialize(ctx, acp.InitializeRequest{})
+	requireRequestErrorCode(t, err, -32602)
+
+	agent = newTestAgent(WithImageLimits(ImageLimits{MaxInputBytesPerImage: -1}))
+	_, err = agent.Initialize(ctx, acp.InitializeRequest{})
 	requireRequestErrorCode(t, err, -32602)
 
 	agent = newTestAgent()
@@ -820,6 +862,11 @@ func main() {
 		if mode == "system-then-result" {
 			os.Stdout.WriteString("{\"type\":\"system\",\"subtype\":\"init\",\"cwd\":\"/tmp/project\",\"session_id\":\"T-agent-thread\"}\n")
 			os.Stdout.WriteString("{\"type\":\"result\",\"subtype\":\"success\",\"duration_ms\":1,\"is_error\":false,\"num_turns\":1,\"result\":\"done\",\"session_id\":\"T-agent-thread\"}\n")
+			return
+		}
+		if mode == "image-output-error" {
+			os.Stdout.WriteString("{\"type\":\"system\",\"subtype\":\"init\",\"cwd\":\"/tmp/project\",\"session_id\":\"T-agent-thread\"}\n")
+			os.Stdout.WriteString("{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"TU-image\",\"content\":[{\"type\":\"image\",\"mimeType\":\"image/png\",\"data\":\"%%%\"}],\"is_error\":false}]},\"session_id\":\"T-agent-thread\"}\n")
 			return
 		}
 		if mode == "no-result" {

@@ -26,8 +26,10 @@ Auth material is live process state only:
 | `AMP_URL` | `WithEnv` or the process environment | Never |
 
 Neither value is written to the settings file or the `SessionStore`. The store
-contains only the manifest and captured stream-JSON frames — no settings, auth
-files, API keys, or other secrets.
+contains the manifest, transcript frames, and canonical image tool-result
+records — no settings, auth files, or API keys. A remote image result is stored
+with its original HTTP(S) URI for replay; if that URI is signed, treat the
+store as confidential application data.
 
 <Warning>
 Seed files (`WithSeedFiles` / `-seed-file`) are written verbatim into the
@@ -40,6 +42,12 @@ isolated native home. Never seed secrets through them; put credentials in
 Native Amp subprocesses never inherit ACP stdout. The adapter captures native
 stdout and stderr through dedicated pipes so JSON-RPC output stays clean and
 native diagnostics cannot leak into the protocol stream.
+
+Image-bearing tool results are canonicalized before transcript and raw-event
+emission. Embedded image bytes live only in the typed ACP content and canonical
+artifact record; `RawOutput`, raw events, logs, and transcript frames contain
+safe metadata and references. Remote result URIs are redacted from those
+diagnostic surfaces.
 
 ## Native-process containment
 

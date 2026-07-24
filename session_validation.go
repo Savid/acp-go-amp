@@ -134,7 +134,7 @@ func mcpConfigJSON(servers []acp.McpServer) (string, error) {
 				return "", err
 			}
 
-			spec := map[string]any{"url": server.Http.Url}
+			spec := map[string]any{keyURL: server.Http.Url}
 			if len(server.Http.Headers) > 0 {
 				headers := make(map[string]string, len(server.Http.Headers))
 				for _, item := range server.Http.Headers {

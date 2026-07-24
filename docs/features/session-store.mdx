@@ -29,23 +29,38 @@ under a separate fixed `60s` bound.
 
 ## Format and layout
 
-`SessionStoreFormat` is `amp-thread-mirror-v1`. Records live under two subpaths:
+`SessionStoreFormat` is `amp-thread-mirror-v1`. Records use these subpaths:
 
 | Subpath | Contents |
 |---|---|
 | main | Manifest: `sessionId` (the adapter-minted ACP session ID), `nativeSessionId` (the Amp thread ID, absent until the first prompt turn creates the thread), `cwd`, `title`, selected `mode`, and Unix-millisecond create/update timestamps. |
 | `transcript` | The full ordered Amp stream-JSON frame mirror for completed prompt turns. |
+| `_artifacts/images/<digest>.json` | Canonical typed image tool-result record containing embedded base64 and media type, or an HTTP(S) resource URI, plus native identity, checksum, and creation time. |
 
-Each completed turn publishes the manifest and full transcript together in
-one `Replace` generation. These frames back `session/load` replay and raw-event
-fidelity. Auth material, settings files, API keys, and secrets are never
-written to the store.
+Each completed turn publishes the manifest, full transcript, and current image
+records together in one `Replace` generation. These records back
+`session/load` replay. Auth environment values, settings files, and API keys
+are never written to the store.
 
-The transcript remains byte-verbatim native Amp stream JSON. Because Amp does
-not expose message ids, the adapter derives each main-agent message UUID from
-the stored frame's absolute position and exact bytes. No wrapper metadata is
-injected into the mirror; replaying it reproduces the same identities emitted
-during the live turn.
+Ordinary transcript frames retain the exact native Amp stream JSON. An
+image-bearing tool-result frame is rewritten to stable artifact references
+before raw-event emission or storage, preventing a second base64 copy or an
+unredacted signed URL from entering those surfaces. Because Amp does not expose
+message ids, the adapter derives each main-agent message UUID from the stored
+assistant frame's absolute position and exact bytes. Replaying the mirror
+reproduces the same identities emitted during the live turn.
+
+Image records expire after 24 hours and are swept during initialization.
+Deleting a session removes every artifact subpath. A replay that needs a
+missing, expired, corrupt, or mismatched record fails with
+`stage: "image_output"` and `reason: "storage_failed"`; it never omits the
+image.
+
+<Warning>
+An HTTP(S) image result is stored with its original URI so replay can produce
+the same resource link. Signed URIs may authorize access to output and make the
+session store confidential application data.
+</Warning>
 
 ## Restore is display-only
 

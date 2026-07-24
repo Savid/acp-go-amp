@@ -24,6 +24,8 @@ Amp stream-JSON frames map to ACP updates:
 - user text frames become user message chunks
 - assistant text frames become agent message chunks
 - tool-use frames become tool-call updates
+- structured tool-result text and images become complete ordered
+  `tool_call_update.content` snapshots
 - usage data becomes ACP `usage_update`
 - final result usage is copied to the prompt response
 
@@ -38,6 +40,13 @@ verbatim (a model-scale value Amp reports), or `0` when absent.
 
 No slash commands are advertised. Text like `/review` remains ordinary prompt
 text and is sent to Amp unchanged.
+
+ACP prompt image blocks are validated before the native process starts and are
+sent as Amp stream-JSON base64 image sources in their original content order.
+See [Models and config](/docs/features/models-config#image-input) for formats
+and native envelopes, [Updates](/docs/reference/updates#image-tool-content) for
+typed tool output, and [Session store](/docs/features/session-store) for replay
+behavior.
 
 ## Cancel and stop reasons
 
@@ -83,6 +92,12 @@ a process exit, the decode/read error for a transport fault, or `result.error`
 falling back to `result.result` for a provider error) — never a fixed
 placeholder. The session stays addressable and retriable after such a failure; a
 follow-up `session/prompt` re-drives the turn.
+
+An adapter failure while representing native image output uses the same
+`-32603` envelope with `cause: "transport"`, plus `stage: "image_output"` and
+a machine-readable `reason`. The adapter first emits failed status for the
+originating tool call, interrupts the turn, and never turns the failure into an
+empty image or successful text.
 
 <Note>
 `WithTurnTimeout(d)` sets an optional per-turn deadline (default `0`, no

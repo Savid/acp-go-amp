@@ -13,7 +13,7 @@ turns and store replay. Each frame type maps to one update kind.
 | user text content | `user_message_chunk` |
 | assistant text content | `agent_message_chunk` |
 | assistant tool use | `tool_call` |
-| user tool result | `tool_call_update` |
+| user tool result | `tool_call_update` with a complete ordered content snapshot |
 | assistant or final usage | `usage_update` |
 | config change | `config_option_update` |
 
@@ -45,15 +45,60 @@ tagged update kinds are `user_message_chunk`, `agent_message_chunk`,
 `tool_call`, and `tool_call_update`.
 
 Frames without a `parent_tool_use_id` are main-agent activity and omit the
-provenance tag. Because the byte-verbatim transcript preserves
-`parent_tool_use_id`, `session/load` replay reproduces the same provenance tags
-as the live turn.
+provenance tag. The transcript preserves `parent_tool_use_id`, so
+`session/load` replay reproduces the same provenance tags as the live turn.
+
+## Image tool content
+
+Structured inline image results become ACP image content on the originating
+tool call. Remote HTTP(S) image attachments, including a Painter result URL,
+become ACP resource links without being fetched. When one native item carries
+both inline bytes and a URL, the bytes take precedence. Text, images, and links
+retain their native order.
+
+Output does not use the prompt-input format allowlist. A raster the adapter can
+structurally identify is emitted with its sniffed media type; BMP output is
+valid even though BMP prompt input is rejected. A native item presented as an
+image whose bytes are not a recognizable raster fails the turn with
+`reason: "not_a_raster"`.
+
+ACP replaces `tool_call_update.content` as one collection, so every
+content-bearing update carries the tool call's complete current array. A
+status-only failed update omits content. Native tool failures retain failed
+status and any valid mapped content; an adapter image-mapping failure emits
+failed status and terminates the prompt.
+
+`RawOutput` contains sanitized diagnostics: media type, dimensions, decoded
+size, checksum, and redacted location where available. It never duplicates
+embedded base64 or exposes a signed result URL.
+
+### Output failures
+
+An adapter failure while representing image output returns `-32603` with the
+Amp turn envelope, `cause: "transport"`, and `stage: "image_output"`:
+
+```json
+{
+  "error": "amp_turn_failed",
+  "cause": "transport",
+  "message": "image output exceeds the configured per-image limit",
+  "stage": "image_output",
+  "reason": "too_large",
+  "sizeBytes": 7000000,
+  "maxBytes": 6291456
+}
+```
+
+The `reason` values are `invalid_base64`, `not_a_raster`, `media_type_mismatch`,
+`missing_file`, `path_not_allowed`, `too_large`, and `storage_failed`. A
+per-tool-call aggregate `too_large` reports the artifact that crossed the total
+and carries the aggregate `sizeBytes`/`maxBytes`.
 
 ## Raw frames and errors
 
-Raw Amp frames are emitted only when `_meta.amp.rawEvent.enabled` is true for the
-session; they are diagnostic and capped at 64 KiB per notification. See
-[Raw events](/docs/features/raw-events).
+Raw Amp frames are emitted only when `_meta.amp.rawEvent.enabled` is true for
+the session; image-bearing frames are sanitized, and every raw notification is
+diagnostic and capped at 64 KiB. See [Raw events](/docs/features/raw-events).
 
 If the server-side thread is missing during continuation, the prompt returns a
 single terminal internal error with `native_state_missing` in the error data

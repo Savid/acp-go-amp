@@ -1,6 +1,6 @@
 ---
 title: Models And Config
-description: Configure Amp turns with its select-only mode option and seed on-disk native state.
+description: Configure Amp turns with its select-only mode option, image input, and seeded on-disk native state.
 ---
 
 Amp exposes one ACP session config option: `mode`. It is select-only, so a host
@@ -22,6 +22,64 @@ through `_meta.amp.options` (`AmpOptions.Mode`) or update it with
 There is no ACP model config option for Amp. A non-empty `WithDefaultModel`,
 `AmpOptions.Model`, or `_meta.amp.options.model` fails session start with the
 uniform unsupported error naming field `model`.
+
+## Image input
+
+Send images as standard ACP image blocks carrying embedded base64 data:
+
+```json
+{
+  "type": "image",
+  "data": "iVBORw0KGgoAAA...",
+  "mimeType": "image/png"
+}
+```
+
+The adapter accepts exactly `image/png`, `image/jpeg`, `image/gif`, and
+`image/webp`, and only static images. Before starting Amp it decodes the base64
+once, checks the declared media type against the bytes, reads dimensions
+without rendering pixels, and rejects GIFs with multiple image descriptors,
+WebP files with the animation flag, and PNG files carrying an `acTL` chunk.
+
+When an image carries both `data` and `uri`, the embedded data determines the
+submitted pixels and the URI is never followed. Image-bearing embedded
+resources use the same validation and aggregate budget as image blocks.
+
+Amp routes models on its hosted backend and exposes no authoritative per-model
+input modalities, so a structurally valid image is always forwarded and the
+native service stays authoritative. The standard `promptCapabilities.image`
+capability advertises that this transport exists.
+
+### Limits and input errors
+
+Decoded image bytes are bounded by the configured `ImageLimits`, 6 MiB per
+image and 6 MiB across one prompt by default (see
+[Go API](/docs/reference/go-api#image-limits)). Two smaller Amp native
+envelopes always apply, regardless of configuration:
+
+- at most 5,138,022 decoded bytes per image
+- at most 8,000 pixels in either dimension
+
+Crossing a configured byte limit returns `too_large`; crossing a native
+envelope returns `native_envelope_exceeded`. Both are `-32602 Invalid params`
+errors raised before any native turn starts:
+
+```json
+{
+  "field": "prompt.image",
+  "error": "too_large",
+  "index": 1,
+  "sizeBytes": 7000000,
+  "maxBytes": 6291456
+}
+```
+
+The full set of input `error` values is `missing_data`, `invalid_base64`,
+`invalid_media_type`, `media_type_mismatch`, `animated_not_supported`,
+`invalid_dimensions`, `too_large`, and `native_envelope_exceeded`. `index`
+counts image-bearing prompt blocks in request order, validation stops at the
+first failing block, and an aggregate error names the image that crosses the
+total.
 
 ## Seed Files
 

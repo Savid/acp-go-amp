@@ -123,7 +123,7 @@ func (b ToolUseBlock) BlockType() string { return BlockTypeToolUse }
 
 type ToolResultBlock struct {
 	ToolUseID string
-	Content   string
+	Content   any
 	IsError   bool
 	Raw       map[string]any
 }
@@ -274,7 +274,7 @@ func parseBlocks(value any) []ContentBlock {
 		case BlockTypeToolUse:
 			blocks = append(blocks, ToolUseBlock{ID: stringValue(raw["id"]), Name: stringValue(raw["name"]), Input: mapValue(raw["input"])})
 		case BlockTypeToolResult:
-			blocks = append(blocks, ToolResultBlock{ToolUseID: stringValue(raw["tool_use_id"]), Content: stringValue(raw["content"]), IsError: boolValue(raw["is_error"]), Raw: raw})
+			blocks = append(blocks, ToolResultBlock{ToolUseID: stringValue(raw["tool_use_id"]), Content: raw["content"], IsError: boolValue(raw["is_error"]), Raw: raw})
 		default:
 			blocks = append(blocks, UnknownBlock{Type: typ, Raw: raw})
 		}

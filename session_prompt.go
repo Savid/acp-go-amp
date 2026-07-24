@@ -46,7 +46,7 @@ func turnFailure(cause, message string) error {
 	return acp.NewInternalError(map[string]any{
 		jsonFieldError: turnFailedError,
 		"cause":        cause,
-		"message":      message,
+		keyMessage:     message,
 	})
 }
 
@@ -144,7 +144,7 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (re
 	}
 	defer release()
 
-	input, err := promptInput(params.Prompt)
+	input, err := promptInputWithLimits(params.Prompt, s.agent.options.ImageLimits)
 	if err != nil {
 		return acp.PromptResponse{}, err
 	}
@@ -266,8 +266,15 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (re
 
 			messageID := ""
 
-			if raw := msg.RawJSON(); raw != "" {
-				transcript = append(transcript, SessionStoreEntry(raw))
+			transcriptJSON, err := s.prepareMessageImageArtifacts(ctx, msg)
+			if err != nil {
+				_ = s.interrupt(context.Background())
+
+				return acp.PromptResponse{}, err
+			}
+
+			if transcriptJSON != "" {
+				transcript = append(transcript, SessionStoreEntry(transcriptJSON))
 
 				messageID = assistantMessageIdentity(s.id, baseTranscriptAt+len(transcript), msg)
 				if messageID != "" {
@@ -400,12 +407,25 @@ func (s *agentSession) emitMessage(ctx context.Context, msg amp.Message, live bo
 					status = acp.ToolCallStatusFailed
 				}
 
-				raw := result.Content
+				content, raw, err := s.toolResultSnapshot(ctx, result)
+				if err != nil {
+					_ = s.emitImageToolFailure(
+						ctx,
+						result.ToolUseID,
+						result.IsError,
+						parent,
+						err,
+					)
+
+					return err
+				}
+
 				if err := s.emitUpdate(ctx, tagParentToolUse(acp.SessionUpdate{ToolCallUpdate: &acp.SessionToolCallUpdate{
 					SessionUpdate: "tool_call_update",
 					ToolCallId:    acp.ToolCallId(result.ToolUseID),
 					Status:        &status,
 					RawOutput:     raw,
+					Content:       content,
 				}}, parent)); err != nil {
 					return err
 				}
@@ -638,11 +658,17 @@ func (s *agentSession) adoptNativeSessionID(ctx context.Context, threadID string
 }
 
 func promptInput(blocks []acp.ContentBlock) (map[string]any, error) {
+	return promptInputWithLimits(blocks, applyOptions(nil).ImageLimits)
+}
+
+func promptInputWithLimits(blocks []acp.ContentBlock, limits ImageLimits) (map[string]any, error) {
 	// An empty prompt is rejected fail-closed: there is nothing to send to the
 	// native harness, so accepting it would spend a turn on silence.
 	if len(blocks) == 0 {
 		return nil, acp.NewInvalidParams(map[string]any{jsonFieldError: valUnsupported, jsonFieldField: fieldPrompt})
 	}
+
+	imageBudget := imagePromptBudget{limits: limits}
 
 	content := make([]map[string]any, 0, len(blocks))
 	for _, block := range blocks {
@@ -650,25 +676,23 @@ func promptInput(blocks []acp.ContentBlock) (map[string]any, error) {
 		case block.Text != nil:
 			content = append(content, map[string]any{keyType: valText, valText: block.Text.Text})
 		case block.Image != nil:
-			// Amp accepts only embedded base64 image data; a data-less image
-			// block is rejected fail-closed instead of forwarding empty base64.
-			if block.Image.Data == "" {
-				return nil, acp.NewInvalidParams(map[string]any{jsonFieldField: "prompt.image", jsonFieldError: "missing image data or uri"})
+			image, err := imageBudget.validate(block.Image.Data, block.Image.MimeType)
+			if err != nil {
+				return nil, err
 			}
 
-			image := map[string]any{
-				keyType: "image",
+			content = append(content, map[string]any{
+				keyType: valImage,
 				keySource: map[string]any{
-					keyType:      "base64",
-					"media_type": block.Image.MimeType,
-					"data":       block.Image.Data,
+					keyType:      valBase64,
+					keyMediaType: block.Image.MimeType,
+					keyData:      image.base64,
 				},
-			}
-			content = append(content, image)
+			})
 		case block.ResourceLink != nil:
 			content = append(content, map[string]any{keyType: valText, valText: resourceLinkText(block.ResourceLink)})
 		case block.Resource != nil:
-			resourceContent, err := embeddedResourceContent(block.Resource.Resource)
+			resourceContent, err := embeddedResourceContent(block.Resource.Resource, &imageBudget)
 			if err != nil {
 				return nil, err
 			}
@@ -681,9 +705,9 @@ func promptInput(blocks []acp.ContentBlock) (map[string]any, error) {
 
 	return map[string]any{
 		keyType: valUser,
-		"message": map[string]any{
-			"role":    valUser,
-			"content": content,
+		keyMessage: map[string]any{
+			"role":     valUser,
+			keyContent: content,
 		},
 	}, nil
 }
@@ -709,7 +733,7 @@ func resourceLinkText(link *acp.ContentBlockResourceLink) string {
 	return strings.Join(parts, "\n")
 }
 
-func embeddedResourceContent(resource acp.EmbeddedResourceResource) (map[string]any, error) {
+func embeddedResourceContent(resource acp.EmbeddedResourceResource, imageBudget *imagePromptBudget) (map[string]any, error) {
 	if resource.TextResourceContents != nil {
 		text := resource.TextResourceContents
 
@@ -726,12 +750,17 @@ func embeddedResourceContent(resource acp.EmbeddedResourceResource) (map[string]
 	if resource.BlobResourceContents != nil {
 		blob := resource.BlobResourceContents
 		if blob.MimeType != nil && strings.HasPrefix(*blob.MimeType, "image/") {
+			image, err := imageBudget.validate(blob.Blob, *blob.MimeType)
+			if err != nil {
+				return nil, err
+			}
+
 			return map[string]any{
-				keyType: "image",
+				keyType: valImage,
 				keySource: map[string]any{
-					keyType:      "base64",
-					"media_type": *blob.MimeType,
-					"data":       blob.Blob,
+					keyType:      valBase64,
+					keyMediaType: *blob.MimeType,
+					keyData:      image.base64,
 				},
 			}, nil
 		}

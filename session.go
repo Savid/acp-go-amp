@@ -43,18 +43,29 @@ const (
 	optionEnvKey           = "env"
 	optionFieldHome        = "home"
 
-	fieldValue  = "value"
-	fieldPrompt = "prompt"
-	fieldCursor = "cursor"
-	keyType     = "type"
-	keyDetail   = "detail"
-	keyMaxBytes = "maxBytes"
-	keySource   = "source"
-	envHome     = "HOME"
+	fieldValue   = "value"
+	fieldPrompt  = "prompt"
+	fieldCursor  = "cursor"
+	keyType      = "type"
+	keyDetail    = "detail"
+	keyMessage   = "message"
+	keyIndex     = "index"
+	keyContent   = "content"
+	keyData      = "data"
+	keyMaxBytes  = "maxBytes"
+	keyMIMEType  = "mimeType"
+	keyMediaType = "media_type"
+	keySource    = "source"
+	keyURL       = "url"
+	envHome      = "HOME"
 
 	valUnsupported       = "unsupported"
 	valNoTransport       = "no_transport"
 	valText              = "text"
+	valImage             = "image"
+	valBase64            = "base64"
+	valHTTP              = "http"
+	valHTTPS             = "https"
 	valUser              = "user"
 	valRequired          = "required"
 	valDuplicate         = "duplicate"
@@ -579,13 +590,34 @@ func (s *agentSession) persistAfterTurn(ctx context.Context, transcript []Sessio
 
 	main, _ := json.Marshal(s.manifest())
 
+	artifactReplacements, err := s.imageArtifactReplacements(ctx)
+	if err != nil {
+		s.retainUnsynced(pending)
+
+		return acp.NewInternalError(map[string]any{jsonFieldError: err.Error()})
+	}
+
+	replacements := make([]SessionStoreReplacement, 0, 2+len(artifactReplacements))
+	replacements = append(replacements,
+		SessionStoreReplacement{
+			Key:     SessionKey{SessionID: string(s.id), Subpath: SessionStoreMainSubpath},
+			Entries: []SessionStoreEntry{main},
+		},
+		SessionStoreReplacement{
+			Key:     SessionKey{SessionID: string(s.id), Subpath: transcriptSubpath},
+			Entries: fullTranscript,
+		},
+	)
+	replacements = append(replacements, artifactReplacements...)
+
 	replaceCtx, cancelReplace := s.agent.sessionStoreWriteContext(ctx)
 	defer cancelReplace()
 
-	if err := s.agent.store.Replace(replaceCtx, SessionKey{SessionID: string(s.id), Subpath: SessionStoreMainSubpath}, []SessionStoreReplacement{
-		{Key: SessionKey{SessionID: string(s.id), Subpath: SessionStoreMainSubpath}, Entries: []SessionStoreEntry{main}},
-		{Key: SessionKey{SessionID: string(s.id), Subpath: transcriptSubpath}, Entries: fullTranscript},
-	}); err != nil {
+	if err := s.agent.store.Replace(
+		replaceCtx,
+		SessionKey{SessionID: string(s.id), Subpath: SessionStoreMainSubpath},
+		replacements,
+	); err != nil {
 		s.retainUnsynced(pending)
 
 		return err

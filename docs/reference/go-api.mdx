@@ -48,11 +48,43 @@ unsupported platforms fail closed. `Agent.ContainmentMode()` and
 | `WithSessionStore` | Durable mirror; see [Session store](/docs/features/session-store). |
 | `WithSessionStoreLoadTimeout` | Bound on every store read (default `10s`); writes use a fixed `60s` bound. |
 | `WithConcurrencyLimits` | Caps on concurrent native work. |
+| `WithImageLimits` | Sets decoded byte limits per input image, prompt, output image, and tool-call content array. |
 | `WithSeedFiles` | Relative-path → contents written into each session's isolated native `HOME` before `amp` launches. See [Seed files](/docs/features/models-config#seed-files). Accepted but inert for model routing — Amp is locked to its hosted backend. |
 | `WithTurnTimeout` | Optional per-turn deadline (default `0`, no deadline); on expiry the turn fails with `cause: "timeout"`. |
 | `WithRuntimeResourceHooks` | Host admission hooks for native roots and adapter scratch roots. |
 | `WithDarwinBestEffortContainment` | Darwin-only explicit opt-in to bounded process-group cleanup with escaped-descendant and PGID-reuse limitations. Invalid on other platforms. |
 | `WithTracerProvider`, `WithMeterProvider`, `WithTextMapPropagator`, `WithLogger` | Observability providers. |
+
+## Image limits
+
+`ImageLimits` has four `int64` decoded-byte fields:
+
+| Field | Default |
+|---|---|
+| `MaxInputBytesPerImage` | 6 MiB |
+| `MaxInputBytesPerPrompt` | 6 MiB |
+| `MaxOutputBytesPerImage` | 6 MiB |
+| `MaxOutputBytesPerToolCall` | 6 MiB |
+
+Embedded hosts set all four decoded-byte policies together:
+
+```go
+limits := ampacp.ImageLimits{
+	MaxInputBytesPerImage:     6 * 1024 * 1024,
+	MaxInputBytesPerPrompt:    6 * 1024 * 1024,
+	MaxOutputBytesPerImage:    6 * 1024 * 1024,
+	MaxOutputBytesPerToolCall: 6 * 1024 * 1024,
+}
+
+agent := ampacp.NewAgent(ampacp.WithImageLimits(limits))
+```
+
+Zero disables the corresponding adapter policy limit; Amp's 5,138,022-byte
+input envelope, 8,000-pixel dimension envelope, and the ACP frame bound still
+apply. Negative values reject initialization. See
+[Models and config](/docs/features/models-config#image-input) for input
+validation and errors, and [Updates](/docs/reference/updates#image-tool-content)
+for output mapping and failures.
 
 ## Amp per-session options
 
