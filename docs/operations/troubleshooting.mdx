@@ -46,8 +46,10 @@ session with `session/new` — not a retry of the same session.
 ## Image failures
 
 Input image failures are `-32602` and happen before Amp starts. Amp's native
-input ceiling is 5,138,022 decoded bytes per image and 8,000 pixels per
-dimension even when the matching `ImageLimits` field is zero.
+input ceiling is 921,600 decoded bytes per image and 8,000 pixels per
+dimension even when the matching `ImageLimits` field is zero. The byte
+ceiling sits below Amp's documented per-image maximum because the hosted
+service rejects larger images with an untyped internal error.
 
 Output representation failures are `-32603` with
 `error: "amp_turn_failed"`, `cause: "transport"`,

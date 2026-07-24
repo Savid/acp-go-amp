@@ -28,7 +28,11 @@ const (
 	imageMIMEGIF  = "image/gif"
 	imageMIMEWebP = "image/webp"
 
-	ampNativeMaxImageBytes     int64  = 5_138_022
+	// Amp's hosted service rejects image-bearing message appends above
+	// roughly 1,000,000 decoded bytes with an untyped internal error, well
+	// under its documented 5,138,022-byte ceiling. 900 KiB keeps this
+	// pre-turn gate safely below that observed service limit.
+	ampNativeMaxImageBytes     int64  = 921_600
 	ampNativeMaxImageDimension uint32 = 8000
 )
 
