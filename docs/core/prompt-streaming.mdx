@@ -94,11 +94,13 @@ falling back to `result.result` for a provider error) — never a fixed
 placeholder. The session stays addressable and retriable after such a failure; a
 follow-up `session/prompt` re-drives the turn.
 
-An adapter failure while representing native image output uses the same
-`-32603` envelope with `cause: "transport"`, plus `stage: "image_output"` and
-a machine-readable `reason`. The adapter first emits failed status for the
-originating tool call, interrupts the turn, and never turns the failure into an
-empty image or successful text.
+An image the adapter will not ship is refused in place: fixed guidance takes
+the image's position in that tool call's own content and the turn keeps
+running with its context. Only the adapter's own artifact store breaking uses
+the `-32603` envelope with `cause: "transport"`, plus `stage: "image_output"`
+and `reason: "storage_failed"`; there the adapter emits failed status for the
+originating tool call and interrupts the turn. Neither path turns the failure
+into an empty image or silently successful text.
 
 <Note>
 `WithTurnTimeout(d)` sets an optional per-turn deadline (default `0`, no

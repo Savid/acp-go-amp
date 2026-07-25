@@ -290,17 +290,96 @@ func TestImageOutputToolAggregateAndFailureLifecycle(t *testing.T) {
 		map[string]any{"type": "image", "mimeType": imageMIMEPNG, "data": validData},
 		map[string]any{"type": "image", "mimeType": imageMIMEPNG, "data": validData},
 	}, false)
-	_, err := session.prepareMessageImageArtifacts(context.Background(), msg)
-	requireImageOutputFailure(t, err, imageOutputTooLarge)
-	waitForRecorded(t, func() bool { return len(client.updatesSnapshot()) == 1 })
+	// The second image crosses the per-tool-call limit. That is an ordinary
+	// verdict: the guidance takes its place in the tool call's own content, the
+	// first image still ships, and the turn is untouched.
+	transcriptJSON, err := session.prepareMessageImageArtifacts(context.Background(), msg)
+	if err != nil {
+		t.Fatalf("aggregate image limit ended the turn: %v", err)
+	}
 
-	update := client.updatesSnapshot()[0].Update.ToolCallUpdate
-	if update == nil || update.Status == nil || *update.Status != acp.ToolCallStatusFailed {
-		t.Fatalf("mapping failure lifecycle = %#v", update)
+	if !strings.Contains(transcriptJSON, imageGuidanceTooLarge) {
+		t.Fatalf("aggregate refusal guidance missing from transcript: %s", transcriptJSON)
+	}
+
+	if strings.Count(transcriptJSON, canonicalImageArtifactType) != 1 {
+		t.Fatalf("aggregate refusal dropped the image that fit: %s", transcriptJSON)
+	}
+
+	if len(client.updatesSnapshot()) != 0 {
+		t.Fatalf("recoverable refusal published a failure update: %#v", client.updatesSnapshot())
 	}
 }
 
-func TestPromptFailsOnNativeImageMappingError(t *testing.T) {
+// TestImageOutputGuidanceSplitsRecoverableFromFatal pins the blast radius of
+// every image-output verdict: an ordinary mistake that can be retried carries
+// guidance and keeps the turn, the adapter's own store breaking does not.
+func TestImageOutputGuidanceSplitsRecoverableFromFatal(t *testing.T) {
+	recoverable := map[string]string{
+		imageOutputPathNotAllowed:    imageGuidancePathNotAllowed,
+		imageOutputMissingFile:       imageGuidanceMissingFile,
+		imageOutputTooLarge:          imageGuidanceTooLarge,
+		imageOutputNotRaster:         imageGuidanceNotRaster,
+		imageOutputInvalidBase64:     imageGuidanceInvalidBase64,
+		imageOutputMediaTypeMismatch: imageGuidanceMIMEMismatched,
+	}
+
+	for reason, guidance := range recoverable {
+		message, ok := imageOutputGuidance(imageOutputFailure(reason, "detail", 0, 0))
+		if !ok || message != guidance {
+			t.Fatalf("guidance for %s = (%q, %t)", reason, message, ok)
+		}
+
+		// The guidance says what to do next and never describes the input.
+		if strings.Contains(message, "root") || strings.Contains(message, "path") {
+			t.Fatalf("guidance for %s describes its input: %q", reason, message)
+		}
+	}
+
+	if _, ok := imageOutputGuidance(imageOutputFailure(imageOutputStorageFailed, "detail", 0, 0)); ok {
+		t.Fatal("a storage failure classified as recoverable")
+	}
+
+	if _, ok := imageOutputGuidance(acp.NewInternalError(map[string]any{"stage": "other"})); ok {
+		t.Fatal("a non-image failure classified as recoverable")
+	}
+
+	if _, ok := imageOutputGuidance(errors.New("not a request error")); ok {
+		t.Fatal("a plain error classified as recoverable")
+	}
+}
+
+// TestPromptFailsOnImageArtifactStoreFailure pins the other half of the split:
+// the adapter's own artifact store breaking is not something the model can act
+// on, so it still ends the turn.
+func TestPromptFailsOnImageArtifactStoreFailure(t *testing.T) {
+	path, _ := fakeAgentAmpPath(t, "image-output-store-failure")
+	agent := newTestAgent(
+		WithExecutablePath(path),
+		WithScratchDir(t.TempDir()),
+		WithSessionStore(&imageStoreTestDouble{
+			InMemorySessionStore: NewInMemorySessionStore(),
+			appendErr:            errors.New("append failed"),
+		}),
+	)
+
+	_, cleanup := attachRecordingClient(t, agent)
+	defer cleanup()
+
+	session, err := agent.NewSession(context.Background(), NewSessionRequest(t.TempDir()))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := agent.Prompt(
+		context.Background(),
+		TextPromptRequest(session.SessionId, "turn-image-store", "generate an image"),
+	); err == nil {
+		t.Fatal("Prompt ignored an image artifact store failure")
+	}
+}
+
+func TestPromptSurvivesNativeImageRefusal(t *testing.T) {
 	path, _ := fakeAgentAmpPath(t, "image-output-error")
 	agent := newTestAgent(
 		WithExecutablePath(path),
@@ -314,17 +393,38 @@ func TestPromptFailsOnNativeImageMappingError(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err = agent.Prompt(
+	// The native turn emits a tool result whose image bytes are not decodable.
+	// The turn still completes, and the tool call carries the guidance in place
+	// of the image.
+	if _, err = agent.Prompt(
 		context.Background(),
 		TextPromptRequest(session.SessionId, "turn-image-error", "generate an image"),
-	)
-	requireImageOutputFailure(t, err, imageOutputInvalidBase64)
+	); err != nil {
+		t.Fatalf("refused native image ended the turn: %v", err)
+	}
+
 	waitForRecorded(t, func() bool { return len(client.updatesSnapshot()) > 0 })
 
 	updates := client.updatesSnapshot()
-	failed := updates[len(updates)-1].Update.ToolCallUpdate
-	if failed == nil || failed.Status == nil || *failed.Status != acp.ToolCallStatusFailed {
-		t.Fatalf("image mapping failure update = %#v", failed)
+
+	guided := false
+
+	for _, update := range updates {
+		call := update.Update.ToolCallUpdate
+		if call == nil {
+			continue
+		}
+
+		for _, item := range call.Content {
+			if item.Content != nil && item.Content.Content.Text != nil &&
+				item.Content.Content.Text.Text == imageGuidanceInvalidBase64 {
+				guided = true
+			}
+		}
+	}
+
+	if !guided {
+		t.Fatalf("refused native image did not deliver guidance: %#v", updates)
 	}
 }
 
@@ -734,13 +834,19 @@ func TestPrepareMessageImageArtifactFailures(t *testing.T) {
 		t.Fatal("image artifact store failure ignored")
 	}
 
-	if _, _, imageErr := failedSession.prepareToolResultArtifacts(ctx, amp.ToolResultBlock{
+	canonical, changed, imageErr := failedSession.prepareToolResultArtifacts(ctx, amp.ToolResultBlock{
 		ToolUseID: "TU-invalid-image",
 		Content: []any{
 			map[string]any{"type": "image", "data": "%%%"},
 		},
-	}); imageErr == nil {
-		t.Fatal("invalid native image accepted during canonicalization")
+	})
+	if imageErr != nil || !changed || len(canonical) != 1 {
+		t.Fatalf("invalid native image canonicalization = (%#v, %t, %v)", canonical, changed, imageErr)
+	}
+
+	refusal, ok := canonical[0].(map[string]any)
+	if !ok || refusal[valText] != imageGuidanceInvalidBase64 {
+		t.Fatalf("invalid native image refusal = %#v", canonical[0])
 	}
 
 	marshalSession := &agentSession{agent: newTestAgent(), id: "T-output-marshal-failure"}
@@ -816,8 +922,15 @@ func TestToolResultSnapshotStorageEdges(t *testing.T) {
 		agent: newTestAgent(WithSessionStore(store), WithImageLimits(smallLimits)),
 		id:    session.id,
 	}
-	if _, _, err := smallSession.toolResultSnapshot(ctx, artifactResult(validRef, valid.Identity)); err == nil {
-		t.Fatal("stored image over current limit accepted")
+	overLimit, _, err := smallSession.toolResultSnapshot(ctx, artifactResult(validRef, valid.Identity))
+	if err != nil {
+		t.Fatalf("stored image over current limit ended the turn: %v", err)
+	}
+
+	if len(overLimit) != 1 || overLimit[0].Content == nil ||
+		overLimit[0].Content.Content.Text == nil ||
+		overLimit[0].Content.Content.Text.Text != imageGuidanceTooLarge {
+		t.Fatalf("stored image over current limit content = %#v", overLimit)
 	}
 
 	second := valid
@@ -833,8 +946,15 @@ func TestToolResultSnapshotStorageEdges(t *testing.T) {
 		artifactItem(validRef, valid.Identity),
 		artifactItem(secondRef, second.Identity),
 	}}
-	if _, _, err := aggregateSession.toolResultSnapshot(ctx, aggregate); err == nil {
-		t.Fatal("stored tool image aggregate over current limit accepted")
+	aggregateContent, _, err := aggregateSession.toolResultSnapshot(ctx, aggregate)
+	if err != nil {
+		t.Fatalf("stored tool image aggregate over current limit ended the turn: %v", err)
+	}
+
+	if len(aggregateContent) != 2 || aggregateContent[0].Content.Content.Image == nil ||
+		aggregateContent[1].Content.Content.Text == nil ||
+		aggregateContent[1].Content.Content.Text.Text != imageGuidanceTooLarge {
+		t.Fatalf("stored tool image aggregate content = %#v", aggregateContent)
 	}
 }
 

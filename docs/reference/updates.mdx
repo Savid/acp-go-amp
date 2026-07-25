@@ -72,27 +72,34 @@ failed status and terminates the prompt.
 size, checksum, and redacted location where available. It never duplicates
 embedded base64 or exposes a signed result URL.
 
-### Output failures
+### Output refusals and failures
 
-An adapter failure while representing image output returns `-32603` with the
-Amp turn envelope, `cause: "transport"`, and `stage: "image_output"`:
+An image output the adapter will not ship — undecodable base64, a declared
+media type its bytes contradict, non-raster bytes, an image over the per-image
+or per-tool-call limit, or a location that is neither inline bytes nor an
+`http(s)` link — is **recoverable**. Fixed guidance takes the image's place in
+that tool call's own content, saying what to do next without naming the
+location, size, media type, or operating-system error, and the turn keeps
+running. The same guidance is mirrored into the transcript, so it is still
+there on the next turn.
+
+Only the adapter's own artifact store breaking is turn-fatal. It returns
+`-32603` with the Amp turn envelope, `cause: "transport"`, and
+`stage: "image_output"`:
 
 ```json
 {
   "error": "amp_turn_failed",
   "cause": "transport",
-  "message": "image output exceeds the configured per-image limit",
+  "message": "image artifact identity does not match its tool content position",
   "stage": "image_output",
-  "reason": "too_large",
-  "sizeBytes": 7000000,
-  "maxBytes": 6291456
+  "reason": "storage_failed"
 }
 ```
 
 The `reason` values are `invalid_base64`, `not_a_raster`, `media_type_mismatch`,
-`missing_file`, `path_not_allowed`, `too_large`, and `storage_failed`. A
-per-tool-call aggregate `too_large` reports the artifact that crossed the total
-and carries the aggregate `sizeBytes`/`maxBytes`.
+`missing_file`, `path_not_allowed`, `too_large`, and `storage_failed`. Only
+`storage_failed` reaches this envelope; the rest are refused in place.
 
 ## Raw frames and errors
 

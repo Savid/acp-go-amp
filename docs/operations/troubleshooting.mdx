@@ -17,7 +17,8 @@ common symptoms to their causes and to the tests that pin each behavior.
 | Prompt fails with `cause: "timeout"` | `WithTurnTimeout` deadline elapsed | Raise or unset the deadline; a timeout is a failure, not a cancel |
 | Prompt is rejected with `field: "prompt.image"` | Invalid, animated, oversize, or native-envelope-breaking image input | Inspect `error`, `index`, `sizeBytes`, and `maxBytes`; see [Image input](/docs/features/models-config#image-input) |
 | Prompt is rejected with `field: "prompt.resource"` | An embedded resource blob that names no raster format is corrupt base64 or spends more than the decoded budget | Same `error` values and byte fields; the offending block is a resource block, not an image block |
-| Prompt fails with `stage: "image_output"` | Native image output could not be validated, stored, or represented | Inspect `reason`; `storage_failed` can indicate an expired or corrupt replay artifact |
+| Prompt fails with `stage: "image_output"` | The adapter's own image artifact store broke; `reason` is always `storage_failed` | Check the session store; an expired or corrupt replay artifact cannot be restored by retrying |
+| A tool call shows guidance text where an image was expected | The image was refused in place — undecodable, non-raster, oversize, mismatched media type, or an unreadable location | Follow the guidance in the tool content; the turn was not interrupted |
 | Prompt fails with `native_state_missing` | Server-side Amp thread is gone | Start a fresh session with `session/new`; a mirror cannot resurrect it |
 | Prompt blocked with `mirror_unsynced` | A prior store write failed | Restore the [session store](/docs/features/session-store) backend so the mirror can commit |
 | Session start rejects an MCP server | Unsupported transport or bad field | [MCP](/docs/features/mcp) — only stdio and HTTP are accepted |
@@ -65,9 +66,10 @@ for a fresh thread and expect the practical ceiling on a continued thread to be
 lower; an oversize append still fails before any bytes are stored.
 </Note>
 
-Output representation failures are `-32603` with
-`error: "amp_turn_failed"`, `cause: "transport"`,
-`stage: "image_output"`, and a `reason`. A missing or expired canonical
+Output failures reaching `-32603` with `error: "amp_turn_failed"`,
+`cause: "transport"`, and `stage: "image_output"` always carry
+`reason: "storage_failed"`; every other output verdict is refused in the tool
+call's content without ending the turn. A missing or expired canonical
 artifact makes load replay fail as `storage_failed`; retrying replay cannot
 restore swept bytes. See [Updates](/docs/reference/updates#output-failures) for
 the complete taxonomy.

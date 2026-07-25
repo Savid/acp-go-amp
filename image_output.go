@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"sort"
@@ -17,6 +18,7 @@ import (
 )
 
 const (
+	keyStage         = "stage"
 	imageOutputStage = "image_output"
 
 	imageOutputInvalidBase64     = "invalid_base64"
@@ -30,7 +32,62 @@ const (
 
 	canonicalImageArtifactType = "_amp_image_artifact"
 	maxACPImageDecodedBytes    = int64(7_864_155)
+
+	// Guidance carried back in place of an image output the adapter will not
+	// ship. Each string is a fixed constant keyed only by the verdict token: it
+	// says what to do next and never describes the location, size, media type,
+	// or operating-system error that produced the verdict.
+	imageGuidancePathNotAllowed = "the image location cannot be read; send the image bytes inline or as an http(s) link and try again"
+	imageGuidanceMissingFile    = "the image could not be read; send the image bytes inline or as an http(s) link and try again"
+	imageGuidanceTooLarge       = "the image is too large to send; send a smaller image and try again"
+	imageGuidanceNotRaster      = "the bytes are not a supported raster image; send a PNG, JPEG, GIF, WebP, or BMP and try again"
+	imageGuidanceInvalidBase64  = "the image payload could not be decoded; send the image bytes again"
+	imageGuidanceMIMEMismatched = "the declared media type does not match the image; send the image again with a matching media type"
 )
+
+// imageOutputGuidance classifies an image-output failure. A recoverable
+// verdict is an ordinary mistake that can be retried — the bytes were sent
+// from a location the adapter cannot read, are gone, are too big, or are not
+// an image — and comes back with fixed guidance. A storage failure is the
+// adapter's own artifact store breaking, which no retry addresses.
+func imageOutputGuidance(err error) (string, bool) {
+	var failure *acp.RequestError
+	if !errors.As(err, &failure) {
+		return "", false
+	}
+
+	data, _ := failure.Data.(map[string]any)
+	if data[keyStage] != imageOutputStage {
+		return "", false
+	}
+
+	reason, _ := data["reason"].(string)
+
+	switch reason {
+	case imageOutputPathNotAllowed:
+		return imageGuidancePathNotAllowed, true
+	case imageOutputMissingFile:
+		return imageGuidanceMissingFile, true
+	case imageOutputTooLarge:
+		return imageGuidanceTooLarge, true
+	case imageOutputNotRaster:
+		return imageGuidanceNotRaster, true
+	case imageOutputInvalidBase64:
+		return imageGuidanceInvalidBase64, true
+	case imageOutputMediaTypeMismatch:
+		return imageGuidanceMIMEMismatched, true
+	default:
+		return "", false
+	}
+}
+
+// imageRefusalItem is the canonical tool-result item that replaces an image
+// the adapter will not ship. It rides the tool call's own content, so the
+// client sees why the image is absent and the mirrored transcript carries the
+// same guidance into every later turn.
+func imageRefusalItem(guidance string) map[string]any {
+	return map[string]any{keyType: valText, valText: guidance}
+}
 
 type preparedToolImage struct {
 	contentIndex int
@@ -47,7 +104,7 @@ func imageOutputFailure(reason, message string, sizeBytes, maxBytes int64) error
 		jsonFieldError: turnFailedError,
 		"cause":        causeTransport,
 		keyMessage:     message,
-		"stage":        imageOutputStage,
+		keyStage:       imageOutputStage,
 		"reason":       reason,
 	}
 	if sizeBytes > 0 || maxBytes > 0 {
@@ -138,6 +195,7 @@ func (s *agentSession) prepareToolResultArtifacts(
 		canonical  = make([]any, 0, len(items))
 		images     = make([]preparedToolImage, 0)
 		totalBytes int64
+		refused    bool
 	)
 
 	for itemIndex, item := range items {
@@ -157,7 +215,18 @@ func (s *agentSession) prepareToolResultArtifacts(
 		case valImage:
 			image, err := prepareNativeToolImage(raw, result.ToolUseID, itemIndex, s.agent.options.ImageLimits)
 			if err != nil {
-				return nil, false, err
+				// Every verdict this raises is one the caller can act on — bad
+				// base64, a contradicted media type, non-raster bytes, an
+				// oversize image, a missing or unreadable location — so the
+				// guidance takes the image's place in the tool call's own
+				// content and the turn is untouched. Only the artifact store
+				// below can fail fatally.
+				guidance, _ := imageOutputGuidance(err)
+				refused = true
+
+				canonical = append(canonical, imageRefusalItem(guidance))
+
+				continue
 			}
 
 			image.contentIndex = len(canonical)
@@ -167,12 +236,12 @@ func (s *agentSession) prepareToolResultArtifacts(
 
 				maxBytes := effectiveImageOutputLimit(s.agent.options.ImageLimits.MaxOutputBytesPerToolCall)
 				if totalBytes > maxBytes {
-					return nil, false, imageOutputFailure(
-						imageOutputTooLarge,
-						"image output exceeds the configured per-tool-call limit",
-						totalBytes,
-						maxBytes,
-					)
+					totalBytes -= int64(len(image.data))
+					refused = true
+
+					canonical = append(canonical, imageRefusalItem(imageGuidanceTooLarge))
+
+					continue
 				}
 			}
 
@@ -184,7 +253,11 @@ func (s *agentSession) prepareToolResultArtifacts(
 	}
 
 	if len(images) == 0 {
-		return nil, false, nil
+		if !refused {
+			return nil, false, nil
+		}
+
+		return canonical, true, nil
 	}
 
 	for _, image := range images {
@@ -573,13 +646,14 @@ func (s *agentSession) toolResultSnapshot(
 					)
 				}
 
+				// A stored image that has since crossed a configured limit is
+				// still an ordinary verdict: the tool call carries the guidance
+				// where the image would have been and the turn runs on.
 				if sizeBytes > maxBytes {
-					return nil, nil, imageOutputFailure(
-						imageOutputTooLarge,
-						"stored image output exceeds the configured per-image limit",
-						sizeBytes,
-						maxBytes,
-					)
+					content = append(content, acp.ToolContent(acp.TextBlock(imageGuidanceTooLarge)))
+					diagnostic = append(diagnostic, imageRefusalItem(imageGuidanceTooLarge))
+
+					continue
 				}
 
 				mimeType, width, height, ok := inspectOutputRaster(decoded)
@@ -597,12 +671,12 @@ func (s *agentSession) toolResultSnapshot(
 
 				toolMax := effectiveImageOutputLimit(s.agent.options.ImageLimits.MaxOutputBytesPerToolCall)
 				if totalBytes > toolMax {
-					return nil, nil, imageOutputFailure(
-						imageOutputTooLarge,
-						"stored image output exceeds the configured per-tool-call limit",
-						totalBytes,
-						toolMax,
-					)
+					totalBytes -= sizeBytes
+
+					content = append(content, acp.ToolContent(acp.TextBlock(imageGuidanceTooLarge)))
+					diagnostic = append(diagnostic, imageRefusalItem(imageGuidanceTooLarge))
+
+					continue
 				}
 
 				content = append(content, acp.ToolContent(acp.ImageBlock(artifact.Data, artifact.MimeType)))
@@ -682,7 +756,7 @@ func (s *agentSession) emitImageToolFailure(
 	status := acp.ToolCallStatusFailed
 
 	raw := map[string]any{
-		"stage":   imageOutputStage,
+		keyStage:  imageOutputStage,
 		"failure": failure.Error(),
 	}
 	if nativeFailed {

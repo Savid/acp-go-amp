@@ -880,6 +880,13 @@ func main() {
 		if mode == "image-output-error" {
 			os.Stdout.WriteString("{\"type\":\"system\",\"subtype\":\"init\",\"cwd\":\"/tmp/project\",\"session_id\":\"T-agent-thread\"}\n")
 			os.Stdout.WriteString("{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"TU-image\",\"content\":[{\"type\":\"image\",\"mimeType\":\"image/png\",\"data\":\"%%%\"}],\"is_error\":false}]},\"session_id\":\"T-agent-thread\"}\n")
+			os.Stdout.WriteString("{\"type\":\"result\",\"subtype\":\"success\",\"duration_ms\":1,\"is_error\":false,\"num_turns\":1,\"result\":\"done\",\"session_id\":\"T-agent-thread\"}\n")
+			return
+		}
+		if mode == "image-output-store-failure" {
+			os.Stdout.WriteString("{\"type\":\"system\",\"subtype\":\"init\",\"cwd\":\"/tmp/project\",\"session_id\":\"T-agent-thread\"}\n")
+			os.Stdout.WriteString("{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"TU-image\",\"content\":[{\"type\":\"image\",\"mimeType\":\"image/png\",\"data\":\"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC\"}],\"is_error\":false}]},\"session_id\":\"T-agent-thread\"}\n")
+			os.Stdout.WriteString("{\"type\":\"result\",\"subtype\":\"success\",\"duration_ms\":1,\"is_error\":false,\"num_turns\":1,\"result\":\"done\",\"session_id\":\"T-agent-thread\"}\n")
 			return
 		}
 		if mode == "no-result" {
