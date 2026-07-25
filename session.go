@@ -53,6 +53,7 @@ const (
 	keyContent   = "content"
 	keyData      = "data"
 	keyMaxBytes  = "maxBytes"
+	keySizeBytes = "sizeBytes"
 	keyMIMEType  = "mimeType"
 	keyMediaType = "media_type"
 	keySource    = "source"

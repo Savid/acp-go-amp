@@ -27,25 +27,29 @@ func defaultPolicy() promptImagePolicy {
 }
 
 // TestBlobResourceChannelRejectsOversizeBytes pins that a non-image blob is
-// bounded by the same per-image decoded limit an image blob is: the fixture is
-// larger than the policy default and must be rejected rather than forwarded. The
-// verdict names the resource channel, because the block a host would have to fix
-// is a resource block and there is no image block at that index to inspect.
+// bounded by the bound the adapter advertises rather than by the looser
+// configured policy limit, and that the payload it is judged on is the base64 the
+// host actually sent. The verdict names the resource channel, because the block a
+// host would have to fix is a resource block and there is no image block at that
+// index to inspect.
 func TestBlobResourceChannelRejectsOversizeBytes(t *testing.T) {
-	oversize := make([]byte, 6_295_951)
 	limits := applyOptions(nil).ImageLimits
+	bound := effectiveInputBytesPerImage(limits)
 
-	require.Greater(t, int64(len(oversize)), limits.MaxInputBytesPerImage)
+	require.Less(t, bound, limits.MaxInputBytesPerImage)
+
+	blob := strings.Repeat("A", int(bound)+4)
 
 	_, err := promptInputWithPolicy(
-		[]acp.ContentBlock{blobResourceBlock(base64.StdEncoding.EncodeToString(oversize), blobMIMEPDF)},
+		t.Context(),
+		[]acp.ContentBlock{blobResourceBlock(blob, blobMIMEPDF)},
 		defaultPolicy(),
 	)
 	requireInvalidParamsData(t, err, resourceSizeErrorData(
 		0,
 		imageErrorTooLarge,
-		int64(len(oversize)),
-		limits.MaxInputBytesPerImage,
+		int64(len(blob)),
+		bound,
 	))
 }
 
@@ -53,19 +57,20 @@ func TestBlobResourceChannelRejectsOversizeBytes(t *testing.T) {
 // per-prompt aggregate verdict a blob triggers also names the resource channel,
 // not the image contract that lent the budget.
 func TestBlobResourceChannelReportsTheAggregateOnItsOwnChannel(t *testing.T) {
-	document := make([]byte, 4096)
+	blob := base64.StdEncoding.EncodeToString(make([]byte, 4096))
 
 	limits := applyOptions(nil).ImageLimits
-	limits.MaxInputBytesPerPrompt = int64(len(document)) - 1
+	limits.MaxInputBytesPerPrompt = int64(len(blob)) - 1
 
 	_, err := promptInputWithPolicy(
-		[]acp.ContentBlock{blobResourceBlock(base64.StdEncoding.EncodeToString(document), blobMIMEPDF)},
+		t.Context(),
+		[]acp.ContentBlock{blobResourceBlock(blob, blobMIMEPDF)},
 		promptImagePolicy{limits: limits},
 	)
 	requireInvalidParamsData(t, err, resourceSizeErrorData(
 		0,
 		imageErrorTooLarge,
-		int64(len(document)),
+		int64(len(blob)),
 		limits.MaxInputBytesPerPrompt,
 	))
 }
@@ -75,14 +80,16 @@ func TestBlobResourceChannelReportsTheAggregateOnItsOwnChannel(t *testing.T) {
 // an embedded resource blob has no handoff form to fall back to.
 func TestBlobResourceChannelRejectsAnEmptyRasterBlob(t *testing.T) {
 	_, err := promptInputWithPolicy(
+		t.Context(),
 		[]acp.ContentBlock{blobResourceBlock("", imageMIMEPNG)},
 		defaultPolicy(),
 	)
-	requireInvalidParamsData(t, err, imageErrorData(0, imageErrorMissingData))
+	requireInvalidParamsData(t, err, resourceErrorData(0, imageErrorMissingData))
 }
 
 func TestBlobResourceChannelRejectsCorruptBase64(t *testing.T) {
 	_, err := promptInputWithPolicy(
+		t.Context(),
 		[]acp.ContentBlock{blobResourceBlock("%%%", blobMIMEPDF)},
 		defaultPolicy(),
 	)
@@ -94,19 +101,19 @@ func TestBlobResourceChannelRejectsCorruptBase64(t *testing.T) {
 // a position in the gated-media sequence.
 func TestBlobResourceChannelCountsTowardThePromptAggregate(t *testing.T) {
 	validPNG := imageFixture(t, "valid.png")
-	document := make([]byte, 4096)
+	blob := base64.StdEncoding.EncodeToString(make([]byte, 4096))
 
 	limits := applyOptions(nil).ImageLimits
-	limits.MaxInputBytesPerPrompt = int64(len(document) + len(validPNG) - 1)
+	limits.MaxInputBytesPerPrompt = int64(len(blob) + len(validPNG) - 1)
 
-	_, err := promptInputWithPolicy([]acp.ContentBlock{
-		blobResourceBlock(base64.StdEncoding.EncodeToString(document), blobMIMEPDF),
+	_, err := promptInputWithPolicy(t.Context(), []acp.ContentBlock{
+		blobResourceBlock(blob, blobMIMEPDF),
 		acp.ImageBlock(base64.StdEncoding.EncodeToString(validPNG), imageMIMEPNG),
 	}, promptImagePolicy{limits: limits})
 	requireInvalidParamsData(t, err, imageSizeErrorData(
 		1,
 		imageErrorTooLarge,
-		int64(len(document)+len(validPNG)),
+		int64(len(blob)+len(validPNG)),
 		limits.MaxInputBytesPerPrompt,
 	))
 }
@@ -152,27 +159,29 @@ func TestGatedMediaBlocksNeverShareAnIndex(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			_, err := promptInputWithPolicy(test.blocks, defaultPolicy())
+			_, err := promptInputWithPolicy(t.Context(), test.blocks, defaultPolicy())
 			requireInvalidParamsData(t, err, imageErrorData(test.want, imageErrorMissingData))
 		})
 	}
 }
 
-// TestBlobResourceChannelKeepsItsDownstreamShape pins that gating the channel did
-// not change what a conforming non-image blob becomes: prompt text carrying its
-// base64.
-func TestBlobResourceChannelKeepsItsDownstreamShape(t *testing.T) {
+// TestBlobResourceChannelDegradesToAReference pins what a conforming non-image
+// blob becomes: Amp has no native mapping for it, so the model is told what was
+// attached and where it lives and the payload stays out of the prompt.
+func TestBlobResourceChannelDegradesToAReference(t *testing.T) {
 	document := base64.StdEncoding.EncodeToString([]byte("%PDF-1.7 body"))
 
 	input, err := promptInputWithPolicy(
+		t.Context(),
 		[]acp.ContentBlock{blobResourceBlock(document, blobMIMEPDF)},
 		defaultPolicy(),
 	)
 	require.NoError(t, err)
 
 	text := promptContentText(t, input)
+	require.Contains(t, text, "URI: file:///doc.pdf")
 	require.Contains(t, text, "MIME: "+blobMIMEPDF)
-	require.Contains(t, text, document)
+	require.NotContains(t, text, document)
 }
 
 // TestRasterDeclarationsNeverReachTheUntypedBlobChannel is the security pin: a
@@ -194,33 +203,36 @@ func TestRasterDeclarationsNeverReachTheUntypedBlobChannel(t *testing.T) {
 	} {
 		t.Run(declared, func(t *testing.T) {
 			input, err := promptInputWithPolicy(
+				t.Context(),
 				[]acp.ContentBlock{blobResourceBlock(encoded, declared)},
 				defaultPolicy(),
 			)
-			requireInvalidParamsData(t, err, imageErrorData(0, imageErrorInvalidMediaType))
+			requireInvalidParamsData(t, err, resourceErrorData(0, imageErrorInvalidMediaType))
 			require.Nil(t, input)
-
-			// The prompt Amp would build carries no base64 for this input at all.
-			built, marshalErr := json.Marshal(input)
-			require.NoError(t, marshalErr)
-			require.NotContains(t, string(built), encoded)
-			require.NotContains(t, string(built), encoded[:32])
 		})
 	}
 }
 
-// TestUntypedBlobChannelStillCarriesBase64 is the control for the pin above: the
-// channel that must never see raster bytes does still inline the bytes of a blob
-// that declares no raster type, so the assertion there is meaningful.
-func TestUntypedBlobChannelStillCarriesBase64(t *testing.T) {
-	encoded := base64.StdEncoding.EncodeToString([]byte("plain bytes"))
+// TestBuiltPromptCarriesNoBlobBase64 asserts the base64-free property against a
+// prompt that was actually built: the request is accepted, its text is present,
+// and neither the whole payload nor any recognizable run of it appears anywhere
+// in the native request. A rejected prompt would prove nothing here, so the
+// success is what carries the assertion.
+func TestBuiltPromptCarriesNoBlobBase64(t *testing.T) {
+	encoded := base64.StdEncoding.EncodeToString(imageFixture(t, "valid.png"))
 
-	input, err := promptInputWithPolicy(
-		[]acp.ContentBlock{blobResourceBlock(encoded, blobMIMEPDF)},
-		defaultPolicy(),
-	)
+	input, err := promptInputWithPolicy(t.Context(), []acp.ContentBlock{
+		acp.TextBlock("look at this"),
+		blobResourceBlock(encoded, blobMIMEPDF),
+	}, defaultPolicy())
 	require.NoError(t, err)
-	require.Contains(t, promptContentText(t, input), encoded)
+	require.NotNil(t, input)
+
+	built, marshalErr := json.Marshal(input)
+	require.NoError(t, marshalErr)
+	require.Contains(t, string(built), "look at this")
+	require.NotContains(t, string(built), encoded)
+	require.NotContains(t, string(built), encoded[:32])
 }
 
 // TestBlobResourceWithoutAMediaTypeStaysUntyped pins that an absent declaration
@@ -228,7 +240,7 @@ func TestUntypedBlobChannelStillCarriesBase64(t *testing.T) {
 func TestBlobResourceWithoutAMediaTypeStaysUntyped(t *testing.T) {
 	encoded := base64.StdEncoding.EncodeToString([]byte("plain bytes"))
 
-	input, err := promptInputWithPolicy([]acp.ContentBlock{
+	input, err := promptInputWithPolicy(t.Context(), []acp.ContentBlock{
 		acp.ResourceBlock(acp.EmbeddedResourceResource{
 			BlobResourceContents: &acp.BlobResourceContents{Blob: encoded, Uri: "file:///doc.bin"},
 		}),
@@ -237,7 +249,8 @@ func TestBlobResourceWithoutAMediaTypeStaysUntyped(t *testing.T) {
 
 	text := promptContentText(t, input)
 	require.NotContains(t, text, "MIME:")
-	require.Contains(t, text, encoded)
+	require.Contains(t, text, "URI: file:///doc.bin")
+	require.NotContains(t, text, encoded)
 }
 
 // TestResourceLinkCarriesNoBytesWhateverItDeclares pins that the resource-link
@@ -247,7 +260,7 @@ func TestResourceLinkCarriesNoBytesWhateverItDeclares(t *testing.T) {
 	link := acp.ResourceLinkBlock("shot", "file:///shot.png")
 	link.ResourceLink.MimeType = acp.Ptr("IMAGE/PNG")
 
-	input, err := promptInputWithPolicy([]acp.ContentBlock{link}, defaultPolicy())
+	input, err := promptInputWithPolicy(t.Context(), []acp.ContentBlock{link}, defaultPolicy())
 	require.NoError(t, err)
 
 	text := promptContentText(t, input)

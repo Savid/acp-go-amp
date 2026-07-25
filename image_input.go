@@ -2,10 +2,12 @@ package ampacp
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/binary"
 	"errors"
 	"io"
+	"os"
 	"strings"
 
 	"github.com/coder/acp-go-sdk"
@@ -73,12 +75,21 @@ type imagePromptBudget struct {
 	handoffRoot string
 	nextIndex   int
 	totalBytes  int64
+	// handoffBlocks counts the handoff-form blocks this prompt has asked the
+	// adapter to read, which is bounded independently of the byte aggregate a
+	// host may disable.
+	handoffBlocks int
+	// root is the opened read root, held for the life of one prompt mapping so
+	// every handoff open in that prompt is relative to one kernel-checked
+	// descriptor.
+	root *os.Root
 }
 
 // nextImageIndex allocates the position this media block reports in the prompt's
-// gated-media sequence. Every gated block consumes one — image content blocks
-// and embedded resource blobs alike — so no two blocks in one prompt can report
-// the same index.
+// gated-media sequence. It is claimed only once a block reaches the shared gate
+// chain — image content blocks and embedded resource blobs alike — so a block
+// refused ahead of every gate stays invisible to the counter, and no two gated
+// blocks in one prompt can report the same index.
 func (b *imagePromptBudget) nextImageIndex() int {
 	index := b.nextIndex
 	b.nextIndex++
@@ -90,92 +101,86 @@ func (b *imagePromptBudget) nextImageIndex() int {
 // data is the embedded form even when a handoff envelope is also present; empty
 // data with handoff intent is the handoff form; empty data with neither is
 // missing_data.
-func (b *imagePromptBudget) validateImageBlock(block *acp.ContentBlockImage) (validatedPromptImage, error) {
-	index := b.nextImageIndex()
-
+func (b *imagePromptBudget) validateImageBlock(ctx context.Context, block *acp.ContentBlockImage) (validatedPromptImage, error) {
 	if block.Data != "" {
-		return b.validateEmbedded(index, block.Data, block.MimeType)
+		return b.validateEmbedded(imageField, block.Data, block.MimeType)
 	}
 
 	if !promptHandoffIntent(block) {
-		return validatedPromptImage{}, imagePromptError(index, imageErrorMissingData)
+		return validatedPromptImage{}, imagePromptError(b.nextIndex, imageErrorMissingData)
 	}
 
-	decoded, sizeBytes, err := readPromptHandoffImage(
-		index,
-		b.handoffRoot,
-		block,
-		effectiveInputBytesPerImage(b.limits),
-	)
-	if err != nil {
-		return validatedPromptImage{}, err
+	decoded, failure := b.handoffBytes(ctx, block)
+	if failure != nil {
+		return validatedPromptImage{}, imagePromptHandoffError(b.nextIndex, failure)
 	}
 
-	if !isPromptImageMIME(block.MimeType) {
-		return validatedPromptImage{}, imagePromptError(index, imageErrorInvalidMediaType)
-	}
-
-	return b.gate(index, block.MimeType, decoded, sizeBytes)
+	// Both forms deliver every byte they account for: a handoff read past the
+	// declared size is rejected where it is read, so the byte the gates count is
+	// the byte that arrived.
+	return b.gate(imageField, b.nextImageIndex(), block.MimeType, decoded, int64(len(decoded)))
 }
 
-// validate validates an embedded base64 image, allocating this block's index in
-// the prompt's gated-media sequence.
+// validate validates an embedded base64 image carried by a resource block. The
+// bytes arrived on a resource, so every verdict names that member even though a
+// raster declaration is what routed them into the image chain.
 func (b *imagePromptBudget) validate(data, mimeType string) (validatedPromptImage, error) {
-	index := b.nextImageIndex()
-
 	if data == "" {
-		return validatedPromptImage{}, imagePromptError(index, imageErrorMissingData)
+		return validatedPromptImage{}, promptMediaError(resourceField, b.nextIndex, imageErrorMissingData)
 	}
 
-	return b.validateEmbedded(index, data, mimeType)
+	return b.validateEmbedded(resourceField, data, mimeType)
 }
 
-func (b *imagePromptBudget) validateEmbedded(index int, data, mimeType string) (validatedPromptImage, error) {
+func (b *imagePromptBudget) validateEmbedded(field, data, mimeType string) (validatedPromptImage, error) {
 	if !isPromptImageMIME(mimeType) {
-		return validatedPromptImage{}, imagePromptError(index, imageErrorInvalidMediaType)
+		return validatedPromptImage{}, promptMediaError(field, b.nextIndex, imageErrorInvalidMediaType)
 	}
 
 	// Retain up to the ACP transport frame cap so structural inspection sees the
 	// whole decodable image. The ingress frame already bounds any payload to this
 	// many decoded bytes, so retaining it is memory-safe; size verdicts below
-	// still gate on the full decoded size.
+	// still gate on the full decoded size, so a payload past the retained window
+	// is rejected rather than truncated and forwarded.
 	decoded, sizeBytes, err := decodePromptImage(data, maxACPImageDecodedBytes)
 	if err != nil {
-		return validatedPromptImage{}, imagePromptError(index, imageErrorInvalidBase64)
+		return validatedPromptImage{}, promptMediaError(field, b.nextIndex, imageErrorInvalidBase64)
 	}
 
-	return b.gate(index, mimeType, decoded, sizeBytes)
+	return b.gate(field, b.nextImageIndex(), mimeType, decoded, sizeBytes)
 }
 
 // gate runs the structural and size verdicts every accepted image passes,
 // whatever transport carried its bytes. sizeBytes is the payload's full decoded
-// size, which can exceed the retained prefix in decoded.
-func (b *imagePromptBudget) gate(index int, mimeType string, decoded []byte, sizeBytes int64) (validatedPromptImage, error) {
+// size, which can exceed the retained prefix in decoded. The caller supplies the
+// request member its channel reports, because routing is chosen by media type
+// while the field follows the block the bytes arrived on.
+func (b *imagePromptBudget) gate(field string, index int, mimeType string, decoded []byte, sizeBytes int64) (validatedPromptImage, error) {
 	sniffedMIME := sniffPromptImageMIME(decoded)
 	if sniffedMIME == "" {
-		return validatedPromptImage{}, imagePromptError(index, imageErrorMediaTypeMismatch)
+		return validatedPromptImage{}, promptMediaError(field, index, imageErrorMediaTypeMismatch)
 	}
 
 	width, height, animated, err := inspectPromptImage(sniffedMIME, decoded)
 	if err != nil || width == 0 || height == 0 {
-		return validatedPromptImage{}, imagePromptError(index, imageErrorInvalidDimensions)
+		return validatedPromptImage{}, promptMediaError(field, index, imageErrorInvalidDimensions)
 	}
 
 	if animated {
-		return validatedPromptImage{}, imagePromptError(index, imageErrorAnimatedNotSupported)
+		return validatedPromptImage{}, promptMediaError(field, index, imageErrorAnimatedNotSupported)
 	}
 
 	if sniffedMIME != mimeType {
-		return validatedPromptImage{}, imagePromptError(index, imageErrorMediaTypeMismatch)
+		return validatedPromptImage{}, promptMediaError(field, index, imageErrorMediaTypeMismatch)
 	}
 
-	if err := b.charge(imageField, index, sizeBytes); err != nil {
+	if err := b.charge(field, index, sizeBytes); err != nil {
 		return validatedPromptImage{}, err
 	}
 
 	if sizeBytes > ampNativeMaxImageBytes {
 		return validatedPromptImage{}, promptMediaSizeError(
-			imageField,
+			field,
 			index,
 			imageErrorNativeEnvelope,
 			sizeBytes,
@@ -184,7 +189,7 @@ func (b *imagePromptBudget) gate(index int, mimeType string, decoded []byte, siz
 	}
 
 	if width > ampNativeMaxImageDimension || height > ampNativeMaxImageDimension {
-		return validatedPromptImage{}, imagePromptError(index, imageErrorNativeEnvelope)
+		return validatedPromptImage{}, promptMediaError(field, index, imageErrorNativeEnvelope)
 	}
 
 	return validatedPromptImage{base64: base64.StdEncoding.EncodeToString(decoded)}, nil
@@ -199,8 +204,22 @@ func (b *imagePromptBudget) charge(field string, index int, sizeBytes int64) err
 	}
 
 	b.totalBytes += sizeBytes
-	if maxBytes := b.limits.MaxInputBytesPerPrompt; maxBytes > 0 && b.totalBytes > maxBytes {
+	if maxBytes := effectiveInputBytesPerPrompt(b.limits); maxBytes > 0 && b.totalBytes > maxBytes {
 		return promptMediaSizeError(field, index, imageErrorTooLarge, b.totalBytes, maxBytes)
+	}
+
+	return nil
+}
+
+// chargeText adds a text resource's bytes to the same per-prompt accumulator the
+// media forms use. Bytes are bytes: declaring them as text rather than as a blob
+// must not buy a prompt more of them than the aggregate allows. It reports at the
+// position the next media block would take without consuming it, because a text
+// resource carries no media the index is meant to identify.
+func (b *imagePromptBudget) chargeText(sizeBytes int64) error {
+	b.totalBytes += sizeBytes
+	if maxBytes := effectiveInputBytesPerPrompt(b.limits); maxBytes > 0 && b.totalBytes > maxBytes {
+		return promptMediaSizeError(resourceField, b.nextIndex, imageErrorTooLarge, b.totalBytes, maxBytes)
 	}
 
 	return nil
@@ -220,16 +239,31 @@ func imagePromptError(index int, errorValue string) error {
 	return promptMediaError(imageField, index, errorValue)
 }
 
-// imagePromptHandoffError reports a handoff-form defect. The four handoff
-// verdicts carry a human message naming the real cause, because a host cannot
-// tell a malformed block from a bad deployment from the verdict alone.
-func imagePromptHandoffError(index int, errorValue, message string) error {
-	return acp.NewInvalidParams(map[string]any{
+// imagePromptHandoffError reports a handoff-form defect. The bytes arrived on an
+// image block, so every handoff verdict names the image contract. A byte verdict
+// carries the size pair every other byte verdict carries; every other verdict
+// carries a constant message, because a host cannot tell a malformed block from
+// a bad deployment from the error value alone.
+func imagePromptHandoffError(index int, failure *handoffError) error {
+	data := map[string]any{
 		jsonFieldField: imageField,
-		jsonFieldError: errorValue,
+		jsonFieldError: failure.value,
 		keyIndex:       index,
-		keyMessage:     message,
-	})
+	}
+
+	if failure.message != "" {
+		data[keyMessage] = failure.message
+	}
+
+	if failure.sizeBytes > 0 {
+		data[keySizeBytes] = failure.sizeBytes
+	}
+
+	if failure.maxBytes > 0 {
+		data[keyMaxBytes] = failure.maxBytes
+	}
+
+	return acp.NewInvalidParams(data)
 }
 
 func promptMediaSizeError(field string, index int, errorValue string, sizeBytes, maxBytes int64) error {
@@ -237,8 +271,8 @@ func promptMediaSizeError(field string, index int, errorValue string, sizeBytes,
 		jsonFieldField: field,
 		jsonFieldError: errorValue,
 		keyIndex:       index,
-		"sizeBytes":    sizeBytes,
-		"maxBytes":     maxBytes,
+		keySizeBytes:   sizeBytes,
+		keyMaxBytes:    maxBytes,
 	})
 }
 

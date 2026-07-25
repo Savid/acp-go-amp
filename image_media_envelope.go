@@ -29,6 +29,16 @@ func effectiveInputBytesPerImage(limits ImageLimits) int64 {
 	return bound
 }
 
+// effectiveInputBytesPerPrompt resolves the configured per-prompt aggregate into
+// the bound the gates actually enforce. A disabled (zero) aggregate stays
+// disabled: the handoff-form block count bounds the read work instead, so
+// restating "disabled" as a byte number would reject the multi-image turn the
+// handoff form exists to carry. Advertisement and gate both read this, so the
+// number a host is told is the number it is judged by.
+func effectiveInputBytesPerPrompt(limits ImageLimits) int64 {
+	return limits.MaxInputBytesPerPrompt
+}
+
 // promptImageMediaTypes is Amp's inbound image allowlist, in the order the media
 // envelope advertises it. The allowlist gate and the advertisement read this one
 // list so they cannot disagree.
@@ -46,7 +56,7 @@ func isPromptImageMIME(mimeType string) bool {
 func mediaEnvelopeMeta(limits ImageLimits) map[string]any {
 	return map[string]any{
 		keyMaxBytes:       effectiveInputBytesPerImage(limits),
-		keyMaxPromptBytes: limits.MaxInputBytesPerPrompt,
+		keyMaxPromptBytes: effectiveInputBytesPerPrompt(limits),
 		keyMaxDimension:   int64(ampNativeMaxImageDimension),
 		keyImageFormats:   promptImageMediaTypes(),
 		// Amp maps no media type to a native document representation: a blob that

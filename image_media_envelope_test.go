@@ -70,6 +70,7 @@ func TestAdvertisedMaxBytesIsTheBoundTheGateEnforces(t *testing.T) {
 			copy(atBound, validPNG)
 
 			_, err := promptInputWithPolicy(
+				t.Context(),
 				[]acp.ContentBlock{acp.ImageBlock(base64.StdEncoding.EncodeToString(atBound), imageMIMEPNG)},
 				promptImagePolicy{limits: test.limits},
 			)
@@ -79,6 +80,7 @@ func TestAdvertisedMaxBytesIsTheBoundTheGateEnforces(t *testing.T) {
 			copy(overBound, validPNG)
 
 			_, err = promptInputWithPolicy(
+				t.Context(),
 				[]acp.ContentBlock{acp.ImageBlock(base64.StdEncoding.EncodeToString(overBound), imageMIMEPNG)},
 				promptImagePolicy{limits: test.limits},
 			)
@@ -102,6 +104,7 @@ func TestAdvertisedMaxDimensionIsTheBoundTheGateEnforces(t *testing.T) {
 	binary.BigEndian.PutUint32(atBound[16:20], uint32(advertised))
 
 	_, err := promptInputWithPolicy(
+		t.Context(),
 		[]acp.ContentBlock{acp.ImageBlock(base64.StdEncoding.EncodeToString(atBound), imageMIMEPNG)},
 		promptImagePolicy{limits: limits},
 	)
@@ -111,6 +114,7 @@ func TestAdvertisedMaxDimensionIsTheBoundTheGateEnforces(t *testing.T) {
 	binary.BigEndian.PutUint32(overBound[16:20], uint32(advertised)+1)
 
 	_, err = promptInputWithPolicy(
+		t.Context(),
 		[]acp.ContentBlock{acp.ImageBlock(base64.StdEncoding.EncodeToString(overBound), imageMIMEPNG)},
 		promptImagePolicy{limits: limits},
 	)
@@ -131,7 +135,7 @@ func TestAdvertisedMaxPromptBytesIsTheBoundTheGateEnforces(t *testing.T) {
 	require.Equal(t, limits.MaxInputBytesPerPrompt, envelope[keyMaxPromptBytes])
 
 	encoded := base64.StdEncoding.EncodeToString(validPNG)
-	_, err := promptInputWithPolicy([]acp.ContentBlock{
+	_, err := promptInputWithPolicy(t.Context(), []acp.ContentBlock{
 		acp.ImageBlock(encoded, imageMIMEPNG),
 		acp.ImageBlock(encoded, imageMIMEPNG),
 	}, promptImagePolicy{limits: limits})
@@ -158,6 +162,7 @@ func TestAdvertisedImageFormatsAreTheAllowlistTheGateEnforces(t *testing.T) {
 	require.False(t, isPromptImageMIME(imageMIMEBMP))
 
 	_, err := promptInputWithPolicy(
+		t.Context(),
 		[]acp.ContentBlock{acp.ImageBlock(base64.StdEncoding.EncodeToString(imageFixture(t, "valid.png")), imageMIMEBMP)},
 		promptImagePolicy{limits: applyOptions(nil).ImageLimits},
 	)

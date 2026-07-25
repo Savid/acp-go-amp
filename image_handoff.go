@@ -1,10 +1,11 @@
 package ampacp
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"io/fs"
 	"math"
@@ -34,37 +35,86 @@ const (
 
 	handoffURIScheme = "file"
 	handoffURIHost   = "localhost"
+
+	// handoffParentDir is the path element a root-relative name may not start
+	// with, which is how a lexical test tells a path that was never under the
+	// read root from one that is.
+	handoffParentDir = ".."
+
+	// handoffSizeBytesExclusiveMax is 2^63 as a float64, the first value at or
+	// above the int64 range. A declared size is validated against it as a float,
+	// because converting an out-of-range float64 to int64 is undefined in Go and
+	// wraps on one architecture while saturating on another.
+	handoffSizeBytesExclusiveMax = 9223372036854775808.0
+
+	// maxHandoffBlocksPerPrompt bounds the handoff-form blocks one prompt may ask
+	// this adapter to read. A handoff block is a couple of hundred bytes on the
+	// wire and drives a whole file read, so without a count bound one legal frame
+	// commits the adapter to arbitrarily much I/O and resident memory whenever the
+	// per-prompt byte aggregate is disabled. It bounds the work rather than the
+	// byte policy, and sits far enough above any real multi-image turn that a
+	// conforming host never meets it.
+	maxHandoffBlocksPerPrompt = 64
+)
+
+// Handoff failure messages. Every one is a compile-time constant: a verdict
+// travels to the client and into the trace backend, so it may never carry a
+// path, a uri, a filename, a digest, a byte count of a file the caller did not
+// describe, or operating-system error text.
+const (
+	handoffRootUnsetMessage      = "handoff input is not enabled: no handoff read root is configured"
+	handoffRootUnopenableMessage = "handoff read root cannot be opened"
+	handoffOutsideRootMessage    = "handoff path is outside the configured read root"
+	handoffNotRegularMessage     = "handoff path is not a regular file"
+	handoffFileAbsentMessage     = "handoff path does not exist"
+	handoffUnopenableMessage     = "handoff file cannot be opened"
+	handoffUninspectableMessage  = "handoff file cannot be inspected"
+	handoffUnreadableMessage     = "handoff file cannot be read"
+	handoffSizeMismatchMessage   = "handoff file does not hold the declared sizeBytes"
+	handoffDigestMismatchMessage = "handoff file bytes do not hash to the declared digest"
+
+	handoffEnvelopeAbsentMessage       = "image block carries no " + metaHandoffKey + " envelope"
+	handoffEnvelopeNotObjectMessage    = metaHandoffKey + " envelope is not an object"
+	handoffEnvelopeUnknownFieldMessage = metaHandoffKey + " envelope carries an unknown field"
+	handoffVersionInvalidMessage       = metaHandoffKey + " envelope version is missing or not an integer"
+	handoffVersionUnsupportedMessage   = metaHandoffKey + " envelope version is not supported"
+	handoffDigestInvalidMessage        = metaHandoffKey + " envelope digest must be 64 lowercase hex characters"
+	handoffSizeBytesInvalidMessage     = metaHandoffKey + " envelope sizeBytes is missing or not a non-negative integer"
+
+	handoffURIAbsentMessage      = "handoff image block carries no uri"
+	handoffURIUnparseableMessage = "handoff uri is not parseable"
+	handoffURISchemeMessage      = "handoff uri scheme is not " + handoffURIScheme
+	handoffURIRemoteHostMessage  = "handoff uri names a remote host"
+	handoffURIRelativeMessage    = "handoff uri path is not absolute"
 )
 
 // handoffFile is the part of an opened handoff file the bounded read needs. The
-// mode and identity are re-checked on the descriptor rather than only on the
-// path, so a file swapped between resolution and read is rejected instead of
-// read.
+// mode is checked on the descriptor rather than on the path, because a read root
+// bounds where a name may lead and never what kind of object it names.
 type handoffFile interface {
 	io.ReadCloser
 	Stat() (os.FileInfo, error)
 }
 
-// These are seams so every resolution and read failure branch is exercisable;
-// production always uses the standard library.
-var (
-	evalSymlinks    = filepath.EvalSymlinks
-	statHandoffFile = os.Stat
-	openHandoffFile = func(name string) (handoffFile, error) {
-		return os.OpenFile(name, os.O_RDONLY|handoffOpenFlags, 0)
-	}
-)
+// openHandoffFile opens one name inside an already-opened read root. It is a
+// seam so the inspection and read failures a real filesystem only produces under
+// a race with the host that owns the file stay exercisable; containment is the
+// root's, not this function's, on every path.
+var openHandoffFile = func(root *os.Root, rel string) (handoffFile, error) {
+	return root.OpenFile(rel, os.O_RDONLY|handoffOpenFlags, 0)
+}
 
-// handoffCause renders an operating-system failure without the path it names, so
-// a verdict returned to a client cannot disclose host filesystem layout while
-// still naming the real cause.
-func handoffCause(err error) string {
-	var pathErr *fs.PathError
-	if errors.As(err, &pathErr) {
-		return pathErr.Err.Error()
-	}
+// handoffError is one handoff pre-gate failure: the image error value, the
+// constant message naming the cause, and the byte pair a size verdict reports.
+type handoffError struct {
+	value     string
+	message   string
+	sizeBytes int64
+	maxBytes  int64
+}
 
-	return err.Error()
+func handoffInvalid(message string) *handoffError {
+	return &handoffError{value: imageErrorInvalidHandoff, message: message}
 }
 
 // promptHandoffEnvelope is a validated _meta["acp-go.dev/handoff"] payload.
@@ -90,129 +140,197 @@ func promptHandoffIntent(block *acp.ContentBlockImage) bool {
 	return err == nil && parsed.Scheme == handoffURIScheme
 }
 
-// readPromptHandoffImage resolves, reads and verifies the handoff-form image
-// block at index. Verdicts are ordered so a host can tell a malformed block
-// (invalid_handoff) from a path it may not read (path_not_allowed), from a file
-// the host already cleaned up (missing_file), from bytes that are not the ones
-// it announced (handoff_digest_mismatch).
+// handoffBytes runs the handoff pre-gate for one image block: the per-prompt
+// block count, envelope and uri strictness, the name's position under the read
+// root, the declared media type, the declared size against the per-image bounds,
+// a bounded root-relative read, then digest verification.
 //
-// The read is bounded at maxBytes+1, the tightest per-image gate plus one. When
-// the whole file fits, its size and digest are verified against the envelope and
-// nothing unverified proceeds. When it does not fit the digest is unverifiable,
-// so the returned size is the file's real size and the caller's size gates
-// reject it — the bytes are never forwarded either way.
-func readPromptHandoffImage(index int, root string, block *acp.ContentBlockImage, maxBytes int64) ([]byte, int64, error) {
-	if root == "" {
-		return nil, 0, imagePromptHandoffError(index, imageErrorInvalidHandoff,
-			"handoff input is not enabled: no handoff read root is configured")
+// Verdicts are ordered so a host can tell a malformed block (invalid_handoff)
+// from a path it may not read (path_not_allowed), from a file the host already
+// cleaned up (missing_file), from bytes that are not the ones it announced
+// (handoff_digest_mismatch). Nothing the filesystem reports feeds a verdict, and
+// every path that returns bytes has verified them against the envelope the
+// caller sent.
+func (b *imagePromptBudget) handoffBytes(ctx context.Context, block *acp.ContentBlockImage) ([]byte, *handoffError) {
+	if b.handoffRoot == "" {
+		return nil, handoffInvalid(handoffRootUnsetMessage)
 	}
 
-	envelope, err := parsePromptHandoffEnvelope(block.Meta)
+	b.handoffBlocks++
+	if b.handoffBlocks > maxHandoffBlocksPerPrompt {
+		return nil, &handoffError{
+			value:     imageErrorTooLarge,
+			sizeBytes: int64(b.handoffBlocks),
+			maxBytes:  maxHandoffBlocksPerPrompt,
+		}
+	}
+
+	envelope, failure := parsePromptHandoffEnvelope(block.Meta)
+	if failure != nil {
+		return nil, failure
+	}
+
+	requested, failure := promptHandoffRequestedPath(block.Uri)
+	if failure != nil {
+		return nil, failure
+	}
+
+	rel, failure := promptHandoffRelativePath(b.handoffRoot, requested)
+	if failure != nil {
+		return nil, failure
+	}
+
+	root, failure := b.handoffRootHandle()
+	if failure != nil {
+		return nil, failure
+	}
+
+	// The declared type is judged before a byte is read, as it is in the embedded
+	// form, so a block this adapter was never going to accept costs it no read and
+	// no hash.
+	if !isPromptImageMIME(block.MimeType) {
+		return nil, &handoffError{value: imageErrorInvalidMediaType}
+	}
+
+	// The size gate reads the caller's own declaration, so an oversize handoff is
+	// rejected before anything is opened and without measuring a file the caller
+	// may not be entitled to measure.
+	if oversize := b.declaredSizeVerdict(envelope.sizeBytes); oversize != nil {
+		return nil, oversize
+	}
+
+	data, failure := readPromptHandoffBytes(ctx, root, rel, envelope.sizeBytes)
+	if failure != nil {
+		return nil, failure
+	}
+
+	return data, verifyPromptHandoffDigest(envelope, data)
+}
+
+// declaredSizeVerdict applies the per-image byte bounds to a declared size. The
+// two bounds keep their own verdicts: a configured policy limit reports
+// too_large, and Amp's unconditional native envelope reports
+// native_envelope_exceeded, exactly as they do for embedded bytes.
+func (b *imagePromptBudget) declaredSizeVerdict(sizeBytes int64) *handoffError {
+	if maxBytes := b.limits.MaxInputBytesPerImage; maxBytes > 0 && sizeBytes > maxBytes {
+		return &handoffError{value: imageErrorTooLarge, sizeBytes: sizeBytes, maxBytes: maxBytes}
+	}
+
+	if sizeBytes > ampNativeMaxImageBytes {
+		return &handoffError{
+			value:     imageErrorNativeEnvelope,
+			sizeBytes: sizeBytes,
+			maxBytes:  ampNativeMaxImageBytes,
+		}
+	}
+
+	return nil
+}
+
+// handoffRootHandle opens the read root once per prompt. Containment is the
+// kernel's from here on: every handoff open is relative to this descriptor and a
+// symlink beneath it may not name a location outside it, so there is no window
+// between deciding a path is inside the root and reading it. A root that cannot
+// be opened is a deployment defect rather than a host cleaning a file up early,
+// so it is path_not_allowed.
+func (b *imagePromptBudget) handoffRootHandle() (*os.Root, *handoffError) {
+	if b.root != nil {
+		return b.root, nil
+	}
+
+	root, err := os.OpenRoot(b.handoffRoot)
 	if err != nil {
-		return nil, 0, imagePromptHandoffError(index, imageErrorInvalidHandoff, err.Error())
+		return nil, &handoffError{value: imageErrorPathNotAllowed, message: handoffRootUnopenableMessage}
 	}
 
-	requested, err := promptHandoffRequestedPath(block.Uri)
-	if err != nil {
-		return nil, 0, imagePromptHandoffError(index, imageErrorInvalidHandoff, err.Error())
-	}
+	b.root = root
 
-	resolved, info, verdict, err := resolvePromptHandoffPath(root, requested)
-	if err != nil {
-		return nil, 0, imagePromptHandoffError(index, verdict, err.Error())
-	}
+	return root, nil
+}
 
-	data, sizeBytes, verdict, err := readPromptHandoffBytes(resolved, info, maxBytes)
-	if err != nil {
-		return nil, 0, imagePromptHandoffError(index, verdict, err.Error())
+// closeHandoffRoot releases the read root's descriptor at the end of the prompt
+// mapping that opened it.
+func (b *imagePromptBudget) closeHandoffRoot() {
+	if b.root != nil {
+		_ = b.root.Close()
+		b.root = nil
 	}
-
-	if sizeBytes > maxBytes {
-		return data, sizeBytes, nil
-	}
-
-	if sizeBytes != envelope.sizeBytes {
-		return nil, 0, imagePromptHandoffError(index, imageErrorDigestMismatch,
-			fmt.Sprintf("handoff file holds %d bytes, envelope declares %d", sizeBytes, envelope.sizeBytes))
-	}
-
-	if digest := sha256.Sum256(data); hex.EncodeToString(digest[:]) != envelope.digest {
-		return nil, 0, imagePromptHandoffError(index, imageErrorDigestMismatch,
-			"handoff file bytes do not hash to the declared digest")
-	}
-
-	return data, sizeBytes, nil
 }
 
 // parsePromptHandoffEnvelope validates the block's handoff envelope. The
 // envelope is strict: exactly three known fields, version 1, a 64-character
 // lowercase hex digest, and a non-negative integer size.
-func parsePromptHandoffEnvelope(meta map[string]any) (promptHandoffEnvelope, error) {
+func parsePromptHandoffEnvelope(meta map[string]any) (promptHandoffEnvelope, *handoffError) {
 	raw, present := meta[metaHandoffKey]
 	if !present {
-		return promptHandoffEnvelope{}, fmt.Errorf("image block carries no %s envelope", metaHandoffKey)
+		return promptHandoffEnvelope{}, handoffInvalid(handoffEnvelopeAbsentMessage)
 	}
 
 	fields, ok := raw.(map[string]any)
 	if !ok {
-		return promptHandoffEnvelope{}, fmt.Errorf("%s envelope is not an object", metaHandoffKey)
+		return promptHandoffEnvelope{}, handoffInvalid(handoffEnvelopeNotObjectMessage)
 	}
 
 	for name := range fields {
 		switch name {
 		case handoffFieldVersion, handoffFieldDigest, handoffFieldSizeBytes:
 		default:
-			return promptHandoffEnvelope{}, fmt.Errorf("%s envelope carries unknown field %q", metaHandoffKey, name)
+			return promptHandoffEnvelope{}, handoffInvalid(handoffEnvelopeUnknownFieldMessage)
 		}
 	}
 
-	version, err := promptHandoffInt(fields, handoffFieldVersion)
-	if err != nil {
-		return promptHandoffEnvelope{}, err
+	version, ok := promptHandoffNumber(fields[handoffFieldVersion])
+	if !ok || version != math.Trunc(version) {
+		return promptHandoffEnvelope{}, handoffInvalid(handoffVersionInvalidMessage)
 	}
 
 	if version != handoffVersion {
-		return promptHandoffEnvelope{}, fmt.Errorf("%s envelope version %d is not supported", metaHandoffKey, version)
+		return promptHandoffEnvelope{}, handoffInvalid(handoffVersionUnsupportedMessage)
 	}
 
 	digest, ok := fields[handoffFieldDigest].(string)
 	if !ok || !isLowercaseHexDigest(digest) {
-		return promptHandoffEnvelope{}, fmt.Errorf(
-			"%s envelope digest must be %d lowercase hex characters", metaHandoffKey, handoffDigestLength)
+		return promptHandoffEnvelope{}, handoffInvalid(handoffDigestInvalidMessage)
 	}
 
-	sizeBytes, err := promptHandoffInt(fields, handoffFieldSizeBytes)
-	if err != nil {
-		return promptHandoffEnvelope{}, err
-	}
-
-	if sizeBytes < 0 {
-		return promptHandoffEnvelope{}, fmt.Errorf("%s envelope sizeBytes is negative", metaHandoffKey)
+	sizeBytes, ok := promptHandoffSizeBytes(fields[handoffFieldSizeBytes])
+	if !ok {
+		return promptHandoffEnvelope{}, handoffInvalid(handoffSizeBytesInvalidMessage)
 	}
 
 	return promptHandoffEnvelope{digest: digest, sizeBytes: sizeBytes}, nil
 }
 
-// promptHandoffInt reads an integral envelope field. A JSON number arrives as a
-// float64 over the transport and as a Go integer from an embedding host, so both
-// are read; a fractional or non-numeric value is a defect.
-func promptHandoffInt(fields map[string]any, name string) (int64, error) {
-	switch value := fields[name].(type) {
+// promptHandoffNumber reads an envelope numeric as a float64 whatever shape it
+// arrived in. A JSON number decodes to float64 under the pinned SDK and to
+// json.Number if the decoder is ever asked for one, and an in-process host
+// builds its own block metadata with a Go int. All three are the same number,
+// and reading them as a float64 is what keeps the range check off an int64
+// conversion whose out-of-range behaviour Go does not define.
+func promptHandoffNumber(value any) (float64, bool) {
+	switch number := value.(type) {
 	case float64:
-		// math.MaxInt64 is not representable as a float64 and rounds up to 2^63, so
-		// the upper comparison has to exclude the boundary itself.
-		if value != math.Trunc(value) || value < math.MinInt64 || value >= math.MaxInt64 {
-			return 0, fmt.Errorf("%s envelope %s is not an integer", metaHandoffKey, name)
-		}
+		return number, true
+	case json.Number:
+		parsed, err := number.Float64()
 
-		return int64(value), nil
+		return parsed, err == nil
 	case int:
-		return int64(value), nil
-	case int64:
-		return value, nil
+		return float64(number), true
 	default:
-		return 0, fmt.Errorf("%s envelope %s is missing or not an integer", metaHandoffKey, name)
+		return 0, false
 	}
+}
+
+// promptHandoffSizeBytes validates a declared byte count entirely in float64,
+// before any int64 conversion: non-negative, integral, and strictly below 2^63.
+func promptHandoffSizeBytes(value any) (int64, bool) {
+	size, ok := promptHandoffNumber(value)
+	if !ok || size < 0 || size != math.Trunc(size) || size >= handoffSizeBytesExclusiveMax {
+		return 0, false
+	}
+
+	return int64(size), true
 }
 
 func isLowercaseHexDigest(digest string) bool {
@@ -232,136 +350,99 @@ func isLowercaseHexDigest(digest string) bool {
 // promptHandoffRequestedPath extracts the local path a handoff block names. Only
 // a file URI with no host (or localhost) and an absolute path is a request the
 // adapter will resolve; everything else is malformed as a block.
-func promptHandoffRequestedPath(uri *string) (string, error) {
+func promptHandoffRequestedPath(uri *string) (string, *handoffError) {
 	if uri == nil || *uri == "" {
-		return "", errors.New("handoff image block carries no uri")
+		return "", handoffInvalid(handoffURIAbsentMessage)
 	}
 
 	parsed, err := url.Parse(*uri)
 	if err != nil {
-		return "", fmt.Errorf("handoff uri is not parseable: %v", err)
+		return "", handoffInvalid(handoffURIUnparseableMessage)
 	}
 
 	if parsed.Scheme != handoffURIScheme {
-		return "", fmt.Errorf("handoff uri scheme %q is not %q", parsed.Scheme, handoffURIScheme)
+		return "", handoffInvalid(handoffURISchemeMessage)
 	}
 
 	if parsed.Host != "" && parsed.Host != handoffURIHost {
-		return "", fmt.Errorf("handoff uri names remote host %q", parsed.Host)
+		return "", handoffInvalid(handoffURIRemoteHostMessage)
 	}
 
 	path := filepath.FromSlash(parsed.Path)
 	if !filepath.IsAbs(path) {
-		return "", fmt.Errorf("handoff uri path %q is not absolute", parsed.Path)
+		return "", handoffInvalid(handoffURIRelativeMessage)
 	}
 
-	return path, nil
+	return filepath.Clean(path), nil
 }
 
-// resolvePromptHandoffPath resolves a requested path to a regular file inside the
-// read root, returning the resolved path and the mode it was inspected with.
-// Containment is checked lexically on the cleaned path, symlinks are then
-// resolved, and containment is re-checked on the resolved path, so neither the
-// request nor any link along it can leave the root. Failure causes never name a
-// host path.
-func resolvePromptHandoffPath(root, requested string) (string, os.FileInfo, string, error) {
-	resolvedRoot, err := evalSymlinks(filepath.Clean(root))
-	if err != nil {
-		return "", nil, imageErrorPathNotAllowed,
-			fmt.Errorf("handoff read root cannot be resolved: %s", handoffCause(err))
+// promptHandoffRelativePath maps an absolute handoff path to the name it has
+// inside the read root. The lexical test only decides which verdict to report
+// for a path that was never under the root; the kernel, not this function, is
+// what keeps a resolved name inside it.
+func promptHandoffRelativePath(root, requested string) (string, *handoffError) {
+	rel, err := filepath.Rel(filepath.Clean(root), requested)
+	if err != nil || rel == handoffParentDir || strings.HasPrefix(rel, handoffParentDir+string(filepath.Separator)) {
+		return "", &handoffError{value: imageErrorPathNotAllowed, message: handoffOutsideRootMessage}
 	}
 
-	cleaned := filepath.Clean(requested)
-	if !pathWithinRoot(filepath.Clean(root), cleaned) {
-		return "", nil, imageErrorPathNotAllowed, errors.New("handoff path is outside the configured read root")
-	}
-
-	resolved, err := evalSymlinks(cleaned)
-	if err != nil {
-		if isNotExistError(err) {
-			return "", nil, imageErrorMissingFile, fmt.Errorf("handoff path does not exist: %s", handoffCause(err))
-		}
-
-		return "", nil, imageErrorPathNotAllowed, fmt.Errorf("handoff path cannot be resolved: %s", handoffCause(err))
-	}
-
-	if !pathWithinRoot(resolvedRoot, resolved) {
-		return "", nil, imageErrorPathNotAllowed, errors.New("handoff path resolves outside the configured read root")
-	}
-
-	info, err := statHandoffFile(resolved)
-	if err != nil {
-		if isNotExistError(err) {
-			return "", nil, imageErrorMissingFile, fmt.Errorf("handoff path does not exist: %s", handoffCause(err))
-		}
-
-		return "", nil, imageErrorPathNotAllowed, fmt.Errorf("handoff path cannot be inspected: %s", handoffCause(err))
-	}
-
-	if !info.Mode().IsRegular() {
-		return "", nil, imageErrorPathNotAllowed, errors.New("handoff path is not a regular file")
-	}
-
-	return resolved, info, "", nil
+	return rel, nil
 }
 
-// pathWithinRoot reports whether an already-cleaned path is the root or sits
-// beneath it.
-func pathWithinRoot(root, path string) bool {
-	if path == root {
-		return true
-	}
-
-	return strings.HasPrefix(path, root+string(os.PathSeparator))
-}
-
-func isNotExistError(err error) bool {
-	return errors.Is(err, fs.ErrNotExist)
-}
-
-// readPromptHandoffBytes reads at most limit+1 bytes so the caller can tell a
-// payload that fits its gate from one that does not, without holding an unbounded
-// file in memory. The returned size is the number of bytes read, or the file's
-// real size when the file exceeded the bound.
+// readPromptHandoffBytes reads a handoff file by its name inside the read root,
+// at most one byte more than the envelope declared.
 //
-// The descriptor is verified against the inspection that admitted the path: the
-// bytes read must come from that same regular file, so a path swapped for a
-// symlink, a FIFO, or another file between resolution and read is rejected rather
-// than read.
-func readPromptHandoffBytes(path string, resolved os.FileInfo, limit int64) ([]byte, int64, string, error) {
-	file, err := openHandoffFile(path)
+// The size the read is bounded by is the caller's own declared sizeBytes,
+// already checked against the per-image bounds, so a file that grew, shrank or
+// was swapped after the block was written fails verification rather than passing
+// a size gate on a stale number. The descriptor is opened without blocking and
+// required to be a regular file, because a root bounds where a name may lead and
+// not what kind of object it names.
+func readPromptHandoffBytes(ctx context.Context, root *os.Root, rel string, declared int64) ([]byte, *handoffError) {
+	if ctx.Err() != nil {
+		return nil, &handoffError{value: imageErrorMissingFile, message: handoffUnreadableMessage}
+	}
+
+	file, err := openHandoffFile(root, rel)
 	if err != nil {
-		return nil, 0, imageErrorMissingFile, fmt.Errorf("handoff file cannot be opened: %s", handoffCause(err))
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, &handoffError{value: imageErrorMissingFile, message: handoffFileAbsentMessage}
+		}
+
+		return nil, &handoffError{value: imageErrorPathNotAllowed, message: handoffUnopenableMessage}
 	}
 
 	defer func() { _ = file.Close() }()
 
-	opened, err := file.Stat()
+	info, err := file.Stat()
 	if err != nil {
-		return nil, 0, imageErrorMissingFile, fmt.Errorf("handoff file cannot be inspected: %s", handoffCause(err))
+		return nil, &handoffError{value: imageErrorMissingFile, message: handoffUninspectableMessage}
 	}
 
-	if !opened.Mode().IsRegular() || !os.SameFile(resolved, opened) {
-		return nil, 0, imageErrorPathNotAllowed,
-			errors.New("handoff file is not the regular file that was resolved")
+	if !info.Mode().IsRegular() {
+		return nil, &handoffError{value: imageErrorPathNotAllowed, message: handoffNotRegularMessage}
 	}
 
-	data, err := io.ReadAll(io.LimitReader(file, limit+1))
+	data, err := io.ReadAll(io.LimitReader(file, declared+1))
 	if err != nil {
-		return nil, 0, imageErrorMissingFile, fmt.Errorf("handoff file cannot be read: %s", handoffCause(err))
+		return nil, &handoffError{value: imageErrorMissingFile, message: handoffUnreadableMessage}
 	}
 
-	sizeBytes := int64(len(data))
-	if sizeBytes <= limit {
-		return data, sizeBytes, "", nil
+	return data, nil
+}
+
+// verifyPromptHandoffDigest fails closed when the read bytes are not the ones
+// the envelope described. Neither message reports what was observed: the caller
+// already knows what it declared, and the file it named may not be one it is
+// entitled to learn the size or the content hash of.
+func verifyPromptHandoffDigest(envelope promptHandoffEnvelope, data []byte) *handoffError {
+	if int64(len(data)) != envelope.sizeBytes {
+		return &handoffError{value: imageErrorDigestMismatch, message: handoffSizeMismatchMessage}
 	}
 
-	// The bound stopped the read, so the file is larger than every size the gates
-	// admit. Report the real size when the descriptor still agrees it is larger,
-	// and never a size the gates would accept.
-	if opened.Size() > sizeBytes {
-		sizeBytes = opened.Size()
+	if digest := sha256.Sum256(data); hex.EncodeToString(digest[:]) != envelope.digest {
+		return &handoffError{value: imageErrorDigestMismatch, message: handoffDigestMismatchMessage}
 	}
 
-	return data, sizeBytes, "", nil
+	return nil
 }

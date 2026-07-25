@@ -25,7 +25,7 @@ func TestImagePromptValidationAcceptsPortableFormats(t *testing.T) {
 			block := acp.ImageBlock(base64.StdEncoding.EncodeToString(data), test.mimeType)
 			block.Image.Uri = acp.Ptr("https://invalid.example/ignored")
 
-			input, err := promptInput([]acp.ContentBlock{block})
+			input, err := promptInput(t.Context(), []acp.ContentBlock{block})
 			if err != nil {
 				t.Fatalf("prompt input: %v", err)
 			}
@@ -124,6 +124,7 @@ func TestImagePromptValidationErrors(t *testing.T) {
 				limits.MaxInputBytesPerImage = int64(len(validPNG) - 1)
 			}
 			_, err := promptInputWithPolicy(
+				t.Context(),
 				[]acp.ContentBlock{acp.ImageBlock(test.data, test.mime)},
 				promptImagePolicy{limits: limits},
 			)
@@ -138,7 +139,7 @@ func TestImagePromptAggregateLimitUsesCrossingImageIndex(t *testing.T) {
 	limits := applyOptions(nil).ImageLimits
 	limits.MaxInputBytesPerPrompt = int64(len(validPNG)*2 - 1)
 
-	_, err := promptInputWithPolicy([]acp.ContentBlock{
+	_, err := promptInputWithPolicy(t.Context(), []acp.ContentBlock{
 		acp.TextBlock("first"),
 		acp.ImageBlock(encoded, imageMIMEPNG),
 		acp.TextBlock("second"),
@@ -160,7 +161,7 @@ func TestImagePromptNativeEnvelopes(t *testing.T) {
 	limits := applyOptions(nil).ImageLimits
 	limits.MaxInputBytesPerImage = 0
 	limits.MaxInputBytesPerPrompt = 0
-	_, err := promptInputWithPolicy([]acp.ContentBlock{
+	_, err := promptInputWithPolicy(t.Context(), []acp.ContentBlock{
 		acp.ImageBlock(base64.StdEncoding.EncodeToString(oversize), imageMIMEPNG),
 	}, promptImagePolicy{limits: limits})
 	requireInvalidParamsData(t, err, imageSizeErrorData(
@@ -172,7 +173,7 @@ func TestImagePromptNativeEnvelopes(t *testing.T) {
 
 	wide := append([]byte(nil), validPNG...)
 	binary.BigEndian.PutUint32(wide[16:20], ampNativeMaxImageDimension+1)
-	_, err = promptInputWithPolicy([]acp.ContentBlock{
+	_, err = promptInputWithPolicy(t.Context(), []acp.ContentBlock{
 		acp.ImageBlock(base64.StdEncoding.EncodeToString(wide), imageMIMEPNG),
 	}, promptImagePolicy{limits: applyOptions(nil).ImageLimits})
 	requireInvalidParamsData(t, err, imageErrorData(0, imageErrorNativeEnvelope))
@@ -197,7 +198,7 @@ func TestImagePromptStructuralErrorsPrecedeNativeEnvelope(t *testing.T) {
 		{name: "oversize bytes fail structure before envelope", data: badHeader, want: imageErrorInvalidDimensions},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			_, err := promptInputWithPolicy([]acp.ContentBlock{
+			_, err := promptInputWithPolicy(t.Context(), []acp.ContentBlock{
 				acp.ImageBlock(base64.StdEncoding.EncodeToString(test.data), imageMIMEPNG),
 			}, promptImagePolicy{limits: limits})
 			requireInvalidParamsData(t, err, imageErrorData(0, test.want))
@@ -249,7 +250,7 @@ func TestImagePromptPerImageTooLargeYieldsToStructuralDefects(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			_, err := promptInputWithPolicy([]acp.ContentBlock{
+			_, err := promptInputWithPolicy(t.Context(), []acp.ContentBlock{
 				acp.ImageBlock(base64.StdEncoding.EncodeToString(test.data), test.mime),
 			}, promptImagePolicy{limits: limits})
 			requireInvalidParamsData(t, err, imageErrorData(0, test.want))
@@ -275,6 +276,7 @@ func TestImagePromptAnimationBeyondRetainWindowPrecedesSizeVerdict(t *testing.T)
 	}
 
 	_, err := promptInputWithPolicy(
+		t.Context(),
 		[]acp.ContentBlock{acp.ImageBlock(base64.StdEncoding.EncodeToString(gif), imageMIMEGIF)},
 		promptImagePolicy{limits: applyOptions(nil).ImageLimits},
 	)
@@ -309,7 +311,7 @@ func TestEmbeddedImageResourceUsesPromptImageBudget(t *testing.T) {
 	limits := applyOptions(nil).ImageLimits
 	limits.MaxInputBytesPerPrompt = int64(len(validPNG)*2 - 1)
 
-	_, err := promptInputWithPolicy([]acp.ContentBlock{
+	_, err := promptInputWithPolicy(t.Context(), []acp.ContentBlock{
 		acp.ImageBlock(encoded, imageMIMEPNG),
 		acp.ResourceBlock(acp.EmbeddedResourceResource{
 			BlobResourceContents: &acp.BlobResourceContents{
@@ -319,7 +321,10 @@ func TestEmbeddedImageResourceUsesPromptImageBudget(t *testing.T) {
 			},
 		}),
 	}, promptImagePolicy{limits: limits})
-	requireInvalidParamsData(t, err, imageSizeErrorData(
+
+	// The blob's raster declaration routes it into the image gates, but it
+	// arrived on a resource block, so that is the member its verdict names.
+	requireInvalidParamsData(t, err, resourceSizeErrorData(
 		1,
 		imageErrorTooLarge,
 		int64(len(validPNG)*2),
@@ -382,6 +387,7 @@ func TestImageInputStructuralEdges(t *testing.T) {
 
 	garbage := base64.StdEncoding.EncodeToString([]byte("not an image"))
 	_, err := promptInputWithPolicy(
+		t.Context(),
 		[]acp.ContentBlock{acp.ImageBlock(garbage, imageMIMEPNG)},
 		promptImagePolicy{limits: applyOptions(nil).ImageLimits},
 	)

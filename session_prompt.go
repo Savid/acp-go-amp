@@ -144,7 +144,7 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (re
 	}
 	defer release()
 
-	input, err := promptInputWithPolicy(params.Prompt, s.agent.promptImagePolicy())
+	input, err := promptInputWithPolicy(ctx, params.Prompt, s.agent.promptImagePolicy())
 	if err != nil {
 		return acp.PromptResponse{}, err
 	}
@@ -673,11 +673,11 @@ func (a *Agent) promptImagePolicy() promptImagePolicy {
 	}
 }
 
-func promptInput(blocks []acp.ContentBlock) (map[string]any, error) {
-	return promptInputWithPolicy(blocks, promptImagePolicy{limits: applyOptions(nil).ImageLimits})
+func promptInput(ctx context.Context, blocks []acp.ContentBlock) (map[string]any, error) {
+	return promptInputWithPolicy(ctx, blocks, promptImagePolicy{limits: applyOptions(nil).ImageLimits})
 }
 
-func promptInputWithPolicy(blocks []acp.ContentBlock, policy promptImagePolicy) (map[string]any, error) {
+func promptInputWithPolicy(ctx context.Context, blocks []acp.ContentBlock, policy promptImagePolicy) (map[string]any, error) {
 	// An empty prompt is rejected fail-closed: there is nothing to send to the
 	// native harness, so accepting it would spend a turn on silence.
 	if len(blocks) == 0 {
@@ -686,15 +686,23 @@ func promptInputWithPolicy(blocks []acp.ContentBlock, policy promptImagePolicy) 
 
 	imageBudget := imagePromptBudget{limits: policy.limits, handoffRoot: policy.handoffRoot}
 
+	defer imageBudget.closeHandoffRoot()
+
 	content := make([]map[string]any, 0, len(blocks))
 	for _, block := range blocks {
+		// Mapping runs before the turn state exists, so a disconnect or a caller
+		// cancellation has no other way to stop a prompt that names many files.
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+
 		switch {
 		case block.Text != nil:
 			content = append(content, map[string]any{keyType: valText, valText: block.Text.Text})
 		case block.Image != nil:
 			// Both input forms converge here as base64 on the native message, so a
 			// handoff path is never part of the request Amp receives.
-			image, err := imageBudget.validateImageBlock(block.Image)
+			image, err := imageBudget.validateImageBlock(ctx, block.Image)
 			if err != nil {
 				return nil, err
 			}
@@ -755,6 +763,13 @@ func embeddedResourceContent(resource acp.EmbeddedResourceResource, imageBudget 
 	if resource.TextResourceContents != nil {
 		text := resource.TextResourceContents
 
+		// A text resource is flattened into the prompt verbatim, so it costs the
+		// thread exactly what a blob of the same length costs. It is charged to the
+		// one per-prompt accumulator every other inbound payload is charged to.
+		if err := imageBudget.chargeText(int64(len(text.Text))); err != nil {
+			return nil, err
+		}
+
 		parts := []string{"Embedded resource", "URI: " + text.Uri}
 		if text.MimeType != nil && *text.MimeType != "" {
 			parts = append(parts, "MIME: "+*text.MimeType)
@@ -792,9 +807,9 @@ func embeddedResourceContent(resource acp.EmbeddedResourceResource, imageBudget 
 			}, nil
 		}
 
-		// A blob that declares no raster type still reaches Amp as bytes, so it
-		// spends the same decoded budget: valid base64, the per-image bound, and
-		// the per-prompt aggregate.
+		// A blob that declares no raster type has no native representation on Amp,
+		// so it degrades to a reference: the model is told what was attached and
+		// where it lives, and the payload stays out of the prompt.
 		if err := imageBudget.admitBlob(blob.Blob); err != nil {
 			return nil, err
 		}
@@ -803,8 +818,6 @@ func embeddedResourceContent(resource acp.EmbeddedResourceResource, imageBudget 
 		if declared != "" {
 			parts = append(parts, "MIME: "+declared)
 		}
-
-		parts = append(parts, "", "Base64 content:", blob.Blob)
 
 		return map[string]any{keyType: valText, valText: strings.Join(parts, "\n")}, nil
 	}

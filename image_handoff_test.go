@@ -1,17 +1,20 @@
 package ampacp
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"io"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/stretchr/testify/require"
@@ -64,9 +67,10 @@ func handoffPolicy(root string, limits ImageLimits) promptImagePolicy {
 	return promptImagePolicy{limits: limits, handoffRoot: root}
 }
 
-// requireHandoffError pins the handoff error envelope: the existing input shape
-// plus a human message naming the real cause, never a bare EOF.
-func requireHandoffError(t *testing.T, err error, index int, errorValue, messageContains string) {
+// requireHandoffError pins one handoff verdict exactly: the input error shape
+// plus the whole message, which must be the declared constant and never a string
+// built from something the adapter observed.
+func requireHandoffError(t *testing.T, err error, index int, errorValue, message string) {
 	t.Helper()
 
 	var reqErr *acp.RequestError
@@ -80,12 +84,7 @@ func requireHandoffError(t *testing.T, err error, index int, errorValue, message
 	require.Equal(t, imageField, data[jsonFieldField])
 	require.Equal(t, errorValue, data[jsonFieldError])
 	require.Equal(t, index, data[keyIndex])
-
-	message, ok := data[keyMessage].(string)
-	require.True(t, ok)
-	require.NotEmpty(t, message)
-	require.NotEqual(t, io.EOF.Error(), message)
-	require.Contains(t, message, messageContains)
+	require.Equal(t, message, data[keyMessage])
 }
 
 func TestHandoffFormAcceptsPortableFormats(t *testing.T) {
@@ -104,51 +103,14 @@ func TestHandoffFormAcceptsPortableFormats(t *testing.T) {
 			path := writeHandoffFile(t, root, filepath.Join("session", "turn", test.name), data)
 
 			input, err := promptInputWithPolicy(
+				t.Context(),
 				[]acp.ContentBlock{handoffBlock(path, test.mimeType, data)},
 				handoffPolicy(root, applyOptions(nil).ImageLimits),
 			)
 			require.NoError(t, err)
-
-			message, ok := input[keyMessage].(map[string]any)
-			require.True(t, ok)
-			content, ok := message[keyContent].([]map[string]any)
-			require.True(t, ok)
-			require.Len(t, content, 1)
-			source, ok := content[0][keySource].(map[string]any)
-			require.True(t, ok)
-			require.Equal(t, base64.StdEncoding.EncodeToString(data), source[keyData])
+			require.Equal(t, base64.StdEncoding.EncodeToString(data), promptContentBase64(t, input))
 		})
 	}
-}
-
-// TestHandoffAcceptsASymlinkInsideTheRoot pins the legitimate link case: a link
-// inside the read root naming a regular file inside the read root is read, not
-// refused. The bytes are opened through the resolved target rather than the
-// requested path, so the opener's refusal to follow a final symlink component
-// guards against a swap without rejecting a host that lays its handoff directory
-// out with links.
-func TestHandoffAcceptsASymlinkInsideTheRoot(t *testing.T) {
-	root := t.TempDir()
-	data := imageFixture(t, "valid.png")
-	target := writeHandoffFile(t, root, filepath.Join("session", "turn", "valid.png"), data)
-
-	link := filepath.Join(root, "latest.png")
-	require.NoError(t, os.Symlink(target, link))
-
-	input, err := promptInputWithPolicy(
-		[]acp.ContentBlock{handoffBlock(link, imageMIMEPNG, data)},
-		handoffPolicy(root, applyOptions(nil).ImageLimits),
-	)
-	require.NoError(t, err)
-
-	message, ok := input[keyMessage].(map[string]any)
-	require.True(t, ok)
-	content, ok := message[keyContent].([]map[string]any)
-	require.True(t, ok)
-	require.Len(t, content, 1)
-	source, ok := content[0][keySource].(map[string]any)
-	require.True(t, ok)
-	require.Equal(t, base64.StdEncoding.EncodeToString(data), source[keyData])
 }
 
 func TestHandoffAndEmbeddedFormsBuildIdenticalNativeRequests(t *testing.T) {
@@ -157,13 +119,13 @@ func TestHandoffAndEmbeddedFormsBuildIdenticalNativeRequests(t *testing.T) {
 	path := writeHandoffFile(t, root, filepath.Join("session", "turn", "valid.png"), data)
 	limits := applyOptions(nil).ImageLimits
 
-	handoff, err := promptInputWithPolicy([]acp.ContentBlock{
+	handoff, err := promptInputWithPolicy(t.Context(), []acp.ContentBlock{
 		acp.TextBlock("look"),
 		handoffBlock(path, imageMIMEPNG, data),
 	}, handoffPolicy(root, limits))
 	require.NoError(t, err)
 
-	embedded, err := promptInputWithPolicy([]acp.ContentBlock{
+	embedded, err := promptInputWithPolicy(t.Context(), []acp.ContentBlock{
 		acp.TextBlock("look"),
 		acp.ImageBlock(base64.StdEncoding.EncodeToString(data), imageMIMEPNG),
 	}, promptImagePolicy{limits: limits})
@@ -182,6 +144,7 @@ func TestHandoffPathNeverReachesTheNativeRequest(t *testing.T) {
 	path := writeHandoffFile(t, root, filepath.Join("session", "turn", "secret-name.png"), data)
 
 	input, err := promptInputWithPolicy(
+		t.Context(),
 		[]acp.ContentBlock{handoffBlock(path, imageMIMEPNG, data)},
 		handoffPolicy(root, applyOptions(nil).ImageLimits),
 	)
@@ -209,16 +172,9 @@ func TestHandoffFormSelection(t *testing.T) {
 		})
 		block.Image.Data = base64.StdEncoding.EncodeToString(data)
 
-		input, err := promptInputWithPolicy([]acp.ContentBlock{block}, handoffPolicy(root, limits))
+		input, err := promptInputWithPolicy(t.Context(), []acp.ContentBlock{block}, handoffPolicy(root, limits))
 		require.NoError(t, err)
-
-		message, ok := input[keyMessage].(map[string]any)
-		require.True(t, ok)
-		content, ok := message[keyContent].([]map[string]any)
-		require.True(t, ok)
-		source, ok := content[0][keySource].(map[string]any)
-		require.True(t, ok)
-		require.Equal(t, base64.StdEncoding.EncodeToString(data), source[keyData])
+		require.Equal(t, base64.StdEncoding.EncodeToString(data), promptContentBase64(t, input))
 	})
 
 	t.Run("empty data with no handoff intent stays missing_data", func(t *testing.T) {
@@ -237,7 +193,7 @@ func TestHandoffFormSelection(t *testing.T) {
 				return unparseable
 			}(),
 		} {
-			_, err := promptInputWithPolicy([]acp.ContentBlock{block}, handoffPolicy(root, limits))
+			_, err := promptInputWithPolicy(t.Context(), []acp.ContentBlock{block}, handoffPolicy(root, limits))
 			requireInvalidParamsData(t, err, imageErrorData(0, imageErrorMissingData))
 		}
 	})
@@ -246,8 +202,8 @@ func TestHandoffFormSelection(t *testing.T) {
 		block := acp.ImageBlock("", imageMIMEPNG)
 		block.Image.Uri = acp.Ptr(fileURI(path))
 
-		_, err := promptInputWithPolicy([]acp.ContentBlock{block}, handoffPolicy(root, limits))
-		requireHandoffError(t, err, 0, imageErrorInvalidHandoff, "carries no acp-go.dev/handoff envelope")
+		_, err := promptInputWithPolicy(t.Context(), []acp.ContentBlock{block}, handoffPolicy(root, limits))
+		requireHandoffError(t, err, 0, imageErrorInvalidHandoff, handoffEnvelopeAbsentMessage)
 	})
 
 	t.Run("an envelope alone is handoff intent", func(t *testing.T) {
@@ -258,8 +214,8 @@ func TestHandoffFormSelection(t *testing.T) {
 			handoffFieldSizeBytes: len(data),
 		}}
 
-		_, err := promptInputWithPolicy([]acp.ContentBlock{block}, handoffPolicy(root, limits))
-		requireHandoffError(t, err, 0, imageErrorInvalidHandoff, "carries no uri")
+		_, err := promptInputWithPolicy(t.Context(), []acp.ContentBlock{block}, handoffPolicy(root, limits))
+		requireHandoffError(t, err, 0, imageErrorInvalidHandoff, handoffURIAbsentMessage)
 	})
 }
 
@@ -273,72 +229,134 @@ func TestHandoffEnvelopeDefects(t *testing.T) {
 	for _, test := range []struct {
 		name     string
 		envelope any
-		contains string
+		message  string
 	}{
-		{name: "not an object", envelope: true, contains: "is not an object"},
+		{name: "not an object", envelope: true, message: handoffEnvelopeNotObjectMessage},
 		{
 			name:     "unknown field",
 			envelope: map[string]any{handoffFieldVersion: 1, handoffFieldDigest: digest, handoffFieldSizeBytes: len(data), "extra": 1},
-			contains: `unknown field "extra"`,
+			message:  handoffEnvelopeUnknownFieldMessage,
 		},
 		{
 			name:     "version missing",
 			envelope: map[string]any{handoffFieldDigest: digest, handoffFieldSizeBytes: len(data)},
-			contains: "version is missing or not an integer",
-		},
-		{
-			name:     "version unsupported",
-			envelope: map[string]any{handoffFieldVersion: 2, handoffFieldDigest: digest, handoffFieldSizeBytes: len(data)},
-			contains: "version 2 is not supported",
+			message:  handoffVersionInvalidMessage,
 		},
 		{
 			name:     "version fractional",
 			envelope: map[string]any{handoffFieldVersion: 1.5, handoffFieldDigest: digest, handoffFieldSizeBytes: len(data)},
-			contains: "version is not an integer",
+			message:  handoffVersionInvalidMessage,
+		},
+		{
+			name:     "version zero",
+			envelope: map[string]any{handoffFieldVersion: 0, handoffFieldDigest: digest, handoffFieldSizeBytes: len(data)},
+			message:  handoffVersionUnsupportedMessage,
+		},
+		{
+			name:     "version unsupported",
+			envelope: map[string]any{handoffFieldVersion: 2, handoffFieldDigest: digest, handoffFieldSizeBytes: len(data)},
+			message:  handoffVersionUnsupportedMessage,
 		},
 		{
 			name:     "digest missing",
 			envelope: map[string]any{handoffFieldVersion: 1, handoffFieldSizeBytes: len(data)},
-			contains: "digest must be 64 lowercase hex characters",
+			message:  handoffDigestInvalidMessage,
 		},
 		{
 			name:     "digest short",
 			envelope: map[string]any{handoffFieldVersion: 1, handoffFieldDigest: digest[:63], handoffFieldSizeBytes: len(data)},
-			contains: "digest must be 64 lowercase hex characters",
+			message:  handoffDigestInvalidMessage,
 		},
 		{
 			name:     "digest uppercase",
 			envelope: map[string]any{handoffFieldVersion: 1, handoffFieldDigest: strings.ToUpper(digest), handoffFieldSizeBytes: len(data)},
-			contains: "digest must be 64 lowercase hex characters",
+			message:  handoffDigestInvalidMessage,
 		},
 		{
 			name:     "digest not hex",
 			envelope: map[string]any{handoffFieldVersion: 1, handoffFieldDigest: strings.Repeat("z", 64), handoffFieldSizeBytes: len(data)},
-			contains: "digest must be 64 lowercase hex characters",
+			message:  handoffDigestInvalidMessage,
 		},
 		{
 			name:     "sizeBytes missing",
 			envelope: map[string]any{handoffFieldVersion: 1, handoffFieldDigest: digest},
-			contains: "sizeBytes is missing or not an integer",
+			message:  handoffSizeBytesInvalidMessage,
 		},
 		{
 			name:     "sizeBytes fractional",
 			envelope: map[string]any{handoffFieldVersion: 1, handoffFieldDigest: digest, handoffFieldSizeBytes: 1.5},
-			contains: "sizeBytes is not an integer",
+			message:  handoffSizeBytesInvalidMessage,
 		},
 		{
 			name:     "sizeBytes negative",
 			envelope: map[string]any{handoffFieldVersion: 1, handoffFieldDigest: digest, handoffFieldSizeBytes: -1},
-			contains: "sizeBytes is negative",
+			message:  handoffSizeBytesInvalidMessage,
+		},
+		{
+			name: "sizeBytes at two to the sixty-three",
+			envelope: map[string]any{
+				handoffFieldVersion: 1, handoffFieldDigest: digest, handoffFieldSizeBytes: handoffSizeBytesExclusiveMax,
+			},
+			message: handoffSizeBytesInvalidMessage,
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			_, err := promptInputWithPolicy(
+				t.Context(),
 				[]acp.ContentBlock{handoffBlockWithEnvelope(path, imageMIMEPNG, test.envelope)},
 				handoffPolicy(root, limits),
 			)
-			requireHandoffError(t, err, 0, imageErrorInvalidHandoff, test.contains)
+			requireHandoffError(t, err, 0, imageErrorInvalidHandoff, test.message)
 		})
+	}
+}
+
+// TestHandoffEnvelopeSizeIsJudgedByTheByteGates pins that a size a host may
+// legally declare but no file can hold is not an envelope defect: 2^53 is below
+// the int64 range and is judged by the per-image bound like any other size.
+func TestHandoffEnvelopeSizeIsJudgedByTheByteGates(t *testing.T) {
+	root := t.TempDir()
+	data := imageFixture(t, "valid.png")
+	path := writeHandoffFile(t, root, "valid.png", data)
+	limits := applyOptions(nil).ImageLimits
+
+	_, err := promptInputWithPolicy(t.Context(), []acp.ContentBlock{
+		handoffBlockWithEnvelope(path, imageMIMEPNG, map[string]any{
+			handoffFieldVersion:   handoffVersion,
+			handoffFieldDigest:    handoffDigest(data),
+			handoffFieldSizeBytes: float64(1 << 53),
+		}),
+	}, handoffPolicy(root, limits))
+	requireInvalidParamsData(t, err, imageSizeErrorData(
+		0, imageErrorTooLarge, 1<<53, limits.MaxInputBytesPerImage,
+	))
+}
+
+func TestHandoffEnvelopeAcceptsNumbersFromADecoder(t *testing.T) {
+	root := t.TempDir()
+	data := imageFixture(t, "valid.png")
+	path := writeHandoffFile(t, root, "valid.png", data)
+
+	raw := fmt.Sprintf(`{"version":1,"digest":%q,"sizeBytes":%d}`, handoffDigest(data), len(data))
+
+	// The pinned SDK decodes envelope numbers to float64, but a decoder asked for
+	// json.Number is one upstream flag away and must validate identically.
+	for _, useNumber := range []bool{false, true} {
+		decoder := json.NewDecoder(strings.NewReader(raw))
+		if useNumber {
+			decoder.UseNumber()
+		}
+
+		var envelope map[string]any
+
+		require.NoError(t, decoder.Decode(&envelope))
+
+		_, err := promptInputWithPolicy(
+			t.Context(),
+			[]acp.ContentBlock{handoffBlockWithEnvelope(path, imageMIMEPNG, envelope)},
+			handoffPolicy(root, applyOptions(nil).ImageLimits),
+		)
+		require.NoError(t, err, "useNumber=%v", useNumber)
 	}
 }
 
@@ -354,10 +372,9 @@ func TestHandoffEnvelopeAcceptsTransportAndNativeIntegerShapes(t *testing.T) {
 	}{
 		{name: "json numbers", version: float64(handoffVersion), sizeBytes: float64(len(data))},
 		{name: "go ints", version: handoffVersion, sizeBytes: len(data)},
-		{name: "go int64s", version: int64(handoffVersion), sizeBytes: int64(len(data))},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			_, err := promptInputWithPolicy([]acp.ContentBlock{
+			_, err := promptInputWithPolicy(t.Context(), []acp.ContentBlock{
 				handoffBlockWithEnvelope(path, imageMIMEPNG, map[string]any{
 					handoffFieldVersion:   test.version,
 					handoffFieldDigest:    handoffDigest(data),
@@ -379,16 +396,16 @@ func TestHandoffURIDefects(t *testing.T) {
 	}
 
 	for _, test := range []struct {
-		name     string
-		uri      *string
-		contains string
+		name    string
+		uri     *string
+		message string
 	}{
-		{name: "absent", uri: nil, contains: "carries no uri"},
-		{name: "empty", uri: acp.Ptr(""), contains: "carries no uri"},
-		{name: "unparseable", uri: acp.Ptr("file://\x7f/x.png"), contains: "is not parseable"},
-		{name: "remote scheme", uri: acp.Ptr("https://example.invalid/x.png"), contains: `scheme "https" is not "file"`},
-		{name: "remote host", uri: acp.Ptr("file://remote.invalid/x.png"), contains: `names remote host "remote.invalid"`},
-		{name: "relative path", uri: acp.Ptr("file:relative/x.png"), contains: "is not absolute"},
+		{name: "absent", uri: nil, message: handoffURIAbsentMessage},
+		{name: "empty", uri: acp.Ptr(""), message: handoffURIAbsentMessage},
+		{name: "unparseable", uri: acp.Ptr("file://\x7f/x.png"), message: handoffURIUnparseableMessage},
+		{name: "remote scheme", uri: acp.Ptr("https://example.invalid/x.png"), message: handoffURISchemeMessage},
+		{name: "remote host", uri: acp.Ptr("file://remote.invalid/x.png"), message: handoffURIRemoteHostMessage},
+		{name: "relative path", uri: acp.Ptr("file:relative/x.png"), message: handoffURIRelativeMessage},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			block := acp.ImageBlock("", imageMIMEPNG)
@@ -396,10 +413,11 @@ func TestHandoffURIDefects(t *testing.T) {
 			block.Image.Meta = map[string]any{metaHandoffKey: envelope}
 
 			_, err := promptInputWithPolicy(
+				t.Context(),
 				[]acp.ContentBlock{block},
 				handoffPolicy(root, applyOptions(nil).ImageLimits),
 			)
-			requireHandoffError(t, err, 0, imageErrorInvalidHandoff, test.contains)
+			requireHandoffError(t, err, 0, imageErrorInvalidHandoff, test.message)
 		})
 	}
 }
@@ -418,6 +436,7 @@ func TestHandoffAcceptsLocalhostURIHost(t *testing.T) {
 	}}
 
 	_, err := promptInputWithPolicy(
+		t.Context(),
 		[]acp.ContentBlock{block},
 		handoffPolicy(root, applyOptions(nil).ImageLimits),
 	)
@@ -430,10 +449,11 @@ func TestHandoffRejectsUnsetReadRoot(t *testing.T) {
 	path := writeHandoffFile(t, root, "valid.png", data)
 
 	_, err := promptInputWithPolicy(
+		t.Context(),
 		[]acp.ContentBlock{handoffBlock(path, imageMIMEPNG, data)},
 		promptImagePolicy{limits: applyOptions(nil).ImageLimits},
 	)
-	requireHandoffError(t, err, 0, imageErrorInvalidHandoff, "no handoff read root is configured")
+	requireHandoffError(t, err, 0, imageErrorInvalidHandoff, handoffRootUnsetMessage)
 }
 
 func TestHandoffPathNotAllowed(t *testing.T) {
@@ -444,10 +464,11 @@ func TestHandoffPathNotAllowed(t *testing.T) {
 		outside := writeHandoffFile(t, t.TempDir(), "valid.png", data)
 
 		_, err := promptInputWithPolicy(
+			t.Context(),
 			[]acp.ContentBlock{handoffBlock(outside, imageMIMEPNG, data)},
 			handoffPolicy(root, applyOptions(nil).ImageLimits),
 		)
-		requireHandoffError(t, err, 0, imageErrorPathNotAllowed, "outside the configured read root")
+		requireHandoffError(t, err, 0, imageErrorPathNotAllowed, handoffOutsideRootMessage)
 	})
 
 	t.Run("parent traversal out of the root", func(t *testing.T) {
@@ -462,23 +483,32 @@ func TestHandoffPathNotAllowed(t *testing.T) {
 		})
 
 		_, err := promptInputWithPolicy(
+			t.Context(),
 			[]acp.ContentBlock{block},
 			handoffPolicy(root, applyOptions(nil).ImageLimits),
 		)
-		requireHandoffError(t, err, 0, imageErrorPathNotAllowed, "outside the configured read root")
+		requireHandoffError(t, err, 0, imageErrorPathNotAllowed, handoffOutsideRootMessage)
 	})
 
-	t.Run("symlink escaping the root", func(t *testing.T) {
+	t.Run("percent-encoded traversal out of the root", func(t *testing.T) {
 		root := t.TempDir()
-		outside := writeHandoffFile(t, t.TempDir(), "valid.png", data)
-		link := filepath.Join(root, "link.png")
-		require.NoError(t, os.Symlink(outside, link))
+		outside := writeHandoffFile(t, t.TempDir(), "secret.png", data)
+
+		block := acp.ImageBlock("", imageMIMEPNG)
+		block.Image.Uri = acp.Ptr("file://" + filepath.ToSlash(root) + "/%2e%2e/" +
+			filepath.Base(filepath.Dir(outside)) + "/secret.png")
+		block.Image.Meta = map[string]any{metaHandoffKey: map[string]any{
+			handoffFieldVersion:   handoffVersion,
+			handoffFieldDigest:    handoffDigest(data),
+			handoffFieldSizeBytes: len(data),
+		}}
 
 		_, err := promptInputWithPolicy(
-			[]acp.ContentBlock{handoffBlock(link, imageMIMEPNG, data)},
+			t.Context(),
+			[]acp.ContentBlock{block},
 			handoffPolicy(root, applyOptions(nil).ImageLimits),
 		)
-		requireHandoffError(t, err, 0, imageErrorPathNotAllowed, "resolves outside the configured read root")
+		requireHandoffError(t, err, 0, imageErrorPathNotAllowed, handoffOutsideRootMessage)
 	})
 
 	t.Run("not a regular file", func(t *testing.T) {
@@ -487,66 +517,49 @@ func TestHandoffPathNotAllowed(t *testing.T) {
 		require.NoError(t, os.MkdirAll(nested, 0o700))
 
 		_, err := promptInputWithPolicy(
+			t.Context(),
 			[]acp.ContentBlock{handoffBlock(nested, imageMIMEPNG, data)},
 			handoffPolicy(root, applyOptions(nil).ImageLimits),
 		)
-		requireHandoffError(t, err, 0, imageErrorPathNotAllowed, "not a regular file")
+		requireHandoffError(t, err, 0, imageErrorPathNotAllowed, handoffNotRegularMessage)
 	})
 
 	t.Run("the read root itself is contained but not readable as a file", func(t *testing.T) {
 		root := t.TempDir()
 
 		_, err := promptInputWithPolicy(
+			t.Context(),
 			[]acp.ContentBlock{handoffBlock(root, imageMIMEPNG, data)},
 			handoffPolicy(root, applyOptions(nil).ImageLimits),
 		)
-		requireHandoffError(t, err, 0, imageErrorPathNotAllowed, "not a regular file")
+		requireHandoffError(t, err, 0, imageErrorPathNotAllowed, handoffNotRegularMessage)
 	})
 
-	t.Run("unresolvable read root", func(t *testing.T) {
+	t.Run("unopenable read root", func(t *testing.T) {
 		root := filepath.Join(t.TempDir(), "absent-root")
 
 		_, err := promptInputWithPolicy(
+			t.Context(),
 			[]acp.ContentBlock{handoffBlock(filepath.Join(root, "valid.png"), imageMIMEPNG, data)},
 			handoffPolicy(root, applyOptions(nil).ImageLimits),
 		)
-		requireHandoffError(t, err, 0, imageErrorPathNotAllowed, "read root cannot be resolved")
+		requireHandoffError(t, err, 0, imageErrorPathNotAllowed, handoffRootUnopenableMessage)
 	})
 
-	t.Run("path resolution failure that is not absence", func(t *testing.T) {
+	t.Run("open failure that is not absence", func(t *testing.T) {
 		root := t.TempDir()
 		path := writeHandoffFile(t, root, "valid.png", data)
 
-		restore := evalSymlinks
-		evalSymlinks = func(name string) (string, error) {
-			if name == filepath.Clean(root) {
-				return restore(name)
-			}
-
-			return "", errors.New("too many levels of symbolic links")
-		}
-		t.Cleanup(func() { evalSymlinks = restore })
+		restore := openHandoffFile
+		openHandoffFile = func(*os.Root, string) (handoffFile, error) { return nil, os.ErrPermission }
+		t.Cleanup(func() { openHandoffFile = restore })
 
 		_, err := promptInputWithPolicy(
+			t.Context(),
 			[]acp.ContentBlock{handoffBlock(path, imageMIMEPNG, data)},
 			handoffPolicy(root, applyOptions(nil).ImageLimits),
 		)
-		requireHandoffError(t, err, 0, imageErrorPathNotAllowed, "cannot be resolved")
-	})
-
-	t.Run("inspection failure that is not absence", func(t *testing.T) {
-		root := t.TempDir()
-		path := writeHandoffFile(t, root, "valid.png", data)
-
-		restore := statHandoffFile
-		statHandoffFile = func(string) (os.FileInfo, error) { return nil, errors.New("permission denied") }
-		t.Cleanup(func() { statHandoffFile = restore })
-
-		_, err := promptInputWithPolicy(
-			[]acp.ContentBlock{handoffBlock(path, imageMIMEPNG, data)},
-			handoffPolicy(root, applyOptions(nil).ImageLimits),
-		)
-		requireHandoffError(t, err, 0, imageErrorPathNotAllowed, "cannot be inspected")
+		requireHandoffError(t, err, 0, imageErrorPathNotAllowed, handoffUnopenableMessage)
 	})
 }
 
@@ -557,155 +570,73 @@ func TestHandoffMissingFile(t *testing.T) {
 		root := t.TempDir()
 
 		_, err := promptInputWithPolicy(
+			t.Context(),
 			[]acp.ContentBlock{handoffBlock(filepath.Join(root, "turn", "gone.png"), imageMIMEPNG, data)},
 			handoffPolicy(root, applyOptions(nil).ImageLimits),
 		)
-		requireHandoffError(t, err, 0, imageErrorMissingFile, "does not exist")
+		requireHandoffError(t, err, 0, imageErrorMissingFile, handoffFileAbsentMessage)
 	})
 
-	t.Run("vanished between resolution and inspection", func(t *testing.T) {
-		root := t.TempDir()
-		path := writeHandoffFile(t, root, "valid.png", data)
-
-		restore := statHandoffFile
-		statHandoffFile = func(string) (os.FileInfo, error) { return nil, os.ErrNotExist }
-		t.Cleanup(func() { statHandoffFile = restore })
-
-		_, err := promptInputWithPolicy(
-			[]acp.ContentBlock{handoffBlock(path, imageMIMEPNG, data)},
-			handoffPolicy(root, applyOptions(nil).ImageLimits),
-		)
-		requireHandoffError(t, err, 0, imageErrorMissingFile, "does not exist")
-	})
-
-	t.Run("unopenable file", func(t *testing.T) {
+	t.Run("uninspectable descriptor", func(t *testing.T) {
 		root := t.TempDir()
 		path := writeHandoffFile(t, root, "valid.png", data)
 
 		restore := openHandoffFile
-		openHandoffFile = func(string) (handoffFile, error) { return nil, os.ErrPermission }
-		t.Cleanup(func() { openHandoffFile = restore })
-
-		_, err := promptInputWithPolicy(
-			[]acp.ContentBlock{handoffBlock(path, imageMIMEPNG, data)},
-			handoffPolicy(root, applyOptions(nil).ImageLimits),
-		)
-		requireHandoffError(t, err, 0, imageErrorMissingFile, "cannot be opened")
-	})
-
-	t.Run("unreadable file", func(t *testing.T) {
-		root := t.TempDir()
-		path := writeHandoffFile(t, root, "valid.png", data)
-
-		restore := openHandoffFile
-		openHandoffFile = func(name string) (handoffFile, error) {
-			opened, err := restore(name)
-			require.NoError(t, err)
-
-			return unreadableHandoffFile{handoffFile: opened}, nil
+		openHandoffFile = func(*os.Root, string) (handoffFile, error) {
+			return failingHandoffFile{statErr: errors.New("stale file handle")}, nil
 		}
 		t.Cleanup(func() { openHandoffFile = restore })
 
 		_, err := promptInputWithPolicy(
+			t.Context(),
 			[]acp.ContentBlock{handoffBlock(path, imageMIMEPNG, data)},
 			handoffPolicy(root, applyOptions(nil).ImageLimits),
 		)
-		requireHandoffError(t, err, 0, imageErrorMissingFile, "cannot be read")
+		requireHandoffError(t, err, 0, imageErrorMissingFile, handoffUninspectableMessage)
+	})
+
+	t.Run("unreadable descriptor", func(t *testing.T) {
+		root := t.TempDir()
+		path := writeHandoffFile(t, root, "valid.png", data)
+
+		restore := openHandoffFile
+		openHandoffFile = func(open *os.Root, rel string) (handoffFile, error) {
+			info, err := open.Stat(rel)
+			require.NoError(t, err)
+
+			return failingHandoffFile{readErr: errors.New("input/output error"), info: info}, nil
+		}
+		t.Cleanup(func() { openHandoffFile = restore })
+
+		_, err := promptInputWithPolicy(
+			t.Context(),
+			[]acp.ContentBlock{handoffBlock(path, imageMIMEPNG, data)},
+			handoffPolicy(root, applyOptions(nil).ImageLimits),
+		)
+		requireHandoffError(t, err, 0, imageErrorMissingFile, handoffUnreadableMessage)
 	})
 }
 
-// unreadableHandoffFile keeps a real descriptor's mode and identity while failing
-// every read, so the read-failure branch is reached after the identity check.
-// TestHandoffFileSwappedAfterResolutionIsRejected pins the descriptor check: the
-// bytes read must come from the same regular file the path resolution admitted,
-// so a path replaced by a symlink, a FIFO, or another file in that window is
-// rejected instead of read.
-func TestHandoffFileSwappedAfterResolutionIsRejected(t *testing.T) {
-	root := t.TempDir()
-	data := imageFixture(t, "valid.png")
-	path := writeHandoffFile(t, root, "valid.png", data)
+// failingHandoffFile is an opened handoff file whose inspection or read fails,
+// standing in for the descriptor-level failures a real filesystem only produces
+// under a race with the host that owns the file.
+type failingHandoffFile struct {
+	readErr error
+	statErr error
+	info    os.FileInfo
+}
 
-	restore := openHandoffFile
-	openHandoffFile = func(name string) (handoffFile, error) {
-		opened, err := restore(name)
-		require.NoError(t, err)
+func (f failingHandoffFile) Read([]byte) (int, error) { return 0, f.readErr }
 
-		return swappedHandoffFile{handoffFile: opened}, nil
+func (failingHandoffFile) Close() error { return nil }
+
+func (f failingHandoffFile) Stat() (os.FileInfo, error) {
+	if f.statErr != nil {
+		return nil, f.statErr
 	}
-	t.Cleanup(func() { openHandoffFile = restore })
 
-	_, err := promptInputWithPolicy(
-		[]acp.ContentBlock{handoffBlock(path, imageMIMEPNG, data)},
-		handoffPolicy(root, applyOptions(nil).ImageLimits),
-	)
-	requireHandoffError(t, err, 0, imageErrorPathNotAllowed, "not the regular file that was resolved")
+	return f.info, nil
 }
-
-func TestHandoffFileDescriptorInspectionFailureIsMissingFile(t *testing.T) {
-	root := t.TempDir()
-	data := imageFixture(t, "valid.png")
-	path := writeHandoffFile(t, root, "valid.png", data)
-
-	restore := openHandoffFile
-	openHandoffFile = func(name string) (handoffFile, error) {
-		opened, err := restore(name)
-		require.NoError(t, err)
-
-		return uninspectableHandoffFile{handoffFile: opened}, nil
-	}
-	t.Cleanup(func() { openHandoffFile = restore })
-
-	_, err := promptInputWithPolicy(
-		[]acp.ContentBlock{handoffBlock(path, imageMIMEPNG, data)},
-		handoffPolicy(root, applyOptions(nil).ImageLimits),
-	)
-	requireHandoffError(t, err, 0, imageErrorMissingFile, "cannot be inspected")
-}
-
-// TestHandoffCausesNameNoHostPath pins that a verdict a client receives carries
-// the real operating-system cause and never the path it names.
-func TestHandoffCausesNameNoHostPath(t *testing.T) {
-	root := t.TempDir()
-	absent := filepath.Join(root, "session", "gone.png")
-
-	_, err := promptInputWithPolicy(
-		[]acp.ContentBlock{handoffBlock(absent, imageMIMEPNG, imageFixture(t, "valid.png"))},
-		handoffPolicy(root, applyOptions(nil).ImageLimits),
-	)
-
-	var reqErr *acp.RequestError
-
-	require.ErrorAs(t, err, &reqErr)
-	require.NotContains(t, reqErr.Error(), root)
-	require.NotContains(t, reqErr.Error(), absent)
-	require.Contains(t, reqErr.Error(), "does not exist")
-}
-
-type uninspectableHandoffFile struct {
-	handoffFile
-}
-
-func (uninspectableHandoffFile) Stat() (os.FileInfo, error) {
-	return nil, errors.New("stale file handle")
-}
-
-type unreadableHandoffFile struct {
-	handoffFile
-}
-
-func (unreadableHandoffFile) Read([]byte) (int, error) { return 0, errors.New("input/output error") }
-
-// swappedHandoffFile reports a mode and identity that do not match the file the
-// path resolved to, standing in for a path replaced between resolution and read.
-type swappedHandoffFile struct {
-	handoffFile
-}
-
-func (swappedHandoffFile) Stat() (os.FileInfo, error) { return swappedFileInfo{}, nil }
-
-type swappedFileInfo struct{ os.FileInfo }
-
-func (swappedFileInfo) Mode() os.FileMode { return os.ModeNamedPipe }
 
 func TestHandoffDigestMismatch(t *testing.T) {
 	data := imageFixture(t, "valid.png")
@@ -718,24 +649,25 @@ func TestHandoffDigestMismatch(t *testing.T) {
 		path := writeHandoffFile(t, root, "valid.png", tampered)
 
 		_, err := promptInputWithPolicy(
+			t.Context(),
 			[]acp.ContentBlock{handoffBlock(path, imageMIMEPNG, data)},
 			handoffPolicy(root, applyOptions(nil).ImageLimits),
 		)
-		requireHandoffError(t, err, 0, imageErrorDigestMismatch, "do not hash to the declared digest")
+		requireHandoffError(t, err, 0, imageErrorDigestMismatch, handoffDigestMismatchMessage)
 	})
 
 	t.Run("declared size disagrees", func(t *testing.T) {
 		root := t.TempDir()
 		path := writeHandoffFile(t, root, "valid.png", data)
 
-		_, err := promptInputWithPolicy([]acp.ContentBlock{
+		_, err := promptInputWithPolicy(t.Context(), []acp.ContentBlock{
 			handoffBlockWithEnvelope(path, imageMIMEPNG, map[string]any{
 				handoffFieldVersion:   handoffVersion,
 				handoffFieldDigest:    handoffDigest(data),
 				handoffFieldSizeBytes: len(data) - 1,
 			}),
 		}, handoffPolicy(root, applyOptions(nil).ImageLimits))
-		requireHandoffError(t, err, 0, imageErrorDigestMismatch, "envelope declares")
+		requireHandoffError(t, err, 0, imageErrorDigestMismatch, handoffSizeMismatchMessage)
 	})
 }
 
@@ -762,6 +694,7 @@ func TestHandoffGateChainMirrorsTheEmbeddedForm(t *testing.T) {
 			path := writeHandoffFile(t, root, test.name+"-"+test.fixture, data)
 
 			_, err := promptInputWithPolicy(
+				t.Context(),
 				[]acp.ContentBlock{handoffBlock(path, test.mimeType, data)},
 				handoffPolicy(root, applyOptions(nil).ImageLimits),
 			)
@@ -769,12 +702,13 @@ func TestHandoffGateChainMirrorsTheEmbeddedForm(t *testing.T) {
 		})
 	}
 
-	t.Run("per image limit reports the real size", func(t *testing.T) {
+	t.Run("per image limit rejects the declared size", func(t *testing.T) {
 		path := writeHandoffFile(t, root, "per-image.png", validPNG)
 		limits := applyOptions(nil).ImageLimits
 		limits.MaxInputBytesPerImage = int64(len(validPNG) - 1)
 
 		_, err := promptInputWithPolicy(
+			t.Context(),
 			[]acp.ContentBlock{handoffBlock(path, imageMIMEPNG, validPNG)},
 			handoffPolicy(root, limits),
 		)
@@ -791,7 +725,7 @@ func TestHandoffGateChainMirrorsTheEmbeddedForm(t *testing.T) {
 		limits := applyOptions(nil).ImageLimits
 		limits.MaxInputBytesPerPrompt = int64(len(validPNG)*2 - 1)
 
-		_, err := promptInputWithPolicy([]acp.ContentBlock{
+		_, err := promptInputWithPolicy(t.Context(), []acp.ContentBlock{
 			acp.ImageBlock(base64.StdEncoding.EncodeToString(validPNG), imageMIMEPNG),
 			handoffBlock(path, imageMIMEPNG, validPNG),
 		}, handoffPolicy(root, limits))
@@ -809,80 +743,409 @@ func TestHandoffGateChainMirrorsTheEmbeddedForm(t *testing.T) {
 		path := writeHandoffFile(t, root, "wide.png", wide)
 
 		_, err := promptInputWithPolicy(
+			t.Context(),
 			[]acp.ContentBlock{handoffBlock(path, imageMIMEPNG, wide)},
 			handoffPolicy(root, applyOptions(nil).ImageLimits),
 		)
 		requireInvalidParamsData(t, err, imageErrorData(0, imageErrorNativeEnvelope))
 	})
+
+	t.Run("native envelope rejects a declared size no policy limit reaches", func(t *testing.T) {
+		limits := ImageLimits{}
+		declared := ampNativeMaxImageBytes + 1
+
+		_, err := promptInputWithPolicy(t.Context(), []acp.ContentBlock{
+			handoffBlockWithEnvelope(filepath.Join(root, "absent.png"), imageMIMEPNG, map[string]any{
+				handoffFieldVersion:   handoffVersion,
+				handoffFieldDigest:    handoffDigest(validPNG),
+				handoffFieldSizeBytes: int(declared),
+			}),
+		}, handoffPolicy(root, limits))
+		requireInvalidParamsData(t, err, imageSizeErrorData(
+			0, imageErrorNativeEnvelope, declared, ampNativeMaxImageBytes,
+		))
+	})
 }
 
-func TestHandoffFileBeyondTheReadBoundIsRejectedUnverified(t *testing.T) {
-	root := t.TempDir()
+// TestHandoffOversizeReadIsRejectedWithoutForwardingBytes pins that no unverified
+// byte survives the read: a size the caller itself declared past the gate is
+// refused before anything is opened, and a file holding more than it was declared
+// to hold contributes nothing to the native request.
+func TestHandoffOversizeReadIsRejectedWithoutForwardingBytes(t *testing.T) {
+	validPNG := imageFixture(t, "valid.png")
+	bound := int64(len(validPNG))
 
-	oversize := make([]byte, ampNativeMaxImageBytes+1)
-	copy(oversize, imageFixture(t, "valid.png"))
-	path := writeHandoffFile(t, root, "oversize.png", oversize)
+	t.Run("a declared size past the gate is rejected before anything is opened", func(t *testing.T) {
+		root := t.TempDir()
 
-	// The digest is deliberately wrong: a file that exceeds the read bound cannot
-	// be verified, and it must still be rejected on size rather than admitted.
-	block := handoffBlockWithEnvelope(path, imageMIMEPNG, map[string]any{
-		handoffFieldVersion:   handoffVersion,
-		handoffFieldDigest:    handoffDigest(nil),
-		handoffFieldSizeBytes: len(oversize),
+		// No file is written, so the only thing that can produce a size verdict
+		// here is the caller's own declaration.
+		block := handoffBlockWithEnvelope(filepath.Join(root, "valid.png"), imageMIMEPNG, map[string]any{
+			handoffFieldVersion:   handoffVersion,
+			handoffFieldDigest:    handoffDigest(validPNG),
+			handoffFieldSizeBytes: int(bound + 1),
+		})
+
+		_, err := promptInputWithPolicy(t.Context(), []acp.ContentBlock{block},
+			handoffPolicy(root, ImageLimits{MaxInputBytesPerImage: bound}))
+		requireInvalidParamsData(t, err, imageSizeErrorData(0, imageErrorTooLarge, bound+1, bound))
 	})
 
-	_, err := promptInputWithPolicy(
-		[]acp.ContentBlock{block},
-		handoffPolicy(root, applyOptions(nil).ImageLimits),
-	)
-	requireInvalidParamsData(t, err, imageSizeErrorData(
-		0,
-		imageErrorNativeEnvelope,
-		int64(len(oversize)),
-		ampNativeMaxImageBytes,
-	))
+	t.Run("a file larger than its declaration forwards nothing", func(t *testing.T) {
+		root := t.TempDir()
+
+		// The file holds one byte more than the envelope describes, which is what
+		// a file appended to after the block was written looks like. Those bytes
+		// were never verified, so none of them may survive the read.
+		grown := make([]byte, bound+1)
+		copy(grown, validPNG)
+		path := writeHandoffFile(t, root, "valid.png", grown)
+
+		block := handoffBlockWithEnvelope(path, imageMIMEPNG, map[string]any{
+			handoffFieldVersion:   handoffVersion,
+			handoffFieldDigest:    handoffDigest(validPNG),
+			handoffFieldSizeBytes: len(validPNG),
+		})
+
+		input, err := promptInputWithPolicy(t.Context(), []acp.ContentBlock{block},
+			handoffPolicy(root, ImageLimits{MaxInputBytesPerImage: bound + 1}))
+		requireHandoffError(t, err, 0, imageErrorDigestMismatch, handoffSizeMismatchMessage)
+		require.Nil(t, input)
+	})
 }
 
-func TestHandoffFileFarBeyondTheReadBoundReportsItsRealSize(t *testing.T) {
+// TestHandoffBlockCountCapRejectsWithAggregateDisabled pins the work bound: with
+// the byte aggregate disabled and every block a small valid image, the block
+// count is the only thing that can reject any of them.
+func TestHandoffBlockCountCapRejectsWithAggregateDisabled(t *testing.T) {
 	root := t.TempDir()
+	data := imageFixture(t, "valid.png")
+	path := writeHandoffFile(t, root, "valid.png", data)
+	limits := ImageLimits{MaxInputBytesPerPrompt: 0}
 
-	oversize := make([]byte, ampNativeMaxImageBytes+4096)
-	copy(oversize, imageFixture(t, "valid.png"))
-	path := writeHandoffFile(t, root, "oversize.png", oversize)
+	blocks := make([]acp.ContentBlock, 0, maxHandoffBlocksPerPrompt+1)
+	for range maxHandoffBlocksPerPrompt + 1 {
+		blocks = append(blocks, handoffBlock(path, imageMIMEPNG, data))
+	}
 
-	_, err := promptInputWithPolicy(
-		[]acp.ContentBlock{handoffBlock(path, imageMIMEPNG, oversize)},
-		handoffPolicy(root, applyOptions(nil).ImageLimits),
-	)
+	_, err := promptInputWithPolicy(t.Context(), blocks, handoffPolicy(root, limits))
 	requireInvalidParamsData(t, err, imageSizeErrorData(
-		0,
-		imageErrorNativeEnvelope,
-		int64(len(oversize)),
-		ampNativeMaxImageBytes,
-	))
-}
-
-func TestHandoffReadBoundTracksTheTighterConfiguredLimit(t *testing.T) {
-	root := t.TempDir()
-	validPNG := imageFixture(t, "valid.png")
-
-	oversize := make([]byte, len(validPNG)+1)
-	copy(oversize, validPNG)
-	path := writeHandoffFile(t, root, "oversize.png", oversize)
-
-	limits := applyOptions(nil).ImageLimits
-	limits.MaxInputBytesPerImage = int64(len(validPNG))
-
-	_, err := promptInputWithPolicy(
-		[]acp.ContentBlock{handoffBlock(path, imageMIMEPNG, oversize)},
-		handoffPolicy(root, limits),
-	)
-	requireInvalidParamsData(t, err, imageSizeErrorData(
-		0,
+		maxHandoffBlocksPerPrompt,
 		imageErrorTooLarge,
-		int64(len(oversize)),
-		limits.MaxInputBytesPerImage,
+		maxHandoffBlocksPerPrompt+1,
+		maxHandoffBlocksPerPrompt,
 	))
+
+	accepted, err := promptInputWithPolicy(t.Context(), blocks[:maxHandoffBlocksPerPrompt], handoffPolicy(root, limits))
+	require.NoError(t, err)
+
+	message, ok := accepted[keyMessage].(map[string]any)
+	require.True(t, ok)
+	content, ok := message[keyContent].([]map[string]any)
+	require.True(t, ok)
+	require.Len(t, content, maxHandoffBlocksPerPrompt)
+}
+
+// TestHandoffFIFOInsideRootIsRejected pins that containment bounds where a name
+// may lead and never what kind of object it names: a FIFO with no writer blocks
+// an ordinary open until one appears, so the verdict has to arrive without the
+// open ever waiting on it.
+func TestHandoffFIFOInsideRootIsRejected(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "valid.png")
+	require.NoError(t, syscall.Mkfifo(path, 0o600))
+
+	block := handoffBlock(path, imageMIMEPNG, imageFixture(t, "valid.png"))
+
+	done := make(chan error, 1)
+
+	go func() {
+		_, err := promptInputWithPolicy(
+			context.Background(),
+			[]acp.ContentBlock{block},
+			handoffPolicy(root, applyOptions(nil).ImageLimits),
+		)
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		requireHandoffError(t, err, 0, imageErrorPathNotAllowed, handoffNotRegularMessage)
+	case <-time.After(10 * time.Second):
+		t.Fatal("opening a FIFO inside the handoff root blocked the read")
+	}
+}
+
+// TestHandoffSymlinkContainmentIsKernelEnforced pins that a link beneath the root
+// cannot name a location outside it, and that the verdict follows the error the
+// open returns rather than any filesystem-shape check of the adapter's own.
+func TestHandoffSymlinkContainmentIsKernelEnforced(t *testing.T) {
+	data := imageFixture(t, "valid.png")
+
+	outsideDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(outsideDir, "secret.png"), data, 0o600))
+
+	for _, test := range []struct {
+		name    string
+		link    string
+		target  string
+		value   string
+		message string
+	}{
+		{name: "a relative link inside the root resolves", link: "inside.png", target: "valid.png"},
+		{
+			name:    "a relative link out of the root is refused",
+			link:    "escape.png",
+			target:  filepath.Join("..", filepath.Base(outsideDir), "secret.png"),
+			value:   imageErrorPathNotAllowed,
+			message: handoffUnopenableMessage,
+		},
+		{
+			name:    "an absolute link is refused even inside the root",
+			link:    "absolute.png",
+			value:   imageErrorPathNotAllowed,
+			message: handoffUnopenableMessage,
+		},
+		{
+			name:    "a link whose target was cleaned up is missing",
+			link:    "dangling.png",
+			target:  "gone.png",
+			value:   imageErrorMissingFile,
+			message: handoffFileAbsentMessage,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			require.NoError(t, os.WriteFile(filepath.Join(root, "valid.png"), data, 0o600))
+
+			target := test.target
+			if target == "" {
+				target = filepath.Join(root, "valid.png")
+			}
+
+			link := filepath.Join(root, test.link)
+			require.NoError(t, os.Symlink(target, link))
+
+			input, err := promptInputWithPolicy(
+				t.Context(),
+				[]acp.ContentBlock{handoffBlock(link, imageMIMEPNG, data)},
+				handoffPolicy(root, applyOptions(nil).ImageLimits),
+			)
+
+			if test.value == "" {
+				require.NoError(t, err)
+				require.Equal(t, base64.StdEncoding.EncodeToString(data), promptContentBase64(t, input))
+
+				return
+			}
+
+			requireHandoffError(t, err, 0, test.value, test.message)
+		})
+	}
+}
+
+// TestHandoffReadHonoursACancelledContext pins that the mapping phase, which runs
+// before the turn state exists, still stops when its caller has gone away.
+func TestHandoffReadHonoursACancelledContext(t *testing.T) {
+	root := t.TempDir()
+	data := imageFixture(t, "valid.png")
+	path := writeHandoffFile(t, root, "valid.png", data)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	_, err := promptInputWithPolicy(
+		ctx,
+		[]acp.ContentBlock{handoffBlock(path, imageMIMEPNG, data)},
+		handoffPolicy(root, applyOptions(nil).ImageLimits),
+	)
+	require.ErrorIs(t, err, context.Canceled)
+
+	budget := imagePromptBudget{limits: applyOptions(nil).ImageLimits, handoffRoot: root}
+
+	handle, failure := budget.handoffRootHandle()
+	require.Nil(t, failure)
+
+	t.Cleanup(budget.closeHandoffRoot)
+
+	_, readFailure := readPromptHandoffBytes(ctx, handle, "valid.png", int64(len(data)))
+	require.NotNil(t, readFailure)
+	require.Equal(t, imageErrorMissingFile, readFailure.value)
+	require.Equal(t, handoffUnreadableMessage, readFailure.message)
+}
+
+// rootSnapshot records every entry under root with the identity and size that
+// would change if the adapter wrote, moved, or removed anything.
+func rootSnapshot(t *testing.T, root string) map[string]string {
+	t.Helper()
+
+	snapshot := map[string]string{}
+
+	require.NoError(t, filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+
+		info, statErr := entry.Info()
+		if statErr != nil {
+			return statErr
+		}
+
+		snapshot[path] = fmt.Sprintf("%v|%d|%v", info.Mode(), info.Size(), info.ModTime())
+
+		return nil
+	}))
+
+	return snapshot
+}
+
+// TestHandoffReadNeverMutatesTheRoot pins the read-only posture: a turn that
+// consumed a file from the root leaves the tree exactly as it found it.
+func TestHandoffReadNeverMutatesTheRoot(t *testing.T) {
+	root := t.TempDir()
+	data := imageFixture(t, "valid.png")
+	path := writeHandoffFile(t, root, filepath.Join("session", "turn", "valid.png"), data)
+
+	before := rootSnapshot(t, root)
+
+	input, err := promptInputWithPolicy(
+		t.Context(),
+		[]acp.ContentBlock{handoffBlock(path, imageMIMEPNG, data)},
+		handoffPolicy(root, applyOptions(nil).ImageLimits),
+	)
+	require.NoError(t, err)
+	require.Equal(t, base64.StdEncoding.EncodeToString(data), promptContentBase64(t, input))
+
+	require.Equal(t, before, rootSnapshot(t, root))
+}
+
+// TestHandoffMessagesCarryNoObservedValues drives a real failure at every stage
+// of the pre-gate and pins that each message a client receives is one of this
+// file's declared constants. A message added later that interpolated a path, a
+// uri, a digest or a measured byte count would not be in the set, and would fail
+// the disclosure assertions besides.
+func TestHandoffMessagesCarryNoObservedValues(t *testing.T) {
+	root := t.TempDir()
+	data := imageFixture(t, "valid.png")
+	path := writeHandoffFile(t, root, "valid.png", data)
+
+	tampered := append([]byte(nil), data...)
+	tampered[len(tampered)-1] ^= 0xff
+	tamperedPath := writeHandoffFile(t, root, "tampered.png", tampered)
+
+	outside := writeHandoffFile(t, t.TempDir(), "secret.png", data)
+
+	escaping := filepath.Join(root, "escape.png")
+	require.NoError(t, os.Symlink(outside, escaping))
+
+	declared := map[string]bool{
+		handoffRootUnsetMessage:            true,
+		handoffRootUnopenableMessage:       true,
+		handoffOutsideRootMessage:          true,
+		handoffNotRegularMessage:           true,
+		handoffFileAbsentMessage:           true,
+		handoffUnopenableMessage:           true,
+		handoffUninspectableMessage:        true,
+		handoffUnreadableMessage:           true,
+		handoffSizeMismatchMessage:         true,
+		handoffDigestMismatchMessage:       true,
+		handoffEnvelopeAbsentMessage:       true,
+		handoffEnvelopeNotObjectMessage:    true,
+		handoffEnvelopeUnknownFieldMessage: true,
+		handoffVersionInvalidMessage:       true,
+		handoffVersionUnsupportedMessage:   true,
+		handoffDigestInvalidMessage:        true,
+		handoffSizeBytesInvalidMessage:     true,
+		handoffURIAbsentMessage:            true,
+		handoffURIUnparseableMessage:       true,
+		handoffURISchemeMessage:            true,
+		handoffURIRemoteHostMessage:        true,
+		handoffURIRelativeMessage:          true,
+	}
+
+	unparseable := acp.ImageBlock("", imageMIMEPNG)
+	unparseable.Image.Uri = acp.Ptr("file://\x7f/x.png")
+	unparseable.Image.Meta = map[string]any{metaHandoffKey: map[string]any{
+		handoffFieldVersion:   handoffVersion,
+		handoffFieldDigest:    handoffDigest(data),
+		handoffFieldSizeBytes: len(data),
+	}}
+
+	envelopeWith := func(fields map[string]any) acp.ContentBlock {
+		return handoffBlockWithEnvelope(path, imageMIMEPNG, fields)
+	}
+
+	for _, test := range []struct {
+		name  string
+		block acp.ContentBlock
+		root  string
+	}{
+		{name: "no read root", block: handoffBlock(path, imageMIMEPNG, data)},
+		{name: "unopenable root", block: handoffBlock(path, imageMIMEPNG, data), root: filepath.Join(root, "absent")},
+		{name: "no envelope", block: handoffBlockWithEnvelope(path, imageMIMEPNG, nil), root: root},
+		{name: "envelope is not an object", block: envelopeWith(nil), root: root},
+		{
+			name: "envelope carries an unknown field",
+			block: envelopeWith(map[string]any{
+				handoffFieldVersion: handoffVersion, handoffFieldDigest: handoffDigest(data),
+				handoffFieldSizeBytes: len(data), "extra": true,
+			}),
+			root: root,
+		},
+		{
+			name: "envelope version is unsupported",
+			block: envelopeWith(map[string]any{
+				handoffFieldVersion: 9, handoffFieldDigest: handoffDigest(data), handoffFieldSizeBytes: len(data),
+			}),
+			root: root,
+		},
+		{
+			name: "envelope digest is malformed",
+			block: envelopeWith(map[string]any{
+				handoffFieldVersion: handoffVersion, handoffFieldDigest: "nope", handoffFieldSizeBytes: len(data),
+			}),
+			root: root,
+		},
+		{
+			name: "envelope size is malformed",
+			block: envelopeWith(map[string]any{
+				handoffFieldVersion: handoffVersion, handoffFieldDigest: handoffDigest(data), handoffFieldSizeBytes: -3,
+			}),
+			root: root,
+		},
+		{name: "uri is unparseable", block: unparseable, root: root},
+		{name: "path is outside the root", block: handoffBlock(outside, imageMIMEPNG, data), root: root},
+		{name: "path escapes through a link", block: handoffBlock(escaping, imageMIMEPNG, data), root: root},
+		{name: "path is a directory", block: handoffBlock(root, imageMIMEPNG, data), root: root},
+		{name: "path is absent", block: handoffBlock(filepath.Join(root, "gone.png"), imageMIMEPNG, data), root: root},
+		{name: "bytes are tampered", block: handoffBlock(tamperedPath, imageMIMEPNG, data), root: root},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := promptInputWithPolicy(
+				t.Context(),
+				[]acp.ContentBlock{test.block},
+				handoffPolicy(test.root, applyOptions(nil).ImageLimits),
+			)
+
+			var reqErr *acp.RequestError
+
+			require.ErrorAs(t, err, &reqErr)
+
+			payload, ok := reqErr.Data.(map[string]any)
+			require.True(t, ok)
+
+			message, ok := payload[keyMessage].(string)
+			require.True(t, ok)
+			require.True(t, declared[message], "message is not a declared constant: %q", message)
+
+			rendered := reqErr.Error()
+			require.NotContains(t, rendered, root)
+			require.NotContains(t, rendered, outside)
+			require.NotContains(t, rendered, "valid.png")
+			require.NotContains(t, rendered, "file://")
+			require.NotRegexp(t, `[0-9a-f]{16}`, rendered)
+		})
+	}
 }
 
 func TestEffectiveInputBytesPerImageIsTheTightestBound(t *testing.T) {
@@ -900,4 +1163,30 @@ func TestEffectiveInputBytesPerImageIsTheTightestBound(t *testing.T) {
 			require.Equal(t, test.want, effectiveInputBytesPerImage(ImageLimits{MaxInputBytesPerImage: test.configured}))
 		})
 	}
+}
+
+// promptContentBase64 joins the base64 of every native image source in a built
+// prompt.
+func promptContentBase64(t *testing.T, input map[string]any) string {
+	t.Helper()
+
+	message, ok := input[keyMessage].(map[string]any)
+	require.True(t, ok)
+	content, ok := message[keyContent].([]map[string]any)
+	require.True(t, ok)
+
+	parts := make([]string, 0, len(content))
+
+	for _, block := range content {
+		source, sourceOK := block[keySource].(map[string]any)
+		if !sourceOK {
+			continue
+		}
+
+		encoded, encodedOK := source[keyData].(string)
+		require.True(t, encodedOK)
+		parts = append(parts, encoded)
+	}
+
+	return strings.Join(parts, "\n")
 }
