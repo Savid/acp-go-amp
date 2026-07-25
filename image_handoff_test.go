@@ -671,6 +671,42 @@ func TestHandoffDigestMismatch(t *testing.T) {
 	})
 }
 
+// TestHandoffBytesAreWithheldWhenVerificationFails pins the read function's own
+// contract rather than the care its current caller takes with the result: bytes
+// that failed the envelope check never leave handoffBytes, so a caller that
+// forwards the data before it reads the failure has nothing to forward.
+func TestHandoffBytesAreWithheldWhenVerificationFails(t *testing.T) {
+	data := imageFixture(t, "valid.png")
+
+	tampered := append([]byte(nil), data...)
+	tampered[len(tampered)-1] ^= 0xff
+
+	for _, test := range []struct {
+		name    string
+		stored  []byte
+		message string
+	}{
+		{name: "bytes do not hash to the declared digest", stored: tampered, message: handoffDigestMismatchMessage},
+		{name: "file is shorter than the declared size", stored: data[:len(data)-1], message: handoffSizeMismatchMessage},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			path := writeHandoffFile(t, root, "valid.png", test.stored)
+
+			budget := imagePromptBudget{limits: applyOptions(nil).ImageLimits, handoffRoot: root}
+			t.Cleanup(budget.closeHandoffRoot)
+
+			block := handoffBlock(path, imageMIMEPNG, data)
+
+			decoded, failure := budget.handoffBytes(t.Context(), block.Image)
+			require.NotNil(t, failure)
+			require.Equal(t, imageErrorDigestMismatch, failure.value)
+			require.Equal(t, test.message, failure.message)
+			require.Nil(t, decoded)
+		})
+	}
+}
+
 func TestHandoffGateChainMirrorsTheEmbeddedForm(t *testing.T) {
 	root := t.TempDir()
 	validPNG := imageFixture(t, "valid.png")

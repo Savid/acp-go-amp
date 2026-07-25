@@ -204,7 +204,11 @@ func (b *imagePromptBudget) handoffBytes(ctx context.Context, block *acp.Content
 		return nil, failure
 	}
 
-	return data, verifyPromptHandoffDigest(envelope, data)
+	if failure := verifyPromptHandoffDigest(envelope, data); failure != nil {
+		return nil, failure
+	}
+
+	return data, nil
 }
 
 // declaredSizeVerdict applies the per-image byte bounds to a declared size. The
