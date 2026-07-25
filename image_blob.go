@@ -27,24 +27,25 @@ func declaresRasterMediaType(declared string) bool {
 // admitBlob gates an embedded resource blob that carries no raster declaration.
 // Amp maps no such media type to a native representation, so the blob degrades
 // to its uri and declaration and its base64 is never carried into the prompt.
-// The block still spends the media budget on the payload the host actually sent
-// — the base64 length, which is what a transport would have had to carry — so
-// declaring bytes as an untyped blob buys a prompt no more of them than an image
-// block gets, and the advertised envelope stays a true statement of the tightest
-// inbound byte gate.
+// The block is weighed on its decoded length, the same quantity every image
+// block is weighed on, so declaring bytes as an untyped blob buys a prompt no
+// more of them than an image block gets and the advertised envelope stays a true
+// statement of the tightest inbound byte gate.
 //
 // Its verdicts report the resource channel: the byte bounds are borrowed from
 // the image contract, but the block a host would have to fix is a resource
 // block. A blob that is not valid base64 is refused ahead of every gate and so
 // consumes no position in the gated-media sequence.
 func (b *imagePromptBudget) admitBlob(blob string) error {
-	if _, _, err := decodePromptImage(blob, 0); err != nil {
+	// Nothing downstream reads these bytes, so none are retained: the decode
+	// exists to prove the payload is base64 and to measure what it decodes to.
+	_, sizeBytes, err := decodePromptImage(blob, 0)
+	if err != nil {
 		return promptMediaError(resourceField, b.nextIndex, imageErrorInvalidBase64)
 	}
 
 	index := b.nextImageIndex()
 
-	sizeBytes := int64(len(blob))
 	if maxBytes := effectiveInputBytesPerImage(b.limits); sizeBytes > maxBytes {
 		return promptMediaSizeError(resourceField, index, imageErrorTooLarge, sizeBytes, maxBytes)
 	}

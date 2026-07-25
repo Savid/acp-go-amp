@@ -26,29 +26,43 @@ func defaultPolicy() promptImagePolicy {
 	return promptImagePolicy{limits: applyOptions(nil).ImageLimits}
 }
 
-// TestBlobResourceChannelRejectsOversizeBytes pins that a non-image blob is
-// bounded by the bound the adapter advertises rather than by the looser
-// configured policy limit, and that the payload it is judged on is the base64 the
-// host actually sent. The verdict names the resource channel, because the block a
-// host would have to fix is a resource block and there is no image block at that
-// index to inspect.
-func TestBlobResourceChannelRejectsOversizeBytes(t *testing.T) {
+// TestBlobResourceChannelIsBoundedByItsDecodedLength pins the quantity a
+// non-image blob is judged on: the bytes its base64 decodes to, bounded by the
+// bound the adapter advertises rather than by the looser configured policy limit.
+// A payload sitting exactly on the advertised bound is accepted even though its
+// base64 is a third larger than that bound, and one decoded byte past it is
+// rejected reporting the decoded length — the number a host has to act on. The
+// verdict names the resource channel, because the block a host would have to fix
+// is a resource block and there is no image block at that index to inspect.
+func TestBlobResourceChannelIsBoundedByItsDecodedLength(t *testing.T) {
 	limits := applyOptions(nil).ImageLimits
-	bound := effectiveInputBytesPerImage(limits)
 
+	envelope, ok := initializeMeta(t)[metaMediaEnvelopeKey].(map[string]any)
+	require.True(t, ok)
+	bound, ok := envelope[keyMaxBytes].(int64)
+	require.True(t, ok)
 	require.Less(t, bound, limits.MaxInputBytesPerImage)
 
-	blob := strings.Repeat("A", int(bound)+4)
+	atBound := base64.StdEncoding.EncodeToString(make([]byte, bound))
+	require.Greater(t, int64(len(atBound)), bound)
 
-	_, err := promptInputWithPolicy(
+	input, err := promptInputWithPolicy(
 		t.Context(),
-		[]acp.ContentBlock{blobResourceBlock(blob, blobMIMEPDF)},
+		[]acp.ContentBlock{blobResourceBlock(atBound, blobMIMEPDF)},
+		defaultPolicy(),
+	)
+	require.NoError(t, err)
+	require.NotNil(t, input)
+
+	_, err = promptInputWithPolicy(
+		t.Context(),
+		[]acp.ContentBlock{blobResourceBlock(base64.StdEncoding.EncodeToString(make([]byte, bound+1)), blobMIMEPDF)},
 		defaultPolicy(),
 	)
 	requireInvalidParamsData(t, err, resourceSizeErrorData(
 		0,
 		imageErrorTooLarge,
-		int64(len(blob)),
+		bound+1,
 		bound,
 	))
 }
@@ -57,10 +71,12 @@ func TestBlobResourceChannelRejectsOversizeBytes(t *testing.T) {
 // per-prompt aggregate verdict a blob triggers also names the resource channel,
 // not the image contract that lent the budget.
 func TestBlobResourceChannelReportsTheAggregateOnItsOwnChannel(t *testing.T) {
-	blob := base64.StdEncoding.EncodeToString(make([]byte, 4096))
+	const decodedBytes = 4096
+
+	blob := base64.StdEncoding.EncodeToString(make([]byte, decodedBytes))
 
 	limits := applyOptions(nil).ImageLimits
-	limits.MaxInputBytesPerPrompt = int64(len(blob)) - 1
+	limits.MaxInputBytesPerPrompt = decodedBytes - 1
 
 	_, err := promptInputWithPolicy(
 		t.Context(),
@@ -70,7 +86,7 @@ func TestBlobResourceChannelReportsTheAggregateOnItsOwnChannel(t *testing.T) {
 	requireInvalidParamsData(t, err, resourceSizeErrorData(
 		0,
 		imageErrorTooLarge,
-		int64(len(blob)),
+		int64(decodedBytes),
 		limits.MaxInputBytesPerPrompt,
 	))
 }
@@ -100,11 +116,13 @@ func TestBlobResourceChannelRejectsCorruptBase64(t *testing.T) {
 // charged to the same per-prompt budget image bytes are, and that a blob consumes
 // a position in the gated-media sequence.
 func TestBlobResourceChannelCountsTowardThePromptAggregate(t *testing.T) {
+	const decodedBytes = 4096
+
 	validPNG := imageFixture(t, "valid.png")
-	blob := base64.StdEncoding.EncodeToString(make([]byte, 4096))
+	blob := base64.StdEncoding.EncodeToString(make([]byte, decodedBytes))
 
 	limits := applyOptions(nil).ImageLimits
-	limits.MaxInputBytesPerPrompt = int64(len(blob) + len(validPNG) - 1)
+	limits.MaxInputBytesPerPrompt = int64(decodedBytes + len(validPNG) - 1)
 
 	_, err := promptInputWithPolicy(t.Context(), []acp.ContentBlock{
 		blobResourceBlock(blob, blobMIMEPDF),
@@ -113,7 +131,7 @@ func TestBlobResourceChannelCountsTowardThePromptAggregate(t *testing.T) {
 	requireInvalidParamsData(t, err, imageSizeErrorData(
 		1,
 		imageErrorTooLarge,
-		int64(len(blob)+len(validPNG)),
+		int64(decodedBytes+len(validPNG)),
 		limits.MaxInputBytesPerPrompt,
 	))
 }

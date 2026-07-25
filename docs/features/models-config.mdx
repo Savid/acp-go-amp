@@ -46,7 +46,9 @@ submitted pixels and the URI is not read. Embedded resources use the same
 validation and aggregate budget as image blocks: a blob whose declared media
 type names a raster format is validated as an image, and a blob that names any
 other type still has to be valid base64 and still spends the per-image and
-per-prompt decoded budget before its bytes are placed in the prompt. A blob that
+per-prompt budget on the bytes it decodes to, even though those bytes never
+reach the prompt: a blob Amp has no native representation for is reduced to its
+URI and declared media type. A blob that
 names no raster format reports its rejection as `field: "prompt.resource"`,
 since the block a host has to fix is a resource block; everything held to the
 image gates reports `field: "prompt.image"`. A declared
