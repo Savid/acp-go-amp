@@ -16,6 +16,7 @@ common symptoms to their causes and to the tests that pin each behavior.
 | Prompt fails with `amp_turn_failed` (`cause: "process_exit"`) | Native `amp` exited non-zero | `message` carries the exit status and stderr tail |
 | Prompt fails with `cause: "timeout"` | `WithTurnTimeout` deadline elapsed | Raise or unset the deadline; a timeout is a failure, not a cancel |
 | Prompt is rejected with `field: "prompt.image"` | Invalid, animated, oversize, or native-envelope-breaking image input | Inspect `error`, `index`, `sizeBytes`, and `maxBytes`; see [Image input](/docs/features/models-config#image-input) |
+| Prompt is rejected with `field: "prompt.resource"` | An embedded resource blob that names no raster format is corrupt base64 or spends more than the decoded budget | Same `error` values and byte fields; the offending block is a resource block, not an image block |
 | Prompt fails with `stage: "image_output"` | Native image output could not be validated, stored, or represented | Inspect `reason`; `storage_failed` can indicate an expired or corrupt replay artifact |
 | Prompt fails with `native_state_missing` | Server-side Amp thread is gone | Start a fresh session with `session/new`; a mirror cannot resurrect it |
 | Prompt blocked with `mirror_unsynced` | A prior store write failed | Restore the [session store](/docs/features/session-store) backend so the mirror can commit |

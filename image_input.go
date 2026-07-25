@@ -12,7 +12,14 @@ import (
 )
 
 const (
-	imageField = "prompt.image"
+	// imageField and resourceField name the request member a verdict belongs to,
+	// not the gate that produced it. Anything routed into the image chain — an
+	// image content block, or a blob whose declaration names a raster type —
+	// reports the image contract; every other embedded blob reports the resource
+	// channel it actually arrived on, because a host has no image block to look at
+	// for that index.
+	imageField    = "prompt.image"
+	resourceField = "prompt.resource"
 
 	imageErrorMissingData          = "missing_data"
 	imageErrorInvalidBase64        = "invalid_base64"
@@ -162,12 +169,13 @@ func (b *imagePromptBudget) gate(index int, mimeType string, decoded []byte, siz
 		return validatedPromptImage{}, imagePromptError(index, imageErrorMediaTypeMismatch)
 	}
 
-	if err := b.charge(index, sizeBytes); err != nil {
+	if err := b.charge(imageField, index, sizeBytes); err != nil {
 		return validatedPromptImage{}, err
 	}
 
 	if sizeBytes > ampNativeMaxImageBytes {
-		return validatedPromptImage{}, imagePromptSizeError(
+		return validatedPromptImage{}, promptMediaSizeError(
+			imageField,
 			index,
 			imageErrorNativeEnvelope,
 			sizeBytes,
@@ -183,26 +191,33 @@ func (b *imagePromptBudget) gate(index int, mimeType string, decoded []byte, siz
 }
 
 // charge applies the configured per-image bound and adds the payload to the
-// prompt's running decoded total.
-func (b *imagePromptBudget) charge(index int, sizeBytes int64) error {
+// prompt's running decoded total. Both bounds are shared by every gated media
+// block, so the caller supplies the field its channel reports.
+func (b *imagePromptBudget) charge(field string, index int, sizeBytes int64) error {
 	if maxBytes := b.limits.MaxInputBytesPerImage; maxBytes > 0 && sizeBytes > maxBytes {
-		return imagePromptSizeError(index, imageErrorTooLarge, sizeBytes, maxBytes)
+		return promptMediaSizeError(field, index, imageErrorTooLarge, sizeBytes, maxBytes)
 	}
 
 	b.totalBytes += sizeBytes
 	if maxBytes := b.limits.MaxInputBytesPerPrompt; maxBytes > 0 && b.totalBytes > maxBytes {
-		return imagePromptSizeError(index, imageErrorTooLarge, b.totalBytes, maxBytes)
+		return promptMediaSizeError(field, index, imageErrorTooLarge, b.totalBytes, maxBytes)
 	}
 
 	return nil
 }
 
-func imagePromptError(index int, errorValue string) error {
+// promptMediaError reports a gated-media defect against the request member the
+// block arrived on.
+func promptMediaError(field string, index int, errorValue string) error {
 	return acp.NewInvalidParams(map[string]any{
-		jsonFieldField: imageField,
+		jsonFieldField: field,
 		jsonFieldError: errorValue,
 		keyIndex:       index,
 	})
+}
+
+func imagePromptError(index int, errorValue string) error {
+	return promptMediaError(imageField, index, errorValue)
 }
 
 // imagePromptHandoffError reports a handoff-form defect. The four handoff
@@ -217,9 +232,9 @@ func imagePromptHandoffError(index int, errorValue, message string) error {
 	})
 }
 
-func imagePromptSizeError(index int, errorValue string, sizeBytes, maxBytes int64) error {
+func promptMediaSizeError(field string, index int, errorValue string, sizeBytes, maxBytes int64) error {
 	return acp.NewInvalidParams(map[string]any{
-		jsonFieldField: imageField,
+		jsonFieldField: field,
 		jsonFieldError: errorValue,
 		keyIndex:       index,
 		"sizeBytes":    sizeBytes,

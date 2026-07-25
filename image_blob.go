@@ -30,13 +30,16 @@ func declaresRasterMediaType(declared string) bool {
 // the configured per-image bound, and counts toward the per-prompt aggregate. It
 // consumes a position in the gated-media sequence like any other gated block, so
 // no two blocks in one prompt can report the same index.
+//
+// Its verdicts report the resource channel: the byte bound is borrowed from the
+// image contract, but the block a host would have to fix is a resource block.
 func (b *imagePromptBudget) admitBlob(blob string) error {
 	index := b.nextImageIndex()
 
 	_, sizeBytes, err := decodePromptImage(blob, 0)
 	if err != nil {
-		return imagePromptError(index, imageErrorInvalidBase64)
+		return promptMediaError(resourceField, index, imageErrorInvalidBase64)
 	}
 
-	return b.charge(index, sizeBytes)
+	return b.charge(resourceField, index, sizeBytes)
 }

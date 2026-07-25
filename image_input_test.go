@@ -353,6 +353,22 @@ func imageSizeErrorData(index int, errorValue string, sizeBytes, maxBytes int64)
 	return data
 }
 
+// resourceErrorData is the same envelope on the resource channel: a gated blob
+// that declares no raster type reports the request member it arrived on.
+func resourceErrorData(index int, errorValue string) map[string]any {
+	data := imageErrorData(index, errorValue)
+	data[jsonFieldField] = resourceField
+
+	return data
+}
+
+func resourceSizeErrorData(index int, errorValue string, sizeBytes, maxBytes int64) map[string]any {
+	data := imageSizeErrorData(index, errorValue, sizeBytes, maxBytes)
+	data[jsonFieldField] = resourceField
+
+	return data
+}
+
 func TestImageInputStructuralEdges(t *testing.T) {
 	writer := &boundedImageWriter{limit: 2}
 	if written, err := writer.Write([]byte("four")); err != nil || written != 4 ||

@@ -121,6 +121,36 @@ func TestHandoffFormAcceptsPortableFormats(t *testing.T) {
 	}
 }
 
+// TestHandoffAcceptsASymlinkInsideTheRoot pins the legitimate link case: a link
+// inside the read root naming a regular file inside the read root is read, not
+// refused. The bytes are opened through the resolved target rather than the
+// requested path, so the opener's refusal to follow a final symlink component
+// guards against a swap without rejecting a host that lays its handoff directory
+// out with links.
+func TestHandoffAcceptsASymlinkInsideTheRoot(t *testing.T) {
+	root := t.TempDir()
+	data := imageFixture(t, "valid.png")
+	target := writeHandoffFile(t, root, filepath.Join("session", "turn", "valid.png"), data)
+
+	link := filepath.Join(root, "latest.png")
+	require.NoError(t, os.Symlink(target, link))
+
+	input, err := promptInputWithPolicy(
+		[]acp.ContentBlock{handoffBlock(link, imageMIMEPNG, data)},
+		handoffPolicy(root, applyOptions(nil).ImageLimits),
+	)
+	require.NoError(t, err)
+
+	message, ok := input[keyMessage].(map[string]any)
+	require.True(t, ok)
+	content, ok := message[keyContent].([]map[string]any)
+	require.True(t, ok)
+	require.Len(t, content, 1)
+	source, ok := content[0][keySource].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, base64.StdEncoding.EncodeToString(data), source[keyData])
+}
+
 func TestHandoffAndEmbeddedFormsBuildIdenticalNativeRequests(t *testing.T) {
 	root := t.TempDir()
 	data := imageFixture(t, "valid.png")

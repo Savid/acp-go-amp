@@ -28,7 +28,9 @@ func defaultPolicy() promptImagePolicy {
 
 // TestBlobResourceChannelRejectsOversizeBytes pins that a non-image blob is
 // bounded by the same per-image decoded limit an image blob is: the fixture is
-// larger than the policy default and must be rejected rather than forwarded.
+// larger than the policy default and must be rejected rather than forwarded. The
+// verdict names the resource channel, because the block a host would have to fix
+// is a resource block and there is no image block at that index to inspect.
 func TestBlobResourceChannelRejectsOversizeBytes(t *testing.T) {
 	oversize := make([]byte, 6_295_951)
 	limits := applyOptions(nil).ImageLimits
@@ -39,11 +41,32 @@ func TestBlobResourceChannelRejectsOversizeBytes(t *testing.T) {
 		[]acp.ContentBlock{blobResourceBlock(base64.StdEncoding.EncodeToString(oversize), blobMIMEPDF)},
 		defaultPolicy(),
 	)
-	requireInvalidParamsData(t, err, imageSizeErrorData(
+	requireInvalidParamsData(t, err, resourceSizeErrorData(
 		0,
 		imageErrorTooLarge,
 		int64(len(oversize)),
 		limits.MaxInputBytesPerImage,
+	))
+}
+
+// TestBlobResourceChannelReportsTheAggregateOnItsOwnChannel pins that the
+// per-prompt aggregate verdict a blob triggers also names the resource channel,
+// not the image contract that lent the budget.
+func TestBlobResourceChannelReportsTheAggregateOnItsOwnChannel(t *testing.T) {
+	document := make([]byte, 4096)
+
+	limits := applyOptions(nil).ImageLimits
+	limits.MaxInputBytesPerPrompt = int64(len(document)) - 1
+
+	_, err := promptInputWithPolicy(
+		[]acp.ContentBlock{blobResourceBlock(base64.StdEncoding.EncodeToString(document), blobMIMEPDF)},
+		promptImagePolicy{limits: limits},
+	)
+	requireInvalidParamsData(t, err, resourceSizeErrorData(
+		0,
+		imageErrorTooLarge,
+		int64(len(document)),
+		limits.MaxInputBytesPerPrompt,
 	))
 }
 
@@ -63,7 +86,7 @@ func TestBlobResourceChannelRejectsCorruptBase64(t *testing.T) {
 		[]acp.ContentBlock{blobResourceBlock("%%%", blobMIMEPDF)},
 		defaultPolicy(),
 	)
-	requireInvalidParamsData(t, err, imageErrorData(0, imageErrorInvalidBase64))
+	requireInvalidParamsData(t, err, resourceErrorData(0, imageErrorInvalidBase64))
 }
 
 // TestBlobResourceChannelCountsTowardThePromptAggregate pins that blob bytes are
