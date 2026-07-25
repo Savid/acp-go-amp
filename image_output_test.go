@@ -278,21 +278,33 @@ func TestImageOutputMIMEDeclarationIgnoresUnrelatedNestedFields(t *testing.T) {
 
 func TestImageOutputToolAggregateAndFailureLifecycle(t *testing.T) {
 	validPNG := imageFixture(t, "valid.png")
-	validData := base64.StdEncoding.EncodeToString(validPNG)
+	validGIF := imageFixture(t, "valid.gif")
+	oversizeJPEG := imageFixture(t, "valid.jpg")
 	limits := applyOptions(nil).ImageLimits
-	limits.MaxOutputBytesPerToolCall = int64(len(validPNG)*2 - 1)
+
+	// Room for the first and last images and nothing else, so the middle image
+	// is the only one the aggregate can refuse and the last one fits only if the
+	// bytes it refused were given back.
+	limits.MaxOutputBytesPerToolCall = int64(len(validPNG) + len(validGIF))
+	if len(oversizeJPEG) <= len(validGIF) {
+		t.Fatalf("middle fixture does not cross the aggregate: %d bytes", len(oversizeJPEG))
+	}
+
 	agent := newTestAgent(WithImageLimits(limits))
 	client, cleanup := attachRecordingClient(t, agent)
 	defer cleanup()
 	session := &agentSession{agent: agent, id: "T-output-limit"}
 
 	msg := parseToolResultMessage(t, "TU-limit", []any{
-		map[string]any{"type": "image", "mimeType": imageMIMEPNG, "data": validData},
-		map[string]any{"type": "image", "mimeType": imageMIMEPNG, "data": validData},
+		map[string]any{"type": "image", "mimeType": imageMIMEPNG, "data": base64.StdEncoding.EncodeToString(validPNG)},
+		map[string]any{"type": "image", "mimeType": imageMIMEJPEG, "data": base64.StdEncoding.EncodeToString(oversizeJPEG)},
+		map[string]any{"type": "image", "mimeType": imageMIMEGIF, "data": base64.StdEncoding.EncodeToString(validGIF)},
 	}, false)
-	// The second image crosses the per-tool-call limit. That is an ordinary
+	// The middle image crosses the per-tool-call limit. That is an ordinary
 	// verdict: the guidance takes its place in the tool call's own content, the
-	// first image still ships, and the turn is untouched.
+	// image before it still ships, and the turn is untouched. Bytes refused here
+	// never left the adapter, so they are not charged to the aggregate either —
+	// the image after the refusal ships on the budget the refusal returned.
 	transcriptJSON, err := session.prepareMessageImageArtifacts(context.Background(), msg)
 	if err != nil {
 		t.Fatalf("aggregate image limit ended the turn: %v", err)
@@ -302,8 +314,8 @@ func TestImageOutputToolAggregateAndFailureLifecycle(t *testing.T) {
 		t.Fatalf("aggregate refusal guidance missing from transcript: %s", transcriptJSON)
 	}
 
-	if strings.Count(transcriptJSON, canonicalImageArtifactType) != 1 {
-		t.Fatalf("aggregate refusal dropped the image that fit: %s", transcriptJSON)
+	if strings.Count(transcriptJSON, canonicalImageArtifactType) != 2 {
+		t.Fatalf("aggregate refusal dropped an image that fit: %s", transcriptJSON)
 	}
 
 	if len(client.updatesSnapshot()) != 0 {
@@ -933,27 +945,61 @@ func TestToolResultSnapshotStorageEdges(t *testing.T) {
 		t.Fatalf("stored image over current limit content = %#v", overLimit)
 	}
 
-	second := valid
-	second.Identity = "tool:valid:1"
-	secondRef := appendSnapshotArtifact(t, store, session.id, second)
+	jpeg := imageFixture(t, "valid.jpg")
+	oversize := storedImageArtifact{
+		Version:     imageArtifactVersion,
+		Kind:        imageArtifactKindEmbedded,
+		Identity:    "tool:oversize:0",
+		Fingerprint: fingerprintImageOutput(jpeg),
+		MimeType:    imageMIMEJPEG,
+		Data:        base64.StdEncoding.EncodeToString(jpeg),
+		CreatedAt:   time.Now().UnixMilli(),
+	}
+	oversizeRef := appendSnapshotArtifact(t, store, session.id, oversize)
+
+	gif := imageFixture(t, "valid.gif")
+	trailing := storedImageArtifact{
+		Version:     imageArtifactVersion,
+		Kind:        imageArtifactKindEmbedded,
+		Identity:    "tool:trailing:0",
+		Fingerprint: fingerprintImageOutput(gif),
+		MimeType:    imageMIMEGIF,
+		Data:        base64.StdEncoding.EncodeToString(gif),
+		CreatedAt:   time.Now().UnixMilli(),
+	}
+	trailingRef := appendSnapshotArtifact(t, store, session.id, trailing)
+
 	aggregateLimits := applyOptions(nil).ImageLimits
-	aggregateLimits.MaxOutputBytesPerToolCall = int64(len(png)*2 - 1)
+
+	// Room for the first and last artifacts and nothing else, so the middle one
+	// is the only one the aggregate can refuse and the last one fits only if the
+	// bytes it refused were given back.
+	aggregateLimits.MaxOutputBytesPerToolCall = int64(len(png) + len(gif))
+	if len(jpeg) <= len(gif) {
+		t.Fatalf("middle fixture does not cross the aggregate: %d bytes", len(jpeg))
+	}
+
 	aggregateSession := &agentSession{
 		agent: newTestAgent(WithSessionStore(store), WithImageLimits(aggregateLimits)),
 		id:    session.id,
 	}
 	aggregate := amp.ToolResultBlock{Content: []any{
 		artifactItem(validRef, valid.Identity),
-		artifactItem(secondRef, second.Identity),
+		artifactItem(oversizeRef, oversize.Identity),
+		artifactItem(trailingRef, trailing.Identity),
 	}}
 	aggregateContent, _, err := aggregateSession.toolResultSnapshot(ctx, aggregate)
 	if err != nil {
 		t.Fatalf("stored tool image aggregate over current limit ended the turn: %v", err)
 	}
 
-	if len(aggregateContent) != 2 || aggregateContent[0].Content.Content.Image == nil ||
+	// Bytes refused here never left the adapter, so they are not charged to the
+	// aggregate either: the artifact after the refusal ships on the budget the
+	// refusal returned.
+	if len(aggregateContent) != 3 || aggregateContent[0].Content.Content.Image == nil ||
 		aggregateContent[1].Content.Content.Text == nil ||
-		aggregateContent[1].Content.Content.Text.Text != imageGuidanceTooLarge {
+		aggregateContent[1].Content.Content.Text.Text != imageGuidanceTooLarge ||
+		aggregateContent[2].Content.Content.Image == nil {
 		t.Fatalf("stored tool image aggregate content = %#v", aggregateContent)
 	}
 }
