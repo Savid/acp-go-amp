@@ -22,16 +22,30 @@ const (
 	imageErrorInvalidDimensions    = "invalid_dimensions"
 	imageErrorTooLarge             = "too_large"
 	imageErrorNativeEnvelope       = "native_envelope_exceeded"
+	imageErrorInvalidHandoff       = "invalid_handoff"
+	imageErrorPathNotAllowed       = "path_not_allowed"
+	imageErrorMissingFile          = "missing_file"
+	imageErrorDigestMismatch       = "handoff_digest_mismatch"
 
 	imageMIMEPNG  = "image/png"
 	imageMIMEJPEG = "image/jpeg"
 	imageMIMEGIF  = "image/gif"
 	imageMIMEWebP = "image/webp"
 
-	// Amp's hosted service rejects image-bearing message appends above
-	// roughly 1,000,000 decoded bytes with an untyped internal error, well
-	// under its documented 5,138,022-byte ceiling. 900 KiB keeps this
-	// pre-turn gate safely below that observed service limit.
+	// Amp keeps a thread's messages in a backing store that caps a single commit
+	// at 1,310,720 bytes of dirty data — 320 four-kilobyte pages — and an image
+	// is stored as inline base64. base64 of 983,040 decoded bytes is exactly that
+	// cap, which is why an image-bearing append above it fails with an untyped
+	// internal error rather than a typed size rejection.
+	//
+	// This gate is 921,600 decoded bytes: 1,228,800 base64 bytes, 300 of the 320
+	// available pages, leaving the rest of the commit room to land. The cap is
+	// per commit rather than per thread, so a long thread has less headroom than
+	// a fresh one; 300 pages is the conservative pin.
+	//
+	// The amp CLI's own 5,138,022-byte (4.9 MiB) check is a client-side
+	// pre-flight in a different enforcement layer, not a service maximum, and is
+	// far too loose to protect this path.
 	ampNativeMaxImageBytes     int64  = 921_600
 	ampNativeMaxImageDimension uint32 = 8000
 )
@@ -46,19 +60,70 @@ type validatedPromptImage struct {
 }
 
 type imagePromptBudget struct {
-	limits     ImageLimits
-	nextIndex  int
-	totalBytes int64
+	limits ImageLimits
+	// handoffRoot is the configured read root for the handoff input form. Empty
+	// rejects every handoff-form block.
+	handoffRoot string
+	nextIndex   int
+	totalBytes  int64
 }
 
-func (b *imagePromptBudget) validate(data, mimeType string) (validatedPromptImage, error) {
+// nextImageIndex allocates the position this media block reports in the prompt's
+// gated-media sequence. Every gated block consumes one — image content blocks
+// and embedded resource blobs alike — so no two blocks in one prompt can report
+// the same index.
+func (b *imagePromptBudget) nextImageIndex() int {
 	index := b.nextIndex
 	b.nextIndex++
+
+	return index
+}
+
+// validateImageBlock selects the block's input form and validates it. Non-empty
+// data is the embedded form even when a handoff envelope is also present; empty
+// data with handoff intent is the handoff form; empty data with neither is
+// missing_data.
+func (b *imagePromptBudget) validateImageBlock(block *acp.ContentBlockImage) (validatedPromptImage, error) {
+	index := b.nextImageIndex()
+
+	if block.Data != "" {
+		return b.validateEmbedded(index, block.Data, block.MimeType)
+	}
+
+	if !promptHandoffIntent(block) {
+		return validatedPromptImage{}, imagePromptError(index, imageErrorMissingData)
+	}
+
+	decoded, sizeBytes, err := readPromptHandoffImage(
+		index,
+		b.handoffRoot,
+		block,
+		effectiveInputBytesPerImage(b.limits),
+	)
+	if err != nil {
+		return validatedPromptImage{}, err
+	}
+
+	if !isPromptImageMIME(block.MimeType) {
+		return validatedPromptImage{}, imagePromptError(index, imageErrorInvalidMediaType)
+	}
+
+	return b.gate(index, block.MimeType, decoded, sizeBytes)
+}
+
+// validate validates an embedded base64 image, allocating this block's index in
+// the prompt's gated-media sequence.
+func (b *imagePromptBudget) validate(data, mimeType string) (validatedPromptImage, error) {
+	index := b.nextImageIndex()
 
 	if data == "" {
 		return validatedPromptImage{}, imagePromptError(index, imageErrorMissingData)
 	}
 
+	return b.validateEmbedded(index, data, mimeType)
+}
+
+func (b *imagePromptBudget) validateEmbedded(index int, data, mimeType string) (validatedPromptImage, error) {
 	if !isPromptImageMIME(mimeType) {
 		return validatedPromptImage{}, imagePromptError(index, imageErrorInvalidMediaType)
 	}
@@ -72,6 +137,13 @@ func (b *imagePromptBudget) validate(data, mimeType string) (validatedPromptImag
 		return validatedPromptImage{}, imagePromptError(index, imageErrorInvalidBase64)
 	}
 
+	return b.gate(index, mimeType, decoded, sizeBytes)
+}
+
+// gate runs the structural and size verdicts every accepted image passes,
+// whatever transport carried its bytes. sizeBytes is the payload's full decoded
+// size, which can exceed the retained prefix in decoded.
+func (b *imagePromptBudget) gate(index int, mimeType string, decoded []byte, sizeBytes int64) (validatedPromptImage, error) {
 	sniffedMIME := sniffPromptImageMIME(decoded)
 	if sniffedMIME == "" {
 		return validatedPromptImage{}, imagePromptError(index, imageErrorMediaTypeMismatch)
@@ -90,13 +162,8 @@ func (b *imagePromptBudget) validate(data, mimeType string) (validatedPromptImag
 		return validatedPromptImage{}, imagePromptError(index, imageErrorMediaTypeMismatch)
 	}
 
-	if maxBytes := b.limits.MaxInputBytesPerImage; maxBytes > 0 && sizeBytes > maxBytes {
-		return validatedPromptImage{}, imagePromptSizeError(index, imageErrorTooLarge, sizeBytes, maxBytes)
-	}
-
-	b.totalBytes += sizeBytes
-	if maxBytes := b.limits.MaxInputBytesPerPrompt; maxBytes > 0 && b.totalBytes > maxBytes {
-		return validatedPromptImage{}, imagePromptSizeError(index, imageErrorTooLarge, b.totalBytes, maxBytes)
+	if err := b.charge(index, sizeBytes); err != nil {
+		return validatedPromptImage{}, err
 	}
 
 	if sizeBytes > ampNativeMaxImageBytes {
@@ -115,11 +182,38 @@ func (b *imagePromptBudget) validate(data, mimeType string) (validatedPromptImag
 	return validatedPromptImage{base64: base64.StdEncoding.EncodeToString(decoded)}, nil
 }
 
+// charge applies the configured per-image bound and adds the payload to the
+// prompt's running decoded total.
+func (b *imagePromptBudget) charge(index int, sizeBytes int64) error {
+	if maxBytes := b.limits.MaxInputBytesPerImage; maxBytes > 0 && sizeBytes > maxBytes {
+		return imagePromptSizeError(index, imageErrorTooLarge, sizeBytes, maxBytes)
+	}
+
+	b.totalBytes += sizeBytes
+	if maxBytes := b.limits.MaxInputBytesPerPrompt; maxBytes > 0 && b.totalBytes > maxBytes {
+		return imagePromptSizeError(index, imageErrorTooLarge, b.totalBytes, maxBytes)
+	}
+
+	return nil
+}
+
 func imagePromptError(index int, errorValue string) error {
 	return acp.NewInvalidParams(map[string]any{
 		jsonFieldField: imageField,
 		jsonFieldError: errorValue,
 		keyIndex:       index,
+	})
+}
+
+// imagePromptHandoffError reports a handoff-form defect. The four handoff
+// verdicts carry a human message naming the real cause, because a host cannot
+// tell a malformed block from a bad deployment from the verdict alone.
+func imagePromptHandoffError(index int, errorValue, message string) error {
+	return acp.NewInvalidParams(map[string]any{
+		jsonFieldField: imageField,
+		jsonFieldError: errorValue,
+		keyIndex:       index,
+		keyMessage:     message,
 	})
 }
 
@@ -131,15 +225,6 @@ func imagePromptSizeError(index int, errorValue string, sizeBytes, maxBytes int6
 		"sizeBytes":    sizeBytes,
 		"maxBytes":     maxBytes,
 	})
-}
-
-func isPromptImageMIME(mimeType string) bool {
-	switch mimeType {
-	case imageMIMEPNG, imageMIMEJPEG, imageMIMEGIF, imageMIMEWebP:
-		return true
-	default:
-		return false
-	}
 }
 
 type boundedImageWriter struct {

@@ -42,7 +42,8 @@ No slash commands are advertised. Text like `/review` remains ordinary prompt
 text and is sent to Amp unchanged.
 
 ACP prompt image blocks are validated before the native process starts and are
-sent as Amp stream-JSON base64 image sources in their original content order.
+sent as Amp stream-JSON base64 image sources in their original content order,
+whether their bytes arrived as embedded base64 or through the local handoff form.
 See [Models and config](/docs/features/models-config#image-input) for formats
 and native envelopes, [Updates](/docs/reference/updates#image-tool-content) for
 typed tool output, and [Session store](/docs/features/session-store) for replay

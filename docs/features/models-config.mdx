@@ -42,8 +42,63 @@ without rendering pixels, and rejects GIFs with multiple image descriptors,
 WebP files with the animation flag, and PNG files carrying an `acTL` chunk.
 
 When an image carries both `data` and `uri`, the embedded data determines the
-submitted pixels and the URI is never followed. Image-bearing embedded
-resources use the same validation and aggregate budget as image blocks.
+submitted pixels and the URI is not read. Embedded resources use the same
+validation and aggregate budget as image blocks: a blob whose declared media
+type names a raster format is validated as an image, and a blob that names any
+other type still has to be valid base64 and still spends the per-image and
+per-prompt decoded budget before its bytes are placed in the prompt. A declared
+media type is matched case-insensitively and without parameters, so
+`IMAGE/PNG` and `image/png; charset=binary` are held to the image gates rather
+than treated as an untyped resource.
+
+### Local handoff input
+
+A co-located host can hand bytes over on disk instead of inside the prompt
+frame. Set `WithInputHandoffRoot` to an absolute directory and send an image
+block with empty `data`, a `file://` URI naming a path under that root, and an
+`acp-go.dev/handoff` envelope:
+
+```json
+{
+  "type": "image",
+  "mimeType": "image/png",
+  "data": "",
+  "uri": "file:///srv/handoff/session/turn/9f86d0...png",
+  "_meta": {
+    "acp-go.dev/handoff": {
+      "version": 1,
+      "digest": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+      "sizeBytes": 123456
+    }
+  }
+}
+```
+
+The adapter resolves the path with symlink-safe containment, requires a regular
+file inside the root, reads at most the effective per-image bound, and verifies
+that the bytes hash to the declared digest before anything else looks at them.
+Verified bytes then pass the same gate chain an embedded image passes, count
+toward the same per-prompt aggregate, and reach Amp as the same base64 source —
+a handoff turn and an embedded turn over the same bytes build byte-identical
+native requests, and the handoff path never appears in the native request.
+
+The root is read-only: the adapter never writes, moves, or removes anything
+under it, and the file's lifetime belongs to the host. The envelope is strict —
+exactly those three fields, version `1` only, a 64-character lowercase hex
+sha256, and a non-negative integer size.
+
+Form selection happens per block, before any other check:
+
+| Block | Form |
+|---|---|
+| non-empty `data` | embedded, even when a handoff envelope is also present |
+| empty `data` with an `acp-go.dev/handoff` envelope or a `file://` URI | handoff |
+| empty `data` with neither | `missing_data` |
+
+Leaving `WithInputHandoffRoot` unset rejects every handoff-form block with
+`invalid_handoff` and withholds the capability advertisement, so a host can tell
+from `initialize` whether its option reached the adapter. See
+[Meta](/docs/reference/meta#advertised-capabilities).
 
 Amp routes models on its hosted backend and exposes no authoritative per-model
 input modalities, so a structurally valid image is always forwarded and the
@@ -59,6 +114,14 @@ envelopes always apply, regardless of configuration:
 
 - at most 921,600 decoded bytes per image
 - at most 8,000 pixels in either dimension
+
+The byte envelope tracks how Amp stores a thread rather than any published
+per-image maximum: messages land in a backing store that caps one commit at
+1,310,720 bytes of dirty data and an image is stored as inline base64, so
+921,600 decoded bytes is 300 of the 320 available four-kilobyte pages. Because
+the cap is per commit, a long thread has less headroom than a fresh one — treat
+921,600 as the bound that holds for a fresh thread. See
+[Troubleshooting](/docs/operations/troubleshooting#image-failures).
 
 Crossing a configured byte limit returns `too_large`; crossing a native
 envelope returns `native_envelope_exceeded`. Both are `-32602 Invalid params`
@@ -76,10 +139,33 @@ errors raised before any native turn starts:
 
 The full set of input `error` values is `missing_data`, `invalid_base64`,
 `invalid_media_type`, `media_type_mismatch`, `animated_not_supported`,
-`invalid_dimensions`, `too_large`, and `native_envelope_exceeded`. `index`
-counts image-bearing prompt blocks in request order, validation stops at the
-first failing block, and an aggregate error names the image that crosses the
-total.
+`invalid_dimensions`, `too_large`, `native_envelope_exceeded`,
+`invalid_handoff`, `path_not_allowed`, `missing_file`, and
+`handoff_digest_mismatch`. `index` counts gated media prompt blocks in request
+order, validation stops at the first failing block, and an aggregate error names
+the image that crosses the total.
+
+The four handoff values are raised before any embedded-form gate and each
+carries a `message` naming the real cause:
+
+| `error` | Meaning |
+|---|---|
+| `invalid_handoff` | the block is malformed as a block: no read root configured, a missing, non-object, unknown-field, wrong-version, bad-digest or bad-size envelope, or a URI that is absent, unparseable, not `file://`, remote-hosted, or not absolute |
+| `path_not_allowed` | the path resolves outside the read root, escapes it through a symlink, or is not a regular file |
+| `missing_file` | the path is inside the root but absent, unopenable, or unreadable — the expected outcome when a host cleans up early |
+| `handoff_digest_mismatch` | the file's byte count or sha256 disagrees with the envelope; the adapter fails closed and never falls back to another transport |
+
+`path_not_allowed` and `missing_file` also exist as image *output* `reason`
+values on the `-32603` `amp_turn_failed` envelope. The JSON-RPC error code tells
+the two apart: as a `-32602` `error` value the token describes a host-supplied
+inbound handoff path, and as a `reason` it describes an Amp-returned outbound
+artifact path.
+
+### Advertised media envelope
+
+`initialize` publishes the bounds above so a host can check an attachment before
+spending a turn on it. See
+[Meta](/docs/reference/meta#advertised-capabilities) for the exact block.
 
 ## Seed Files
 

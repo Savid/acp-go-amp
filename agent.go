@@ -96,7 +96,11 @@ func NewAgent(opts ...Option) *Agent {
 		lifecycleDone:        make(chan struct{}),
 		activeLimitErr:       validateConcurrencyLimits(options.ConcurrencyLimits),
 		containmentMode:      mode,
-		configurationErr:     errors.Join(validateContainmentOptions(options), validateImageLimits(options.ImageLimits)),
+		configurationErr: errors.Join(
+			validateContainmentOptions(options),
+			validateImageLimits(options.ImageLimits),
+			validateInputHandoffRoot(options.InputHandoffRoot),
+		),
 	}
 }
 
@@ -210,22 +214,37 @@ func (a *Agent) Initialize(ctx context.Context, params acp.InitializeRequest) (r
 				List:                  &acp.SessionListCapabilities{},
 				Resume:                &acp.SessionResumeCapabilities{},
 			},
-			Meta: map[string]any{
-				ampMetaKey: map[string]any{
-					metaRawEventKey: map[string]any{
-						"method":         RawEventMethod,
-						"enabledBy":      "_meta.amp.rawEvent.enabled",
-						keyMaxBytes:      rawEventMaxBytes,
-						"defaultEnabled": false,
-					},
-					"sessionStore": map[string]any{
-						"format": SessionStoreFormat,
-						"key":    []string{jsonFieldSessionID, "subpath"},
-					},
-				},
-			},
+			Meta: agentCapabilityMeta(a.options),
 		},
 	}, nil
+}
+
+// agentCapabilityMeta builds the advertised agentCapabilities._meta block: the
+// Amp vendor block, the family-reserved media envelope — always emitted, and
+// never conditioned on any other advertisement — and the handoff advertisement
+// only when a handoff read root is configured.
+func agentCapabilityMeta(options Options) map[string]any {
+	meta := map[string]any{
+		ampMetaKey: map[string]any{
+			metaRawEventKey: map[string]any{
+				"method":         RawEventMethod,
+				"enabledBy":      "_meta.amp.rawEvent.enabled",
+				keyMaxBytes:      rawEventMaxBytes,
+				"defaultEnabled": false,
+			},
+			"sessionStore": map[string]any{
+				"format": SessionStoreFormat,
+				"key":    []string{jsonFieldSessionID, "subpath"},
+			},
+		},
+		metaMediaEnvelopeKey: mediaEnvelopeMeta(options.ImageLimits),
+	}
+
+	if options.InputHandoffRoot != "" {
+		meta[metaHandoffKey] = handoffAdvertisement()
+	}
+
+	return meta
 }
 
 func (a *Agent) Authenticate(ctx context.Context, params acp.AuthenticateRequest) (resp acp.AuthenticateResponse, err error) {

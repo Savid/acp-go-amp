@@ -53,6 +53,24 @@ the oracle, and the Task tool — carry `_meta.amp.parentToolUseId`, the id of t
 `tool_use` block that spawned the delegated agent. Main-agent updates omit the
 key. See [Updates](/docs/reference/updates) for the tagged update kinds.
 
+## Inbound content-block metadata
+
+One key is read from an inbound `_meta` outside the `amp` namespace, and only on
+an image content block: `acp-go.dev/handoff`, the local handoff input envelope.
+
+```json
+{
+  "version": 1,
+  "digest": "<64-character lowercase hex sha256>",
+  "sizeBytes": 123456
+}
+```
+
+It is strict — exactly these three fields, version `1` only — and it is read
+only when `WithInputHandoffRoot` is set. On a block with non-empty `data` it is
+ignored, because embedded data wins. See
+[Models and config](/docs/features/models-config#local-handoff-input).
+
 ## Advertised capabilities
 
 `initialize` advertises standard `promptCapabilities.image: true` plus
@@ -61,6 +79,37 @@ elicitation capability metadata, because the adapter supports neither. Amp
 does not expose authoritative per-model input modalities, so the adapter
 publishes no model-specific image claims.
 
-Amp therefore does not advertise `_meta["acp-go.dev/route"]`, stamp it on
-callbacks, or validate a turn nonce. Its prompt-builder nonce parameter is
-intentionally ignored; cancellation remains structurally scoped by `sessionId`.
+`agentCapabilities._meta` also carries `acp-go.dev/mediaEnvelope`, the bounds
+this adapter actually enforces on inbound media:
+
+```json
+{
+  "acp-go.dev/mediaEnvelope": {
+    "maxBytes": 921600,
+    "maxPromptBytes": 6291456,
+    "maxDimension": 8000,
+    "imageFormats": ["image/png", "image/jpeg", "image/gif", "image/webp"],
+    "documentFormats": []
+  }
+}
+```
+
+- `maxBytes` is the effective per-image decoded bound: the tighter of
+  `ImageLimits.MaxInputBytesPerImage` and Amp's 921,600-byte native envelope, so
+  the default configuration advertises the native envelope.
+- `maxPromptBytes` is the per-prompt aggregate decoded bound
+  (`ImageLimits.MaxInputBytesPerPrompt`).
+- `maxDimension` is Amp's 8,000-pixel native bound.
+- `imageFormats` is the accepted media-type allowlist.
+- `documentFormats` is always the empty array: Amp maps no media type to a
+  native document representation.
+
+The block is always present, and it is independent of every other
+advertisement. `acp-go.dev/handoff` is added, as `{"versions": [1]}`, only when
+`WithInputHandoffRoot` is set; its absence is how a host learns that its option
+never reached this adapter.
+
+Amp does not advertise `_meta["acp-go.dev/route"]`, stamp it on callbacks, or
+validate a turn nonce — and that says nothing about the media envelope, which is
+advertised regardless. Its prompt-builder nonce parameter is intentionally
+ignored; cancellation remains structurally scoped by `sessionId`.

@@ -47,9 +47,22 @@ session with `session/new` — not a retry of the same session.
 
 Input image failures are `-32602` and happen before Amp starts. Amp's native
 input ceiling is 921,600 decoded bytes per image and 8,000 pixels per
-dimension even when the matching `ImageLimits` field is zero. The byte
-ceiling sits below Amp's documented per-image maximum because the hosted
-service rejects larger images with an untyped internal error.
+dimension even when the matching `ImageLimits` field is zero.
+
+The byte ceiling comes from how Amp stores a thread: messages land in a backing
+store that caps one commit at 1,310,720 bytes of dirty data, and an image is
+stored as inline base64, so an append whose base64 crosses that cap fails with
+an untyped internal error instead of a typed size rejection. 921,600 decoded
+bytes is 1,228,800 base64 bytes — 300 of the 320 available four-kilobyte pages —
+which leaves the rest of the commit room to land. The amp CLI's own 4.9 MiB
+pre-flight check is a separate client-side bound, not the service ceiling.
+
+<Note>
+The cap applies per commit, not per thread, so a long thread has less headroom
+for one image than a fresh thread does. Treat 921,600 as the bound that holds
+for a fresh thread and expect the practical ceiling on a continued thread to be
+lower; an oversize append still fails before any bytes are stored.
+</Note>
 
 Output representation failures are `-32603` with
 `error: "amp_turn_failed"`, `cause: "transport"`,

@@ -129,6 +129,12 @@ docs-audit:
 	@rg -q 'does not advertise Amp elicitation metadata' docs/features/elicitation.mdx
 	@rg -q 'promptCapabilities.image: true' docs/reference/meta.mdx
 	@rg -q '921,600 decoded bytes per image' docs/features/models-config.mdx
+	@rg -q 'acp-go.dev/mediaEnvelope' docs/reference/meta.mdx
+	@rg -q 'documentFormats' docs/reference/meta.mdx
+	@rg -q 'acp-go.dev/handoff' docs/reference/meta.mdx docs/features/models-config.mdx
+	@rg -q 'WithInputHandoffRoot' README.md docs/reference/go-api.mdx docs/operations/security.mdx
+	@rg -q 'handoff_digest_mismatch' docs/features/models-config.mdx
+	@rg -q 'invalid_handoff' docs/features/models-config.mdx
 	@rg -q '_artifacts/images/<digest>.json' docs/features/session-store.mdx
 	@rg -q 'MaxOutputBytesPerToolCall' docs/reference/go-api.mdx
 

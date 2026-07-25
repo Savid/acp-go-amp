@@ -16,6 +16,26 @@ inside the isolated config tree before being passed with `--settings-file`. The
 directory is removed on close/delete, so one session cannot read another's
 native state or the operator's real `~/.config/amp`.
 
+## Handoff read root
+
+`WithInputHandoffRoot` is the only directory an ACP client can point the adapter
+at for reads, and it is opt-in: unset, no inbound path is readable at all.
+
+- Every requested path is checked for containment against the cleaned root,
+  resolved through symlinks, and re-checked against the resolved root, so a
+  symlink inside the root cannot reach outside it.
+- Only regular files are read, so a device node or FIFO under the root is
+  rejected before it is opened.
+- Reads are bounded at the effective per-image byte limit, and the bytes must
+  hash to the digest the client declared before anything else uses them.
+- The root is never written to, and nothing under it is moved or removed. The
+  path is not recorded in the native request, the transcript, raw events, or
+  logs.
+
+Point it at a directory that holds nothing but handoff payloads. It grants read
+access to that whole tree, so a workspace parent or a directory shared between
+tenants is the wrong choice.
+
 ## Secret handling
 
 Auth material is live process state only:

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/coder/acp-go-sdk"
+	"github.com/stretchr/testify/require"
 )
 
 func TestCancelDeterminismAndNativeCancelResult(t *testing.T) {
@@ -604,4 +605,42 @@ func TestWithScratchDirCreatesDirectories(t *testing.T) {
 			t.Fatalf("isolated path %s stat=%v info=%#v", path, err, info)
 		}
 	}
+}
+
+func TestInitializeAdvertisesTheFamilyMediaEnvelope(t *testing.T) {
+	meta := initializeMeta(t)
+
+	require.Equal(t, []string{metaMediaEnvelopeKey, ampMetaKey}, sortedMetaKeys(meta))
+
+	envelope, ok := meta[metaMediaEnvelopeKey].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, map[string]any{
+		keyMaxBytes:        int64(921_600),
+		keyMaxPromptBytes:  int64(6_291_456),
+		keyMaxDimension:    int64(8000),
+		keyImageFormats:    []string{imageMIMEPNG, imageMIMEJPEG, imageMIMEGIF, imageMIMEWebP},
+		keyDocumentFormats: []string{},
+	}, envelope)
+}
+
+// TestMediaEnvelopeIsNotConditionedOnRouteSupport pins that Amp advertises the
+// family media envelope while advertising no route surface at all, so a host must
+// never infer one from the other.
+func TestMediaEnvelopeIsNotConditionedOnRouteSupport(t *testing.T) {
+	meta := initializeMeta(t)
+
+	require.NotContains(t, meta, "acp-go.dev/route")
+	require.Contains(t, meta, metaMediaEnvelopeKey)
+}
+
+func TestHandoffAdvertisementFollowsTheConfiguredReadRoot(t *testing.T) {
+	require.NotContains(t, initializeMeta(t), metaHandoffKey)
+
+	meta := initializeMeta(t, WithInputHandoffRoot(t.TempDir()))
+	require.Equal(t, []string{metaHandoffKey, metaMediaEnvelopeKey, ampMetaKey}, sortedMetaKeys(meta))
+	require.Equal(t, map[string]any{keyVersions: []int64{1}}, meta[metaHandoffKey])
+
+	encoded, err := json.Marshal(meta[metaHandoffKey])
+	require.NoError(t, err)
+	require.JSONEq(t, `{"versions":[1]}`, string(encoded))
 }

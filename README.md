@@ -87,8 +87,9 @@ func main() {
 ```
 
 See [Go API docs](docs/reference/go-api.mdx) for options such as the Amp
-executable path, the ephemeral scratch directory (`WithScratchDir`), session
-storage, image byte limits (`WithImageLimits`), and OpenTelemetry providers.
+executable path, the ephemeral scratch directory (`WithScratchDir`), the handoff
+read root (`WithInputHandoffRoot`), session storage, image byte limits
+(`WithImageLimits`), and OpenTelemetry providers.
 Amp has no native config/auth root, so `WithHome`/`-home` is unsupported and
 rejects at session start.
 
@@ -111,9 +112,12 @@ rejects at session start.
   cannot prove escaped descendants absent, and retains a numeric PGID-reuse
   collateral-signalling risk.
 - Prompt streaming for assistant messages, tool calls, and thread results.
-- Embedded static PNG, JPEG, GIF, and WebP prompt input with structural
-  validation before Amp starts. Native inline tool images become typed ACP
-  images; remote Painter attachments become resource links without fetching.
+- Static PNG, JPEG, GIF, and WebP prompt input with structural validation before
+  Amp starts, as embedded base64 or — for a co-located host that sets
+  `WithInputHandoffRoot` — as a digest-verified local file handed over on disk.
+  `initialize` publishes the byte, pixel, and format bounds the adapter actually
+  enforces. Native inline tool images become typed ACP images; remote Painter
+  attachments become resource links without fetching.
 - Stable wrapper-derived message UUIDs on main-agent chunks and terminal prompt
   responses, replayed from the durable Amp transcript mirror.
 - MCP stdio and streamable HTTP configuration; other MCP transports are

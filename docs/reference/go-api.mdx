@@ -42,6 +42,7 @@ unsupported platforms fail closed. `Agent.ContainmentMode()` and
 |---|---|
 | `WithExecutablePath` | Native `amp` executable path. |
 | `WithScratchDir` | Sole parent for all ephemeral on-disk scratch (per-session isolated `HOME`/XDG directories, startup probe directory). Empty falls back to the system temp directory; created `0700` when missing. |
+| `WithInputHandoffRoot` | Absolute read root for the local handoff input form. Read-only, so it is not a materialization root. Unset rejects every handoff-form block. See [Handoff read root](#handoff-read-root). |
 | `WithHome` | Unsupported: Amp has no native config/auth root. Kept on the surface for symmetry; a non-empty value rejects at session start. Use `WithScratchDir`. |
 | `WithDefaultModel` | Accepted for symmetry; non-empty values reject at session start. |
 | `WithEnv` | Environment injected into native processes (e.g. `AMP_API_KEY`). |
@@ -81,10 +82,33 @@ agent := ampacp.NewAgent(ampacp.WithImageLimits(limits))
 
 Zero disables the corresponding adapter policy limit; Amp's 921,600-byte
 input envelope, 8,000-pixel dimension envelope, and the ACP frame bound still
-apply. Negative values reject initialization. See
+apply. Negative values reject initialization. The input fields are what
+`initialize` publishes as `acp-go.dev/mediaEnvelope`
+([Meta](/docs/reference/meta#advertised-capabilities)), so a configured limit
+change is visible to hosts at boot. See
 [Models and config](/docs/features/models-config#image-input) for input
 validation and errors, and [Updates](/docs/reference/updates#image-tool-content)
 for output mapping and failures.
+
+## Handoff read root
+
+`WithInputHandoffRoot(dir string)` enables the local handoff input form for a
+co-located host: an image block may arrive with empty `data`, a `file://` URI
+under `dir`, and a digest envelope, and the adapter reads and verifies those
+bytes instead of decoding embedded base64.
+
+```go
+agent := ampacp.NewAgent(ampacp.WithInputHandoffRoot("/var/lib/host/handoff"))
+```
+
+The path must be absolute; a relative value fails initialization and every
+session start. The directory is a **read** root — the adapter never writes,
+moves, or removes anything beneath it, so it neither materializes state nor
+competes with `WithScratchDir`. Unset is the default and rejects every
+handoff-form block with `invalid_handoff` while withholding the
+`acp-go.dev/handoff` advertisement. See
+[Models and config](/docs/features/models-config#local-handoff-input) for the
+wire shape and verdicts.
 
 ## Amp per-session options
 

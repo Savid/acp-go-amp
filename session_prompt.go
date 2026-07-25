@@ -144,7 +144,7 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (re
 	}
 	defer release()
 
-	input, err := promptInputWithLimits(params.Prompt, s.agent.options.ImageLimits)
+	input, err := promptInputWithPolicy(params.Prompt, s.agent.promptImagePolicy())
 	if err != nil {
 		return acp.PromptResponse{}, err
 	}
@@ -657,18 +657,34 @@ func (s *agentSession) adoptNativeSessionID(ctx context.Context, threadID string
 	return nil
 }
 
-func promptInput(blocks []acp.ContentBlock) (map[string]any, error) {
-	return promptInputWithLimits(blocks, applyOptions(nil).ImageLimits)
+// promptImagePolicy carries the inbound media policy the prompt mapper enforces:
+// the decoded byte limits and the handoff read root.
+type promptImagePolicy struct {
+	limits ImageLimits
+	// handoffRoot is the host-supplied read root for the handoff input form.
+	// Empty rejects every handoff-form block.
+	handoffRoot string
 }
 
-func promptInputWithLimits(blocks []acp.ContentBlock, limits ImageLimits) (map[string]any, error) {
+func (a *Agent) promptImagePolicy() promptImagePolicy {
+	return promptImagePolicy{
+		limits:      a.options.ImageLimits,
+		handoffRoot: a.options.InputHandoffRoot,
+	}
+}
+
+func promptInput(blocks []acp.ContentBlock) (map[string]any, error) {
+	return promptInputWithPolicy(blocks, promptImagePolicy{limits: applyOptions(nil).ImageLimits})
+}
+
+func promptInputWithPolicy(blocks []acp.ContentBlock, policy promptImagePolicy) (map[string]any, error) {
 	// An empty prompt is rejected fail-closed: there is nothing to send to the
 	// native harness, so accepting it would spend a turn on silence.
 	if len(blocks) == 0 {
 		return nil, acp.NewInvalidParams(map[string]any{jsonFieldError: valUnsupported, jsonFieldField: fieldPrompt})
 	}
 
-	imageBudget := imagePromptBudget{limits: limits}
+	imageBudget := imagePromptBudget{limits: policy.limits, handoffRoot: policy.handoffRoot}
 
 	content := make([]map[string]any, 0, len(blocks))
 	for _, block := range blocks {
@@ -676,7 +692,9 @@ func promptInputWithLimits(blocks []acp.ContentBlock, limits ImageLimits) (map[s
 		case block.Text != nil:
 			content = append(content, map[string]any{keyType: valText, valText: block.Text.Text})
 		case block.Image != nil:
-			image, err := imageBudget.validate(block.Image.Data, block.Image.MimeType)
+			// Both input forms converge here as base64 on the native message, so a
+			// handoff path is never part of the request Amp receives.
+			image, err := imageBudget.validateImageBlock(block.Image)
 			if err != nil {
 				return nil, err
 			}
@@ -749,8 +767,17 @@ func embeddedResourceContent(resource acp.EmbeddedResourceResource, imageBudget 
 
 	if resource.BlobResourceContents != nil {
 		blob := resource.BlobResourceContents
-		if blob.MimeType != nil && strings.HasPrefix(*blob.MimeType, "image/") {
-			image, err := imageBudget.validate(blob.Blob, *blob.MimeType)
+
+		declared := ""
+		if blob.MimeType != nil {
+			declared = *blob.MimeType
+		}
+
+		// A declaration that claims a raster type is routed into the image gates
+		// whatever its case or parameters, so image bytes cannot reach the untyped
+		// channel below and bypass the native envelope.
+		if declaresRasterMediaType(declared) {
+			image, err := imageBudget.validate(blob.Blob, declared)
 			if err != nil {
 				return nil, err
 			}
@@ -759,15 +786,22 @@ func embeddedResourceContent(resource acp.EmbeddedResourceResource, imageBudget 
 				keyType: valImage,
 				keySource: map[string]any{
 					keyType:      valBase64,
-					keyMediaType: *blob.MimeType,
+					keyMediaType: declared,
 					keyData:      image.base64,
 				},
 			}, nil
 		}
 
+		// A blob that declares no raster type still reaches Amp as bytes, so it
+		// spends the same decoded budget: valid base64, the per-image bound, and
+		// the per-prompt aggregate.
+		if err := imageBudget.admitBlob(blob.Blob); err != nil {
+			return nil, err
+		}
+
 		parts := []string{"Embedded resource", "URI: " + blob.Uri}
-		if blob.MimeType != nil && *blob.MimeType != "" {
-			parts = append(parts, "MIME: "+*blob.MimeType)
+		if declared != "" {
+			parts = append(parts, "MIME: "+declared)
 		}
 
 		parts = append(parts, "", "Base64 content:", blob.Blob)

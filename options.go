@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -119,7 +120,11 @@ type Options struct {
 	// (per-session isolated HOME/XDG dirs, startup probe dirs, any temp). Empty
 	// falls back to the system temp directory. See WithScratchDir.
 	ScratchDir string
-	Env        map[string]string
+	// InputHandoffRoot is the read root for the local handoff input form. It
+	// materializes nothing, so it is not a materialization root. Empty rejects
+	// every handoff-form image block. See WithInputHandoffRoot.
+	InputHandoffRoot string
+	Env              map[string]string
 
 	Logger            *slog.Logger
 	TracerProvider    trace.TracerProvider
@@ -269,6 +274,24 @@ func WithHome(path string) Option {
 func WithScratchDir(dir string) Option {
 	return func(options *Options) {
 		options.ScratchDir = dir
+	}
+}
+
+// WithInputHandoffRoot sets the read root for the local handoff input form. An
+// image content block may arrive with empty data, a file URI naming a path under
+// this directory, and an _meta "acp-go.dev/handoff" envelope carrying the sha256
+// digest and byte size of the referenced file; the wrapper then reads and
+// verifies those bytes instead of decoding embedded base64. The directory must
+// be absolute.
+//
+// It is a read root only: the wrapper never writes, moves, or removes anything
+// under it, so it is not an ephemeral-materialization root and does not compete
+// with WithScratchDir. Leaving it unset withholds the handoff capability
+// advertisement at initialize and rejects every handoff-form block with the
+// uniform invalid_handoff input error.
+func WithInputHandoffRoot(dir string) Option {
+	return func(options *Options) {
+		options.InputHandoffRoot = dir
 	}
 }
 
@@ -507,6 +530,18 @@ func validateContainmentOptions(options Options) error {
 		if strings.HasPrefix(strings.ToUpper(key), privateEnvPrefix) {
 			return fmt.Errorf("environment key %q uses the reserved %s prefix", key, privateEnvPrefix)
 		}
+	}
+
+	return nil
+}
+
+// validateInputHandoffRoot rejects a relative handoff read root. Containment
+// checks are meaningless against a root whose meaning depends on the process
+// working directory, so a relative value is a configuration error rather than a
+// per-block verdict.
+func validateInputHandoffRoot(root string) error {
+	if root != "" && !filepath.IsAbs(root) {
+		return errors.New("input handoff root must be an absolute path")
 	}
 
 	return nil
