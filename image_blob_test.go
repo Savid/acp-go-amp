@@ -312,3 +312,27 @@ func promptContentText(t *testing.T, input map[string]any) string {
 
 	return strings.Join(parts, "\n")
 }
+
+// TestTextResourceBytesCountTowardPromptAggregate pins that declaring bytes as
+// text rather than as a blob buys a prompt no more of them than the aggregate
+// allows: a text resource is flattened into the prompt verbatim, so it is charged
+// to the one accumulator every other inbound payload is charged to.
+func TestTextResourceBytesCountTowardPromptAggregate(t *testing.T) {
+	text := strings.Repeat("a", 4096)
+	blocks := []acp.ContentBlock{
+		acp.ResourceBlock(acp.EmbeddedResourceResource{TextResourceContents: &acp.TextResourceContents{
+			Uri: "file:///notes.txt", Text: text,
+		}}),
+	}
+
+	input, err := promptInputWithPolicy(t.Context(), blocks,
+		promptImagePolicy{limits: ImageLimits{MaxInputBytesPerPrompt: int64(len(text))}})
+	require.NoError(t, err)
+	require.Contains(t, promptContentText(t, input), text)
+
+	_, err = promptInputWithPolicy(t.Context(), blocks,
+		promptImagePolicy{limits: ImageLimits{MaxInputBytesPerPrompt: int64(len(text)) - 1}})
+	requireInvalidParamsData(t, err, resourceSizeErrorData(
+		0, imageErrorTooLarge, int64(len(text)), int64(len(text))-1,
+	))
+}
