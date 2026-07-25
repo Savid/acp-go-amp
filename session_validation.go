@@ -11,8 +11,8 @@ import (
 )
 
 func (a *Agent) validateSessionStartOptions(options AmpOptions) error {
-	if a.configurationErr != nil {
-		return acp.NewInvalidParams(map[string]any{jsonFieldError: a.configurationErr.Error()})
+	if optionsErr := a.optionsError(); optionsErr != nil {
+		return optionsErr
 	}
 
 	// Amp has no native config/auth root, so any configured Home is rejected

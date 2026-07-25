@@ -79,9 +79,11 @@ block with empty `data`, a `file://` URI naming a path under that root, and an
 }
 ```
 
-The adapter resolves the path with symlink-safe containment, requires a regular
-file inside the root, reads at most the effective per-image bound, and verifies
-that the bytes hash to the declared digest before anything else looks at them.
+The adapter opens the path relative to the read root, so containment is enforced
+by the kernel as part of the open, requires the opened descriptor to be a regular
+file, reads at most one byte past the declared size, and verifies that the bytes
+match that size and hash to the declared digest before anything else looks at
+them.
 Verified bytes then pass the same gate chain an embedded image passes, count
 toward the same per-prompt aggregate, and reach Amp as the same base64 source —
 a handoff turn and an embedded turn over the same bytes build byte-identical
@@ -156,7 +158,7 @@ carries a `message` naming the real cause:
 | `error` | Meaning |
 |---|---|
 | `invalid_handoff` | the block is malformed as a block: no read root configured, a missing, non-object, unknown-field, wrong-version, bad-digest or bad-size envelope, or a URI that is absent, unparseable, not `file://`, remote-hosted, or not absolute |
-| `path_not_allowed` | the path resolves outside the read root, escapes it through a symlink, or is not a regular file |
+| `path_not_allowed` | the path lies outside the read root, is reached through a symlink the root refuses (any absolute symlink, or one leading out of the root), or does not name a regular file |
 | `missing_file` | the path is inside the root but absent, unopenable, or unreadable — the expected outcome when a host cleans up early |
 | `handoff_digest_mismatch` | the file's byte count or sha256 disagrees with the envelope; the adapter fails closed and never falls back to another transport |
 

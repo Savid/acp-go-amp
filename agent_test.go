@@ -421,6 +421,19 @@ func TestAgentErrorAndConformanceBranches(t *testing.T) {
 	if err := configurationAgent.validateSessionStartOptions(AmpOptions{}); err == nil {
 		t.Fatal("configuration error was ignored")
 	}
+	// Session establishment reports every option failure initialize reports, so
+	// an embedded host that never handshakes cannot open a session on limits that
+	// failed validation at construction.
+	limitPath, _ := fakeAgentAmpPath(t, "")
+	limitAgent := newTestAgent(
+		WithExecutablePath(limitPath),
+		WithScratchDir(t.TempDir()),
+		WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: -1}),
+	)
+	if _, err := limitAgent.NewSession(context.Background(), NewSessionRequest(t.TempDir())); err == nil ||
+		!strings.Contains(err.Error(), "max active sessions must be non-negative") {
+		t.Fatalf("concurrency limit error at session start = %v", err)
+	}
 	if err := newTestAgent().validateSessionStartOptions(AmpOptions{Env: map[string]string{"acp_go_amp_internal_bad": "value"}}); err == nil {
 		t.Fatal("reserved session environment was accepted")
 	}

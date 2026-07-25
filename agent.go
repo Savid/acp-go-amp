@@ -176,12 +176,25 @@ func (a *Agent) Close() error {
 	return a.closeErr
 }
 
+// optionsError reports every construction-time option failure as one uniform
+// invalid-params error, or nil when all of them validated. Both the handshake
+// and session establishment report it, because an embedded host can open a
+// session and prompt without ever calling initialize.
+func (a *Agent) optionsError() error {
+	configurationErr := errors.Join(a.activeLimitErr, a.configurationErr)
+	if configurationErr == nil {
+		return nil
+	}
+
+	return acp.NewInvalidParams(map[string]any{jsonFieldError: configurationErr.Error()})
+}
+
 func (a *Agent) Initialize(ctx context.Context, params acp.InitializeRequest) (resp acp.InitializeResponse, err error) {
 	_, finish := a.observe.StartACPRequest(ctx, acp.AgentMethodInitialize)
 	defer func() { finish(err) }()
 
-	if configurationErr := errors.Join(a.activeLimitErr, a.configurationErr); configurationErr != nil {
-		return acp.InitializeResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldError: configurationErr.Error()})
+	if optionsErr := a.optionsError(); optionsErr != nil {
+		return acp.InitializeResponse{}, optionsErr
 	}
 
 	if sweepErr := a.sweepExpiredImageArtifacts(ctx); sweepErr != nil {
