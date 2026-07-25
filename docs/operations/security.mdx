@@ -21,16 +21,19 @@ native state or the operator's real `~/.config/amp`.
 `WithInputHandoffRoot` is the only directory an ACP client can point the adapter
 at for reads, and it is opt-in: unset, no inbound path is readable at all.
 
+- The block's own declaration is judged first: an unallowlisted media type, and
+  then a declared size above the effective per-image byte limit, are refused
+  before the root is opened at all. A refusal on the declaration therefore
+  reveals nothing about whether the file it named exists.
 - Containment is enforced by the kernel: the root is opened once per prompt and
   every file is opened relative to that descriptor, so a name leading out of the
   root — including through a symlink — is refused as part of the open itself.
 - The opened descriptor must be a regular file, because a root bounds where a
   name may lead and not what kind of object it names, so a device node or FIFO
   under the root is rejected rather than read.
-- A declared size above the effective per-image byte limit is rejected without
-  opening anything, reads stop one byte past the size the block declared, and
-  the bytes must match that size and hash to the digest the client declared
-  before anything else uses them.
+- Reads stop one byte past the size the block declared, and the bytes must match
+  that size and hash to the digest the client declared before anything else uses
+  them.
 - The root is never written to, and nothing under it is moved or removed. The
   path is not recorded in the native request, the transcript, raw events, or
   logs.

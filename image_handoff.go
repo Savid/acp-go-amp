@@ -141,9 +141,9 @@ func promptHandoffIntent(block *acp.ContentBlockImage) bool {
 }
 
 // handoffBytes runs the handoff pre-gate for one image block: the per-prompt
-// block count, envelope and uri strictness, the name's position under the read
-// root, the declared media type, the declared size against the per-image bounds,
-// a bounded root-relative read, then digest verification.
+// block count, envelope and uri strictness, the declared media type, the
+// declared size against the per-image bounds, the name's position under the read
+// root, a bounded root-relative read, then digest verification.
 //
 // Verdicts are ordered so a host can tell a malformed block (invalid_handoff)
 // from a path it may not read (path_not_allowed), from a file the host already
@@ -175,6 +175,20 @@ func (b *imagePromptBudget) handoffBytes(ctx context.Context, block *acp.Content
 		return nil, failure
 	}
 
+	// The declaration is judged in full before the filesystem is consulted at all,
+	// as the declared type is in the embedded form. A block this adapter was never
+	// going to accept costs it no open, no read and no hash, and its refusal cannot
+	// report whether the path it named exists.
+	if !isPromptImageMIME(block.MimeType) {
+		return nil, &handoffError{value: imageErrorInvalidMediaType}
+	}
+
+	// The size gate reads the caller's own declaration, so an oversize handoff is
+	// rejected without measuring a file the caller may not be entitled to measure.
+	if oversize := b.declaredSizeVerdict(envelope.sizeBytes); oversize != nil {
+		return nil, oversize
+	}
+
 	rel, failure := promptHandoffRelativePath(b.handoffRoot, requested)
 	if failure != nil {
 		return nil, failure
@@ -183,20 +197,6 @@ func (b *imagePromptBudget) handoffBytes(ctx context.Context, block *acp.Content
 	root, failure := b.handoffRootHandle()
 	if failure != nil {
 		return nil, failure
-	}
-
-	// The declared type is judged before a byte is read, as it is in the embedded
-	// form, so a block this adapter was never going to accept costs it no read and
-	// no hash.
-	if !isPromptImageMIME(block.MimeType) {
-		return nil, &handoffError{value: imageErrorInvalidMediaType}
-	}
-
-	// The size gate reads the caller's own declaration, so an oversize handoff is
-	// rejected before anything is opened and without measuring a file the caller
-	// may not be entitled to measure.
-	if oversize := b.declaredSizeVerdict(envelope.sizeBytes); oversize != nil {
-		return nil, oversize
 	}
 
 	data, failure := readPromptHandoffBytes(ctx, root, rel, envelope.sizeBytes)

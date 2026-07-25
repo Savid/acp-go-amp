@@ -767,6 +767,32 @@ func TestHandoffGateChainMirrorsTheEmbeddedForm(t *testing.T) {
 	})
 }
 
+// TestHandoffDeclaredMediaTypeIsJudgedBeforeTheFilesystem pins the pre-gate
+// order: a declaration this adapter was never going to accept costs it no open,
+// no read and no hash. The absent name proves the verdict needs no file at all;
+// the name outside the root proves the declared type outranks the location, so a
+// bad-MIME probe cannot learn whether the file it named is there.
+func TestHandoffDeclaredMediaTypeIsJudgedBeforeTheFilesystem(t *testing.T) {
+	root := t.TempDir()
+	validPNG := imageFixture(t, "valid.png")
+	outside := writeHandoffFile(t, t.TempDir(), "outside.png", validPNG)
+
+	for _, test := range []struct {
+		name string
+		path string
+	}{
+		{name: "the name does not exist", path: filepath.Join(root, "absent.png")},
+		{name: "the name leaves the root", path: outside},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := promptInputWithPolicy(t.Context(), []acp.ContentBlock{
+				handoffBlock(test.path, "image/svg+xml", validPNG),
+			}, handoffPolicy(root, applyOptions(nil).ImageLimits))
+			requireInvalidParamsData(t, err, imageErrorData(0, imageErrorInvalidMediaType))
+		})
+	}
+}
+
 // TestHandoffOversizeReadIsRejectedWithoutForwardingBytes pins that no unverified
 // byte survives the read: a size the caller itself declared past the gate is
 // refused before anything is opened, and a file holding more than it was declared
@@ -777,18 +803,22 @@ func TestHandoffOversizeReadIsRejectedWithoutForwardingBytes(t *testing.T) {
 
 	t.Run("a declared size past the gate is rejected before anything is opened", func(t *testing.T) {
 		root := t.TempDir()
+		outside := writeHandoffFile(t, t.TempDir(), "outside.png", validPNG)
 
-		// No file is written, so the only thing that can produce a size verdict
-		// here is the caller's own declaration.
-		block := handoffBlockWithEnvelope(filepath.Join(root, "valid.png"), imageMIMEPNG, map[string]any{
-			handoffFieldVersion:   handoffVersion,
-			handoffFieldDigest:    handoffDigest(validPNG),
-			handoffFieldSizeBytes: int(bound + 1),
-		})
+		// No file is written inside the root and the second name would be refused
+		// for its location, so the only thing that can produce a size verdict for
+		// either is the caller's own declaration.
+		for _, path := range []string{filepath.Join(root, "valid.png"), outside} {
+			block := handoffBlockWithEnvelope(path, imageMIMEPNG, map[string]any{
+				handoffFieldVersion:   handoffVersion,
+				handoffFieldDigest:    handoffDigest(validPNG),
+				handoffFieldSizeBytes: int(bound + 1),
+			})
 
-		_, err := promptInputWithPolicy(t.Context(), []acp.ContentBlock{block},
-			handoffPolicy(root, ImageLimits{MaxInputBytesPerImage: bound}))
-		requireInvalidParamsData(t, err, imageSizeErrorData(0, imageErrorTooLarge, bound+1, bound))
+			_, err := promptInputWithPolicy(t.Context(), []acp.ContentBlock{block},
+				handoffPolicy(root, ImageLimits{MaxInputBytesPerImage: bound}))
+			requireInvalidParamsData(t, err, imageSizeErrorData(0, imageErrorTooLarge, bound+1, bound))
+		}
 	})
 
 	t.Run("a file larger than its declaration forwards nothing", func(t *testing.T) {

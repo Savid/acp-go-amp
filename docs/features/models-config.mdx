@@ -79,11 +79,13 @@ block with empty `data`, a `file://` URI naming a path under that root, and an
 }
 ```
 
-The adapter opens the path relative to the read root, so containment is enforced
-by the kernel as part of the open, requires the opened descriptor to be a regular
-file, reads at most one byte past the declared size, and verifies that the bytes
-match that size and hash to the declared digest before anything else looks at
-them.
+The declared media type and the declared size are judged first, from the block
+alone, so a block that fails either is refused before the read root is opened at
+all and its refusal says nothing about whether the named file exists. The adapter
+then opens the path relative to the read root, so containment is enforced by the
+kernel as part of the open, requires the opened descriptor to be a regular file,
+reads at most one byte past the declared size, and verifies that the bytes match
+that size and hash to the declared digest before anything else looks at them.
 Verified bytes then pass the same gate chain an embedded image passes, count
 toward the same per-prompt aggregate, and reach Amp as the same base64 source —
 a handoff turn and an embedded turn over the same bytes build byte-identical
