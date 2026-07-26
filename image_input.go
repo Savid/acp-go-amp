@@ -52,9 +52,11 @@ const (
 	// per commit rather than per thread, so a long thread has less headroom than
 	// a fresh one; 300 pages is the conservative pin.
 	//
-	// The amp CLI's own 5,138,022-byte (4.9 MiB) check is a client-side
-	// pre-flight in a different enforcement layer, not a service maximum, and is
-	// far too loose to protect this path.
+	// The 4.9 MiB figure sometimes quoted for Amp images is not a published
+	// limit: it is a 5,138,022.4-byte constant read out of the shipped amp CLI's
+	// minified bundle, so it is a client-side pre-flight in a different
+	// enforcement layer rather than a service maximum, and it is far too loose
+	// to protect this path.
 	ampNativeMaxImageBytes     int64  = 921_600
 	ampNativeMaxImageDimension uint32 = 8000
 )

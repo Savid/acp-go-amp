@@ -56,8 +56,10 @@ store that caps one commit at 1,310,720 bytes of dirty data, and an image is
 stored as inline base64, so an append whose base64 crosses that cap fails with
 an untyped internal error instead of a typed size rejection. 921,600 decoded
 bytes is 1,228,800 base64 bytes — 300 of the 320 available four-kilobyte pages —
-which leaves the rest of the commit room to land. The amp CLI's own 4.9 MiB
-pre-flight check is a separate client-side bound, not the service ceiling.
+which leaves the rest of the commit room to land. The 4.9 MiB figure sometimes
+quoted for Amp images is not a published limit — it is a constant carried in the
+shipped amp CLI's minified bundle, a separate client-side pre-flight rather than
+the service ceiling.
 
 <Note>
 The cap applies per commit, not per thread, so a long thread has less headroom
