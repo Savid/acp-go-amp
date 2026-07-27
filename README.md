@@ -88,7 +88,8 @@ func main() {
 
 See [Go API docs](docs/reference/go-api.mdx) for options such as the Amp
 executable path, the ephemeral scratch directory (`WithScratchDir`), the handoff
-read root (`WithInputHandoffRoot`), session storage, image byte limits
+read root (`WithInputHandoffRoot`), the provider-auth ledger root
+(`WithProviderAuthRoot`), session storage, image byte limits
 (`WithImageLimits`), and OpenTelemetry providers.
 Amp has no native config/auth root, so `WithHome`/`-home` is unsupported and
 rejects at session start.
@@ -128,6 +129,12 @@ rejects at session start.
   permission, so the adapter never sends `session/request_permission`.
 - No fork surface; `_amp/session/fork` is unsupported and `session/fork`
   returns method-not-found.
+- An owner-driven Amp login behind eight session-scoped `_amp/auth/*` methods,
+  advertised only while `WithProviderAuthRoot`/`-provider-auth-root` names a
+  usable durable directory. The catalog is the one Amp account entry, the
+  hosted paste-back URL is relayed for the owner to approve, and the resulting
+  opaque key is harvested once and redelivered as `AMP_API_KEY`. `disconnect`
+  releases the ledger slot and promises no Amp-side revocation.
 - Durable mirroring through a host-provided `SessionStore`; ordinary frames are
   retained under `transcript`, while image-bearing tool frames use canonical
   artifact references backed by `_artifacts/images/` records.
@@ -153,7 +160,14 @@ make audit
 make test-integration-smoke
 make test-integration-live
 make test-integration-cover
+make test-integration-attended
+make test-integration-keystore
 ```
+
+`test-integration-attended` drives one real Amp login and needs a human to
+approve it; `test-integration-keystore` proves where a brokered credential is
+resident and needs a container runtime. Neither joins `make audit`, and each
+fails rather than skips once its own gate is set.
 
 Live integration tests require a local authenticated `amp` CLI. The live target
 sets `ACP_GO_AMP_RUN_INTEGRATION=1` and `ACP_GO_AMP_RUN_LIVE_TOKENS=1` and may

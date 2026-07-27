@@ -1,0 +1,491 @@
+package amp
+
+import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/url"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"sync"
+)
+
+const (
+	authLoginSubcommand = "login"
+
+	authSecretsDirName = "amp"
+	// authSecretsFileName holds the flat single-key object amp writes its
+	// account credential into under XDG_DATA_HOME.
+	authSecretsFileName = "secrets.json"
+	// authSecretEntryKey is the only entry of that object this package reads.
+	// Every other key belongs to amp and is dropped rather than forwarded.
+	//nolint:gosec // G101 false positive: this is amp's store key name, not a credential.
+	authSecretEntryKey = "apiKey@https://ampcode.com/"
+
+	// authNativeSecretsSetting moves the account credential from the file store
+	// to the OS keystore, where the item is keyed by hostname alone. Only this
+	// exact namespaced spelling resolves — the bare dotted key and both nested
+	// forms are ignored — and it is read at global scope, which is the settings
+	// file this package writes.
+	authNativeSecretsSetting = "amp.experimental.cli.nativeSecretsStorage.enabled"
+
+	//nolint:gosec // G101 false positive: this is an environment variable name, not a credential.
+	authAPIKeyEnv        = "AMP_API_KEY"
+	authHeadlessOAuthEnv = "AMP_HEADLESS_OAUTH"
+	authBrowserEnv       = "BROWSER"
+	// authBrowserNoop is what the launcher execs in place of a browser. `amp
+	// login` opens one with no suppression flag, and the browser writes its
+	// profile — cookie jar included — into the same root this package reads the
+	// credential from.
+	authBrowserNoop = "/bin/true"
+
+	// AuthURLHost is the only host a relayed authorization URL may name.
+	AuthURLHost = "ampcode.com"
+
+	dataHomeEnv = "XDG_DATA_HOME"
+
+	authURLScanLimit = 64 * 1024
+)
+
+// authSettingsDocument asserts the native-secrets flag false. The wrapper owns
+// the settings file it points amp at, and no managed file can override this
+// value: the admin layer wins only for an explicit "admin" scope or a scopeless
+// read, while this flag is read at "global" scope.
+var authSettingsDocument = []byte("{\n  \"" + authNativeSecretsSetting + "\": false\n}\n")
+
+var (
+	authReadFile  = os.ReadFile
+	authOpenPipe  = os.Pipe
+	errAuthNoURL  = errors.New("amp login printed no authorization URL")
+	errAuthSecret = errors.New("amp account secret is not a non-empty string")
+)
+
+// AuthSettingsDocument returns the settings body every session writes.
+func AuthSettingsDocument() []byte {
+	return authSettingsDocument
+}
+
+// AuthFileStoreAsserted reports whether the settings file still resolves the
+// native-secrets flag to false. An absent, malformed, or true value is not an
+// assertion, and the caller fails closed on it rather than reading a store it
+// cannot prove is authoritative.
+func AuthFileStoreAsserted(settingsFile string) (bool, error) {
+	contents, err := authReadFile(settingsFile)
+	if err != nil {
+		return false, fmt.Errorf("read amp settings file: %w", err)
+	}
+
+	var settings map[string]json.RawMessage
+	if err := json.Unmarshal(contents, &settings); err != nil {
+		return false, fmt.Errorf("decode amp settings file: %w", err)
+	}
+
+	raw, ok := settings[authNativeSecretsSetting]
+	if !ok {
+		return false, nil
+	}
+
+	var enabled bool
+	if err := json.Unmarshal(raw, &enabled); err != nil {
+		return false, nil //nolint:nilerr // a non-boolean value is not an assertion, and this reports assertion rather than decode success.
+	}
+
+	return !enabled, nil
+}
+
+// AuthSecretsPath is the exact file the credential leg reads. Nothing else
+// under the data home is read: `amp login` launches a browser that writes its
+// own profile there, so the root holds more than this package put in it.
+func AuthSecretsPath(dataHome string) string {
+	return filepath.Join(dataHome, authSecretsDirName, authSecretsFileName)
+}
+
+// AuthReadSecret reads the single account entry out of the isolated data home.
+// A missing file and a missing entry are both absence; a present entry that is
+// not a non-empty string is a decode failure.
+func AuthReadSecret(dataHome string) (string, bool, error) {
+	contents, err := authReadFile(AuthSecretsPath(dataHome))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", false, nil
+		}
+
+		return "", false, fmt.Errorf("read amp secrets: %w", err)
+	}
+
+	var secrets map[string]json.RawMessage
+	if err := json.Unmarshal(contents, &secrets); err != nil {
+		return "", false, fmt.Errorf("decode amp secrets: %w", err)
+	}
+
+	raw, ok := secrets[authSecretEntryKey]
+	if !ok {
+		return "", false, nil
+	}
+
+	var secret string
+	if err := json.Unmarshal(raw, &secret); err != nil || secret == "" {
+		return "", false, errAuthSecret
+	}
+
+	return secret, true, nil
+}
+
+// AuthSecretPresent probes the named slot for non-empty presence.
+func AuthSecretPresent(dataHome string) (bool, error) {
+	_, present, err := AuthReadSecret(dataHome)
+
+	return present, err
+}
+
+// AuthLogin is one running `amp login`. It owns the child's containment
+// boundary, its pipes, and the single authorization URL it printed.
+type AuthLogin struct {
+	tree     *processTree
+	stdin    io.WriteCloser
+	stdout   io.ReadCloser
+	stderr   io.ReadCloser
+	wait     *commandWait
+	url      chan string
+	dataHome string
+
+	stdinOnce sync.Once
+	stdinErr  error
+	closeOnce sync.Once
+	closeErr  error
+	onPanic   func(ctx context.Context, name string, recovered any)
+}
+
+// StartAuthLogin launches the hosted paste-back login in the client's isolated
+// data home. AMP_HEADLESS_OAUTH forces the headless leg outright rather than
+// relying on amp's TTY heuristic, and AMP_API_KEY is removed: with one set,
+// `amp login` copies the ambient value into the store and exits without
+// starting a flow at all, which would hand an environment-supplied credential
+// back as a brokered one.
+func (c *Client) StartAuthLogin(ctx context.Context) (*AuthLogin, error) {
+	path, err := Discover(ctx, c.options.CLIPath)
+	if err != nil {
+		return nil, err
+	}
+
+	cmd := commandContext(context.Background(), path, c.authLoginArgs()...)
+
+	cmd.Dir = c.options.Cwd
+	if cmd.Dir == "" {
+		cmd.Dir, err = getwd()
+		if err != nil {
+			return nil, fmt.Errorf("get working directory: %w", err)
+		}
+	}
+
+	cmd.Env = authLoginEnv(c.options.Env, cmd.Dir)
+
+	launch, err := c.prepareProcessLaunch(ctx, cmd)
+	if err != nil {
+		return nil, fmt.Errorf("amp login: %w", err)
+	}
+
+	// Read the residence off the environment the containment boundary settled
+	// on, not the one this package asked for: a boundary that relaunches the
+	// child through a wrapper carries the native environment elsewhere.
+	dataHome := environmentMap(cmd.Env)[dataHomeEnv]
+
+	pipes, err := newAuthLoginPipes()
+	if err != nil {
+		return nil, errors.Join(err, launch.close())
+	}
+
+	cmd = launch.cmd
+	cmd.Stdin = pipes.stdinReader
+	cmd.Stdout = pipes.stdoutWriter
+	cmd.Stderr = pipes.stderrWriter
+	cmd.WaitDelay = defaultCloseKillAfter
+
+	tree, err := startProcessTree(launch)
+	if err != nil {
+		pipes.closeAll()
+
+		return nil, fmt.Errorf("start amp login: %w", err)
+	}
+
+	pipes.closeChildSide()
+
+	login := &AuthLogin{
+		tree:     tree,
+		stdin:    pipes.stdin,
+		stdout:   pipes.stdout,
+		stderr:   pipes.stderr,
+		wait:     tree.commandWait(),
+		url:      make(chan string, 1),
+		dataHome: dataHome,
+		onPanic:  c.options.OnGoroutinePanic,
+	}
+
+	go login.readStdout(ctx)
+	go login.drainStderr(ctx)
+
+	return login, nil
+}
+
+func (c *Client) authLoginArgs() []string {
+	args := []string{ampArgNoIDE, ampArgNoColor, ampArgNoNotifications}
+	if c.options.SettingsFile != "" {
+		args = append(args, ampArgSettingsFile, c.options.SettingsFile)
+	}
+
+	return append(args, authLoginSubcommand)
+}
+
+// authLoginEnv builds the login child's environment: the session's own values
+// plus the headless and browser-neutralising overrides, with the ambient API
+// key removed however it arrived.
+func authLoginEnv(base map[string]string, cwd string) []string {
+	overrides := make(map[string]string, len(base)+2)
+	for key, value := range base {
+		overrides[key] = value
+	}
+
+	overrides[authHeadlessOAuthEnv] = "1"
+	overrides[authBrowserEnv] = authBrowserNoop
+
+	env := BuildEnv(overrides, cwd)
+
+	kept := make([]string, 0, len(env))
+
+	for _, entry := range env {
+		if key, _, ok := strings.Cut(entry, "="); ok && key == authAPIKeyEnv {
+			continue
+		}
+
+		kept = append(kept, entry)
+	}
+
+	return kept
+}
+
+type authLoginPipes struct {
+	stdinReader  *os.File
+	stdin        *os.File
+	stdout       *os.File
+	stdoutWriter *os.File
+	stderr       *os.File
+	stderrWriter *os.File
+}
+
+func newAuthLoginPipes() (*authLoginPipes, error) {
+	pipes := &authLoginPipes{}
+
+	stdinReader, stdin, err := authOpenPipe()
+	if err != nil {
+		return nil, fmt.Errorf("create amp login stdin: %w", err)
+	}
+
+	pipes.stdinReader, pipes.stdin = stdinReader, stdin
+
+	stdout, stdoutWriter, err := authOpenPipe()
+	if err != nil {
+		pipes.closeAll()
+
+		return nil, fmt.Errorf("create amp login stdout: %w", err)
+	}
+
+	pipes.stdout, pipes.stdoutWriter = stdout, stdoutWriter
+
+	stderr, stderrWriter, err := authOpenPipe()
+	if err != nil {
+		pipes.closeAll()
+
+		return nil, fmt.Errorf("create amp login stderr: %w", err)
+	}
+
+	pipes.stderr, pipes.stderrWriter = stderr, stderrWriter
+
+	return pipes, nil
+}
+
+func (p *authLoginPipes) closeChildSide() {
+	for _, file := range []*os.File{p.stdinReader, p.stdoutWriter, p.stderrWriter} {
+		if file != nil {
+			_ = file.Close()
+		}
+	}
+}
+
+func (p *authLoginPipes) closeAll() {
+	p.closeChildSide()
+
+	for _, file := range []*os.File{p.stdin, p.stdout, p.stderr} {
+		if file != nil {
+			_ = file.Close()
+		}
+	}
+}
+
+func (l *AuthLogin) recoverGoroutine(ctx context.Context, name string) {
+	if l.onPanic == nil {
+		return
+	}
+
+	if recovered := recover(); recovered != nil {
+		l.onPanic(ctx, name, recovered)
+	}
+}
+
+// readStdout publishes the first line that is a valid authorization URL and
+// keeps draining afterwards so the child never blocks on a full pipe. The URL
+// is validated as a URL before anything else looks at the line, so output the
+// harness wraps or reflows yields no URL rather than the wrong bytes.
+func (l *AuthLogin) readStdout(ctx context.Context) {
+	defer l.recoverGoroutine(ctx, "amp login stdout reader")
+	defer close(l.url)
+
+	scanner := bufio.NewScanner(l.stdout)
+	scanner.Buffer(make([]byte, 0, 4096), authURLScanLimit)
+
+	found := false
+
+	for scanner.Scan() {
+		if found {
+			continue
+		}
+
+		candidate := strings.TrimSpace(scanner.Text())
+		if !authLoginURL(candidate) {
+			continue
+		}
+
+		found = true
+
+		l.url <- candidate
+	}
+}
+
+// drainStderr consumes the child's stderr and forwards none of it. A native
+// login failure line can quote the value the owner pasted.
+func (l *AuthLogin) drainStderr(ctx context.Context) {
+	defer l.recoverGoroutine(ctx, "amp login stderr drain")
+
+	_, _ = io.Copy(io.Discard, l.stderr)
+}
+
+func authLoginURL(candidate string) bool {
+	parsed, err := url.Parse(candidate)
+
+	return err == nil && parsed.Scheme == "https" && parsed.Host == AuthURLHost
+}
+
+// DataHome reports where this login's credential actually lands. It is the
+// session's isolated data home on a platform whose containment boundary leaves
+// the environment alone, and the per-command generation root on one that
+// redirects it — so the residence is read off the child that wrote it rather
+// than assumed from the session.
+func (l *AuthLogin) DataHome() string {
+	return l.dataHome
+}
+
+// URL waits for the authorization URL the child printed.
+func (l *AuthLogin) URL(ctx context.Context) (string, error) {
+	select {
+	case value, ok := <-l.url:
+		if !ok {
+			return "", errAuthNoURL
+		}
+
+		return value, nil
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+}
+
+// Submit hands the owner's pasted value to the child and waits for it to
+// settle. The value carries the account credential in the clear, so it is
+// written straight through and retained nowhere.
+func (l *AuthLogin) Submit(ctx context.Context, input string) error {
+	if _, err := l.stdin.Write([]byte(input + "\n")); err != nil {
+		return fmt.Errorf("submit amp login input: %w", err)
+	}
+
+	if err := l.closeStdin(); err != nil {
+		return err
+	}
+
+	waitErr, completed := l.wait.await(ctx)
+	if !completed {
+		return fmt.Errorf("wait for amp login: %w", waitErr)
+	}
+
+	if waitErr != nil {
+		return fmt.Errorf("amp login: %w", waitErr)
+	}
+
+	return nil
+}
+
+// Settled reports whether the child has exited without blocking on it, which is
+// how a login that completed on its own is discovered.
+func (l *AuthLogin) Settled() (bool, error) {
+	select {
+	case <-l.wait.done:
+		if l.wait.err != nil {
+			return true, fmt.Errorf("amp login: %w", l.wait.err)
+		}
+
+		return true, nil
+	default:
+		return false, nil
+	}
+}
+
+func (l *AuthLogin) closeStdin() error {
+	l.stdinOnce.Do(func() {
+		if err := l.stdin.Close(); err != nil {
+			l.stdinErr = fmt.Errorf("close amp login stdin: %w", err)
+		}
+	})
+
+	return l.stdinErr
+}
+
+// Close terminates the login child through the selected containment boundary
+// and releases every descriptor. An interrupted child's exit status is an
+// expected outcome and is not reported as a failure.
+func (l *AuthLogin) Close() error {
+	l.closeOnce.Do(func() {
+		killErr := l.tree.kill()
+		containmentErr := processTreeTerminateAndWait(l.tree, defaultCloseWait)
+
+		if ProcessContainmentComplete(containmentErr) {
+			waitCtx, cancel := context.WithTimeout(context.Background(), commandWaitTimeout)
+			if _, completed := l.wait.await(waitCtx); !completed {
+				containmentErr = errors.Join(containmentErr,
+					fmt.Errorf("%w: wait for amp login close", ErrProcessContainmentIncomplete))
+			}
+
+			cancel()
+		}
+
+		l.closeErr = errors.Join(
+			authExpected(killErr),
+			containmentErr,
+			l.closeStdin(),
+			l.stdout.Close(),
+			l.stderr.Close(),
+		)
+	})
+
+	return l.closeErr
+}
+
+// authExpected drops the error a kill against an already-exited child returns.
+func authExpected(err error) error {
+	if err == nil || errors.Is(err, os.ErrProcessDone) || errors.Is(err, exec.ErrNotFound) {
+		return nil
+	}
+
+	return err
+}

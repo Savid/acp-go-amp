@@ -42,6 +42,9 @@ const (
 	optionModeKey          = "mode"
 	optionEnvKey           = "env"
 	optionFieldHome        = "home"
+	// optionFieldProviderAuthDirectHome names the unsupported exact-home consent
+	// gate.
+	optionFieldProviderAuthDirectHome = "providerAuthDirectHome"
 
 	fieldValue   = "value"
 	fieldPrompt  = "prompt"
@@ -59,6 +62,11 @@ const (
 	keySource    = "source"
 	keyURL       = "url"
 	envHome      = "HOME"
+
+	envXDGConfigHome = "XDG_CONFIG_HOME"
+	envXDGCacheHome  = "XDG_CACHE_HOME"
+	envXDGDataHome   = "XDG_DATA_HOME"
+	envXDGStateHome  = "XDG_STATE_HOME"
 
 	valUnsupported       = "unsupported"
 	valNoTransport       = "no_transport"
@@ -187,8 +195,13 @@ func newAgentSession(ctx context.Context, agent *Agent, id acp.SessionId, cwd st
 		}
 	}
 
+	// The settings file the wrapper points amp at is the only place the native
+	// secrets flag resolves from: it is read at global scope, which no managed
+	// file intercepts. Asserting it false keeps the credential in the isolated
+	// per-session file store, because the keystore item it would otherwise move
+	// to is keyed by hostname alone and shared by every session on the machine.
 	settingsFile := filepath.Join(configDir, "amp", "settings.json")
-	if err := writeFile(settingsFile, []byte("{}\n"), 0o600); err != nil {
+	if err := writeFile(settingsFile, amp.AuthSettingsDocument(), 0o600); err != nil {
 		return nil, fmt.Errorf("write amp settings file: %w", err)
 	}
 
@@ -203,10 +216,10 @@ func newAgentSession(ctx context.Context, agent *Agent, id acp.SessionId, cwd st
 
 	env := mergeEnv(agent.options.Env, meta.options.Env)
 	env[envHome] = homeDir
-	env["XDG_CONFIG_HOME"] = configDir
-	env["XDG_CACHE_HOME"] = cacheDir
-	env["XDG_DATA_HOME"] = dataDir
-	env["XDG_STATE_HOME"] = stateDir
+	env[envXDGConfigHome] = configDir
+	env[envXDGCacheHome] = cacheDir
+	env[envXDGDataHome] = dataDir
+	env[envXDGStateHome] = stateDir
 
 	session := &agentSession{
 		agent:                 agent,
@@ -345,6 +358,8 @@ func (s *agentSession) Close(ctx context.Context) error {
 	s.closed = true
 	s.mu.Unlock()
 
+	s.closeProviderAuth()
+
 	state := s.activePromptState()
 	if state != nil {
 		state.cancel()
@@ -373,6 +388,8 @@ func (s *agentSession) Delete(ctx context.Context) error {
 	s.mu.Lock()
 	s.closed = true
 	s.mu.Unlock()
+
+	s.closeProviderAuth()
 
 	state := s.activePromptState()
 	if state != nil {

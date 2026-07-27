@@ -40,6 +40,7 @@ type Agent struct {
 	activeLimitErr   error
 	containmentMode  RuntimeContainmentMode
 	configurationErr error
+	providerAuth     *providerAuth
 }
 
 var newAgentForServe = NewAgent
@@ -83,7 +84,7 @@ func NewAgent(opts ...Option) *Agent {
 		)
 	}
 
-	return &Agent{
+	agent := &Agent{
 		options:              options,
 		log:                  log,
 		store:                store,
@@ -100,8 +101,12 @@ func NewAgent(opts ...Option) *Agent {
 			validateContainmentOptions(options),
 			validateImageLimits(options.ImageLimits),
 			validateInputHandoffRoot(options.InputHandoffRoot),
+			validateProviderAuthRoots(options),
 		),
 	}
+	agent.providerAuth = newProviderAuth(agent)
+
+	return agent
 }
 
 func (a *Agent) ContainmentMode() RuntimeContainmentMode {
@@ -227,33 +232,40 @@ func (a *Agent) Initialize(ctx context.Context, params acp.InitializeRequest) (r
 				List:                  &acp.SessionListCapabilities{},
 				Resume:                &acp.SessionResumeCapabilities{},
 			},
-			Meta: agentCapabilityMeta(a.options),
+			Meta: a.agentCapabilityMeta(),
 		},
 	}, nil
 }
 
 // agentCapabilityMeta builds the advertised agentCapabilities._meta block: the
 // Amp vendor block, the family-reserved media envelope — always emitted, and
-// never conditioned on any other advertisement — and the handoff advertisement
-// only when a handoff read root is configured.
-func agentCapabilityMeta(options Options) map[string]any {
-	meta := map[string]any{
-		ampMetaKey: map[string]any{
-			metaRawEventKey: map[string]any{
-				"method":         RawEventMethod,
-				"enabledBy":      "_meta.amp.rawEvent.enabled",
-				keyMaxBytes:      rawEventMaxBytes,
-				"defaultEnabled": false,
-			},
-			"sessionStore": map[string]any{
-				"format": SessionStoreFormat,
-				"key":    []string{jsonFieldSessionID, "subpath"},
-			},
+// never conditioned on any other advertisement — the handoff advertisement only
+// when a handoff read root is configured, and the provider-auth legs only when
+// a usable durable ledger root is.
+func (a *Agent) agentCapabilityMeta() map[string]any {
+	ampMeta := map[string]any{
+		metaRawEventKey: map[string]any{
+			jsonFieldMethod:  RawEventMethod,
+			"enabledBy":      "_meta.amp.rawEvent.enabled",
+			keyMaxBytes:      rawEventMaxBytes,
+			"defaultEnabled": false,
 		},
-		metaMediaEnvelopeKey: mediaEnvelopeMeta(options.ImageLimits),
+		"sessionStore": map[string]any{
+			"format":     SessionStoreFormat,
+			jsonFieldKey: []string{jsonFieldSessionID, "subpath"},
+		},
 	}
 
-	if options.InputHandoffRoot != "" {
+	if a.providerAuth != nil {
+		ampMeta[providerAuthCapabilityKey] = a.providerAuth.capability()
+	}
+
+	meta := map[string]any{
+		ampMetaKey:           ampMeta,
+		metaMediaEnvelopeKey: mediaEnvelopeMeta(a.options.ImageLimits),
+	}
+
+	if a.options.InputHandoffRoot != "" {
 		meta[metaHandoffKey] = handoffAdvertisement()
 	}
 
@@ -291,6 +303,10 @@ func (a *Agent) HandleExtensionMethod(ctx context.Context, method string, params
 			jsonFieldField: ForkSessionMethod,
 		})
 	default:
+		if result, handled, authErr := a.handleAuthExtensionMethod(ctx, method, params); handled {
+			return result, authErr
+		}
+
 		return nil, acp.NewMethodNotFound(method)
 	}
 }

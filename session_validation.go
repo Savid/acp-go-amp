@@ -23,6 +23,13 @@ func (a *Agent) validateSessionStartOptions(options AmpOptions) error {
 		return unsupportedField(optionFieldHome)
 	}
 
+	// Amp's disconnect releases the ledger slot a connection owns and performs
+	// no native removal, so no leg here reads or clears an operator's canonical
+	// native home and the exact-home consent gate has nothing to authorize.
+	if a.options.ProviderAuthDirectHome != "" {
+		return unsupportedField(optionFieldProviderAuthDirectHome)
+	}
+
 	if a.options.DefaultModel != "" {
 		return unsupportedField(optionModelKey)
 	}

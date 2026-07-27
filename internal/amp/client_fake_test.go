@@ -29,6 +29,10 @@ func TestFakeAmpHelper(t *testing.T) {
 	mode := os.Getenv("FAKE_AMP_MODE")
 	recordHelperJSON(state, "args.jsonl", args)
 
+	if len(args) > 0 && args[len(args)-1] == authLoginSubcommand {
+		helperLogin(mode, state)
+		os.Exit(0)
+	}
 	if slices.Contains(args, "version") {
 		if mode == "bad-version" {
 			os.Stdout.WriteString("0.0.1\n")
@@ -1224,5 +1228,39 @@ func TestTurnClosePreservesSnapshotOnIncompleteBoundary(t *testing.T) {
 	}
 	if complete != 0 || incomplete != 1 {
 		t.Fatalf("Close lifecycle = complete %d, incomplete %d", complete, incomplete)
+	}
+}
+
+// TestNativeCommandsRejectPreOccupiedStandardStreams drives the fail-closed
+// checks a launch wrapper trips when it hands back a command whose standard
+// streams are already bound: the wrapper owns the pipes, so a bound stream
+// means the adapter would read a boundary it does not control.
+func TestNativeCommandsRejectPreOccupiedStandardStreams(t *testing.T) {
+	path, _ := fakeAmpPath(t, "")
+	original := prepareProcessTree
+	t.Cleanup(func() { prepareProcessTree = original })
+
+	occupiers := map[string]func(*exec.Cmd){
+		"stdin":  func(cmd *exec.Cmd) { cmd.Stdin = strings.NewReader("") },
+		"stdout": func(cmd *exec.Cmd) { cmd.Stdout = io.Discard },
+		"stderr": func(cmd *exec.Cmd) { cmd.Stderr = io.Discard },
+	}
+	for name, occupy := range occupiers {
+		prepareProcessTree = func(cmd *exec.Cmd, options processLaunchOptions) (*processTreeCommand, error) {
+			launch, err := original(cmd, options)
+			if err != nil {
+				return nil, err
+			}
+			occupy(launch.cmd)
+			return launch, nil
+		}
+
+		client := newTestClient(t, nil, Options{CLIPath: path, Cwd: t.TempDir()})
+		if _, err := client.ListThreads(context.Background()); err == nil {
+			t.Fatalf("%s: a command ran with a bound stream", name)
+		}
+		if _, err := client.Execute(context.Background(), map[string]any{}); err == nil {
+			t.Fatalf("%s: a turn ran with a bound stream", name)
+		}
 	}
 }

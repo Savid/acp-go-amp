@@ -1,12 +1,15 @@
 package ampacp
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/savid/acp-go-amp/internal/amp"
 )
 
 func TestWithSeedFilesClones(t *testing.T) {
@@ -300,7 +303,7 @@ func TestNewAgentSessionSeedFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read managed settings: %v", err)
 	}
-	if strings.TrimSpace(string(managed)) != "{}" {
+	if !bytes.Equal(managed, amp.AuthSettingsDocument()) {
 		t.Fatalf("managed settings overwritten: %q", managed)
 	}
 }

@@ -1,12 +1,13 @@
 ---
 title: Authentication
-description: Supply Amp credentials through the environment; the adapter advertises no ACP auth methods.
+description: Supply an Amp key through the environment, or broker one with the eight session-scoped provider-auth methods.
 ---
 
-Amp owns authentication end to end. The adapter advertises no ACP auth methods
-in `initialize`, and `Authenticate` rejects any caller-provided method ID.
-There is no login flow to bridge — you provide a key and the native process
-uses it.
+Amp has exactly one login, and it authenticates the Amp account itself rather
+than a model provider. The adapter advertises no ACP auth methods in
+`initialize`, and `Authenticate` rejects any caller-provided method ID. There
+are two supported ways to get a key into a session: supply one through the
+environment, or broker one through the provider-auth methods.
 
 ## Provide a key
 
@@ -26,11 +27,84 @@ through one of the sources above.
 <Warning>
 Session startup fails fast with a descriptive error when no `AMP_API_KEY` is
 available, rather than leaving the native process blocked on its interactive
-login flow. Export the key before opening a session.
+login flow. Export the key before opening a session, or broker one first.
 </Warning>
+
+## Broker a login
+
+Set `WithProviderAuthRoot` (or `-provider-auth-root`) to an absolute, durable,
+host-owned directory and the adapter advertises eight session-scoped extension
+methods:
+
+```text
+_amp/auth/methods      _amp/auth/authorize   _amp/auth/callback    _amp/auth/status
+_amp/auth/cancel       _amp/auth/inventory   _amp/auth/credential  _amp/auth/disconnect
+```
+
+Without that root no method is advertised and every one answers
+method-not-found: a leg that cannot record what it did is never offered. The
+root holds a values-free bookkeeping ledger — provider slot identity, connection
+ID, revision, binding generation, flow ID, state, and timestamps — and never
+credential material, URLs, or pasted values. It is created `0700` and entries
+are written `0600`.
+
+The catalog has exactly one entry, `amp`, with one method. Amp's per-provider
+model-credential commands are not brokered: they are loopback-only,
+entitlement-gated, and stored on Amp's side.
+
+### The flow
+
+1. `methods` returns the single entry and an opaque `generation` token naming
+   that exact result.
+2. `authorize` runs `amp login` inside the session's isolated home and relays
+   the hosted paste-back URL. `interaction` is `callback` and `callbackInput`
+   is `code`.
+3. The owner opens the URL, approves at Amp, and pastes the value back through
+   `callback`.
+4. `status` reports the flow. Amp races a hook that can complete the login
+   without any paste, so `status` also discovers a login that finished on its
+   own, behind a five-second floor on its own native reads.
+5. `credential` harvests once, returning `{"type": "api", "key": "..."}`. The
+   Amp key is opaque, long-lived, and non-rotating, so it carries no expiry, no
+   refresh half, and no metadata, and a second harvest on the same flow is
+   refused.
+6. `disconnect` bumps the binding generation and releases the ledger slot.
+
+<Warning>
+The value the owner pastes back is not an authorization code to be exchanged —
+it carries the account credential in the clear and stays valid indefinitely. It
+is written straight to the native login process and is never logged, echoed,
+persisted, or retained after delivery.
+</Warning>
+
+### Redelivery
+
+There is no injection option. Once a host holds a harvested key it redelivers
+it as `AMP_API_KEY` through `WithEnv` or `AmpOptions.Env`, which is the path
+above. Supplying `_meta.amp.options.providerAuth` is rejected as an unsupported
+field.
+
+### What disconnect does and does not do
+
+`disconnect` bumps the binding generation and releases the slot the ledger
+names. It performs **no native removal** and promises **no Amp-side
+revocation**: Amp's own `logout` refuses while an environment key is set, and
+the account key stays valid at Amp until the owner revokes it there. Present
+that plainly to an owner rather than as a revocation.
+
+### Storage
+
+Amp keeps the account key in a flat single-key `secrets.json` under the
+session's isolated `XDG_DATA_HOME`, mode `0600`. A hidden settings key can move
+it into the operating system keystore instead, where the item is keyed by
+hostname alone — not by the isolated home — so every Amp process on the machine
+would then share one credential. The adapter writes that key `false` into the
+settings file it owns and fails every provider-auth leg closed if it ever reads
+back `true`.
 
 ## What is never stored
 
-Auth material is live process state only. `AMP_API_KEY` (and `AMP_URL`) are
-never written to the session manifest, the transcript, or the settings file.
-See [Security](/docs/operations/security).
+Auth material is live process state only. `AMP_API_KEY`, `AMP_URL`, the pasted
+callback value, the relayed URL, and the harvested key are never written to the
+session manifest, the transcript, the settings file, or a raw event. See
+[Security](/docs/operations/security).

@@ -13,6 +13,8 @@ subprocess; stdout is reserved for JSON-RPC and diagnostics go to stderr.
 | `-path` | Amp executable path. Defaults to `amp` on `PATH`. |
 | `-scratch-dir` | Parent directory for ephemeral session scratch: the isolated per-session native HOME/XDG state, the startup probe directory, and any temp. Empty means the system temp directory. |
 | `-home` | Native config/auth root. Accepted on the adapter surface; non-empty values fail session start because Amp has no such root — its per-session isolated HOME/XDG state lives under `-scratch-dir` instead. |
+| `-provider-auth-root` | Absolute durable directory holding the values-free provider-auth ledger. Empty leaves every `_amp/auth/*` method unadvertised. See [Authentication](/docs/features/authentication#broker-a-login). |
+| `-provider-auth-direct-home` | Accepted on the adapter surface; non-empty values fail session start because `disconnect` releases only the ledger slot a connection owns and reads no operator home. |
 | `-model` | Default model. Accepted on the adapter surface; non-empty values fail session start because Amp has no ACP model config option. |
 | `-seed-file` | Repeatable `<relpath>=<hostpath>`. Reads the host file and writes its contents to `<relpath>` inside each session's isolated native `HOME` before `amp` launches. See [Seed files](/docs/features/models-config#seed-files). |
 | `-darwin-best-effort-containment` | Darwin-only explicit opt-in to bounded process-group cleanup. Warns unconditionally; detached descendants can survive and numeric PGID reuse can cause collateral signalling. |

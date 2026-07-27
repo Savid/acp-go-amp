@@ -163,7 +163,7 @@ func mergeEnv(base, session map[string]string) map[string]string {
 
 func activeRequestEnv(env map[string]string) map[string]string {
 	out := cloneStringMap(env)
-	for _, key := range []string{envHome, "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"} {
+	for _, key := range []string{envHome, envXDGConfigHome, envXDGCacheHome, envXDGDataHome, envXDGStateHome} {
 		delete(out, key)
 	}
 

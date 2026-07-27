@@ -760,6 +760,8 @@ const fakeMode = ` + strconv.Quote(mode) + `
 
 const fakeState = ` + strconv.Quote(state) + `
 
+const fakeLoginURL = ` + strconv.Quote(fakeLoginURL) + `
+
 func main() {
 	args := os.Args[1:]
 	state := fakeState
@@ -776,6 +778,10 @@ func main() {
 		}
 	}
 	record(state, "args.jsonl", args)
+	if len(args) > 0 && args[len(args)-1] == "login" {
+		fakeLogin(mode, state)
+		return
+	}
 	if len(args) > 0 && args[0] == "version" {
 		if mode == "bad-version" {
 			os.Stdout.WriteString("0.0.1\n")
@@ -985,6 +991,58 @@ func index(values []string, target string) int {
 		}
 	}
 	return -1
+}
+
+func fakeLogin(mode string, state string) {
+	switch mode {
+	case "login-no-url":
+		os.Stdout.WriteString("If your browser does not open automatically, visit:\n\nnothing usable\n")
+	case "login-fragment-url":
+		os.Stdout.WriteString(fakeLoginURL + "#fragment\n")
+	case "login-settled":
+		os.Stdout.WriteString(fakeLoginURL + "\n")
+	case "login-settled-secret":
+		os.Stdout.WriteString(fakeLoginURL + "\n")
+		writeFakeSecret("independent")
+	case "login-settled-fail":
+		os.Stdout.WriteString(fakeLoginURL + "\n")
+		os.Stderr.WriteString("Login failed\n")
+		os.Exit(1)
+	case "login-hang":
+		os.Stdout.WriteString(fakeLoginURL + "\n")
+		for {
+			time.Sleep(time.Hour)
+		}
+	case "login-refuse":
+		os.Stdout.WriteString(fakeLoginURL + "\n")
+		io.ReadAll(os.Stdin)
+		os.Stderr.WriteString("Login failed: that code looks incomplete\n")
+		os.Exit(1)
+	case "login-no-secret":
+		os.Stdout.WriteString(fakeLoginURL + "\n")
+		io.ReadAll(os.Stdin)
+	default:
+		os.Stdout.WriteString("If your browser does not open automatically, visit:\n\n" + fakeLoginURL + "\n\n")
+		os.Stdout.WriteString("When prompted, paste your code here: ")
+		pasted, _ := io.ReadAll(os.Stdin)
+		record(state, "login-stdin.jsonl", strings.TrimSpace(string(pasted)))
+		writeFakeSecret(strings.TrimSpace(string(pasted)))
+	}
+}
+
+func writeFakeSecret(pasted string) {
+	dataHome := os.Getenv("XDG_DATA_HOME")
+	if dataHome == "" {
+		return
+	}
+	dir := filepath.Join(dataHome, "amp")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		os.Exit(2)
+	}
+	body := "{\"apiKey@https://ampcode.com/\":\"secret-for-" + pasted + "\"}"
+	if err := os.WriteFile(filepath.Join(dir, "secrets.json"), []byte(body), 0600); err != nil {
+		os.Exit(2)
+	}
 }
 
 func record(state string, name string, value any) {

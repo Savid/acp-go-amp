@@ -50,8 +50,11 @@ Auth material is live process state only:
 |---|---|---|
 | `AMP_API_KEY` | `WithEnv` or the process environment | Never |
 | `AMP_URL` | `WithEnv` or the process environment | Never |
+| The value pasted into `_amp/auth/callback` | The owner, through the host | Never |
+| The relayed `_amp/auth/authorize` URL | The native login process | Never |
+| The key returned by `_amp/auth/credential` | The isolated `secrets.json` | Never |
 
-Neither value is written to the settings file or the `SessionStore`. The store
+No value is written to the settings file or the `SessionStore`. The store
 contains the manifest, transcript frames, and canonical image tool-result
 records — no settings, auth files, or API keys. A remote image result is stored
 with its original HTTP(S) URI for replay; if that URI is signed, treat the
@@ -62,6 +65,28 @@ Seed files (`WithSeedFiles` / `-seed-file`) are written verbatim into the
 isolated native home. Never seed secrets through them; put credentials in
 `WithEnv` so they stay in live process state and out of durable files.
 </Warning>
+
+The provider-auth ledger under `WithProviderAuthRoot` is bookkeeping only:
+provider slot identity, connection ID, revision, binding generation, flow ID,
+authorize request ID, state, and timestamps. It never holds credential
+material, authorization URLs, or pasted values, and it is never keyed by,
+swept with, or restored alongside a session. A provider-auth leg failure
+carries a closed `cause` enum and never native message text: a native login
+failure line can quote the value the owner pasted.
+
+Two environment variables are removed from every native spawn, from the live
+environment and from an explicit override alike, because neither can be
+disarmed once the child is running:
+
+| Variable | Why |
+|---|---|
+| `GOTRACEBACK` | `crash` dumps every goroutine to stderr before any adapter code runs. |
+| `AMP_DISABLE_SECRET_REDACTION` | Turns off Amp's own redaction wholesale. |
+
+The native login additionally runs with `AMP_API_KEY` removed and its browser
+launch neutralised, so a brokered login never copies an ambient environment key
+back out as if it had been brokered, and no browser writes a profile into the
+directory the adapter reads the credential from.
 
 ## Stream isolation
 

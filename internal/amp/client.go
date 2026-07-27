@@ -45,6 +45,8 @@ const (
 	adapterOneShotDeathPathEnv  = "ACP_GO_AMP_TEST_ONE_SHOT_DEATH_PATH"
 	adapterOneShotDeathStateEnv = "ACP_GO_AMP_TEST_ONE_SHOT_DEATH_STATE"
 	adapterPrivateEnvPrefix     = "ACP_" + "GO_AMP_INTERNAL_"
+	scrubbedTracebackEnv        = "GOTRACEBACK"
+	scrubbedRedactionEnv        = "AMP_DISABLE_SECRET_REDACTION"
 )
 
 var (
@@ -725,7 +727,7 @@ func BuildEnv(overrides map[string]string, cwd string) []string {
 	keys := make([]string, 0, len(os.Environ())+len(overrides)+1)
 
 	set := func(key, value string) {
-		if key == "" || isPrivateAdapterEnv(key) {
+		if key == "" || isPrivateAdapterEnv(key) || isScrubbedEnv(key) {
 			return
 		}
 
@@ -763,6 +765,20 @@ func BuildEnv(overrides map[string]string, cwd string) []string {
 	}
 
 	return out
+}
+
+// isScrubbedEnv reports the variables that never reach a spawned amp process,
+// from the live environment or from an explicit override. Neither is disarmable
+// once the child is running: GOTRACEBACK=crash dumps every goroutine to stderr
+// before any code of ours runs, and AMP_DISABLE_SECRET_REDACTION turns off
+// amp's own redaction wholesale.
+func isScrubbedEnv(key string) bool {
+	switch key {
+	case scrubbedTracebackEnv, scrubbedRedactionEnv:
+		return true
+	default:
+		return false
+	}
 }
 
 func isPrivateAdapterEnv(key string) bool {

@@ -34,14 +34,16 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 	}
 
 	var (
-		path             string
-		home             string
-		model            string
-		scratchDir       string
-		debug            bool
-		showVersion      bool
-		darwinBestEffort bool
-		seedFiles        = seedFileFlag{}
+		path                   string
+		home                   string
+		model                  string
+		scratchDir             string
+		providerAuthRoot       string
+		providerAuthDirectHome string
+		debug                  bool
+		showVersion            bool
+		darwinBestEffort       bool
+		seedFiles              = seedFileFlag{}
 	)
 
 	flags := flag.NewFlagSet("acp-go-amp", flag.ContinueOnError)
@@ -50,6 +52,8 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 	flags.StringVar(&home, "home", "", "native config/auth root; unsupported by Amp and rejected at session start")
 	flags.StringVar(&model, "model", "", "default model; unsupported by Amp and rejected at session start")
 	flags.StringVar(&scratchDir, "scratch-dir", "", "parent directory for ephemeral session scratch; empty means the system temp directory")
+	flags.StringVar(&providerAuthRoot, "provider-auth-root", "", "durable directory for the provider-auth ledger; without it no provider-auth method is advertised")
+	flags.StringVar(&providerAuthDirectHome, "provider-auth-direct-home", "", "unsupported: Amp's disconnect releases only the ledger slot a connection owns, so no leg acts on a canonical native home; a non-empty value is rejected at session start")
 	flags.BoolVar(&debug, "debug", false, "enable debug logging")
 	flags.BoolVar(&showVersion, "version", false, "print adapter version and exit")
 	flags.BoolVar(&darwinBestEffort, "darwin-best-effort-containment", false, "accept Darwin process-group containment and its escaped-descendant and PGID-reuse risks")
@@ -117,6 +121,8 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 		ampacp.WithHome(home),
 		ampacp.WithDefaultModel(model),
 		ampacp.WithScratchDir(scratchDir),
+		ampacp.WithProviderAuthRoot(providerAuthRoot),
+		ampacp.WithProviderAuthDirectHome(providerAuthDirectHome),
 		ampacp.WithLogger(logger),
 		ampacp.WithAgentVersion(agentVer),
 	)

@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: audit build clean coverage-check docs-audit fmt fmt-check help lint modernize-check test test/cover test-cross-compile test-integration-cover test-integration-live test-integration-smoke tidy vuln
+.PHONY: audit build clean coverage-check docs-audit fmt fmt-check help lint modernize-check test test/cover test-cross-compile test-integration-attended test-integration-cover test-integration-keystore test-integration-live test-integration-smoke tidy vuln
 
 GOLANGCI_LINT_VERSION ?= v2.12.2
 GOLANGCI_LINT := go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
@@ -44,6 +44,14 @@ test-integration-smoke:
 ## test-integration-live: run live integration tests that spend model tokens
 test-integration-live:
 	ACP_GO_AMP_RUN_INTEGRATION=1 ACP_GO_AMP_RUN_LIVE_TOKENS=1 go test -race -count=1 -tags=integration -timeout=180s -run Live -v ./integration/...
+
+## test-integration-attended: run the provider-auth login a human must approve in real time
+test-integration-attended:
+	ACP_GO_AMP_RUN_INTEGRATION=1 ACP_GO_AMP_RUN_ATTENDED=1 go test -race -count=1 -tags=integration -timeout=1200s -run Attended -v ./integration/...
+
+## test-integration-keystore: run credential-residence tests against the container fixture
+test-integration-keystore:
+	ACP_GO_AMP_RUN_INTEGRATION=1 ACP_GO_AMP_RUN_KEYSTORE=1 go test -race -count=1 -tags=integration -timeout=900s -run Keystore -v ./integration/...
 
 ## test-integration-cover: run smoke integration tests with compiled binary coverage
 test-integration-cover:
@@ -113,6 +121,8 @@ docs-audit:
 	@rg -q 'flags.StringVar\(&path, "path"' cmd/acp-go-amp/main.go
 	@rg -q 'flags.StringVar\(&home, "home"' cmd/acp-go-amp/main.go
 	@rg -q 'flags.StringVar\(&model, "model"' cmd/acp-go-amp/main.go
+	@rg -q 'flags.StringVar\(&providerAuthRoot, "provider-auth-root"' cmd/acp-go-amp/main.go
+	@rg -q 'flags.StringVar\(&providerAuthDirectHome, "provider-auth-direct-home"' cmd/acp-go-amp/main.go
 	@rg -q 'flags.BoolVar\(&debug, "debug"' cmd/acp-go-amp/main.go
 	@rg -q 'flags.BoolVar\(&showVersion, "version"' cmd/acp-go-amp/main.go
 	@rg -q 'local transcript restore is not native thread resurrection' README.md docs/features/session-store.mdx
@@ -137,6 +147,11 @@ docs-audit:
 	@rg -q 'invalid_handoff' docs/features/models-config.mdx
 	@rg -q '_artifacts/images/<digest>.json' docs/features/session-store.mdx
 	@rg -q 'MaxOutputBytesPerToolCall' docs/reference/go-api.mdx
+	@rg -q 'WithProviderAuthRoot' README.md docs/reference/go-api.mdx docs/reference/cli.mdx docs/features/authentication.mdx
+	@rg -q '_amp/auth/credential' docs/reference/acp-methods.mdx docs/features/authentication.mdx
+	@rg -q 'amp_auth_failed' docs/reference/acp-methods.mdx
+	@rg -q 'no Amp-side' docs/features/authentication.mdx
+	@rg -q 'AMP_DISABLE_SECRET_REDACTION' docs/operations/security.mdx
 
 ## audit: run local checks
 audit: fmt-check lint build test coverage-check test-cross-compile tidy vuln modernize-check docs-audit

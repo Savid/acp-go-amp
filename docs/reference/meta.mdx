@@ -74,7 +74,26 @@ ignored, because embedded data wins. See
 ## Advertised capabilities
 
 `initialize` advertises standard `promptCapabilities.image: true` plus
-`_meta.amp.rawEvent` and `_meta.amp.sessionStore`. It omits fork and
+`_meta.amp.rawEvent` and `_meta.amp.sessionStore`. While a usable provider-auth
+root is configured it also carries `_meta.amp.providerAuth`, listing the eight
+enabled leg names:
+
+```json
+{
+  "providerAuth": {
+    "methods": [
+      "_amp/auth/methods", "_amp/auth/authorize", "_amp/auth/callback",
+      "_amp/auth/status", "_amp/auth/cancel", "_amp/auth/inventory",
+      "_amp/auth/credential", "_amp/auth/disconnect"
+    ]
+  }
+}
+```
+
+No `injectionKey` is advertised: a brokered Amp key is redelivered as
+`AMP_API_KEY`, so `_meta.amp.options.providerAuth` is rejected as an
+unsupported field. The block is absent entirely when no usable root is
+configured, which is how a host learns the surface never came up. It omits fork and
 elicitation capability metadata, because the adapter supports neither. Amp
 does not expose authoritative per-model input modalities, so the adapter
 publishes no model-specific image claims.

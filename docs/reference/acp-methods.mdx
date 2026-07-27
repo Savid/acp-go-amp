@@ -23,6 +23,33 @@ method-not-found rather than partial behavior.
 | `session/delete` | Tombstones locally, then deletes the Amp thread when one was created. |
 | `session/set_config_option` | Updates `mode`. |
 
+## Provider auth methods
+
+These eight session-scoped extension methods are advertised only while
+`-provider-auth-root` (or `WithProviderAuthRoot`) names a usable durable
+directory; without it each returns method-not-found. Every request and result
+object is closed — an unknown, duplicate, or misplaced field is rejected with
+invalid params naming the field path — and every time value is Unix epoch
+milliseconds.
+
+| Method | Params | Result |
+|---|---|---|
+| `_amp/auth/methods` | `{sessionId}` | `{providers, generation}` |
+| `_amp/auth/authorize` | `{sessionId, providerId, connectionId, methodsGeneration, method, authorizeRequestId, inputs?}` | `{interaction, url, message, callbackInput, flowId, flowExpiresAt}` |
+| `_amp/auth/callback` | `{sessionId, providerId, method, flowId, input}` | `{flowId}` |
+| `_amp/auth/status` | `{sessionId, providerId, flowId}` | `{flowId, state, reason?}` |
+| `_amp/auth/cancel` | `{sessionId, providerId, flowId}` | `{flowId}` |
+| `_amp/auth/inventory` | `{sessionId}` | `{entries}` |
+| `_amp/auth/credential` | `{sessionId, providerId, flowId}` | `{connectionId, revision, bindingGeneration, credential}` |
+| `_amp/auth/disconnect` | `{sessionId, providerId, connectionId, bindingGeneration}` | `{}` |
+
+A caller addressing failure — an unknown, superseded, or cross-session
+`flowId`, a stale `methodsGeneration`, a `method` that is not the flow's — is
+invalid params with the field path. Every other failure is JSON-RPC `-32000`
+carrying `{"error": "amp_auth_failed", "cause": ..., "retryable": ...}` with a
+closed `cause` enum and no native message text. See
+[Authentication](/docs/features/authentication#broker-a-login).
+
 ## Unsupported and rejected
 
 - `session/set_mode` returns method-not-found and is not advertised.

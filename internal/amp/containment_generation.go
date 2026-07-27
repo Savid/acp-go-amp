@@ -108,7 +108,7 @@ func (g *DarwinGeneration) prepareCommand(cmd *exec.Cmd, writableRoot string) er
 		"HOME":               home,
 		"XDG_CONFIG_HOME":    config,
 		"XDG_CACHE_HOME":     cache,
-		"XDG_DATA_HOME":      data,
+		dataHomeEnv:          data,
 		"XDG_STATE_HOME":     state,
 		DarwinRuntimeIDEnv:   g.RuntimeID,
 		DarwinScratchRootEnv: g.ScratchRoot,
