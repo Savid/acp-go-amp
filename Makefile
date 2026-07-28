@@ -47,7 +47,12 @@ test-integration-live:
 
 ## test-integration-attended: run the provider-auth login a human must approve in real time
 test-integration-attended:
-	ACP_GO_AMP_RUN_INTEGRATION=1 ACP_GO_AMP_RUN_ATTENDED=1 go test -race -count=1 -tags=integration -timeout=1200s -v -run TestAttended ./integration/...
+	@log=$$(mktemp); rc=$$(mktemp); \
+	{ ACP_GO_AMP_RUN_INTEGRATION=1 ACP_GO_AMP_RUN_ATTENDED=1 go test -race -count=1 -tags=integration -timeout=1200s -v -run TestAttended ./integration/... 2>&1; echo $$? >"$$rc"; } | tee "$$log"; \
+	status=$$(cat "$$rc"); ran=$$(grep -c '^--- PASS: TestAttended' "$$log"); \
+	rm -f "$$log" "$$rc"; \
+	[ "$$status" -eq 0 ] || exit "$$status"; \
+	[ "$$ran" -gt 0 ] || { echo 'no attended provider-auth login ran: -run TestAttended selected nothing'; exit 1; }
 
 ## test-integration-keystore: run the three-configuration credential-residence matrix
 test-integration-keystore:
