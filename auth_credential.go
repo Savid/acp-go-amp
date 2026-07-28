@@ -194,16 +194,16 @@ func (p *providerAuth) credential(_ context.Context, params json.RawMessage) (an
 	}
 
 	if storeErr := session.authFileStore(); storeErr != nil {
-		return nil, p.fail(flow, authCauseNativeVeto, false)
+		return nil, p.failHarvest(flow, authCauseNativeVeto)
 	}
 
 	record, ok, err := p.ledger.read(flow.providerID, flow.connectionID)
 	if err != nil || !ok {
-		return nil, p.fail(flow, authCauseHarvestFailed, false)
+		return nil, p.failHarvest(flow, authCauseHarvestFailed)
 	}
 
 	if record.ConnectionID != flow.connectionID || record.Revision != flow.revision || record.BindingGeneration != flow.bindingGeneration {
-		return nil, p.fail(flow, authCauseHarvestFailed, false)
+		return nil, p.failHarvest(flow, authCauseHarvestFailed)
 	}
 
 	p.mu.Lock()
@@ -212,7 +212,7 @@ func (p *providerAuth) credential(_ context.Context, params json.RawMessage) (an
 
 	secret, present, err := authReadSecret(residence)
 	if err != nil || !present {
-		return nil, p.fail(flow, authCauseHarvestFailed, false)
+		return nil, p.failHarvest(flow, authCauseHarvestFailed)
 	}
 
 	p.mu.Lock()
@@ -230,6 +230,24 @@ func (p *providerAuth) credential(_ context.Context, params json.RawMessage) (an
 		BindingGeneration: flow.bindingGeneration,
 		Credential:        ProviderCredential{Type: ProviderCredentialAPI, API: &ProviderAPICredential{Key: secret}},
 	}, nil
+}
+
+// failHarvest fails the leg and records the demotion the harvest owns. This is
+// the one transition a flow already terminal may still take: the leg is
+// admitted only from authenticated or saved, so what it demotes is a completion
+// nobody is racing, and a slot that answered nothing leaves the flow no longer
+// standing for a credential this connection can produce.
+func (p *providerAuth) failHarvest(flow *authFlow, cause string) error {
+	state, reason := authFlowTransition(cause, false)
+
+	p.mu.Lock()
+	flow.state = state
+	flow.reason = reason
+	p.mu.Unlock()
+
+	p.closeLogin(flow)
+
+	return authFailed(cause, flow.providerID, flow.method.ID, flow.id)
 }
 
 // disconnect bumps the binding generation and releases the ledger slot. It

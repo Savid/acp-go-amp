@@ -972,6 +972,69 @@ func TestCancelIsIdempotentAndClaimsNoProviderSideCancellation(t *testing.T) {
 	}
 }
 
+// TestTerminalizeKeepsTheFirstTerminalTransition pins the record itself: a flow
+// has one terminal transition, and a later one is dropped rather than
+// overwriting the owner's.
+func TestTerminalizeKeepsTheFirstTerminalTransition(t *testing.T) {
+	fixture := newAuthFixture(t, "login-hang")
+	authorized := fixture.mustAuthorize("connection-1")
+
+	flow, err := fixture.broker.addressFlow(fixture.session.id, authProviderID, authorized.FlowID)
+	if err != nil {
+		t.Fatalf("addressFlow: %v", err)
+	}
+
+	fixture.broker.terminalize(flow, authStateCancelled, authReasonOwnerCancel)
+	fixture.broker.terminalize(flow, authStateAuthenticated, "")
+
+	if status := fixture.status(authorized.FlowID); status.State != authStateCancelled || status.Reason != authReasonOwnerCancel {
+		t.Fatalf("status = %#v, want cancelled/owner_cancel", status)
+	}
+}
+
+// TestCompletionAnswersForAFlowClosedUnderIt pins the leg against the record: a
+// login child that settled after the owner closed the flow owns no transition
+// and writes no confirmation. The confirmation would bind a credential to a
+// connection generation the owner already ended, and a cause naming the
+// provider would report a refusal nobody made.
+func TestCompletionAnswersForAFlowClosedUnderIt(t *testing.T) {
+	cases := []struct {
+		name   string
+		state  string
+		reason string
+		cause  string
+	}{
+		{name: "cancelled", state: authStateCancelled, reason: authReasonOwnerCancel, cause: authCauseFlowCancelled},
+		{name: "expired", state: authStateExpired, reason: authReasonDeadline, cause: authCauseFlowState},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			fixture := newAuthFixture(t, "login-hang")
+			authorized := fixture.mustAuthorize("connection-1")
+
+			flow, err := fixture.broker.addressFlow(fixture.session.id, authProviderID, authorized.FlowID)
+			if err != nil {
+				t.Fatalf("addressFlow: %v", err)
+			}
+
+			fixture.broker.terminalize(flow, testCase.state, testCase.reason)
+
+			requireAuthCause(t, fixture.broker.completeFlow(flow), testCase.cause)
+			requireAuthCause(t, fixture.broker.failSettled(flow, authCauseProviderRefused, true), testCase.cause)
+
+			record, ok, readErr := fixture.broker.ledger.read(authProviderID, "connection-1")
+			if readErr != nil || !ok || record.State != authLedgerIntent {
+				t.Fatalf("ledger = %#v/%v/%v, want intent", record, ok, readErr)
+			}
+
+			if status := fixture.status(authorized.FlowID); status.State != testCase.state || status.Reason != testCase.reason {
+				t.Fatalf("status = %#v, want %s/%s", status, testCase.state, testCase.reason)
+			}
+		})
+	}
+}
+
 func TestFlowExpiresOnItsEffectiveDeadline(t *testing.T) {
 	fixture := newAuthFixture(t, "login-hang")
 	torn := captureLoginTeardown(t)

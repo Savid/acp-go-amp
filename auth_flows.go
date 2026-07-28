@@ -558,7 +558,7 @@ func (p *providerAuth) callback(ctx context.Context, params json.RawMessage) (an
 	// pipe as a refusal of a login that in fact succeeded.
 	if settled, settleErr := login.Settled(); settled {
 		if settleErr != nil {
-			return nil, p.fail(flow, authCauseProviderRefused, false)
+			return nil, p.failSettled(flow, authCauseProviderRefused, false)
 		}
 
 		if err := p.completeFlow(flow); err != nil {
@@ -572,7 +572,7 @@ func (p *providerAuth) callback(ctx context.Context, params json.RawMessage) (an
 	defer cancel()
 
 	if submitErr := login.Submit(submitCtx, input); submitErr != nil {
-		return nil, p.fail(flow, authCauseProviderRefused, true)
+		return nil, p.failSettled(flow, authCauseProviderRefused, true)
 	}
 
 	if err := p.completeFlow(flow); err != nil {
@@ -586,6 +586,10 @@ func (p *providerAuth) callback(ctx context.Context, params json.RawMessage) (an
 // as authenticated. The credential the login just wrote is not read here: the
 // harvest leg is the only reader, and it runs at most once.
 func (p *providerAuth) completeFlow(flow *authFlow) error {
+	if cause, abandoned := p.abandonedCause(flow); abandoned {
+		return authFailed(cause, flow.providerID, flow.method.ID, flow.id)
+	}
+
 	record := authLedgerRecord{
 		ProviderID:         flow.providerID,
 		ConnectionID:       flow.connectionID,
@@ -607,6 +611,36 @@ func (p *providerAuth) completeFlow(flow *authFlow) error {
 	return nil
 }
 
+// abandonedCause reports the cause a leg answers with when the flow reached a
+// terminal state while the native call this leg started was still in flight.
+// Such a leg owns no transition and confirms nothing: the record it addressed
+// is already closed, and the outcome it carries is no longer the flow's.
+func (p *providerAuth) abandonedCause(flow *authFlow) (string, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	switch {
+	case !authTerminal(flow.state):
+		return "", false
+	case flow.state == authStateCancelled:
+		return authCauseFlowCancelled, true
+	default:
+		return authCauseFlowState, true
+	}
+}
+
+// failSettled answers a native outcome that could have arrived after the flow
+// closed. The transition it would otherwise perform belongs to whoever closed
+// the flow first, and a cause naming the provider over a login the owner
+// abandoned reports a refusal nobody made.
+func (p *providerAuth) failSettled(flow *authFlow, cause string, materialInFlight bool) error {
+	if abandoned, ok := p.abandonedCause(flow); ok {
+		return authFailed(abandoned, flow.providerID, flow.method.ID, flow.id)
+	}
+
+	return p.fail(flow, cause, materialInFlight)
+}
+
 // fail returns the leg's closed error and performs the transition its cause
 // pairs with. A cause with no transition consumes nothing.
 func (p *providerAuth) fail(flow *authFlow, cause string, materialInFlight bool) error {
@@ -618,13 +652,20 @@ func (p *providerAuth) fail(flow *authFlow, cause string, materialInFlight bool)
 	return authFailed(cause, flow.providerID, flow.method.ID, flow.id)
 }
 
-// terminalize records the flow's terminal state and frees the pending slot. It
-// deliberately leaves the login child's handle in place: on a successful
-// completion the credential is resident under that child's own root, and
-// tearing the child down reclaims the root the harvest still has to read.
+// terminalize records the flow's one terminal transition and frees the pending
+// slot. A flow that already reached one keeps it: a login child still running
+// when the owner cancelled settles into a record the owner already closed, and
+// what it settled on is no longer the flow's outcome. It deliberately leaves the
+// login child's handle in place: on a successful completion the credential is
+// resident under that child's own root, and tearing the child down reclaims the
+// root the harvest still has to read.
 func (p *providerAuth) terminalize(flow *authFlow, state string, reason string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
+	if authTerminal(flow.state) {
+		return
+	}
 
 	flow.state = state
 	flow.reason = reason
