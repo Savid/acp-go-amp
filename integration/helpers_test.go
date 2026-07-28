@@ -5,11 +5,13 @@ package integration
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -17,6 +19,7 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 	ampacp "github.com/savid/acp-go-amp"
+	"github.com/savid/acp-go-amp/internal/amp"
 )
 
 const (
@@ -29,6 +32,62 @@ const (
 )
 
 var integrationLogger = slog.New(slog.DiscardHandler)
+
+// integrationContainmentOptions accepts Darwin process-group containment on
+// behalf of the integration tier. Darwin containment fails closed without an
+// explicit caller opt-in, so every agent this package builds has to make it.
+func integrationContainmentOptions(options []ampacp.Option) []ampacp.Option {
+	if runtime.GOOS == "darwin" {
+		return append(options, ampacp.WithDarwinBestEffortContainment())
+	}
+
+	return options
+}
+
+func newIntegrationAgent(options ...ampacp.Option) *ampacp.Agent {
+	return ampacp.NewAgent(integrationContainmentOptions(options)...)
+}
+
+// newIntegrationAmpClient builds a native client that reaches the amp binary on
+// the same containment terms the agent uses: a registry-recorded generation per
+// launch, rooted in a scratch parent this test owns and removed once the launch
+// completes.
+func newIntegrationAmpClient(
+	t *testing.T,
+	logger *slog.Logger,
+	kind ampacp.RuntimeResourceKind,
+	options amp.Options,
+) *amp.Client {
+	t.Helper()
+
+	if runtime.GOOS == "darwin" {
+		parent := t.TempDir()
+		options.DarwinBestEffort = true
+		options.NewDarwinGeneration = func(context.Context) (*amp.DarwinGeneration, error) {
+			root, err := os.MkdirTemp(parent, "acp-go-amp-command-*")
+			if err != nil {
+				return nil, err
+			}
+
+			generation, err := amp.NewDarwinGenerationRecord(parent, root, string(kind))
+			if err != nil {
+				return nil, errors.Join(err, os.RemoveAll(root))
+			}
+
+			generation.Release = func(complete bool) error {
+				if !complete {
+					return nil
+				}
+
+				return os.RemoveAll(root)
+			}
+
+			return generation, nil
+		}
+	}
+
+	return amp.NewClient(logger, options)
+}
 
 func TestMain(m *testing.M) {
 	previousLogger := slog.Default()
@@ -262,7 +321,7 @@ func serveLiveAgentRawForTest(
 
 	serveErr := make(chan error, 1)
 	go func() {
-		options := append(base, opts...)
+		options := integrationContainmentOptions(append(base, opts...))
 		serveErr <- ampacp.Serve(serveCtx, c2aR, a2cW, options...)
 	}()
 
@@ -303,7 +362,12 @@ func connectLiveAgentBinary(
 		t.Skipf("set %s to run compiled binary integration coverage", envAgentBinary)
 	}
 
-	args := []string{"-path", ampPath}
+	args := make([]string, 0, 3)
+	if runtime.GOOS == "darwin" {
+		args = append(args, "-darwin-best-effort-containment")
+	}
+
+	args = append(args, "-path", ampPath)
 
 	cmd := exec.Command(agentPath, args...) // #nosec G204 -- path is the test-built agent binary.
 	cmd.Env = append(os.Environ(), envAmpAPIKey+"=fake-integration-key")

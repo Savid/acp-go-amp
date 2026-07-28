@@ -23,7 +23,7 @@ func TestSmokeAmpVersion(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	client := amp.NewClient(slog.Default(), amp.Options{})
+	client := newIntegrationAmpClient(t, slog.Default(), ampacp.RuntimeResourceDiscovery, amp.Options{})
 	version, err := client.Version(ctx)
 	if err != nil {
 		t.Fatalf("amp binary present but version probe failed: %v", err)
@@ -39,7 +39,7 @@ func TestSmokeFakeACPLifecycleAndMCP(t *testing.T) {
 		t.Skip("shell fake is POSIX-only")
 	}
 	path := fakeAmpBinary(t)
-	agent := ampacp.NewAgent(
+	agent := newIntegrationAgent(
 		ampacp.WithExecutablePath(path),
 		ampacp.WithScratchDir(t.TempDir()),
 		ampacp.WithEnv(map[string]string{"AMP_API_KEY": "fake"}),
@@ -124,7 +124,10 @@ func TestLiveThreadTurn(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	client := amp.NewClient(slog.Default(), amp.Options{SettingsFile: settings, Mode: "medium"})
+	client := newIntegrationAmpClient(
+		t, slog.Default(), ampacp.RuntimeResourcePrompt,
+		amp.Options{SettingsFile: settings, Mode: "medium"},
+	)
 	turn, err := client.Execute(ctx, map[string]any{
 		"type": "user",
 		"message": map[string]any{
@@ -176,7 +179,7 @@ func TestLiveRestoreAfterLocalStateWipe(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
-	agent := ampacp.NewAgent(
+	agent := newIntegrationAgent(
 		ampacp.WithScratchDir(homeParent),
 		ampacp.WithEnv(env),
 		ampacp.WithSessionStore(store),
@@ -189,7 +192,10 @@ func TestLiveRestoreAfterLocalStateWipe(t *testing.T) {
 	cleanupEnv := env
 	defer func() {
 		if threadID != "" {
-			deleteClient := amp.NewClient(slog.Default(), amp.Options{Env: cleanupEnv, Cwd: cwd})
+			deleteClient := newIntegrationAmpClient(
+				t, slog.Default(), ampacp.RuntimeResourcePrompt,
+				amp.Options{Env: cleanupEnv, Cwd: cwd},
+			)
 			_ = deleteClient.DeleteThread(context.Background(), threadID)
 		}
 	}()
@@ -234,7 +240,7 @@ func TestLiveRestoreAfterLocalStateWipe(t *testing.T) {
 	env, homeParent = isolatedAmpEnv(t, root, apiKey)
 	cleanupEnv = env
 
-	restored := ampacp.NewAgent(
+	restored := newIntegrationAgent(
 		ampacp.WithScratchDir(homeParent),
 		ampacp.WithEnv(env),
 		ampacp.WithSessionStore(store),
