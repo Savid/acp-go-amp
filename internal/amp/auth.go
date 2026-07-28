@@ -37,12 +37,6 @@ const (
 	//nolint:gosec // G101 false positive: this is an environment variable name, not a credential.
 	authAPIKeyEnv        = "AMP_API_KEY"
 	authHeadlessOAuthEnv = "AMP_HEADLESS_OAUTH"
-	authBrowserEnv       = "BROWSER"
-	// authBrowserNoop is what the launcher execs in place of a browser. `amp
-	// login` opens one with no suppression flag, and the browser writes its
-	// profile — cookie jar included — into the same root this package reads the
-	// credential from.
-	authBrowserNoop = "/bin/true"
 
 	// AuthURLHost is the only host a relayed authorization URL may name.
 	AuthURLHost = "ampcode.com"
@@ -153,6 +147,7 @@ type AuthLogin struct {
 	wait     *commandWait
 	url      chan string
 	dataHome string
+	shim     *browserShim
 
 	stdinOnce sync.Once
 	stdinErr  error
@@ -166,7 +161,10 @@ type AuthLogin struct {
 // relying on amp's TTY heuristic, and AMP_API_KEY is removed: with one set,
 // `amp login` copies the ambient value into the store and exits without
 // starting a flow at all, which would hand an environment-supplied credential
-// back as a brokered one.
+// back as a brokered one. The child runs behind a browser shim because `amp
+// login` opens a browser with no suppression flag, and that browser writes its
+// profile — cookie jar included — into the same root this package reads the
+// credential from.
 func (c *Client) StartAuthLogin(ctx context.Context) (*AuthLogin, error) {
 	path, err := Discover(ctx, c.options.CLIPath)
 	if err != nil {
@@ -183,11 +181,16 @@ func (c *Client) StartAuthLogin(ctx context.Context) (*AuthLogin, error) {
 		}
 	}
 
-	cmd.Env = authLoginEnv(c.options.Env, cmd.Dir)
+	shim, err := newBrowserShim(c.options.ScratchParent)
+	if err != nil {
+		return nil, fmt.Errorf("amp login: %w", err)
+	}
+
+	cmd.Env = shim.environ(authLoginEnv(c.options.Env, cmd.Dir))
 
 	launch, err := c.prepareProcessLaunch(ctx, cmd)
 	if err != nil {
-		return nil, fmt.Errorf("amp login: %w", err)
+		return nil, errors.Join(fmt.Errorf("amp login: %w", err), shim.remove())
 	}
 
 	// Read the residence off the environment the containment boundary settled
@@ -197,7 +200,7 @@ func (c *Client) StartAuthLogin(ctx context.Context) (*AuthLogin, error) {
 
 	pipes, err := newAuthLoginPipes()
 	if err != nil {
-		return nil, errors.Join(err, launch.close())
+		return nil, errors.Join(err, launch.close(), shim.remove())
 	}
 
 	cmd = launch.cmd
@@ -210,7 +213,7 @@ func (c *Client) StartAuthLogin(ctx context.Context) (*AuthLogin, error) {
 	if err != nil {
 		pipes.closeAll()
 
-		return nil, fmt.Errorf("start amp login: %w", err)
+		return nil, errors.Join(fmt.Errorf("start amp login: %w", err), shim.remove())
 	}
 
 	pipes.closeChildSide()
@@ -223,6 +226,7 @@ func (c *Client) StartAuthLogin(ctx context.Context) (*AuthLogin, error) {
 		wait:     tree.commandWait(),
 		url:      make(chan string, 1),
 		dataHome: dataHome,
+		shim:     shim,
 		onPanic:  c.options.OnGoroutinePanic,
 	}
 
@@ -242,16 +246,15 @@ func (c *Client) authLoginArgs() []string {
 }
 
 // authLoginEnv builds the login child's environment: the session's own values
-// plus the headless and browser-neutralising overrides, with the ambient API
-// key removed however it arrived.
+// plus the headless override, with the ambient API key removed however it
+// arrived.
 func authLoginEnv(base map[string]string, cwd string) []string {
-	overrides := make(map[string]string, len(base)+2)
+	overrides := make(map[string]string, len(base)+1)
 	for key, value := range base {
 		overrides[key] = value
 	}
 
 	overrides[authHeadlessOAuthEnv] = "1"
-	overrides[authBrowserEnv] = authBrowserNoop
 
 	env := BuildEnv(overrides, cwd)
 
@@ -475,6 +478,7 @@ func (l *AuthLogin) Close() error {
 			l.closeStdin(),
 			l.stdout.Close(),
 			l.stderr.Close(),
+			l.shim.remove(),
 		)
 	})
 

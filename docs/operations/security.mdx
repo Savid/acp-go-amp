@@ -83,10 +83,22 @@ disarmed once the child is running:
 | `GOTRACEBACK` | `crash` dumps every goroutine to stderr before any adapter code runs. |
 | `AMP_DISABLE_SECRET_REDACTION` | Turns off Amp's own redaction wholesale. |
 
-The native login additionally runs with `AMP_API_KEY` removed and its browser
-launch neutralised, so a brokered login never copies an ambient environment key
-back out as if it had been brokered, and no browser writes a profile into the
-directory the adapter reads the credential from.
+The native login additionally runs with `AMP_API_KEY` removed, so a brokered
+login never copies an ambient environment key back out as if it had been
+brokered.
+
+Its browser launch is neutralised by two mechanisms at once, because a native
+launcher may use either. The login child runs with a scratch directory of no-op
+launchers — `open`, `xdg-open`, `x-www-browser`, `www-browser`,
+`sensible-browser` — ahead of every other entry on its `PATH`, and with
+`BROWSER` pointing into that same directory. The directory is mode `0700`,
+lives under the scratch parent (`WithScratchDir` / `-scratch-dir`), and is
+removed when the login handle closes. On Windows the login refuses to start:
+the launcher there resolves out of the system directory ahead of `PATH` and
+opens a URL through a shell builtin with no image to shadow, so no launch can
+be proven contained. Without this, a launcher that execs `open` directly opens
+a tab on the operator's desktop and the browser writes its profile — cookie jar
+included — into the directory the adapter reads the credential from.
 
 ## Stream isolation
 

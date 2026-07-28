@@ -1,0 +1,15 @@
+//go:build windows
+
+package amp
+
+import (
+	"errors"
+	"testing"
+)
+
+func TestNewBrowserShimFailsClosed(t *testing.T) {
+	shim, err := newBrowserShim(t.TempDir())
+	if shim != nil || !errors.Is(err, errBrowserShimUnsupported) {
+		t.Fatalf("newBrowserShim = %v, %v; want a refusal", shim, err)
+	}
+}

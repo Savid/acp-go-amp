@@ -205,10 +205,6 @@ func TestAuthLoginEnvDropsTheAmbientKey(t *testing.T) {
 		t.Fatalf("login env does not force the headless leg: %v", env)
 	}
 
-	if !slices.Contains(env, authBrowserEnv+"="+authBrowserNoop) {
-		t.Fatalf("login env does not neutralise the browser launch: %v", env)
-	}
-
 	if !slices.Contains(env, "AMP_URL=https://amp.example") {
 		t.Fatalf("login env dropped a session override: %v", env)
 	}
