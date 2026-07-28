@@ -84,6 +84,10 @@ type authFlow struct {
 	reason    string
 	expiresAt time.Time
 	harvested bool
+	// claimed is held by the one leg driving this flow's login child, so a
+	// second callback or a status poll cannot write to a stdin another leg is
+	// already writing to and closing.
+	claimed bool
 
 	nextProbeAt time.Time
 
@@ -166,6 +170,21 @@ func (p *providerAuth) authorize(ctx context.Context, params json.RawMessage) (a
 
 	key := authFlowKey{sessionID: session.id, providerID: request.providerID}
 
+	releaseKey, admitted := p.admitKey(ctx, key)
+	if !admitted {
+		return nil, authFailed(authCauseTimeout, request.providerID, request.method, "")
+	}
+
+	defer releaseKey()
+
+	// The retired check precedes the replay because the two can never both
+	// answer: a supersede retires the key it replaced and the successor becomes
+	// the retained one. Asking first is what keeps a supersede whose successor
+	// never published from replaying the record it already tore down.
+	if p.requestRetired(key, request.authorizeRequestID) {
+		return nil, invalidAuthField(authFieldAuthorizeRequestID)
+	}
+
 	if replay, replayed, replayErr := p.replayAuthorize(ctx, key, request.authorizeRequestID); replayed {
 		if replayErr != nil {
 			return nil, replayErr
@@ -195,6 +214,59 @@ func (p *providerAuth) authorize(ctx context.Context, params json.RawMessage) (a
 	p.supersede(key, authReasonSuperseded)
 
 	now := authNow()
+
+	record, recordErr := p.recordIntent(ctx, request, flowID, now)
+	if recordErr != nil {
+		return nil, recordErr
+	}
+
+	flow := &authFlow{
+		id:                 flowID,
+		sessionID:          session.id,
+		providerID:         request.providerID,
+		connectionID:       request.connectionID,
+		revision:           record.Revision,
+		bindingGeneration:  record.BindingGeneration,
+		method:             method,
+		authorizeRequestID: request.authorizeRequestID,
+		createdAt:          record.CreatedAt,
+		state:              authStatePending,
+		expiresAt:          now.Add(authSafetyDeadline),
+		ready:              make(chan struct{}),
+		disarm:             make(chan struct{}),
+	}
+
+	if !p.publishFlow(key, flow) {
+		return nil, unknownSessionError()
+	}
+
+	presentation, cause := p.mintPresentation(ctx, session, flow)
+	if cause != "" {
+		mintErr := p.fail(flow, cause, false)
+		p.settleMint(flow, authAuthorizeResult{}, mintErr)
+
+		return nil, mintErr
+	}
+
+	p.settleMint(flow, presentation, nil)
+	p.armCompleter(flow)
+
+	return presentation, nil
+}
+
+// recordIntent persists the flow's slot binding before any login child exists.
+// The read that carries the prior generation forward and the write that
+// supersedes it are one sequence under the slot gate: a disconnect landing
+// between them would have its own bump read back as this flow's generation and
+// silently undone by the write that follows.
+func (p *providerAuth) recordIntent(ctx context.Context, request authorizeRequest, flowID string, now time.Time) (authLedgerRecord, error) {
+	release, admitted := p.admitSlot(ctx, request.providerID)
+	if !admitted {
+		return authLedgerRecord{}, authFailed(authCauseTimeout, request.providerID, request.method, "")
+	}
+
+	defer release()
+
 	record := authLedgerRecord{
 		ProviderID:         request.providerID,
 		ConnectionID:       request.connectionID,
@@ -214,52 +286,10 @@ func (p *providerAuth) authorize(ctx context.Context, params json.RawMessage) (a
 	}
 
 	if writeErr := p.ledger.write(record); writeErr != nil {
-		return nil, authFailed(authCauseProcess, request.providerID, request.method, "")
+		return authLedgerRecord{}, authFailed(authCauseProcess, request.providerID, request.method, "")
 	}
 
-	flow := &authFlow{
-		id:                 flowID,
-		sessionID:          session.id,
-		providerID:         request.providerID,
-		connectionID:       request.connectionID,
-		revision:           record.Revision,
-		bindingGeneration:  record.BindingGeneration,
-		method:             method,
-		authorizeRequestID: request.authorizeRequestID,
-		createdAt:          record.CreatedAt,
-		state:              authStatePending,
-		expiresAt:          now.Add(authSafetyDeadline),
-		ready:              make(chan struct{}),
-		disarm:             make(chan struct{}),
-	}
-
-	p.register(key, flow)
-
-	presentation, cause := p.mintPresentation(ctx, session, flow)
-	if cause != "" {
-		mintErr := p.fail(flow, cause, false)
-		p.settleMint(flow, authAuthorizeResult{}, mintErr)
-
-		return nil, mintErr
-	}
-
-	p.settleMint(flow, presentation, nil)
-	p.armCompleter(flow)
-
-	return presentation, nil
-}
-
-// register publishes the flow before its mint runs. That ordering is what makes
-// the flowId a mint failure reports address a real terminal record, and what
-// lets a repeat of the idempotency key that arrives mid-mint find the flow to
-// wait on rather than start a second login.
-func (p *providerAuth) register(key authFlowKey, flow *authFlow) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	p.flows[key] = flow
-	p.byID[flow.id] = flow
-	p.retained[key] = flow
+	return record, nil
 }
 
 // settleMint publishes the mint's verdict to every waiting repeat. A flow the
@@ -433,12 +463,19 @@ func (p *providerAuth) expire(flow *authFlow) {
 	p.closeLogin(flow)
 }
 
-// supersede terminalizes the flow a new authorize replaces and tears its login
-// child down alongside the wrapper disarm.
+// supersede retires the record a new authorize replaces, whatever state it
+// reached. Its flow id stops addressing anything, its idempotency key is retired
+// so a delayed retry of it cannot mint in place of the successor, and its login
+// child is torn down — a flow that completed still holds the credential it
+// installed under that child's own root, and a record nobody can address any
+// more is one nobody can harvest, so leaving the residence up would leave a live
+// key resident for a connection this broker no longer answers for. A flow that
+// already reached a terminal state keeps it: being replaced is what ends its
+// life, not the transition it happened to end on.
 func (p *providerAuth) supersede(key authFlowKey, reason string) {
 	p.mu.Lock()
 
-	flow, ok := p.flows[key]
+	flow, ok := p.retained[key]
 	if !ok {
 		p.mu.Unlock()
 
@@ -447,9 +484,12 @@ func (p *providerAuth) supersede(key authFlowKey, reason string) {
 
 	delete(p.flows, key)
 	delete(p.byID, flow.id)
+	p.retire(key, flow.authorizeRequestID)
 
-	flow.state = authStateCancelled
-	flow.reason = reason
+	if !authTerminal(flow.state) {
+		flow.state = authStateCancelled
+		flow.reason = reason
+	}
 
 	flow.stopCompleter()
 	p.mu.Unlock()
@@ -532,18 +572,19 @@ func (p *providerAuth) callback(ctx context.Context, params json.RawMessage) (an
 		return nil, invalidAuthField(authFieldMethod)
 	}
 
-	p.mu.Lock()
-	terminal := authTerminal(flow.state)
-	login := flow.login
-	p.mu.Unlock()
-
-	if terminal {
-		return nil, authFailed(authCauseFlowState, providerID, method, flowID)
+	if claimErr := p.claimFlow(flow); claimErr != nil {
+		return nil, claimErr
 	}
+
+	defer p.releaseFlow(flow)
 
 	if input == "" || len(input) > authMaxCallbackBytes {
 		return nil, invalidAuthField(authFieldInput)
 	}
+
+	p.mu.Lock()
+	login := flow.login
+	p.mu.Unlock()
 
 	if login == nil {
 		return nil, p.fail(flow, authCauseTransport, false)
@@ -552,6 +593,13 @@ func (p *providerAuth) callback(ctx context.Context, params json.RawMessage) (an
 	if storeErr := session.authFileStore(); storeErr != nil {
 		return nil, p.fail(flow, authCauseNativeVeto, false)
 	}
+
+	releaseSlot, admitted := p.admitSlot(ctx, providerID)
+	if !admitted {
+		return nil, authFailed(authCauseTimeout, providerID, method, flow.id)
+	}
+
+	defer releaseSlot()
 
 	// Amp races a hook that can finish the login without any paste. A child that
 	// has already settled wants no input, and writing to it would report a dead
@@ -566,6 +614,15 @@ func (p *providerAuth) callback(ctx context.Context, params json.RawMessage) (an
 		}
 
 		return authFlowIDResult{FlowID: flow.id}, nil
+	}
+
+	// The recorded binding is re-read before the paste reaches the child, not
+	// only before the confirmation is written. A disconnect that already released
+	// the slot leaves nothing for this paste to install against, and a paste
+	// submitted anyway would put the account key in the child's residence with
+	// the ledger reading `removed` over it.
+	if !p.lineageCurrent(flow) {
+		return nil, authFailed(authCauseBindingConflict, providerID, method, flow.id)
 	}
 
 	submitCtx, cancel := context.WithTimeout(ctx, authNativeCallTimeout)
@@ -584,10 +641,16 @@ func (p *providerAuth) callback(ctx context.Context, params json.RawMessage) (an
 
 // completeFlow records the post-mutation confirmation and terminalizes the flow
 // as authenticated. The credential the login just wrote is not read here: the
-// harvest leg is the only reader, and it runs at most once.
+// harvest leg is the only reader, and it runs at most once. Its caller holds the
+// slot gate, so the binding it checks here cannot move before the write below
+// lands.
 func (p *providerAuth) completeFlow(flow *authFlow) error {
 	if cause, abandoned := p.abandonedCause(flow); abandoned {
 		return authFailed(cause, flow.providerID, flow.method.ID, flow.id)
+	}
+
+	if !p.lineageCurrent(flow) {
+		return authFailed(authCauseBindingConflict, flow.providerID, flow.method.ID, flow.id)
 	}
 
 	record := authLedgerRecord{
@@ -691,13 +754,13 @@ func (p *providerAuth) addressFlow(sessionID acp.SessionId, providerID string, f
 
 // status reports the flow, not the connection. Amp's key never expires, so no
 // credential expiry is ever reported.
-func (p *providerAuth) status(_ context.Context, params json.RawMessage) (any, error) {
+func (p *providerAuth) status(ctx context.Context, params json.RawMessage) (any, error) {
 	_, flow, err := p.addressedFlowLeg(params)
 	if err != nil {
 		return nil, err
 	}
 
-	p.probe(flow)
+	p.probe(ctx, flow)
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -708,12 +771,21 @@ func (p *providerAuth) status(_ context.Context, params json.RawMessage) (any, e
 // probe refreshes a pending flow from the login child behind the adapter's own
 // interval, serving the cached state in between so a consumer's poll cadence
 // never reaches the provider. Amp races a loopback hook against the paste, so a
-// flow can complete without any callback arriving at all.
-func (p *providerAuth) probe(flow *authFlow) {
+// flow can complete without any callback arriving at all. It drives the same
+// login child a callback does, so it takes the same claim — and takes it only if
+// it is free, because a poll has nothing to add to a flow a callback is already
+// completing.
+func (p *providerAuth) probe(ctx context.Context, flow *authFlow) {
+	if !p.tryClaimFlow(flow) {
+		return
+	}
+
+	defer p.releaseFlow(flow)
+
 	p.mu.Lock()
 
 	now := authNow()
-	if authTerminal(flow.state) || flow.login == nil || now.Before(flow.nextProbeAt) {
+	if flow.login == nil || now.Before(flow.nextProbeAt) {
 		p.mu.Unlock()
 
 		return
@@ -734,6 +806,13 @@ func (p *providerAuth) probe(flow *authFlow) {
 
 		return
 	}
+
+	releaseSlot, admitted := p.admitSlot(ctx, flow.providerID)
+	if !admitted {
+		return
+	}
+
+	defer releaseSlot()
 
 	_ = p.completeFlow(flow)
 }
@@ -804,8 +883,15 @@ func (p *providerAuth) addressedFlowLeg(params json.RawMessage) (*agentSession, 
 // the isolated home it was writing into. It is also the one place a retained
 // record is dropped: an idempotent repeat is answerable for exactly as long as
 // the session that owns the flow.
+//
+// The id is marked closed in the same critical section that takes the sweep set,
+// which is what makes the set complete: an authorize already past its session
+// lookup cannot publish afterwards, so there is no flow the sweep can miss and
+// no need to make close wait for a native call it does not own.
 func (p *providerAuth) closeSession(sessionID acp.SessionId) {
 	p.mu.Lock()
+
+	p.closedSessions[sessionID] = struct{}{}
 
 	owned := make([]*authFlow, 0, len(p.byID))
 
@@ -830,6 +916,18 @@ func (p *providerAuth) closeSession(sessionID acp.SessionId) {
 	for key := range p.retained {
 		if key.sessionID == sessionID {
 			delete(p.retained, key)
+		}
+	}
+
+	for key := range p.retired {
+		if key.sessionID == sessionID {
+			delete(p.retired, key)
+		}
+	}
+
+	for key := range p.admissions {
+		if key.sessionID == sessionID {
+			delete(p.admissions, key)
 		}
 	}
 

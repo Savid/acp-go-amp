@@ -58,9 +58,15 @@ entitlement-gated, and stored on Amp's side.
    that exact result.
 2. `authorize` runs `amp login` inside the session's isolated home and relays
    the hosted paste-back URL. `interaction` is `callback` and `callbackInput`
-   is `code`. A repeat of the same `authorizeRequestId` replays that
+   is `code`. A repeat of the newest `authorizeRequestId` replays that
    presentation and flow ID verbatim for as long as the session lives — no
-   second login, whatever state the flow has since reached.
+   second login, whatever state the flow has since reached. A request id a
+   later `authorize` replaced is refused with invalid params naming
+   `authorizeRequestId`: only the newest record is answerable, and minting in
+   an older one's place would destroy the flow whose URL the owner is looking
+   at. That replacement also retires the previous flow entirely — its `flowId`
+   stops addressing anything and its unharvested credential residence is
+   released.
 3. The owner opens the URL, approves at Amp, and pastes the value back through
    `callback`.
 4. `status` reports the flow. Amp races a hook that can complete the login
@@ -102,6 +108,14 @@ names. It performs **no native removal** and promises **no Amp-side
 revocation**: Amp's own `logout` refuses while an environment key is set, and
 the account key stays valid at Amp until the owner revokes it there. Present
 that plainly to an owner rather than as a revocation.
+
+A `disconnect` that returns success is final against the login it raced. Every
+rewrite of one provider's recorded binding is serialised, so a `callback`
+already in flight either lands first — and is then released by the
+`disconnect` — or finds the generation moved and is refused with
+`binding_conflict` without pasting anything. The generation never moves
+backwards, so the value a successful `disconnect` established is the one the
+next `disconnect` fences against.
 
 ### Storage
 

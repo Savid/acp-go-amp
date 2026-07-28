@@ -44,8 +44,9 @@ milliseconds.
 | `_amp/auth/disconnect` | `{sessionId, providerId, connectionId, bindingGeneration}` | `{}` |
 
 A caller addressing failure — an unknown, superseded, or cross-session
-`flowId`, a stale `methodsGeneration`, a `method` that is not the flow's — is
-invalid params with the field path. `connectionId` is caller-minted and bounded
+`flowId`, a stale `methodsGeneration`, a `method` that is not the flow's, an
+`authorizeRequestId` a later `authorize` replaced — is invalid params with the
+field path. `connectionId` is caller-minted and bounded
 to at most 128 bytes of `A-Z`, `a-z`, `0-9`, `-`, and `_`; every leg that
 carries one checks it before the value is compared or recorded, and anything
 outside that shape is invalid params naming `connectionId`. Every other failure

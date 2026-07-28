@@ -274,8 +274,10 @@ func (p *providerAuth) failHarvest(flow *authFlow, cause string) error {
 // performs no native removal and promises no Amp-side revocation: amp's own
 // logout refuses while an environment key is set, and the account key stays
 // valid at Amp until the owner revokes it there. There is no absence to verify,
-// so none is claimed.
-func (p *providerAuth) disconnect(_ context.Context, params json.RawMessage) (any, error) {
+// so none is claimed — what it ends is the lineage, and the whole read →
+// compare → bump → record sequence runs under the slot gate so a login
+// completion cannot write the lineage it just ended back over it.
+func (p *providerAuth) disconnect(ctx context.Context, params json.RawMessage) (any, error) {
 	fields, err := authParamFields(params, authFieldSessionID, authFieldProviderID, authFieldConnectionID, authFieldBindingGeneration)
 	if err != nil {
 		return nil, err
@@ -304,6 +306,13 @@ func (p *providerAuth) disconnect(_ context.Context, params json.RawMessage) (an
 	if _, sessionErr := p.authSession(sessionID); sessionErr != nil {
 		return nil, sessionErr
 	}
+
+	release, admitted := p.admitSlot(ctx, providerID)
+	if !admitted {
+		return nil, authFailed(authCauseTimeout, providerID, "", "")
+	}
+
+	defer release()
 
 	record, ok, err := p.ledger.read(providerID, connectionID)
 	if err != nil {

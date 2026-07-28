@@ -869,7 +869,7 @@ func TestStatusHoldsTheNativePollFloor(t *testing.T) {
 
 	// The first status arms the interval; a second inside it serves the cached
 	// state without touching the child again.
-	fixture.broker.probe(flow)
+	fixture.broker.probe(t.Context(), flow)
 
 	fixture.broker.mu.Lock()
 	armed := flow.nextProbeAt
@@ -879,7 +879,7 @@ func TestStatusHoldsTheNativePollFloor(t *testing.T) {
 		t.Fatal("status did not arm the poll interval")
 	}
 
-	fixture.broker.probe(flow)
+	fixture.broker.probe(t.Context(), flow)
 
 	fixture.broker.mu.Lock()
 	again := flow.nextProbeAt
@@ -895,10 +895,10 @@ func TestStatusHoldsTheNativePollFloor(t *testing.T) {
 
 	// A terminal flow, and one whose login child is gone, are both no-ops.
 	fixture.broker.terminalize(flow, authStateCancelled, authReasonOwnerCancel)
-	fixture.broker.probe(flow)
+	fixture.broker.probe(t.Context(), flow)
 
 	fixture.broker.closeLogin(flow)
-	fixture.broker.probe(flow)
+	fixture.broker.probe(t.Context(), flow)
 }
 
 func TestStatusAndCancelRejectAddressingFailures(t *testing.T) {

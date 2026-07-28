@@ -95,6 +95,18 @@ func authMethodNames() []string {
 // providerAuth is the agent-scoped broker behind the provider-auth legs. It
 // owns the generation naming the current catalog, the per-session flow records,
 // and the durable values-free ledger.
+//
+// The ACP connection runs every inbound request on its own goroutine and
+// cancels that goroutine's context when the handler returns; only notifications
+// are processed in order. So two legs addressing the same flow, the same
+// session, or the same recorded binding run at the same time, and every
+// read state → native call → write state sequence below is a check-then-set
+// whose window is the whole native call. The admissions in auth_admission.go
+// exist for that reason and for no other: without them a wide check-then-set
+// hands two legs the same authorization to act on, and because each field
+// access is individually locked there is no data race for the detector to
+// report — only a lost update the host sees as a disconnect that came back or a
+// paste that vanished.
 type providerAuth struct {
 	agent  *Agent
 	ledger *authLedger
@@ -107,6 +119,16 @@ type providerAuth struct {
 	// every terminal transition frees the pending slot while an idempotent
 	// repeat must still be answered verbatim.
 	retained map[authFlowKey]*authFlow
+	// retired holds the request ids a supersede replaced, so a delayed retry of
+	// one fails on its own key instead of destroying the flow that replaced it.
+	retired map[authFlowKey]map[string]struct{}
+	// closedSessions holds the ids whose sweep already ran, which is what a
+	// publication is refused against.
+	closedSessions map[acp.SessionId]struct{}
+	// admissions serialises authorize per (session, provider); slots serialise
+	// every rewrite of one provider's recorded binding.
+	admissions map[authFlowKey]chan struct{}
+	slots      map[string]chan struct{}
 }
 
 type authFlowKey struct {
@@ -131,11 +153,15 @@ func newProviderAuth(agent *Agent) *providerAuth {
 	}
 
 	return &providerAuth{
-		agent:    agent,
-		ledger:   ledger,
-		flows:    make(map[authFlowKey]*authFlow),
-		byID:     make(map[string]*authFlow),
-		retained: make(map[authFlowKey]*authFlow),
+		agent:          agent,
+		ledger:         ledger,
+		flows:          make(map[authFlowKey]*authFlow),
+		byID:           make(map[string]*authFlow),
+		retained:       make(map[authFlowKey]*authFlow),
+		retired:        make(map[authFlowKey]map[string]struct{}),
+		closedSessions: make(map[acp.SessionId]struct{}),
+		admissions:     make(map[authFlowKey]chan struct{}),
+		slots:          make(map[string]chan struct{}),
 	}
 }
 
@@ -280,9 +306,21 @@ func authFlowTransition(cause string, materialInFlight bool) (string, string) {
 }
 
 // authSession resolves the session a leg addresses. An unknown, unloaded, or
-// tombstoned session gets the uniform unknown-session rejection.
+// tombstoned session gets the uniform unknown-session rejection, and so does one
+// whose close already swept its flows: that is the cheap refusal of an ordinary
+// late leg, while publication is what refuses the leg that passed here a moment
+// before the close ran.
 func (p *providerAuth) authSession(id string) (*agentSession, error) {
-	return p.agent.session(acp.SessionId(id))
+	session, err := p.agent.session(acp.SessionId(id))
+	if err != nil {
+		return nil, err
+	}
+
+	if p.sessionClosed(session.id) {
+		return nil, unknownSessionError()
+	}
+
+	return session, nil
 }
 
 // authDataHome reports the session's isolated XDG_DATA_HOME, which is where amp
