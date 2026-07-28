@@ -47,11 +47,11 @@ test-integration-live:
 
 ## test-integration-attended: run the provider-auth login a human must approve in real time
 test-integration-attended:
-	ACP_GO_AMP_RUN_INTEGRATION=1 ACP_GO_AMP_RUN_ATTENDED=1 go test -race -count=1 -tags=integration -timeout=1200s -run Attended -v ./integration/...
+	ACP_GO_AMP_RUN_INTEGRATION=1 ACP_GO_AMP_RUN_ATTENDED=1 go test -race -count=1 -tags=integration -timeout=1200s -v -run TestAttended ./integration/...
 
 ## test-integration-keystore: run the three-configuration credential-residence matrix
 test-integration-keystore:
-	ACP_GO_AMP_RUN_INTEGRATION=1 ACP_GO_AMP_RUN_KEYSTORE=1 go test -race -count=1 -tags=integration -timeout=900s -run Keystore -v ./integration/... .
+	ACP_GO_AMP_RUN_INTEGRATION=1 ACP_GO_AMP_RUN_KEYSTORE=1 go test -race -count=1 -tags=integration -timeout=900s -v -run TestKeystore ./...
 
 ## test-integration-cover: run smoke integration tests with compiled binary coverage
 test-integration-cover:

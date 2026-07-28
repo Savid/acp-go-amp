@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/testcontainers/testcontainers-go"
+	tcexec "github.com/testcontainers/testcontainers-go/exec"
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
@@ -22,13 +23,13 @@ const (
 	browserShimProbeCase = "TestLoginNeverExecsABrowserLauncher"
 )
 
-// TestKeystoreTierLinuxLoginNeverExecsABrowserLauncher runs the login path's
+// TestKeystoreLinuxLoginNeverExecsABrowserLauncher runs the login path's
 // non-execution proof on Linux. The native binary picks its launcher by GOOS —
 // `open` on darwin, `xdg-open` on everything else — so a proof that only ever
 // ran on a developer's Mac leaves the branch every Linux host takes asserted
 // and never executed.
-func TestKeystoreTierLinuxLoginNeverExecsABrowserLauncher(t *testing.T) {
-	requireKeystoreTier(t)
+func TestKeystoreLinuxLoginNeverExecsABrowserLauncher(t *testing.T) {
+	requireKeystoreRuntime(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
@@ -59,11 +60,13 @@ func TestKeystoreTierLinuxLoginNeverExecsABrowserLauncher(t *testing.T) {
 		t.Fatalf("copy browser shim probe: %v", err)
 	}
 
+	// The raw exec stream is frame-multiplexed: every read carries an eight-byte
+	// header, so an unmultiplexed reader interleaves those bytes into the logs.
 	code, output, err := container.Exec(ctx, []string{
 		browserShimProbePath,
 		"-test.v",
 		"-test.run", "^" + browserShimProbeCase + "$",
-	})
+	}, tcexec.Multiplexed())
 	if err != nil {
 		t.Fatalf("run browser shim probe: %v", err)
 	}
