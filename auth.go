@@ -331,6 +331,18 @@ func (s *agentSession) authDataHome() string {
 	return s.env[envXDGDataHome]
 }
 
+// lifetimeEnded reports whether this session record has been closed or deleted.
+// It is what distinguishes the session a provider-auth leg is holding from the
+// next one to carry the same id, and it is set before either teardown reaches
+// the broker, so a leg that reads it live is one the teardown's sweep still has
+// ahead of it.
+func (s *agentSession) lifetimeEnded() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.closed
+}
+
 // closeProviderAuth terminalizes every flow the session owns before its scratch
 // is reclaimed, so a login child never outlives the isolated home it writes to.
 func (s *agentSession) closeProviderAuth() {

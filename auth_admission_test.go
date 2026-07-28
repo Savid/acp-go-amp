@@ -552,6 +552,95 @@ func TestAReopenedSessionIdServesTheAuthSurfaceAgain(t *testing.T) {
 	}
 }
 
+// TestReopeningAnIdDoesNotAdmitTheLifetimeItReplaced parks an authorize between
+// the store assertion it passed and the publication it has not reached, and
+// closes and reloads the session id underneath it. Clearing the mark makes the
+// id serve legs again, and the parked leg still holds the session that close
+// tore down: readmitting it on the strength of the id alone publishes a flow
+// into a lifetime whose sweep has already run and starts a login child in a
+// scratch root that was reclaimed while it waited.
+func TestReopeningAnIdDoesNotAdmitTheLifetimeItReplaced(t *testing.T) {
+	store := NewInMemorySessionStore()
+	fixture := newAuthFixture(t, "login-hang", WithSessionStore(store))
+	starts := countAuthLogins(t)
+
+	manifest, err := json.Marshal(ampManifest{
+		Format: SessionStoreFormat, SessionID: string(fixture.session.id),
+		NativeSessionID: string(fixture.session.id), Cwd: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("marshal manifest: %v", err)
+	}
+
+	key := SessionKey{SessionID: string(fixture.session.id)}
+	if replaceErr := store.Replace(t.Context(), key,
+		[]SessionStoreReplacement{{Key: key, Entries: []SessionStoreEntry{manifest}}}); replaceErr != nil {
+		t.Fatalf("seed manifest: %v", replaceErr)
+	}
+
+	params := fixture.rawParams(map[string]any{
+		authFieldSessionID:          string(fixture.session.id),
+		authFieldProviderID:         authProviderID,
+		authFieldConnectionID:       "connection-1",
+		authFieldMethodsGeneration:  fixture.generation(),
+		authFieldMethod:             authMethodID,
+		authFieldAuthorizeRequestID: "request-a",
+	})
+
+	arrived := make(chan struct{}, 1)
+	release := make(chan struct{})
+	originalMarshal := ledgerMarshal
+
+	t.Cleanup(func() { ledgerMarshal = originalMarshal })
+
+	ledgerMarshal = func(value any) ([]byte, error) {
+		arrived <- struct{}{}
+		<-release
+
+		return originalMarshal(value)
+	}
+
+	answered := make(chan error, 1)
+
+	go func() {
+		_, callErr := fixture.agent.HandleExtensionMethod(context.Background(), AuthAuthorizeMethod, params)
+		answered <- callErr
+	}()
+
+	<-arrived
+
+	if _, closeErr := fixture.agent.CloseSession(t.Context(),
+		acp.CloseSessionRequest{SessionId: fixture.session.id}); closeErr != nil {
+		t.Fatalf("close session: %v", closeErr)
+	}
+
+	if _, loadErr := fixture.agent.LoadSession(t.Context(),
+		LoadSessionRequest(fixture.session.id, t.TempDir())); loadErr != nil {
+		t.Fatalf("load session: %v", loadErr)
+	}
+
+	close(release)
+
+	callErr := <-answered
+	if callErr == nil {
+		t.Fatal("a leg holding a torn-down session published against the id that replaced it")
+	}
+
+	requireInvalidAuthField(t, callErr, authFieldSessionID)
+
+	if got := starts.Load(); got != 0 {
+		t.Fatalf("login children started into a reclaimed scratch root = %d, want 0", got)
+	}
+
+	fixture.broker.mu.Lock()
+	escaped := len(fixture.broker.byID)
+	fixture.broker.mu.Unlock()
+
+	if escaped != 0 {
+		t.Fatalf("%d flow records escaped the session close", escaped)
+	}
+}
+
 // TestAdmissionRefusesALegTheCallerAbandoned pins what a leg does when the gate
 // it needs is held and its own caller has gone. It answers the closed
 // timeout cause and takes nothing, rather than sitting on a native sequence

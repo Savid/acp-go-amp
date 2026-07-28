@@ -29,11 +29,23 @@ func (p *providerAuth) sessionClosed(sessionID acp.SessionId) bool {
 // Close deliberately does not wait for in-flight legs. Draining would block
 // session/close for the length of an unbounded native call, and refusing
 // publication holds the same invariant without it.
-func (p *providerAuth) publishFlow(key authFlowKey, flow *authFlow) bool {
+//
+// Two things are asked, because the mark alone names an id and the invariant is
+// about a lifetime. The mark is what orders publication against the sweep: close
+// takes it in the same critical section that takes the sweep set, so a flow
+// published before it is swept with the rest and a flow that would publish after
+// it never exists. But the mark is cleared the moment the id is live again, and
+// a leg that waited out a gate still holds the session that close tore down —
+// readmitting it on the id alone starts a login child in a scratch root that was
+// reclaimed while it waited, under a record the new lifetime's close will not
+// recognise as its own. The session's own end is set before close reaches this
+// lock, so a session that reads live here is one whose sweep is still ahead of
+// this publication and cannot miss it.
+func (p *providerAuth) publishFlow(key authFlowKey, flow *authFlow, session *agentSession) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	if _, closed := p.closedSessions[flow.sessionID]; closed {
+	if _, closed := p.closedSessions[flow.sessionID]; closed || session.lifetimeEnded() {
 		return false
 	}
 

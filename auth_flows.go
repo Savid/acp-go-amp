@@ -236,7 +236,7 @@ func (p *providerAuth) authorize(ctx context.Context, params json.RawMessage) (a
 		disarm:             make(chan struct{}),
 	}
 
-	if !p.publishFlow(key, flow) {
+	if !p.publishFlow(key, flow, session) {
 		return nil, unknownSessionError()
 	}
 
