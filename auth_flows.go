@@ -87,6 +87,12 @@ type authFlow struct {
 
 	nextProbeAt time.Time
 
+	// ready is closed once the mint has settled, and mintErr carries the verdict
+	// it settled on. A repeat of the idempotency key that arrives while the mint
+	// is still running waits here instead of starting a second login.
+	ready   chan struct{}
+	mintErr error
+
 	disarm chan struct{}
 }
 
@@ -160,7 +166,11 @@ func (p *providerAuth) authorize(ctx context.Context, params json.RawMessage) (a
 
 	key := authFlowKey{sessionID: session.id, providerID: request.providerID}
 
-	if replay, ok := p.replayAuthorize(key, request.authorizeRequestID); ok {
+	if replay, replayed, replayErr := p.replayAuthorize(ctx, key, request.authorizeRequestID); replayed {
+		if replayErr != nil {
+			return nil, replayErr
+		}
+
 		return replay, nil
 	}
 
@@ -219,24 +229,56 @@ func (p *providerAuth) authorize(ctx context.Context, params json.RawMessage) (a
 		createdAt:          record.CreatedAt,
 		state:              authStatePending,
 		expiresAt:          now.Add(authSafetyDeadline),
+		ready:              make(chan struct{}),
 		disarm:             make(chan struct{}),
 	}
 
-	presentation, err := p.mintPresentation(ctx, session, flow)
-	if err != nil {
-		return nil, err
+	p.register(key, flow)
+
+	presentation, cause := p.mintPresentation(ctx, session, flow)
+	if cause != "" {
+		mintErr := p.fail(flow, cause, false)
+		p.settleMint(flow, authAuthorizeResult{}, mintErr)
+
+		return nil, mintErr
 	}
 
-	flow.presentation = presentation
-
-	p.mu.Lock()
-	p.flows[key] = flow
-	p.byID[flowID] = flow
-	p.mu.Unlock()
-
+	p.settleMint(flow, presentation, nil)
 	p.armCompleter(flow)
 
 	return presentation, nil
+}
+
+// register publishes the flow before its mint runs. That ordering is what makes
+// the flowId a mint failure reports address a real terminal record, and what
+// lets a repeat of the idempotency key that arrives mid-mint find the flow to
+// wait on rather than start a second login.
+func (p *providerAuth) register(key authFlowKey, flow *authFlow) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	p.flows[key] = flow
+	p.byID[flow.id] = flow
+	p.retained[key] = flow
+}
+
+// settleMint publishes the mint's verdict to every waiting repeat. A flow the
+// session closed or a newer authorize superseded while the mint was still
+// running is already torn down and unreachable, so the child this mint started
+// is released here rather than left holding a native root nobody can reclaim.
+func (p *providerAuth) settleMint(flow *authFlow, presentation authAuthorizeResult, mintErr error) {
+	p.mu.Lock()
+
+	flow.presentation = presentation
+	flow.mintErr = mintErr
+	orphaned := authTerminal(flow.state)
+
+	close(flow.ready)
+	p.mu.Unlock()
+
+	if orphaned {
+		p.closeLogin(flow)
+	}
 }
 
 func decodeAuthorizeRequest(fields map[string]json.RawMessage) (authorizeRequest, error) {
@@ -276,49 +318,65 @@ func decodeAuthorizeRequest(fields map[string]json.RawMessage) (authorizeRequest
 	return request, nil
 }
 
-// replayAuthorize answers a repeated idempotency key verbatim from memory: no
-// supersede, no completer disarm, no destruction of flow state, and no native
-// call.
-func (p *providerAuth) replayAuthorize(key authFlowKey, requestID string) (authAuthorizeResult, bool) {
+// replayAuthorize answers a repeated idempotency key verbatim from the retained
+// record: no supersede, no completer disarm, no destruction of flow or broker
+// state, and no native call. The record outlives every terminal transition, so
+// a repeat is answerable for as long as the session lives.
+func (p *providerAuth) replayAuthorize(ctx context.Context, key authFlowKey, requestID string) (authAuthorizeResult, bool, error) {
+	p.mu.Lock()
+
+	flow, ok := p.retained[key]
+	if !ok || flow.authorizeRequestID != requestID {
+		p.mu.Unlock()
+
+		return authAuthorizeResult{}, false, nil
+	}
+
+	ready := flow.ready
+	p.mu.Unlock()
+
+	select {
+	case <-ready:
+	case <-ctx.Done():
+		// The caller stopped waiting on a mint that is still running, so nothing
+		// about the flow is decided and nothing is consumed.
+		return authAuthorizeResult{}, true, authFailed(authCauseTimeout, flow.providerID, flow.method.ID, flow.id)
+	}
+
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	flow, ok := p.flows[key]
-	if !ok || flow.authorizeRequestID != requestID {
-		return authAuthorizeResult{}, false
-	}
-
-	return flow.presentation, true
+	return flow.presentation, true, flow.mintErr
 }
 
 // mintPresentation runs `amp login` in the session's isolated data home and
 // relays the hosted paste-back URL it prints. The URL carries the flow's own
 // auth token, so it is validated against its bound before it is relayed and is
-// treated as code-bearing everywhere afterwards.
-func (p *providerAuth) mintPresentation(ctx context.Context, session *agentSession, flow *authFlow) (authAuthorizeResult, error) {
+// treated as code-bearing everywhere afterwards. A refusal is reported as its
+// cause alone: the flow is already registered, so the caller terminalizes it
+// through the transition that cause pairs with.
+func (p *providerAuth) mintPresentation(ctx context.Context, session *agentSession, flow *authFlow) (authAuthorizeResult, string) {
 	login, err := authStartLogin(session.client(), ctx)
 	if err != nil {
-		return authAuthorizeResult{}, authFailed(authCauseProcess, flow.providerID, flow.method.ID, flow.id)
+		return authAuthorizeResult{}, authCauseProcess
 	}
 
+	p.mu.Lock()
 	flow.login = login
 	flow.residence = login.DataHome()
+	p.mu.Unlock()
 
 	urlCtx, cancel := context.WithTimeout(ctx, authNativeCallTimeout)
 	defer cancel()
 
 	minted, err := login.URL(urlCtx)
 	if err != nil {
-		p.closeLogin(flow)
-
-		return authAuthorizeResult{}, authFailed(authCauseProcess, flow.providerID, flow.method.ID, flow.id)
+		return authAuthorizeResult{}, authCauseProcess
 	}
 
 	authorizeURL, ok := authDisplayURL(minted)
 	if !ok {
-		p.closeLogin(flow)
-
-		return authAuthorizeResult{}, authFailed(authCauseNativeVeto, flow.providerID, flow.method.ID, flow.id)
+		return authAuthorizeResult{}, authCauseNativeVeto
 	}
 
 	return authAuthorizeResult{
@@ -328,7 +386,7 @@ func (p *providerAuth) mintPresentation(ctx context.Context, session *agentSessi
 		CallbackInput: authCallbackInputCode,
 		FlowID:        flow.id,
 		FlowExpiresAt: flow.expiresAt.UnixMilli(),
-	}, nil
+	}, ""
 }
 
 // armCompleter bounds the flow by its effective deadline. It is armed exactly
@@ -695,7 +753,9 @@ func (p *providerAuth) addressedFlowLeg(params json.RawMessage) (*agentSession, 
 // as cancelled/session_closed, and tears down every login child the session
 // still holds — including the completed ones a harvest never came for. It runs
 // before the session's scratch is reclaimed, so a login child never outlives
-// the isolated home it was writing into.
+// the isolated home it was writing into. It is also the one place a retained
+// record is dropped: an idempotent repeat is answerable for exactly as long as
+// the session that owns the flow.
 func (p *providerAuth) closeSession(sessionID acp.SessionId) {
 	p.mu.Lock()
 
@@ -717,6 +777,12 @@ func (p *providerAuth) closeSession(sessionID acp.SessionId) {
 		flow.stopCompleter()
 
 		owned = append(owned, flow)
+	}
+
+	for key := range p.retained {
+		if key.sessionID == sessionID {
+			delete(p.retained, key)
+		}
 	}
 
 	p.mu.Unlock()

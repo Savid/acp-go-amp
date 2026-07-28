@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -81,11 +82,37 @@ func TestKeystoreProviderAuthResidence(t *testing.T) {
 		t.Fatalf("copy residence probe: %v", err)
 	}
 
-	code, output, err := container.Exec(ctx, []string{
-		"/bin/sh", "-c",
-		". " + keystoreEnvFile + "; export DBUS_SESSION_BUS_ADDRESS; exec " +
-			keystoreProbePath + " -test.v -test.run '^TestKeystoreResidenceMatrix$'",
-	})
+	// Both Linux configurations run in this one container and differ by exactly
+	// one thing: whether the session bus that reaches the Secret Service is
+	// exported. Which store is authoritative is a behavioral fork, and a run
+	// that exercises one side of it hides the fork.
+	for _, configuration := range []struct {
+		name string
+		bus  bool
+	}{
+		{name: "keystore-absent"},
+		{name: "keystore-present", bus: true},
+	} {
+		t.Run(configuration.name, func(t *testing.T) {
+			runResidenceMatrix(ctx, t, container, configuration.bus)
+		})
+	}
+}
+
+// runResidenceMatrix executes the probe in one configuration and requires it to
+// have reported a pass. An exit status alone would go green on a skip, which is
+// the silent success this tier exists to prevent.
+func runResidenceMatrix(ctx context.Context, t *testing.T, container testcontainers.Container, bus bool) {
+	t.Helper()
+
+	script := "export " + envRunIntegration + "=1 " + envRunKeystore + "=1; "
+	if bus {
+		script += ". " + keystoreEnvFile + "; export DBUS_SESSION_BUS_ADDRESS; "
+	}
+
+	script += "exec " + keystoreProbePath + " -test.v -test.run '^TestKeystoreResidenceMatrix$'"
+
+	code, output, err := container.Exec(ctx, []string{"/bin/sh", "-c", script})
 	if err != nil {
 		t.Fatalf("run residence matrix: %v", err)
 	}
@@ -100,17 +127,21 @@ func TestKeystoreProviderAuthResidence(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("residence matrix exited %d", code)
 	}
+
+	if !strings.Contains(string(logs), "--- PASS: TestKeystoreResidenceMatrix") {
+		t.Fatal("the residence matrix did not run in this configuration")
+	}
 }
 
 // buildResidenceProbe compiles the package that owns the read path for the
-// fixture's platform. The matrix cannot run on the host: only the container has
-// a Secret Service to answer it.
+// fixture's platform, under the tag that guards the matrix so it never builds
+// into an ungated run.
 func buildResidenceProbe(t *testing.T) string {
 	t.Helper()
 
 	out := filepath.Join(t.TempDir(), "residence.test")
 
-	command := exec.Command("go", "test", "-c", "-o", out, ".")
+	command := exec.Command("go", "test", "-c", "-tags=integration", "-o", out, ".")
 	command.Dir = ".."
 	command.Env = append(os.Environ(), "GOOS=linux", "GOARCH="+runtime.GOARCH, "CGO_ENABLED=0")
 

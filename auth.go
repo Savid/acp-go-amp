@@ -102,6 +102,10 @@ type providerAuth struct {
 	generation string
 	flows      map[authFlowKey]*authFlow
 	byID       map[string]*authFlow
+	// retained holds the most recent flow per key whatever its state, because
+	// every terminal transition frees the pending slot while an idempotent
+	// repeat must still be answered verbatim.
+	retained map[authFlowKey]*authFlow
 }
 
 type authFlowKey struct {
@@ -126,10 +130,11 @@ func newProviderAuth(agent *Agent) *providerAuth {
 	}
 
 	return &providerAuth{
-		agent:  agent,
-		ledger: ledger,
-		flows:  make(map[authFlowKey]*authFlow),
-		byID:   make(map[string]*authFlow),
+		agent:    agent,
+		ledger:   ledger,
+		flows:    make(map[authFlowKey]*authFlow),
+		byID:     make(map[string]*authFlow),
+		retained: make(map[authFlowKey]*authFlow),
 	}
 }
 

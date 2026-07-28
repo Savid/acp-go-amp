@@ -11,11 +11,10 @@ import (
 // ProviderCredentialType selects one variant of the closed credential union.
 type ProviderCredentialType string
 
-const (
-	ProviderCredentialOAuth       ProviderCredentialType = "oauth"
-	ProviderCredentialAPI         ProviderCredentialType = "api"
-	ProviderCredentialHermesOAuth ProviderCredentialType = "hermesOauth"
-)
+// ProviderCredentialAPI is the only variant amp's legs reach: the account this
+// surface brokers is held as one opaque key, and no other shape is ever emitted
+// or accepted.
+const ProviderCredentialAPI ProviderCredentialType = "api"
 
 // credentialFieldType is the union's discriminator.
 const credentialFieldType = "type"
@@ -28,83 +27,29 @@ const (
 	providerMetadataMaxTotalBytes = 8192
 )
 
-// ProviderOAuthCredential is the rotating three-part variant.
-type ProviderOAuthCredential struct {
-	Refresh         string `json:"refresh"`
-	Access          string `json:"access"`
-	AccessExpiresAt int64  `json:"accessExpiresAt"`
-	AccountID       string `json:"accountId,omitempty"`
-	EnterpriseURL   string `json:"enterpriseUrl,omitempty"`
-}
-
-// ProviderAPICredential is the opaque-key variant, and the only one this
-// adapter emits. The Amp account key is opaque, long-lived, and non-rotating,
-// so it carries no expiry, no refresh half, and no metadata.
+// ProviderAPICredential is the opaque-key variant. The Amp account key is
+// opaque, long-lived, and non-rotating, so it carries no expiry, no refresh
+// half, and no metadata.
 type ProviderAPICredential struct {
 	Key      string            `json:"key"`
 	Metadata map[string]string `json:"metadata,omitempty"`
 }
 
-// ProviderHermesOAuthCredential is the reserved-slot variant.
-type ProviderHermesOAuthCredential struct {
-	AuthType        string `json:"authType"`
-	AccessToken     string `json:"accessToken"`
-	RefreshToken    string `json:"refreshToken,omitempty"`
-	AccessExpiresAt int64  `json:"accessExpiresAt,omitempty"`
-}
-
-// ProviderCredential is the closed, flat credential union. Exactly one variant
+// ProviderCredential is the closed, flat credential union. Its one variant
 // pointer is non-nil in a valid value, and the type member selects it.
 type ProviderCredential struct {
-	Type        ProviderCredentialType
-	OAuth       *ProviderOAuthCredential
-	API         *ProviderAPICredential
-	HermesOAuth *ProviderHermesOAuthCredential
-}
-
-// ProviderAuthBinding is one connection generation and the credential bound to
-// it.
-type ProviderAuthBinding struct {
-	ConnectionID      string             `json:"connectionId"`
-	Revision          int64              `json:"revision"`
-	BindingGeneration int64              `json:"bindingGeneration"`
-	Credential        ProviderCredential `json:"credential"`
+	Type ProviderCredentialType
+	API  *ProviderAPICredential
 }
 
 var errProviderCredentialInvalid = errors.New("provider credential is not a valid member of the closed union")
 
 func (credential ProviderCredential) MarshalJSON() ([]byte, error) {
-	switch credential.Type {
-	case ProviderCredentialOAuth:
-		if credential.OAuth == nil {
-			return nil, errProviderCredentialInvalid
-		}
-
-		return json.Marshal(struct {
-			Type ProviderCredentialType `json:"type"`
-			ProviderOAuthCredential
-		}{credential.Type, *credential.OAuth})
-	case ProviderCredentialAPI:
-		if credential.API == nil {
-			return nil, errProviderCredentialInvalid
-		}
-
-		return json.Marshal(struct {
-			Type ProviderCredentialType `json:"type"`
-			ProviderAPICredential
-		}{credential.Type, *credential.API})
-	case ProviderCredentialHermesOAuth:
-		if credential.HermesOAuth == nil {
-			return nil, errProviderCredentialInvalid
-		}
-
-		return json.Marshal(struct {
-			Type ProviderCredentialType `json:"type"`
-			ProviderHermesOAuthCredential
-		}{credential.Type, *credential.HermesOAuth})
-	default:
+	if credential.Type != ProviderCredentialAPI || credential.API == nil {
 		return nil, errProviderCredentialInvalid
 	}
+
+	return json.Marshal(apiCredentialEnvelope{Type: credential.Type, ProviderAPICredential: *credential.API})
 }
 
 // apiCredentialEnvelope is the flat wire object of the api variant: the
@@ -249,16 +194,16 @@ func (p *providerAuth) credential(_ context.Context, params json.RawMessage) (an
 	}
 
 	if storeErr := session.authFileStore(); storeErr != nil {
-		return nil, authFailed(authCauseNativeVeto, flow.providerID, flow.method.ID, flow.id)
+		return nil, p.fail(flow, authCauseNativeVeto, false)
 	}
 
 	record, ok, err := p.ledger.read(flow.providerID)
 	if err != nil || !ok {
-		return nil, authFailed(authCauseHarvestFailed, flow.providerID, flow.method.ID, flow.id)
+		return nil, p.fail(flow, authCauseHarvestFailed, false)
 	}
 
 	if record.ConnectionID != flow.connectionID || record.Revision != flow.revision || record.BindingGeneration != flow.bindingGeneration {
-		return nil, authFailed(authCauseHarvestFailed, flow.providerID, flow.method.ID, flow.id)
+		return nil, p.fail(flow, authCauseHarvestFailed, false)
 	}
 
 	p.mu.Lock()
@@ -267,7 +212,7 @@ func (p *providerAuth) credential(_ context.Context, params json.RawMessage) (an
 
 	secret, present, err := authReadSecret(residence)
 	if err != nil || !present {
-		return nil, authFailed(authCauseHarvestFailed, flow.providerID, flow.method.ID, flow.id)
+		return nil, p.fail(flow, authCauseHarvestFailed, false)
 	}
 
 	p.mu.Lock()

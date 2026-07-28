@@ -65,7 +65,12 @@ func TestAuthLedgerRootValidation(t *testing.T) {
 		t.Fatal("a relative root was accepted")
 	}
 
-	root := t.TempDir()
+	// A root the operator already created carries whatever mode it was made
+	// with, so the configured root itself is restricted and not just the leaf.
+	root := filepath.Join(t.TempDir(), "provider-auth")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
 
 	ledger, err := newAuthLedger(Options{ProviderAuthRoot: root})
 	if err != nil {
@@ -76,20 +81,58 @@ func TestAuthLedgerRootValidation(t *testing.T) {
 		t.Fatalf("ledger dir = %q", ledger.dir)
 	}
 
-	info, err := os.Stat(ledger.dir)
-	if err != nil || info.Mode().Perm() != authLedgerDirMode {
-		t.Fatalf("ledger dir mode = %v/%v", info, err)
+	for _, dir := range []string{root, ledger.dir} {
+		info, statErr := os.Stat(dir)
+		if statErr != nil || info.Mode().Perm() != authLedgerDirMode {
+			t.Fatalf("%s mode = %v/%v", dir, info, statErr)
+		}
 	}
 }
 
 func TestAuthLedgerRootFailuresLeaveTheSurfaceUnadvertised(t *testing.T) {
 	want := errors.New("no root")
 
-	cases := map[string]func(){
-		"mkdir":  func() { ledgerMkdirAll = func(string, os.FileMode) error { return want } },
-		"chmod":  func() { ledgerChmod = func(string, os.FileMode) error { return want } },
-		"stat":   func() { ledgerStat = func(string) (os.FileInfo, error) { return nil, want } },
-		"create": func() { ledgerCreateTemp = func(string, string) (ledgerFile, error) { return nil, want } },
+	// The configured root and the leaf under it are prepared separately, so each
+	// step is failed on its own path rather than everywhere at once.
+	cases := map[string]func(root string){
+		"rootMkdir": func(root string) {
+			ledgerMkdirAll = func(path string, mode os.FileMode) error {
+				if path == root {
+					return want
+				}
+
+				return os.MkdirAll(path, mode)
+			}
+		},
+		"rootChmod": func(root string) {
+			ledgerChmod = func(path string, mode os.FileMode) error {
+				if path == root {
+					return want
+				}
+
+				return os.Chmod(path, mode)
+			}
+		},
+		"leafMkdir": func(root string) {
+			ledgerMkdirAll = func(path string, mode os.FileMode) error {
+				if path != root {
+					return want
+				}
+
+				return os.MkdirAll(path, mode)
+			}
+		},
+		"leafChmod": func(root string) {
+			ledgerChmod = func(path string, mode os.FileMode) error {
+				if path != root {
+					return want
+				}
+
+				return os.Chmod(path, mode)
+			}
+		},
+		"stat":   func(string) { ledgerStat = func(string) (os.FileInfo, error) { return nil, want } },
+		"create": func(string) { ledgerCreateTemp = func(string, string) (ledgerFile, error) { return nil, want } },
 	}
 
 	originals := func() func() {
@@ -100,10 +143,11 @@ func TestAuthLedgerRootFailuresLeaveTheSurfaceUnadvertised(t *testing.T) {
 
 	for name, install := range cases {
 		restore := originals()
+		root := t.TempDir()
 
-		install()
+		install(root)
 
-		_, err := newAuthLedger(Options{ProviderAuthRoot: t.TempDir()})
+		_, err := newAuthLedger(Options{ProviderAuthRoot: root})
 
 		restore()
 

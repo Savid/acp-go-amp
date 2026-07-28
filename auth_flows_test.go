@@ -117,6 +117,229 @@ func TestAuthorizeIsIdempotentAndSupersedes(t *testing.T) {
 	}
 }
 
+func TestAuthorizeReplaysAcrossTerminalization(t *testing.T) {
+	fixture := newAuthFixture(t, "login")
+	first := fixture.mustAuthorize("connection-1")
+
+	if err := fixture.callback(first.FlowID, "pasted"); err != nil {
+		t.Fatalf("callback: %v", err)
+	}
+
+	// The key is answerable for as long as the session lives, so a repeat that
+	// arrives after the flow went terminal still replays it: no supersede, no
+	// ledger revision, no second login, and the same flow id.
+	native := len(readHelperJSON[[]string](t, filepath.Join(fixture.state, "args.jsonl")))
+
+	replay, err := fixture.authorize("connection-1", "request-connection-1")
+	if err != nil {
+		t.Fatalf("replayed authorize: %v", err)
+	}
+
+	if replay != first {
+		t.Fatalf("replay = %#v, want %#v", replay, first)
+	}
+
+	if again := len(readHelperJSON[[]string](t, filepath.Join(fixture.state, "args.jsonl"))); again != native {
+		t.Fatalf("the repeat drove %d native calls", again-native)
+	}
+
+	record, _, err := fixture.broker.ledger.read(authProviderID)
+	if err != nil || record.Revision != 1 || record.FlowID != first.FlowID {
+		t.Fatalf("ledger after the repeat = %#v/%v", record, err)
+	}
+
+	if status := fixture.status(first.FlowID); status.State != authStateAuthenticated || status.Reason != "" {
+		t.Fatalf("the repeat disturbed the flow: %#v", status)
+	}
+}
+
+func TestAuthorizeReplaysAMintFailureAgainstARealFlow(t *testing.T) {
+	fixture := newAuthFixture(t, "login-no-url")
+
+	_, err := fixture.authorize("connection-1", "request-a")
+	if err == nil {
+		t.Fatal("a failed mint returned a presentation")
+	}
+
+	requireAuthCause(t, err, authCauseProcess)
+
+	// The flow is registered before the mint runs, so the id a mint failure
+	// reports addresses the terminal record it made rather than nothing.
+	flowID, _ := authFailure(t, err)[authFieldFlowID].(string)
+	if flowID == "" {
+		t.Fatalf("the mint failure carried no flow id: %#v", authFailure(t, err))
+	}
+
+	if status := fixture.status(flowID); status.State != authStateFailed || status.Reason != authReasonProcess {
+		t.Fatalf("status after a failed mint = %#v", status)
+	}
+
+	_, replayErr := fixture.authorize("connection-1", "request-a")
+	if replayErr == nil {
+		t.Fatal("the repeat started a second login")
+	}
+
+	requireAuthCause(t, replayErr, authCauseProcess)
+
+	if replayed, _ := authFailure(t, replayErr)[authFieldFlowID].(string); replayed != flowID {
+		t.Fatalf("the repeat reported flow %q, want %q", replayed, flowID)
+	}
+}
+
+// blockAuthLogin holds every mint at the native seam until the returned channel
+// is closed, which is what an authorize still waiting on `amp login` looks like
+// from another caller's side.
+func blockAuthLogin(t *testing.T, started chan<- struct{}) (chan struct{}, func() *nativeamp.AuthLogin) {
+	t.Helper()
+
+	release := make(chan struct{})
+	original := authStartLogin
+
+	var child *nativeamp.AuthLogin
+
+	authStartLogin = func(client *nativeamp.Client, ctx context.Context) (*nativeamp.AuthLogin, error) {
+		close(started)
+		<-release
+
+		login, err := original(client, ctx)
+		child = login
+
+		return login, err
+	}
+
+	t.Cleanup(func() { authStartLogin = original })
+
+	return release, func() *nativeamp.AuthLogin { return child }
+}
+
+func TestAuthorizeReplayWaitsForAnInFlightMint(t *testing.T) {
+	fixture := newAuthFixture(t, "login-hang")
+
+	params, err := json.Marshal(map[string]any{
+		authFieldSessionID:          string(fixture.session.id),
+		authFieldProviderID:         authProviderID,
+		authFieldConnectionID:       "connection-1",
+		authFieldMethodsGeneration:  fixture.generation(),
+		authFieldMethod:             authMethodID,
+		authFieldAuthorizeRequestID: "request-a",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	started := make(chan struct{})
+	release, _ := blockAuthLogin(t, started)
+
+	type outcome struct {
+		result any
+		err    error
+	}
+
+	call := func() chan outcome {
+		answered := make(chan outcome, 1)
+
+		go func() {
+			result, callErr := fixture.agent.HandleExtensionMethod(context.Background(), AuthAuthorizeMethod, params)
+			answered <- outcome{result: result, err: callErr}
+		}()
+
+		return answered
+	}
+
+	minting := call()
+	<-started
+
+	// The repeat arrives while the first mint is still running. It waits for
+	// that mint instead of starting a second login.
+	repeating := call()
+
+	select {
+	case got := <-repeating:
+		t.Fatalf("the repeat answered before the mint settled: %#v", got)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(release)
+
+	minted, repeated := <-minting, <-repeating
+	if minted.err != nil || repeated.err != nil {
+		t.Fatalf("authorize = %v, repeat = %v", minted.err, repeated.err)
+	}
+
+	if minted.result != repeated.result {
+		t.Fatalf("repeat = %#v, want %#v", repeated.result, minted.result)
+	}
+
+	presentation, _ := minted.result.(authAuthorizeResult)
+	if presentation.URL != fakeLoginURL {
+		t.Fatalf("the waiting repeat answered with %#v", presentation)
+	}
+}
+
+func TestAuthorizeReplayAbandonsAWaitTheCallerCancelled(t *testing.T) {
+	fixture := newAuthFixture(t, "login-hang")
+	key := authFlowKey{sessionID: fixture.session.id, providerID: authProviderID}
+
+	fixture.broker.mu.Lock()
+	fixture.broker.retained[key] = &authFlow{authorizeRequestID: "request-a", ready: make(chan struct{})}
+	fixture.broker.mu.Unlock()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	_, replayed, err := fixture.broker.replayAuthorize(ctx, key, "request-a")
+	if !replayed || err == nil {
+		t.Fatalf("a repeat the caller abandoned kept waiting: %v/%v", replayed, err)
+	}
+
+	requireAuthCause(t, err, authCauseTimeout)
+
+	// A key that names no retained flow is not a repeat at all.
+	if _, replayed, err := fixture.broker.replayAuthorize(t.Context(), key, "request-b"); replayed || err != nil {
+		t.Fatalf("an unrecorded key replayed: %v/%v", replayed, err)
+	}
+}
+
+func TestAuthorizeReleasesALoginChildTheSessionCloseRacedPastIt(t *testing.T) {
+	fixture := newAuthFixture(t, "login-hang")
+
+	params, err := json.Marshal(map[string]any{
+		authFieldSessionID:          string(fixture.session.id),
+		authFieldProviderID:         authProviderID,
+		authFieldConnectionID:       "connection-1",
+		authFieldMethodsGeneration:  fixture.generation(),
+		authFieldMethod:             authMethodID,
+		authFieldAuthorizeRequestID: "request-a",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	started := make(chan struct{})
+	release, child := blockAuthLogin(t, started)
+	answered := make(chan error, 1)
+
+	go func() {
+		_, callErr := fixture.agent.HandleExtensionMethod(context.Background(), AuthAuthorizeMethod, params)
+		answered <- callErr
+	}()
+
+	<-started
+
+	// The session closes while the mint is still in flight, so the flow is
+	// already torn down when its login child finally exists.
+	fixture.broker.closeSession(fixture.session.id)
+	close(release)
+
+	if callErr := <-answered; callErr != nil {
+		t.Fatalf("authorize: %v", callErr)
+	}
+
+	if settled, _ := child().Settled(); !settled {
+		t.Fatal("the mint's login child outlived the session that owned it")
+	}
+}
+
 func TestAuthorizeRejectsAddressingFailures(t *testing.T) {
 	fixture := newAuthFixture(t, "login-hang")
 	generation := fixture.generation()
@@ -520,24 +743,31 @@ func (f *authFixture) awaitSettledLogin(flowID string) *authFlow {
 	return nil
 }
 
-// awaitReleasedLogin blocks until a flow's login child has been torn down, so
-// the native root it owned is reclaimed before the test's scratch is.
-func (f *authFixture) awaitReleasedLogin(flow *authFlow) {
-	f.t.Helper()
+// captureLoginTeardown reports when a native login teardown has returned. The
+// broker clears its handle on the child before tearing it down, so a completer
+// firing in the background is still inside the child's native cleanup after the
+// flow record says the child was released; a test that waits on the handle
+// alone leaves that cleanup running past its own end.
+func captureLoginTeardown(t *testing.T) <-chan struct{} {
+	t.Helper()
 
-	for range 200 {
-		f.broker.mu.Lock()
-		released := flow.login == nil
-		f.broker.mu.Unlock()
+	torn := make(chan struct{}, 1)
+	original := authCloseLogin
 
-		if released {
-			return
+	authCloseLogin = func(login *nativeamp.AuthLogin) error {
+		err := original(login)
+
+		select {
+		case torn <- struct{}{}:
+		default:
 		}
 
-		time.Sleep(25 * time.Millisecond)
+		return err
 	}
 
-	f.t.Fatal("the login child was never released")
+	t.Cleanup(func() { authCloseLogin = original })
+
+	return torn
 }
 
 func TestCallbackAcceptsAFlowThatAlreadyCompletedOnItsOwn(t *testing.T) {
@@ -720,6 +950,7 @@ func TestCancelIsIdempotentAndClaimsNoProviderSideCancellation(t *testing.T) {
 
 func TestFlowExpiresOnItsEffectiveDeadline(t *testing.T) {
 	fixture := newAuthFixture(t, "login-hang")
+	torn := captureLoginTeardown(t)
 
 	original := authNow
 	authNow = func() time.Time { return original().Add(-authSafetyDeadline - time.Minute) }
@@ -754,7 +985,10 @@ func TestFlowExpiresOnItsEffectiveDeadline(t *testing.T) {
 		t.Fatalf("addressFlow: %v", addressErr)
 	}
 
-	fixture.awaitReleasedLogin(flow)
+	// The completer tears the child down on its own goroutine, so the test waits
+	// for that teardown rather than for the handle the broker clears first.
+	<-torn
+
 	fixture.broker.expire(flow)
 
 	if again := fixture.status(authorized.FlowID); again != status {

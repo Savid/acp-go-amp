@@ -58,7 +58,9 @@ entitlement-gated, and stored on Amp's side.
    that exact result.
 2. `authorize` runs `amp login` inside the session's isolated home and relays
    the hosted paste-back URL. `interaction` is `callback` and `callbackInput`
-   is `code`.
+   is `code`. A repeat of the same `authorizeRequestId` replays that
+   presentation and flow ID verbatim for as long as the session lives — no
+   second login, whatever state the flow has since reached.
 3. The owner opens the URL, approves at Amp, and pastes the value back through
    `callback`.
 4. `status` reports the flow. Amp races a hook that can complete the login

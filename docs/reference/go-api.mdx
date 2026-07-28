@@ -158,37 +158,30 @@ later prompts.
 
 ## Provider auth types
 
-The provider-auth surface exports one closed credential union and the binding
-it travels in. Exactly one variant pointer is non-nil in a valid value and
-`type` selects it; decoding is strict about unknown fields, duplicate fields,
-and empty required strings.
+The provider-auth surface exports one closed credential union. Its variant
+pointer is non-nil in a valid value and `type` selects it; decoding is strict
+about unknown fields, duplicate fields, and empty required strings.
 
 ```go
 type ProviderCredentialType string
 
-const (
-    ProviderCredentialOAuth       ProviderCredentialType = "oauth"
-    ProviderCredentialAPI         ProviderCredentialType = "api"
-    ProviderCredentialHermesOAuth ProviderCredentialType = "hermesOauth"
-)
+const ProviderCredentialAPI ProviderCredentialType = "api"
 
-type ProviderCredential struct {
-    Type        ProviderCredentialType
-    OAuth       *ProviderOAuthCredential
-    API         *ProviderAPICredential
-    HermesOAuth *ProviderHermesOAuthCredential
+type ProviderAPICredential struct {
+    Key      string            `json:"key"`
+    Metadata map[string]string `json:"metadata,omitempty"`
 }
 
-type ProviderAuthBinding struct {
-    ConnectionID      string             `json:"connectionId"`
-    Revision          int64              `json:"revision"`
-    BindingGeneration int64              `json:"bindingGeneration"`
-    Credential        ProviderCredential `json:"credential"`
+type ProviderCredential struct {
+    Type ProviderCredentialType
+    API  *ProviderAPICredential
 }
 ```
 
-Amp brokers one opaque account key, so `api` is the only variant its legs use
-and the only one `UnmarshalJSON` accepts. `AuthMethodsMethod`,
+Amp brokers one opaque account key, so `api` is the only variant its legs
+reach, the only one it emits, and the only one `UnmarshalJSON` accepts. Amp
+accepts no credential injection, so no binding type crosses this surface.
+`AuthMethodsMethod`,
 `AuthAuthorizeMethod`, `AuthCallbackMethod`, `AuthStatusMethod`,
 `AuthCancelMethod`, `AuthInventoryMethod`, `AuthCredentialMethod`, and
 `AuthDisconnectMethod` are the exported method-name constants.

@@ -4,48 +4,21 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
 
 	nativeamp "github.com/savid/acp-go-amp/internal/amp"
 )
 
-func TestProviderCredentialMarshalsEveryVariant(t *testing.T) {
-	cases := map[string]struct {
-		credential ProviderCredential
-		want       string
-	}{
-		"oauth": {
-			credential: ProviderCredential{Type: ProviderCredentialOAuth, OAuth: &ProviderOAuthCredential{
-				Refresh: "r", Access: "a", AccessExpiresAt: 1, AccountID: "acct", EnterpriseURL: "https://e",
-			}},
-			want: `{"type":"oauth","refresh":"r","access":"a","accessExpiresAt":1,"accountId":"acct","enterpriseUrl":"https://e"}`,
-		},
-		"api": {
-			credential: ProviderCredential{Type: ProviderCredentialAPI, API: &ProviderAPICredential{Key: "k"}},
-			want:       `{"type":"api","key":"k"}`,
-		},
-		"hermesOauth": {
-			credential: ProviderCredential{Type: ProviderCredentialHermesOAuth, HermesOAuth: &ProviderHermesOAuthCredential{
-				AuthType: "oauth", AccessToken: "t",
-			}},
-			want: `{"type":"hermesOauth","authType":"oauth","accessToken":"t"}`,
-		},
-	}
-
-	for name, testCase := range cases {
-		encoded, err := json.Marshal(testCase.credential)
-		if err != nil || string(encoded) != testCase.want {
-			t.Fatalf("%s: marshal = %s/%v, want %s", name, encoded, err, testCase.want)
-		}
+func TestProviderCredentialMarshalsTheApiVariantOnly(t *testing.T) {
+	encoded, err := json.Marshal(ProviderCredential{Type: ProviderCredentialAPI, API: &ProviderAPICredential{Key: "k"}})
+	if err != nil || string(encoded) != `{"type":"api","key":"k"}` {
+		t.Fatalf("marshal = %s/%v", encoded, err)
 	}
 
 	invalid := []ProviderCredential{
-		{Type: ProviderCredentialOAuth},
 		{Type: ProviderCredentialAPI},
-		{Type: ProviderCredentialHermesOAuth},
+		{Type: "oauth", API: &ProviderAPICredential{Key: "k"}},
 		{Type: "wellknown"},
 		{},
 	}
@@ -128,27 +101,6 @@ func TestProviderMetadataBounds(t *testing.T) {
 	}
 }
 
-func TestProviderAuthBindingRoundTrips(t *testing.T) {
-	binding := ProviderAuthBinding{
-		ConnectionID: "connection-1", Revision: 2, BindingGeneration: 3,
-		Credential: ProviderCredential{Type: ProviderCredentialAPI, API: &ProviderAPICredential{Key: "k"}},
-	}
-
-	encoded, err := json.Marshal(binding)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-
-	var decoded ProviderAuthBinding
-	if err := json.Unmarshal(encoded, &decoded); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-
-	if decoded.ConnectionID != binding.ConnectionID || decoded.Credential.API.Key != "k" {
-		t.Fatalf("binding = %#v", decoded)
-	}
-}
-
 func TestCredentialRejectsAnIncompleteFlow(t *testing.T) {
 	fixture := newAuthFixture(t, "login-hang")
 	authorized := fixture.mustAuthorize("connection-1")
@@ -164,105 +116,130 @@ func TestCredentialRejectsAnIncompleteFlow(t *testing.T) {
 
 	requireAuthCause(t, err, authCauseFlowState)
 
+	// A flow-state refusal is one the adapter made itself, so it consumes
+	// nothing: the flow is exactly as pending as it was.
+	if status := fixture.status(authorized.FlowID); status.State != authStatePending {
+		t.Fatalf("a flow-state refusal transitioned the flow: %#v", status)
+	}
+
 	if err := fixture.call(AuthCredentialMethod, map[string]any{authFieldSessionID: "T-unknown"}, nil); err == nil {
 		t.Fatal("credential answered for an unknown session")
 	}
 }
 
-func TestCredentialFailsClosedOnAnUnreadableOrFencedSlot(t *testing.T) {
-	// A completed flow whose native store answers nothing fails closed rather
-	// than reporting absence: flipping the native-secrets flag deletes the file
-	// after migrating it, so nothing found is never proof of nothing stored.
-	empty := newAuthFixture(t, "login-no-secret")
-	authorized := empty.mustAuthorize("connection-1")
+func TestCredentialFailsClosedAndTerminalizesTheFlow(t *testing.T) {
+	// A completed flow whose slot cannot answer fails closed rather than
+	// reporting absence — flipping the native-secrets flag deletes the file after
+	// migrating it, so nothing found is never proof of nothing stored — and the
+	// leg failed after the flow existed, so the cause it returns and the reason
+	// it terminalizes on are one verdict.
+	cases := map[string]struct {
+		mode    string
+		arrange func(*testing.T, *authFixture) func()
+		cause   string
+		reason  string
+	}{
+		"emptySlot": {
+			mode:   "login-no-secret",
+			cause:  authCauseHarvestFailed,
+			reason: authReasonHarvestFailed,
+		},
+		"unassertedStore": {
+			mode: "login",
+			arrange: func(t *testing.T, fixture *authFixture) func() {
+				t.Helper()
 
-	if err := empty.callback(authorized.FlowID, "pasted"); err != nil {
-		t.Fatalf("callback: %v", err)
+				if err := os.WriteFile(fixture.session.settingsFile,
+					[]byte(`{"amp.experimental.cli.nativeSecretsStorage.enabled":true}`), 0o600); err != nil {
+					t.Fatal(err)
+				}
+
+				return func() {}
+			},
+			cause:  authCauseNativeVeto,
+			reason: authReasonNativeVeto,
+		},
+		"fencedLedgerEntry": {
+			mode: "login",
+			arrange: func(t *testing.T, fixture *authFixture) func() {
+				t.Helper()
+
+				record, _, err := fixture.broker.ledger.read(authProviderID)
+				if err != nil {
+					t.Fatalf("ledger read: %v", err)
+				}
+
+				record.ConnectionID = "someone-else"
+
+				if writeErr := fixture.broker.ledger.write(record); writeErr != nil {
+					t.Fatalf("ledger write: %v", writeErr)
+				}
+
+				return func() {}
+			},
+			cause:  authCauseHarvestFailed,
+			reason: authReasonHarvestFailed,
+		},
+		"missingLedgerEntry": {
+			mode: "login",
+			arrange: func(t *testing.T, fixture *authFixture) func() {
+				t.Helper()
+
+				if err := os.Remove(fixture.broker.ledger.path(authProviderID)); err != nil {
+					t.Fatal(err)
+				}
+
+				return func() {}
+			},
+			cause:  authCauseHarvestFailed,
+			reason: authReasonHarvestFailed,
+		},
+		"unreadableLedger": {
+			mode: "login",
+			arrange: func(*testing.T, *authFixture) func() {
+				original := ledgerReadFile
+				ledgerReadFile = func(string) ([]byte, error) { return nil, errors.New("read denied") }
+
+				return func() { ledgerReadFile = original }
+			},
+			cause:  authCauseHarvestFailed,
+			reason: authReasonHarvestFailed,
+		},
 	}
 
-	params := map[string]any{
-		authFieldSessionID: string(empty.session.id), authFieldProviderID: authProviderID, authFieldFlowID: authorized.FlowID,
+	for name, testCase := range cases {
+		t.Run(name, func(t *testing.T) {
+			fixture := newAuthFixture(t, testCase.mode)
+			authorized := fixture.mustAuthorize("connection-1")
+
+			if err := fixture.callback(authorized.FlowID, "pasted"); err != nil {
+				t.Fatalf("callback: %v", err)
+			}
+
+			restore := func() {}
+			if testCase.arrange != nil {
+				restore = testCase.arrange(t, fixture)
+			}
+
+			err := fixture.call(AuthCredentialMethod, map[string]any{
+				authFieldSessionID:  string(fixture.session.id),
+				authFieldProviderID: authProviderID,
+				authFieldFlowID:     authorized.FlowID,
+			}, nil)
+
+			restore()
+
+			if err == nil {
+				t.Fatal("a slot that answers nothing was harvested")
+			}
+
+			requireAuthCause(t, err, testCase.cause)
+
+			if status := fixture.status(authorized.FlowID); status.State != authStateFailed || status.Reason != testCase.reason {
+				t.Fatalf("status after a failed harvest = %#v, want failed/%s", status, testCase.reason)
+			}
+		})
 	}
-
-	err := empty.call(AuthCredentialMethod, params, nil)
-	if err == nil {
-		t.Fatal("an empty store was harvested")
-	}
-
-	requireAuthCause(t, err, authCauseHarvestFailed)
-
-	fixture := newAuthFixture(t, "login")
-	completed := fixture.mustAuthorize("connection-1")
-
-	if writeErr := fixture.callback(completed.FlowID, "pasted"); writeErr != nil {
-		t.Fatalf("callback: %v", writeErr)
-	}
-
-	harvest := map[string]any{
-		authFieldSessionID: string(fixture.session.id), authFieldProviderID: authProviderID, authFieldFlowID: completed.FlowID,
-	}
-
-	// An unasserted native store vetoes the read.
-	if writeErr := os.WriteFile(fixture.session.settingsFile,
-		[]byte(`{"amp.experimental.cli.nativeSecretsStorage.enabled":true}`), 0o600); writeErr != nil {
-		t.Fatal(writeErr)
-	}
-
-	err = fixture.call(AuthCredentialMethod, harvest, nil)
-	if err == nil {
-		t.Fatal("credential read an unasserted native store")
-	}
-
-	requireAuthCause(t, err, authCauseNativeVeto)
-
-	if writeErr := os.WriteFile(fixture.session.settingsFile, nativeamp.AuthSettingsDocument(), 0o600); writeErr != nil {
-		t.Fatal(writeErr)
-	}
-
-	// A ledger entry that does not name this connection generation is not this
-	// connection's to hand out.
-	record, _, readErr := fixture.broker.ledger.read(authProviderID)
-	if readErr != nil {
-		t.Fatalf("ledger read: %v", readErr)
-	}
-
-	fenced := record
-	fenced.ConnectionID = "someone-else"
-
-	if writeErr := fixture.broker.ledger.write(fenced); writeErr != nil {
-		t.Fatalf("ledger write: %v", writeErr)
-	}
-
-	err = fixture.call(AuthCredentialMethod, harvest, nil)
-	if err == nil {
-		t.Fatal("a mismatched fence was harvested")
-	}
-
-	requireAuthCause(t, err, authCauseHarvestFailed)
-
-	// A ledger that answers nothing at all is the same verdict.
-	if removeErr := os.Remove(fixture.broker.ledger.path(authProviderID)); removeErr != nil {
-		t.Fatal(removeErr)
-	}
-
-	err = fixture.call(AuthCredentialMethod, harvest, nil)
-	if err == nil {
-		t.Fatal("a missing ledger entry was harvested")
-	}
-
-	requireAuthCause(t, err, authCauseHarvestFailed)
-
-	originalRead := ledgerReadFile
-	ledgerReadFile = func(string) ([]byte, error) { return nil, errors.New("read denied") }
-
-	err = fixture.call(AuthCredentialMethod, harvest, nil)
-	ledgerReadFile = originalRead
-
-	if err == nil {
-		t.Fatal("an unreadable ledger was harvested")
-	}
-
-	requireAuthCause(t, err, authCauseHarvestFailed)
 }
 
 func TestDisconnectReleasesTheSlotWithoutClaimingRevocation(t *testing.T) {
@@ -379,84 +356,4 @@ func TestDisconnectRejectsAddressingAndFenceFailures(t *testing.T) {
 	}
 
 	requireAuthCause(t, err, authCauseProcess)
-}
-
-// keystoreFixtureMarker is written by the credential-residence fixture's
-// entrypoint. The matrix below needs a live Secret Service, so it runs inside
-// that container and nowhere else.
-const keystoreFixtureMarker = "/run/acp-go-amp-keystore/marker"
-
-// keystoreCanary values are canary material only; the fixture never plants a
-// real credential and never mounts a real home.
-const (
-	keystoreFileCanary  = "canary-file-store-key"
-	keystoreStoreCanary = "canary-keystore-key"
-)
-
-// TestKeystoreResidenceMatrix proves the two facts amp's assert-false rests on:
-// the file store stays authoritative for the read path, and a keystore item
-// present under the unpartitioned name — service amp.cli.apiKey, username
-// ampcode.com, keyed by hostname and nothing else — never becomes the harvest
-// source.
-func TestKeystoreResidenceMatrix(t *testing.T) {
-	if _, err := os.Stat(keystoreFixtureMarker); err != nil {
-		t.Skip("the credential-residence matrix runs inside the keystore fixture container")
-	}
-
-	dataHome := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(dataHome, "amp"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-
-	seedKeystoreCanary(t, keystoreStoreCanary)
-
-	body := `{"apiKey@https://ampcode.com/":"` + keystoreFileCanary + `"}`
-	if err := os.WriteFile(nativeamp.AuthSecretsPath(dataHome), []byte(body), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	secret, present, err := nativeamp.AuthReadSecret(dataHome)
-	if err != nil || !present {
-		t.Fatalf("the file store answered nothing: %v/%v", present, err)
-	}
-
-	if secret != keystoreFileCanary {
-		t.Fatalf("the harvest read %q, want the file store's %q", secret, keystoreFileCanary)
-	}
-
-	// The settings document the wrapper writes is what keeps that true.
-	settings := filepath.Join(t.TempDir(), "settings.json")
-	if writeErr := os.WriteFile(settings, nativeamp.AuthSettingsDocument(), 0o600); writeErr != nil {
-		t.Fatal(writeErr)
-	}
-
-	asserted, err := nativeamp.AuthFileStoreAsserted(settings)
-	if err != nil || !asserted {
-		t.Fatalf("the wrapper's settings do not assert the file store: %v/%v", asserted, err)
-	}
-
-	// Removing the file leaves the keystore item alone and the harvest empty,
-	// which is the fail-closed answer rather than the keystore's value.
-	if err := os.Remove(nativeamp.AuthSecretsPath(dataHome)); err != nil {
-		t.Fatal(err)
-	}
-
-	if _, present, err := nativeamp.AuthReadSecret(dataHome); err != nil || present {
-		t.Fatalf("the unpartitioned keystore item became the harvest source: %v/%v", present, err)
-	}
-}
-
-// seedKeystoreCanary plants canary material through the platform tool rather
-// than through the read path, so the assertion is not a round trip of one
-// library against itself.
-func seedKeystoreCanary(t *testing.T, contents string) {
-	t.Helper()
-
-	command := exec.Command("secret-tool", "store", "--label=amp-canary",
-		"service", "amp.cli.apiKey", "username", nativeamp.AuthURLHost)
-	command.Stdin = strings.NewReader(contents)
-
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("seed keystore canary: %v: %s", err, output)
-	}
 }
