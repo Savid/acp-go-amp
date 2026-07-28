@@ -606,6 +606,7 @@ func (a *Agent) loadOrResume(ctx context.Context, sessionID acp.SessionId, cwd s
 
 	a.sessions[sessionID] = session
 	a.mu.Unlock()
+	a.reopenProviderAuth(sessionID)
 	a.observe.AddActiveSession(ctx, 1)
 
 	return session, transcript, true, nil

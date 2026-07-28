@@ -126,9 +126,11 @@ type providerAuth struct {
 	// publication is refused against.
 	closedSessions map[acp.SessionId]struct{}
 	// admissions serialises authorize per (session, provider); slots serialise
-	// every rewrite of one provider's recorded binding.
-	admissions map[authFlowKey]chan struct{}
-	slots      map[string]chan struct{}
+	// every rewrite of one provider's recorded binding. Both are refcounted and
+	// drop their own entries, so neither grows with the sessions an agent
+	// outlives and neither can hand a held gate away.
+	admissions map[authFlowKey]*authGate
+	slots      map[string]*authGate
 }
 
 type authFlowKey struct {
@@ -160,8 +162,8 @@ func newProviderAuth(agent *Agent) *providerAuth {
 		retained:       make(map[authFlowKey]*authFlow),
 		retired:        make(map[authFlowKey]map[string]struct{}),
 		closedSessions: make(map[acp.SessionId]struct{}),
-		admissions:     make(map[authFlowKey]chan struct{}),
-		slots:          make(map[string]chan struct{}),
+		admissions:     make(map[authFlowKey]*authGate),
+		slots:          make(map[string]*authGate),
 	}
 }
 
@@ -337,6 +339,19 @@ func (s *agentSession) closeProviderAuth() {
 	}
 
 	s.agent.providerAuth.closeSession(s.id)
+}
+
+// reopenProviderAuth clears the close mark a reinstated id carries. session/close
+// drops the id from the live session map without tombstoning it — only delete
+// tombstones — so a later load or resume rebuilds a session under exactly that
+// id. A mark left behind would refuse every provider-auth leg for it for the
+// rest of the agent's life, on the strength of a lifetime that already ended.
+func (a *Agent) reopenProviderAuth(sessionID acp.SessionId) {
+	if a.providerAuth == nil {
+		return
+	}
+
+	a.providerAuth.reopenSession(sessionID)
 }
 
 // authFileStore establishes that the file store is still the authoritative one

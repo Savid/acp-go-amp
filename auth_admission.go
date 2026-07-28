@@ -2,6 +2,7 @@ package ampacp
 
 import (
 	"context"
+	"sync"
 
 	"github.com/coder/acp-go-sdk"
 )
@@ -49,17 +50,7 @@ func (p *providerAuth) publishFlow(key authFlowKey, flow *authFlow) bool {
 // publish → mint atomic against a second authorize and so what makes the
 // idempotency key mean anything at all.
 func (p *providerAuth) admitKey(ctx context.Context, key authFlowKey) (func(), bool) {
-	p.mu.Lock()
-
-	gate, ok := p.admissions[key]
-	if !ok {
-		gate = make(chan struct{}, 1)
-		p.admissions[key] = gate
-	}
-
-	p.mu.Unlock()
-
-	return authHoldGate(ctx, gate)
+	return authAcquireGate(ctx, &p.mu, p.admissions, key)
 }
 
 // admitSlot gates every rewrite of one provider's recorded binding against
@@ -69,29 +60,75 @@ func (p *providerAuth) admitKey(ctx context.Context, key authFlowKey) (func(), b
 // lineage check, its submit, and its confirmation, so the two can never
 // interleave into a generation that goes backwards.
 func (p *providerAuth) admitSlot(ctx context.Context, providerID string) (func(), bool) {
-	p.mu.Lock()
-
-	gate, ok := p.slots[providerID]
-	if !ok {
-		gate = make(chan struct{}, 1)
-		p.slots[providerID] = gate
-	}
-
-	p.mu.Unlock()
-
-	return authHoldGate(ctx, gate)
+	return authAcquireGate(ctx, &p.mu, p.slots, providerID)
 }
 
-// authHoldGate takes a single-holder gate and returns the release its holder
-// defers. A caller that stopped waiting takes nothing, so it has nothing to
-// release.
-func authHoldGate(ctx context.Context, gate chan struct{}) (func(), bool) {
+// authGate is one single-holder gate together with the number of legs that hold
+// it or are waiting for it.
+type authGate struct {
+	ch      chan struct{}
+	waiters int
+}
+
+// authAcquireGate takes the gate named by key, creating it on first use, and
+// returns the release its holder defers. A caller that stopped waiting takes
+// nothing, so it has nothing to release.
+//
+// The gate's lifetime is the refcount and nothing else: authDropGate is the only
+// thing that may ever remove an entry, and it does so only when the last leg has
+// left. Deleting a gate any other way — sweeping a closed session's entries, for
+// instance — replaces a gate a leg still holds with a fresh one that the next
+// leg walks straight through, so the serialization silently stops happening
+// while every map operation still looks correct. The refcount also bounds both
+// maps: the key gate is keyed per session and would otherwise accumulate one
+// dead entry per session an agent outlives.
+func authAcquireGate[K comparable](ctx context.Context, mu *sync.Mutex, gates map[K]*authGate, key K) (func(), bool) {
+	mu.Lock()
+
+	gate, ok := gates[key]
+	if !ok {
+		gate = &authGate{ch: make(chan struct{}, 1)}
+		gates[key] = gate
+	}
+
+	gate.waiters++
+	mu.Unlock()
+
 	select {
-	case gate <- struct{}{}:
-		return func() { <-gate }, true
+	case gate.ch <- struct{}{}:
+		return func() {
+			<-gate.ch
+			authDropGate(mu, gates, key, gate)
+		}, true
 	case <-ctx.Done():
+		authDropGate(mu, gates, key, gate)
+
 		return nil, false
 	}
+}
+
+// authDropGate accounts for one leg leaving and removes the gate once it was the
+// last. A gate nobody holds or wants orders nothing, so the next leg to ask for
+// that key can be handed a new one.
+func authDropGate[K comparable](mu *sync.Mutex, gates map[K]*authGate, key K, gate *authGate) {
+	mu.Lock()
+	defer mu.Unlock()
+
+	gate.waiters--
+	if gate.waiters == 0 {
+		delete(gates, key)
+	}
+}
+
+// reopenSession clears the mark a session id carries once that id is live
+// again. A close mark is a statement about a session's lifetime, not about the
+// id, and an id that names a rebuilt session names a lifetime whose flows no
+// close has swept.
+func (p *providerAuth) reopenSession(sessionID acp.SessionId) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	delete(p.closedSessions, sessionID)
 }
 
 // claimFlow admits the one leg that may drive this flow's login child and holds

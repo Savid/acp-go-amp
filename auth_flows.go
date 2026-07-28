@@ -925,12 +925,6 @@ func (p *providerAuth) closeSession(sessionID acp.SessionId) {
 		}
 	}
 
-	for key := range p.admissions {
-		if key.sessionID == sessionID {
-			delete(p.admissions, key)
-		}
-	}
-
 	p.mu.Unlock()
 
 	for _, flow := range owned {

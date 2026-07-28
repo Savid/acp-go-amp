@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/coder/acp-go-sdk"
 	nativeamp "github.com/savid/acp-go-amp/internal/amp"
 )
 
@@ -467,6 +468,88 @@ func TestALateLegIsRefusedOnAClosedSession(t *testing.T) {
 	}
 
 	requireInvalidAuthField(t, err, authFieldSessionID)
+}
+
+// TestAGateOutlivesEverySweepAndOnlyItsOwnLastWaiter pins the one thing that
+// makes a gate a gate. Its lifetime is its refcount and nothing else: a gate
+// removed while a leg still holds it is replaced by a fresh one the next leg
+// walks straight through, and the serialization stops happening while every map
+// operation still looks correct. The same refcount is what keeps the per-session
+// key gate from accumulating a dead entry for every session the agent outlives.
+func TestAGateOutlivesEverySweepAndOnlyItsOwnLastWaiter(t *testing.T) {
+	fixture := newAuthFixture(t, "login-hang")
+	key := authFlowKey{sessionID: fixture.session.id, providerID: authProviderID}
+
+	release, held := fixture.broker.admitKey(context.Background(), key)
+	if !held {
+		t.Fatal("the key gate was not free")
+	}
+
+	fixture.broker.closeSession(fixture.session.id)
+
+	abandoned, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	if _, passed := fixture.broker.admitKey(abandoned, key); passed {
+		t.Fatal("a session close handed a gate away while a leg still held it")
+	}
+
+	release()
+
+	fixture.broker.mu.Lock()
+	gates := len(fixture.broker.admissions)
+	fixture.broker.mu.Unlock()
+
+	if gates != 0 {
+		t.Fatalf("%d gates outlived every leg that used them", gates)
+	}
+}
+
+// TestAReopenedSessionIdServesTheAuthSurfaceAgain pins the close mark against
+// the id it is written under. session/close drops the id from the live map
+// without tombstoning it, so a load rebuilds a session under exactly that id —
+// and a mark that outlived the lifetime it described would refuse every
+// provider-auth leg for that id for the rest of the agent's life.
+func TestAReopenedSessionIdServesTheAuthSurfaceAgain(t *testing.T) {
+	store := NewInMemorySessionStore()
+	fixture := newAuthFixture(t, "login-hang", WithSessionStore(store))
+
+	manifest, err := json.Marshal(ampManifest{
+		Format: SessionStoreFormat, SessionID: string(fixture.session.id),
+		NativeSessionID: string(fixture.session.id), Cwd: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("marshal manifest: %v", err)
+	}
+
+	key := SessionKey{SessionID: string(fixture.session.id)}
+	if replaceErr := store.Replace(t.Context(), key,
+		[]SessionStoreReplacement{{Key: key, Entries: []SessionStoreEntry{manifest}}}); replaceErr != nil {
+		t.Fatalf("seed manifest: %v", replaceErr)
+	}
+
+	if _, closeErr := fixture.agent.CloseSession(t.Context(),
+		acp.CloseSessionRequest{SessionId: fixture.session.id}); closeErr != nil {
+		t.Fatalf("close session: %v", closeErr)
+	}
+
+	if err := fixture.call(AuthMethodsMethod, map[string]any{authFieldSessionID: string(fixture.session.id)}, nil); err == nil {
+		t.Fatal("a closed session still served the auth surface")
+	}
+
+	if _, loadErr := fixture.agent.LoadSession(t.Context(),
+		LoadSessionRequest(fixture.session.id, t.TempDir())); loadErr != nil {
+		t.Fatalf("load session: %v", loadErr)
+	}
+
+	var methods authMethodsResult
+	if err := fixture.call(AuthMethodsMethod, map[string]any{authFieldSessionID: string(fixture.session.id)}, &methods); err != nil {
+		t.Fatalf("a reinstated session id was refused the auth surface: %v", err)
+	}
+
+	if methods.Generation == "" {
+		t.Fatalf("methods after reopen = %#v", methods)
+	}
 }
 
 // TestAdmissionRefusesALegTheCallerAbandoned pins what a leg does when the gate
