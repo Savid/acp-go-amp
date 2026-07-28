@@ -1176,3 +1176,76 @@ func TestNewAuthTokenReportsAnEntropyFailure(t *testing.T) {
 		t.Fatal("a token was minted with no entropy")
 	}
 }
+
+// adversarialConnectionIDs are the caller-minted values the bound refuses. Each
+// is a shape the id would otherwise carry into a durable ledger entry, into the
+// name that entry is hashed into, and into the adapter's own logs, and the two
+// replacement-rune spellings are one Go string reached from two different wire
+// encodings, which aliases one connection onto another's entry.
+func adversarialConnectionIDs() map[string]string {
+	return map[string]string{
+		"empty":              "",
+		"path separators":    "../../../etc/passwd",
+		"windows separators": `..\..\connection`,
+		"newline":            "connection\n1",
+		"nul":                "connection\x00 1",
+		"bidi override":      "connection\u202e1",
+		"space":              "connection 1",
+		"colon":              "connection:1",
+		"replacement rune":   "connection-�",
+		"non ascii":          "connection-é",
+		"unbounded":          strings.Repeat("c", authConnectionIDMaxBytes+1),
+	}
+}
+
+func TestConnectionIDIsRefusedAtEverySurfaceEntry(t *testing.T) {
+	fixture := newAuthFixture(t, "login")
+
+	seeded := authLedgerRecord{
+		ProviderID: authProviderID, ConnectionID: "connection-1",
+		Revision: 1, BindingGeneration: 1, State: authLedgerConfirmed,
+	}
+	if err := fixture.broker.ledger.write(seeded); err != nil {
+		t.Fatalf("seed ledger: %v", err)
+	}
+
+	for name, connectionID := range adversarialConnectionIDs() {
+		t.Run(name, func(t *testing.T) {
+			_, err := fixture.authorize(connectionID, "request-1")
+			requireInvalidAuthField(t, err, authFieldConnectionID)
+
+			err = fixture.call(AuthDisconnectMethod, map[string]any{
+				authFieldSessionID:         string(fixture.session.id),
+				authFieldProviderID:        authProviderID,
+				authFieldConnectionID:      connectionID,
+				authFieldBindingGeneration: seeded.BindingGeneration,
+			}, nil)
+			requireInvalidAuthField(t, err, authFieldConnectionID)
+		})
+	}
+
+	// Every refusal landed before the leg derived a ledger name from the id or
+	// read the entry the live binding names, so nothing recorded a value the
+	// bound rejects.
+	live, ok, err := fixture.broker.ledger.read(authProviderID, seeded.ConnectionID)
+	if err != nil || !ok {
+		t.Fatalf("ledger read: ok=%v err=%v", ok, err)
+	}
+
+	if live != seeded {
+		t.Fatalf("the live entry changed under a refused connection id: %#v", live)
+	}
+}
+
+func TestConnectionIDAcceptsTheOpaqueTokenAConsumerMints(t *testing.T) {
+	for _, connectionID := range []string{
+		"pac_2f1c9b4e-8d3a-4c17-9f21-0b6e5a7c8d90",
+		"connection-1",
+		"C0",
+		strings.Repeat("c", authConnectionIDMaxBytes),
+	} {
+		if !authValidConnectionID(connectionID) {
+			t.Fatalf("connection id %q was refused", connectionID)
+		}
+	}
+}

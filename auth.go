@@ -385,6 +385,57 @@ func authRequiredString(fields map[string]json.RawMessage, name string) (string,
 	return value, nil
 }
 
+// authConnectionIDMaxBytes bounds the caller-minted connection id. The value is
+// durable — it lands in a ledger entry a later leg equality-checks against what
+// the caller sent — and the bound leaves room for the opaque token a consumer
+// mints, of which a prefixed UUID is forty bytes.
+const authConnectionIDMaxBytes = 128
+
+// authRequiredConnectionID decodes and validates the connection id a leg
+// addresses. It runs where the value enters, ahead of every comparison, every
+// write, and the ledger file name the id is hashed into, so no leg ever fences
+// against, records, or derives a path from an id this bound refuses. The value
+// is never normalised: a later leg compares it byte for byte with what the
+// caller sent, so rewriting it would break that comparison.
+func authRequiredConnectionID(fields map[string]json.RawMessage) (string, error) {
+	value, err := authRequiredString(fields, authFieldConnectionID)
+	if err != nil {
+		return "", err
+	}
+
+	if !authValidConnectionID(value) {
+		return "", invalidAuthField(authFieldConnectionID)
+	}
+
+	return value, nil
+}
+
+// authValidConnectionID reports whether id is an opaque bounded ASCII token.
+// The alphabet keeps the id safe in every position it reaches — a path segment,
+// a native label, and a log line — and admits no non-ASCII spelling, so two
+// wire encodings can never decode to one Go string and alias one connection
+// onto another's entry.
+func authValidConnectionID(id string) bool {
+	if id == "" || len(id) > authConnectionIDMaxBytes {
+		return false
+	}
+
+	for index := range len(id) {
+		if !authConnectionIDByte(id[index]) {
+			return false
+		}
+	}
+
+	return true
+}
+
+func authConnectionIDByte(char byte) bool {
+	return (char >= 'A' && char <= 'Z') ||
+		(char >= 'a' && char <= 'z') ||
+		(char >= '0' && char <= '9') ||
+		char == '-' || char == '_'
+}
+
 // authString decodes a string field that may be empty but must be present.
 func authString(fields map[string]json.RawMessage, name string) (string, error) {
 	raw, ok := fields[name]

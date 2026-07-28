@@ -291,7 +291,7 @@ func (p *providerAuth) disconnect(_ context.Context, params json.RawMessage) (an
 		return nil, err
 	}
 
-	connectionID, err := authRequiredString(fields, authFieldConnectionID)
+	connectionID, err := authRequiredConnectionID(fields)
 	if err != nil {
 		return nil, err
 	}

@@ -45,7 +45,11 @@ milliseconds.
 
 A caller addressing failure — an unknown, superseded, or cross-session
 `flowId`, a stale `methodsGeneration`, a `method` that is not the flow's — is
-invalid params with the field path. Every other failure is JSON-RPC `-32000`
+invalid params with the field path. `connectionId` is caller-minted and bounded
+to at most 128 bytes of `A-Z`, `a-z`, `0-9`, `-`, and `_`; every leg that
+carries one checks it before the value is compared or recorded, and anything
+outside that shape is invalid params naming `connectionId`. Every other failure
+is JSON-RPC `-32000`
 carrying `{"error": "amp_auth_failed", "cause": ..., "retryable": ...}` with a
 closed `cause` enum and no native message text. See
 [Authentication](/docs/features/authentication#broker-a-login).
