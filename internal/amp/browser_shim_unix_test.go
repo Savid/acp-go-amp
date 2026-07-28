@@ -20,7 +20,7 @@ func browserProbeDir(t *testing.T, marker string) string {
 	dir := t.TempDir()
 	script := []byte("#!/bin/sh\necho \"$0 $*\" >> " + shellQuote(marker) + "\nexit 0\n")
 
-	for _, name := range []string{"open", "xdg-open"} {
+	for _, name := range browserLauncherNames {
 		if err := os.WriteFile(filepath.Join(dir, name), script, 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -39,17 +39,20 @@ func TestLoginNeverExecsABrowserLauncher(t *testing.T) {
 
 	t.Setenv("PATH", probe+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	resolved, err := exec.LookPath("open")
-	if err != nil || resolved != filepath.Join(probe, "open") {
-		t.Fatalf("open resolved to %q, %v; want the probe launcher", resolved, err)
+	for _, name := range browserLauncherNames {
+		resolved, lookErr := exec.LookPath(name)
+		if lookErr != nil || resolved != filepath.Join(probe, name) {
+			t.Fatalf("%s resolved to %q, %v; want the probe launcher", name, resolved, lookErr)
+		}
+
+		if runErr := exec.Command(resolved, "probe://control").Run(); runErr != nil {
+			t.Fatalf("probe launcher %s control run: %v", name, runErr)
+		}
 	}
 
-	if runErr := exec.Command(resolved, "probe://control").Run(); runErr != nil {
-		t.Fatalf("probe launcher control run: %v", runErr)
-	}
-
-	if _, statErr := os.Stat(marker); statErr != nil {
-		t.Fatalf("the probe launcher recorded nothing when executed directly: %v", statErr)
+	control, err := os.ReadFile(marker)
+	if err != nil || strings.Count(string(control), "\n") != len(browserLauncherNames) {
+		t.Fatalf("the probe launchers recorded %q, %v; want one line per launcher", control, err)
 	}
 
 	if removeErr := os.Remove(marker); removeErr != nil {
@@ -59,11 +62,18 @@ func TestLoginNeverExecsABrowserLauncher(t *testing.T) {
 	dir := t.TempDir()
 	resolvedFile := filepath.Join(dir, "resolved")
 	path := filepath.Join(dir, "amp")
-	// The launcher name is bare so the child resolves it through the PATH it was
-	// handed, which is exactly how the native binary opens a URL.
-	harness := "#!/bin/sh\ncommand -v open > " + shellQuote(resolvedFile) + "\n" +
-		"open \"https://example.invalid/\"\nxdg-open \"https://example.invalid/\"\n" +
-		"echo " + shellQuote(helperLoginURL) + "\nexit 0\n"
+	// Every launcher name is exercised because the native binary picks one by
+	// GOOS: `open` on darwin and `xdg-open` everywhere else. Each name is bare so
+	// the child resolves it through the PATH it was handed, which is exactly how
+	// the native binary opens a URL.
+	harness := "#!/bin/sh\n"
+
+	for _, name := range browserLauncherNames {
+		harness += "command -v " + name + " >> " + shellQuote(resolvedFile) + "\n" +
+			name + " \"https://example.invalid/\"\n"
+	}
+
+	harness += "echo " + shellQuote(helperLoginURL) + "\nexit 0\n"
 
 	if writeErr := os.WriteFile(path, []byte(harness), 0o700); writeErr != nil {
 		t.Fatal(writeErr)
@@ -93,10 +103,21 @@ func TestLoginNeverExecsABrowserLauncher(t *testing.T) {
 	}
 
 	// The recorder staying silent only means something if the child could reach
-	// it, so the name it did resolve has to be the shim standing in front of it.
+	// it, so every name it did resolve has to be the shim standing in front of it.
 	shimmed, err := os.ReadFile(resolvedFile)
-	if err != nil || !strings.Contains(string(shimmed), browserShimPrefix) {
-		t.Fatalf("the child resolved open to %q, %v; want a shim launcher", shimmed, err)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resolved := strings.Fields(string(shimmed))
+	if len(resolved) != len(browserLauncherNames) {
+		t.Fatalf("the child resolved %q; want one path per launcher", shimmed)
+	}
+
+	for i, launcher := range resolved {
+		if !strings.Contains(launcher, browserShimPrefix) || filepath.Base(launcher) != browserLauncherNames[i] {
+			t.Fatalf("the child resolved %s to %q; want a shim launcher", browserLauncherNames[i], launcher)
+		}
 	}
 }
 
