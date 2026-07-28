@@ -14,8 +14,8 @@ import (
 )
 
 const (
-	envResidenceIntegration = "ACP_GO_AMP_RUN_INTEGRATION"
-	envResidenceKeystore    = "ACP_GO_AMP_RUN_KEYSTORE"
+	envRunIntegration = "ACP_GO_AMP_RUN_INTEGRATION"
+	envRunKeystore    = "ACP_GO_AMP_RUN_KEYSTORE"
 	// envSessionBus reaches the Secret Service. Whether the fixture exported one
 	// is the whole difference between the two Linux configurations.
 	envSessionBus = "DBUS_SESSION_BUS_ADDRESS"
@@ -93,9 +93,9 @@ func TestKeystoreResidenceMatrix(t *testing.T) {
 func requireResidenceTier(t *testing.T) {
 	t.Helper()
 
-	if os.Getenv(envResidenceIntegration) != "1" || os.Getenv(envResidenceKeystore) != "1" {
+	if os.Getenv(envRunIntegration) != "1" || os.Getenv(envRunKeystore) != "1" {
 		t.Skipf("set %s=1 and %s=1 to run the credential-residence matrix",
-			envResidenceIntegration, envResidenceKeystore)
+			envRunIntegration, envRunKeystore)
 	}
 
 	if runtime.GOOS == "darwin" {
