@@ -1,11 +1,14 @@
 package ampacp
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	nativeamp "github.com/savid/acp-go-amp/internal/amp"
 )
@@ -385,4 +388,101 @@ func TestDisconnectRejectsAddressingAndFenceFailures(t *testing.T) {
 	}
 
 	requireAuthCause(t, err, authCauseProcess)
+}
+
+// TestConcurrentCredentialLegsHarvestOnce drives two credential legs at one
+// completed flow at the same time. The SDK dispatches every inbound request on
+// its own goroutine, so a host retrying after a client-side timeout — or any
+// second caller — puts two legs on one flowId, and the claim is what decides
+// which of them reads the slot. Two answers are two live copies of one key,
+// and because every field access is individually locked there is no data race
+// for the detector to report.
+func TestConcurrentCredentialLegsHarvestOnce(t *testing.T) {
+	fixture := newAuthFixture(t, "login")
+	authorized := fixture.mustAuthorize("connection-1")
+
+	if err := fixture.callback(authorized.FlowID, "pasted"); err != nil {
+		t.Fatalf("callback: %v", err)
+	}
+
+	original := authReadSecret
+	t.Cleanup(func() { authReadSecret = original })
+
+	release := make(chan struct{})
+
+	var reads atomic.Int64
+
+	authReadSecret = func(dataHome string) (string, bool, error) {
+		reads.Add(1)
+		<-release
+
+		return original(dataHome)
+	}
+
+	params, err := json.Marshal(map[string]any{
+		authFieldSessionID:  string(fixture.session.id),
+		authFieldProviderID: authProviderID,
+		authFieldFlowID:     authorized.FlowID,
+	})
+	if err != nil {
+		t.Fatalf("marshal credential params: %v", err)
+	}
+
+	answered := make(chan error, 2)
+
+	for range 2 {
+		go func() {
+			_, callErr := fixture.agent.HandleExtensionMethod(context.Background(), AuthCredentialMethod, params)
+			answered <- callErr
+		}()
+	}
+
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+
+	harvested := 0
+
+	for range 2 {
+		if legErr := <-answered; legErr == nil {
+			harvested++
+		} else {
+			requireAuthCause(t, legErr, authCauseFlowState)
+		}
+	}
+
+	if harvested != 1 {
+		t.Fatalf("legs that harvested = %d, want 1", harvested)
+	}
+
+	if got := reads.Load(); got != 1 {
+		t.Fatalf("slot reads = %d, want 1", got)
+	}
+}
+
+// TestFailHarvestKeepsARecordACauseCannotTransition pins the guard on the
+// harvest's demotion. Four of the leg's causes pair with no transition at all,
+// and writing the state one of those yields would put the empty string —
+// outside the closed wire enum, and terminal to every reader of it — into the
+// flow record and every later status answer.
+func TestFailHarvestKeepsARecordACauseCannotTransition(t *testing.T) {
+	fixture := newAuthFixture(t, "login")
+	authorized := fixture.mustAuthorize("connection-1")
+
+	if err := fixture.callback(authorized.FlowID, "pasted"); err != nil {
+		t.Fatalf("callback: %v", err)
+	}
+
+	flow, err := fixture.broker.addressFlow(fixture.session.id, authProviderID, authorized.FlowID)
+	if err != nil {
+		t.Fatalf("addressFlow: %v", err)
+	}
+
+	for _, cause := range []string{authCausePolicy, authCauseBindingConflict, authCauseFlowState, authCauseFlowCancelled} {
+		requireAuthCause(t, fixture.broker.failHarvest(flow, cause), cause)
+
+		status := fixture.status(authorized.FlowID)
+		if status.State != authStateAuthenticated || status.Reason != "" {
+			t.Fatalf("failHarvest(%q) moved the record to %#v", cause, status)
+		}
+	}
 }

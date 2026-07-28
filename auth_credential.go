@@ -171,26 +171,19 @@ type authCredentialResult struct {
 
 // credential harvests exactly one slot: the one this connection's own ledger
 // entry names, in the session's own isolated data home. It runs once per flow —
-// the key is long-lived and non-rotating, so there is no harvest cycle — and a
-// slot that answers nothing fails the leg closed rather than reporting absence,
-// because a flipped native-secrets flag deletes the file after migrating it.
+// the key is long-lived and non-rotating, so there is no harvest cycle, and the
+// claim that enforces it is taken before any read rather than after them all —
+// and a slot that answers nothing fails the leg closed rather than reporting
+// absence, because a flipped native-secrets flag deletes the file after
+// migrating it.
 func (p *providerAuth) credential(_ context.Context, params json.RawMessage) (any, error) {
 	session, flow, err := p.addressedFlowLeg(params)
 	if err != nil {
 		return nil, err
 	}
 
-	p.mu.Lock()
-	state := flow.state
-	harvested := flow.harvested
-	p.mu.Unlock()
-
-	if state != authStateAuthenticated && state != authStateSaved {
-		return nil, authFailed(authCauseFlowState, flow.providerID, flow.method.ID, flow.id)
-	}
-
-	if harvested {
-		return nil, authFailed(authCauseFlowState, flow.providerID, flow.method.ID, flow.id)
+	if claimErr := p.claimHarvest(flow); claimErr != nil {
+		return nil, claimErr
 	}
 
 	if storeErr := session.authFileStore(); storeErr != nil {
@@ -215,10 +208,6 @@ func (p *providerAuth) credential(_ context.Context, params json.RawMessage) (an
 		return nil, p.failHarvest(flow, authCauseHarvestFailed)
 	}
 
-	p.mu.Lock()
-	flow.harvested = true
-	p.mu.Unlock()
-
 	// The residence has served its one purpose, so the login child that owns it
 	// is torn down here rather than left holding a native root for a harvest
 	// that has already happened.
@@ -232,17 +221,48 @@ func (p *providerAuth) credential(_ context.Context, params json.RawMessage) (an
 	}, nil
 }
 
+// claimHarvest admits the one harvest a completed flow allows and holds the
+// claim for the whole attempt, so two legs answering the same flow cannot both
+// read the slot. The state read and the claim are one critical section because
+// four native reads sit between them, and a check-then-set that wide lets a
+// second leg pass the check before the first has set it — handing back two live
+// copies of one key with no race for the detector to find, since every
+// individual field access is itself locked.
+func (p *providerAuth) claimHarvest(flow *authFlow) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if flow.state != authStateAuthenticated && flow.state != authStateSaved {
+		return authFailed(authCauseFlowState, flow.providerID, flow.method.ID, flow.id)
+	}
+
+	if flow.harvested {
+		return authFailed(authCauseFlowState, flow.providerID, flow.method.ID, flow.id)
+	}
+
+	flow.harvested = true
+
+	return nil
+}
+
 // failHarvest fails the leg and records the demotion the harvest owns. This is
 // the one transition a flow already terminal may still take: the leg is
 // admitted only from authenticated or saved, so what it demotes is a completion
 // nobody is racing, and a slot that answered nothing leaves the flow no longer
-// standing for a credential this connection can produce.
+// standing for a credential this connection can produce. A cause that owns no
+// transition demotes nothing and leaves the record where its owner left it,
+// because writing an empty state would put a value outside the wire enum into
+// every later status answer. The claim is released either way: at-most-once
+// governs the credential a harvest hands back, and an attempt that handed back
+// nothing has nothing to be once about.
 func (p *providerAuth) failHarvest(flow *authFlow, cause string) error {
-	state, reason := authFlowTransition(cause, false)
-
 	p.mu.Lock()
-	flow.state = state
-	flow.reason = reason
+	flow.harvested = false
+
+	if state, reason := authFlowTransition(cause, false); state != "" {
+		flow.state = state
+		flow.reason = reason
+	}
 	p.mu.Unlock()
 
 	p.closeLogin(flow)
