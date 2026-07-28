@@ -17,7 +17,14 @@ var ErrProcessContainmentIncomplete = errors.New("amp process containment incomp
 // subreaper supervisor, Windows uses a Job Object, and platforms without an
 // unescapable native-command boundary reject the launch.
 type processTreeCommand struct {
-	cmd           *exec.Cmd
+	cmd *exec.Cmd
+	// nativeEnv is the environment the containment boundary settled on for the
+	// native child, published because it is not the environment the caller
+	// handed in: a boundary that redirects the child's roots rewrites it during
+	// preparation, and a caller that needs to know where the child will write
+	// must be handed the answer rather than infer it from a command object it
+	// happens to still share.
+	nativeEnv     []string
 	inherited     []*os.File
 	startGate     *os.File
 	control       *os.File

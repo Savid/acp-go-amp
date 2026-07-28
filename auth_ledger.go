@@ -159,14 +159,19 @@ func newAuthLedger(options Options) (*authLedger, error) {
 	return &authLedger{dir: dir}, errors.Join(probe.Close(), ledgerRemove(name))
 }
 
-func (l *authLedger) path(providerID string) string {
-	sum := sha256.Sum256([]byte(providerID))
+// path addresses one connection's binding. Amp brokers a single provider, so a
+// name derived from the provider alone would be the whole ledger and the second
+// connection to authorize would silently take the first's record with it. The
+// separator is a byte neither identifier may contain, so no pair of identifiers
+// can run together into another pair's name.
+func (l *authLedger) path(providerID string, connectionID string) string {
+	sum := sha256.Sum256([]byte(providerID + "\x00" + connectionID))
 
 	return filepath.Join(l.dir, hex.EncodeToString(sum[:])[:32]+".json")
 }
 
-func (l *authLedger) read(providerID string) (authLedgerRecord, bool, error) {
-	contents, err := ledgerReadFile(l.path(providerID))
+func (l *authLedger) read(providerID string, connectionID string) (authLedgerRecord, bool, error) {
+	contents, err := ledgerReadFile(l.path(providerID, connectionID))
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return authLedgerRecord{}, false, nil
@@ -203,7 +208,7 @@ func (l *authLedger) write(record authLedgerRecord) error {
 		return errors.Join(fmt.Errorf("write provider auth ledger entry: %w", err), ledgerRemove(temp))
 	}
 
-	if err := ledgerRename(temp, l.path(record.ProviderID)); err != nil {
+	if err := ledgerRename(temp, l.path(record.ProviderID, record.ConnectionID)); err != nil {
 		return errors.Join(fmt.Errorf("commit provider auth ledger entry: %w", err), ledgerRemove(temp))
 	}
 
@@ -261,7 +266,13 @@ func (l *authLedger) list() ([]authLedgerRecord, error) {
 		records = append(records, record)
 	}
 
-	sort.Slice(records, func(i, j int) bool { return records[i].ProviderID < records[j].ProviderID })
+	sort.Slice(records, func(i, j int) bool {
+		if records[i].ProviderID != records[j].ProviderID {
+			return records[i].ProviderID < records[j].ProviderID
+		}
+
+		return records[i].ConnectionID < records[j].ConnectionID
+	})
 
 	return records, nil
 }
@@ -317,7 +328,7 @@ func (p *providerAuth) inventory(_ context.Context, params json.RawMessage) (any
 			continue
 		}
 
-		present, err := authSecretPresent(p.authResidence(session, record.ProviderID))
+		present, err := authSecretPresent(p.authResidence(session, record.ProviderID, record.ConnectionID))
 		if err != nil {
 			return nil, authFailed(authCauseHarvestFailed, record.ProviderID, "", "")
 		}
@@ -334,16 +345,20 @@ func (p *providerAuth) inventory(_ context.Context, params json.RawMessage) (any
 	return authInventoryResult{Entries: entries}, nil
 }
 
-// authResidence names the slot this session's own flow for a provider wrote
-// into. A ledger record with no flow in this session names a slot that lived in
-// a session that is gone, so it falls back to this session's isolated home,
-// where the probe honestly finds nothing.
-func (p *providerAuth) authResidence(session *agentSession, providerID string) string {
+// authResidence names the slot this session's own flow for a connection wrote
+// into. It is addressed by connection because the ledger is: two connections
+// have two records and two logins, and answering one record's proof from the
+// other's residence would report residence nothing established. A ledger record
+// with no flow in this session names a slot that lived in a session that is
+// gone, so it falls back to this session's isolated home, where the probe
+// honestly finds nothing.
+func (p *providerAuth) authResidence(session *agentSession, providerID string, connectionID string) string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	for _, flow := range p.byID {
-		if flow.sessionID == session.id && flow.providerID == providerID && flow.residence != "" {
+		if flow.sessionID == session.id && flow.providerID == providerID &&
+			flow.connectionID == connectionID && flow.residence != "" {
 			return flow.residence
 		}
 	}

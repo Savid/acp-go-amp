@@ -205,8 +205,38 @@ func TestAuthLoginEnvDropsTheAmbientKey(t *testing.T) {
 		t.Fatalf("login env does not force the headless leg: %v", env)
 	}
 
-	if !slices.Contains(env, "AMP_URL=https://amp.example") {
+	if !slices.Contains(env, AuthDeploymentEnv+"=https://amp.example") {
 		t.Fatalf("login env dropped a session override: %v", env)
+	}
+}
+
+// TestAuthDeploymentSupported pins which deployments the brokering legs will
+// run against. The deployment selector reaches the login child either way —
+// ordinary Amp commands honour it — so it is the auth surface, whose URL host
+// and store key are measured facts about one deployment, that refuses.
+func TestAuthDeploymentSupported(t *testing.T) {
+	t.Setenv(AuthDeploymentEnv, "")
+
+	cases := map[string]bool{
+		"":                              true,
+		"https://" + AuthURLHost:        true,
+		"https://" + AuthURLHost + "/":  true,
+		"https://amp.example":           false,
+		"https://ampcode.com.evil.test": false,
+		"://":                           false,
+	}
+
+	for value, want := range cases {
+		client := NewClient(nil, Options{Env: map[string]string{AuthDeploymentEnv: value}})
+		if got := client.AuthDeploymentSupported(); got != want {
+			t.Fatalf("AuthDeploymentSupported(%q) = %v, want %v", value, got, want)
+		}
+	}
+
+	// An unset selector is the default deployment, which is what every pinned
+	// fact on this surface describes.
+	if !NewClient(nil, Options{}).AuthDeploymentSupported() {
+		t.Fatal("an unset deployment selector was refused")
 	}
 }
 

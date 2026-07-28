@@ -197,7 +197,7 @@ func (p *providerAuth) credential(_ context.Context, params json.RawMessage) (an
 		return nil, p.fail(flow, authCauseNativeVeto, false)
 	}
 
-	record, ok, err := p.ledger.read(flow.providerID)
+	record, ok, err := p.ledger.read(flow.providerID, flow.connectionID)
 	if err != nil || !ok {
 		return nil, p.fail(flow, authCauseHarvestFailed, false)
 	}
@@ -267,7 +267,7 @@ func (p *providerAuth) disconnect(_ context.Context, params json.RawMessage) (an
 		return nil, sessionErr
 	}
 
-	record, ok, err := p.ledger.read(providerID)
+	record, ok, err := p.ledger.read(providerID, connectionID)
 	if err != nil {
 		return nil, authFailed(authCauseHarvestFailed, providerID, "", "")
 	}

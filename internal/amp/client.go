@@ -646,6 +646,7 @@ func (c *Client) prepareProcessLaunch(ctx context.Context, cmd *exec.Cmd) (*proc
 		return nil, errors.Join(err, finishErr)
 	}
 
+	launch.nativeEnv = append([]string(nil), cmd.Env...)
 	launch.bestEffort = c.options.DarwinBestEffort
 	launch.generation = generation
 	launch.acquireNative = func() (func(), error) {

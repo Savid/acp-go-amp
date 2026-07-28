@@ -183,6 +183,40 @@ func TestDarwinClientLaunchPreparationAndPipeFailures(t *testing.T) {
 	}
 }
 
+// TestPrepareProcessLaunchPublishesTheSettledEnvironment pins the hand-off the
+// login residence depends on. The containment generation rewrites the child's
+// data home while the launch is prepared, so a caller that needs to know where
+// the child will write reads it off the launch — never off the command it
+// handed in, which names the same environment only for as long as nothing
+// between them copies it.
+func TestPrepareProcessLaunchPublishesTheSettledEnvironment(t *testing.T) {
+	requested := t.TempDir()
+	scratch := t.TempDir()
+
+	client := NewClient(nil, Options{DarwinBestEffort: true})
+	client.options.NewDarwinGeneration = func(context.Context) (*DarwinGeneration, error) {
+		return &DarwinGeneration{ScratchRoot: scratch, RecordFinished: func(bool) error { return nil }}, nil
+	}
+
+	cmd := exec.Command("true")
+	cmd.Env = []string{dataHomeEnv + "=" + requested}
+
+	launch, err := client.prepareProcessLaunch(context.Background(), cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Cleanup(func() { _ = launch.close() })
+
+	// The command the caller still holds stops being the source of the answer.
+	cmd.Env = []string{dataHomeEnv + "=" + filepath.Join(requested, "diverged")}
+
+	settled := environmentMap(launch.nativeEnv)[dataHomeEnv]
+	if settled == "" || !pathWithin(scratch, settled) {
+		t.Fatalf("settled data home = %q, want a generation root under %q", settled, scratch)
+	}
+}
+
 func TestDarwinPrepareProcessLaunchHooksAndErrors(t *testing.T) {
 	ctx := context.Background()
 	client := NewClient(nil, Options{DarwinBestEffort: true})

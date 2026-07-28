@@ -207,7 +207,7 @@ func (p *providerAuth) authorize(ctx context.Context, params json.RawMessage) (a
 		UpdatedAt:          now.UnixMilli(),
 	}
 
-	if prior, ok, readErr := p.ledger.read(request.providerID); readErr == nil && ok {
+	if prior, ok, readErr := p.ledger.read(request.providerID, request.connectionID); readErr == nil && ok {
 		record.Revision = prior.Revision + 1
 		record.BindingGeneration = prior.BindingGeneration
 		record.CreatedAt = prior.CreatedAt
@@ -352,11 +352,18 @@ func (p *providerAuth) replayAuthorize(ctx context.Context, key authFlowKey, req
 // mintPresentation runs `amp login` in the session's isolated data home and
 // relays the hosted paste-back URL it prints. The URL carries the flow's own
 // auth token, so it is validated against its bound before it is relayed and is
-// treated as code-bearing everywhere afterwards. A refusal is reported as its
-// cause alone: the flow is already registered, so the caller terminalizes it
-// through the transition that cause pairs with.
+// treated as code-bearing everywhere afterwards. A session pointed at a
+// deployment this surface has no measured URL host or store key for is refused
+// here, before any login child exists. A refusal is reported as its cause
+// alone: the flow is already registered, so the caller terminalizes it through
+// the transition that cause pairs with.
 func (p *providerAuth) mintPresentation(ctx context.Context, session *agentSession, flow *authFlow) (authAuthorizeResult, string) {
-	login, err := authStartLogin(session.client(), ctx)
+	client := session.client()
+	if !client.AuthDeploymentSupported() {
+		return authAuthorizeResult{}, authCauseUnsupportedVariant
+	}
+
+	login, err := authStartLogin(client, ctx)
 	if err != nil {
 		return authAuthorizeResult{}, authCauseProcess
 	}

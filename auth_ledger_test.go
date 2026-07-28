@@ -186,18 +186,18 @@ func TestAuthLedgerWritesAtomicallyAndDurably(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-	got, ok, err := ledger.read(authProviderID)
+	got, ok, err := ledger.read(authProviderID, "connection-1")
 	if err != nil || !ok || got != record {
 		t.Fatalf("read = %#v/%v/%v", got, ok, err)
 	}
 
-	info, err := os.Stat(ledger.path(authProviderID))
+	info, err := os.Stat(ledger.path(authProviderID, "connection-1"))
 	if err != nil || info.Mode().Perm() != authLedgerFileMode {
 		t.Fatalf("entry mode = %v/%v", info, err)
 	}
 
 	// Ledger content is closed: no credential material, no URL, no prompt answer.
-	contents, err := os.ReadFile(ledger.path(authProviderID))
+	contents, err := os.ReadFile(ledger.path(authProviderID, "connection-1"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -239,12 +239,12 @@ func TestAuthLedgerWritesAtomicallyAndDurably(t *testing.T) {
 		t.Fatalf("ordered list = %#v/%v", records, err)
 	}
 
-	if err := os.Remove(ledger.path(second.ProviderID)); err != nil {
+	if err := os.Remove(ledger.path(second.ProviderID, second.ConnectionID)); err != nil {
 		t.Fatal(err)
 	}
 
 	// An absent entry is absence rather than a failure.
-	if _, ok, err := ledger.read("other"); ok || err != nil {
+	if _, ok, err := ledger.read("other", "connection-1"); ok || err != nil {
 		t.Fatalf("absent read = %v/%v", ok, err)
 	}
 }
@@ -317,13 +317,13 @@ func TestAuthLedgerSurfacesReadFailures(t *testing.T) {
 
 	ledgerReadFile = func(string) ([]byte, error) { return nil, want }
 
-	if _, _, err := ledger.read(authProviderID); !errors.Is(err, want) {
+	if _, _, err := ledger.read(authProviderID, "connection-1"); !errors.Is(err, want) {
 		t.Fatalf("read failure = %v", err)
 	}
 
 	ledgerReadFile = func(string) ([]byte, error) { return []byte("{"), nil }
 
-	if _, _, err := ledger.read(authProviderID); err == nil {
+	if _, _, err := ledger.read(authProviderID, "connection-1"); err == nil {
 		t.Fatal("a malformed entry decoded")
 	}
 
@@ -422,6 +422,58 @@ func TestInventoryDerivesProofFromTheLedgerAndAProbe(t *testing.T) {
 	}
 }
 
+// TestInventoryKeepsEveryConnectionsBinding pins the ledger's addressing. Amp
+// brokers exactly one provider, so a record addressed by provider alone is the
+// whole ledger: a second connection's authorize would take the first's binding
+// with it, leaving a connection nothing can release and nothing can harvest.
+func TestInventoryKeepsEveryConnectionsBinding(t *testing.T) {
+	fixture := newAuthFixture(t, "login")
+
+	first := fixture.mustAuthorize("connection-1")
+	if err := fixture.callback(first.FlowID, "pasted"); err != nil {
+		t.Fatalf("callback: %v", err)
+	}
+
+	second := fixture.mustAuthorize("connection-2")
+	if err := fixture.callback(second.FlowID, "pasted"); err != nil {
+		t.Fatalf("callback: %v", err)
+	}
+
+	var both authInventoryResult
+	if err := fixture.call(AuthInventoryMethod, map[string]any{authFieldSessionID: string(fixture.session.id)}, &both); err != nil {
+		t.Fatalf("inventory: %v", err)
+	}
+
+	if len(both.Entries) != 2 {
+		t.Fatalf("inventory holds %d bindings, want 2: %#v", len(both.Entries), both.Entries)
+	}
+
+	for index, want := range []string{"connection-1", "connection-2"} {
+		entry := both.Entries[index]
+		if entry.ConnectionID != want || entry.Revision != 1 || entry.BindingGeneration != 1 {
+			t.Fatalf("binding %d = %#v", index, entry)
+		}
+	}
+
+	// The earlier binding is still releasable on the generation it was issued
+	// under, which it could not be if the later authorize had rewritten it.
+	if err := fixture.call(AuthDisconnectMethod, map[string]any{
+		authFieldSessionID: string(fixture.session.id), authFieldProviderID: authProviderID,
+		authFieldConnectionID: "connection-1", authFieldBindingGeneration: 1,
+	}, nil); err != nil {
+		t.Fatalf("disconnect: %v", err)
+	}
+
+	var remaining authInventoryResult
+	if err := fixture.call(AuthInventoryMethod, map[string]any{authFieldSessionID: string(fixture.session.id)}, &remaining); err != nil {
+		t.Fatalf("inventory: %v", err)
+	}
+
+	if len(remaining.Entries) != 1 || remaining.Entries[0].ConnectionID != "connection-2" {
+		t.Fatalf("inventory after one release = %#v", remaining.Entries)
+	}
+}
+
 func TestInventoryReportsConfirmedAbsence(t *testing.T) {
 	fixture := newAuthFixture(t, "login")
 	authorized := fixture.mustAuthorize("connection-1")
@@ -515,17 +567,24 @@ func TestInventoryRejectsAddressingAndProbeFailures(t *testing.T) {
 func TestAuthResidenceFallsBackToTheSessionHome(t *testing.T) {
 	fixture := newAuthFixture(t, "login")
 
-	if residence := fixture.broker.authResidence(fixture.session, authProviderID); residence != fixture.session.authDataHome() {
+	if residence := fixture.broker.authResidence(fixture.session, authProviderID, "connection-1"); residence != fixture.session.authDataHome() {
 		t.Fatalf("residence with no flow = %q", residence)
 	}
 
 	fixture.mustAuthorize("connection-1")
 
-	if residence := fixture.broker.authResidence(fixture.session, "openai"); residence != fixture.session.authDataHome() {
+	if residence := fixture.broker.authResidence(fixture.session, "openai", "connection-1"); residence != fixture.session.authDataHome() {
 		t.Fatalf("residence for an unrelated provider = %q", residence)
 	}
 
-	if residence := fixture.broker.authResidence(fixture.session, authProviderID); residence == "" {
+	// A connection with no flow of its own here names a slot nothing in this
+	// session established, so it falls back rather than borrowing another
+	// connection's residence.
+	if residence := fixture.broker.authResidence(fixture.session, authProviderID, "connection-2"); residence != fixture.session.authDataHome() {
+		t.Fatalf("residence for an unrelated connection = %q", residence)
+	}
+
+	if residence := fixture.broker.authResidence(fixture.session, authProviderID, "connection-1"); residence == "" {
 		t.Fatal("residence for a live flow is empty")
 	}
 }

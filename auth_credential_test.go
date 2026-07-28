@@ -164,12 +164,12 @@ func TestCredentialFailsClosedAndTerminalizesTheFlow(t *testing.T) {
 			arrange: func(t *testing.T, fixture *authFixture) func() {
 				t.Helper()
 
-				record, _, err := fixture.broker.ledger.read(authProviderID)
+				record, _, err := fixture.broker.ledger.read(authProviderID, "connection-1")
 				if err != nil {
 					t.Fatalf("ledger read: %v", err)
 				}
 
-				record.ConnectionID = "someone-else"
+				record.Revision++
 
 				if writeErr := fixture.broker.ledger.write(record); writeErr != nil {
 					t.Fatalf("ledger write: %v", writeErr)
@@ -185,7 +185,7 @@ func TestCredentialFailsClosedAndTerminalizesTheFlow(t *testing.T) {
 			arrange: func(t *testing.T, fixture *authFixture) func() {
 				t.Helper()
 
-				if err := os.Remove(fixture.broker.ledger.path(authProviderID)); err != nil {
+				if err := os.Remove(fixture.broker.ledger.path(authProviderID, "connection-1")); err != nil {
 					t.Fatal(err)
 				}
 
@@ -267,7 +267,7 @@ func TestDisconnectReleasesTheSlotWithoutClaimingRevocation(t *testing.T) {
 		t.Fatalf("disconnect: %v", writeErr)
 	}
 
-	record, ok, err := fixture.broker.ledger.read(authProviderID)
+	record, ok, err := fixture.broker.ledger.read(authProviderID, "connection-1")
 	if err != nil || !ok || record.State != authLedgerRemoved || record.BindingGeneration != 2 {
 		t.Fatalf("ledger after disconnect = %#v/%v/%v", record, ok, err)
 	}

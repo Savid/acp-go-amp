@@ -68,9 +68,33 @@ func TestAuthorizeRelaysTheHostedPasteBackURL(t *testing.T) {
 	}
 
 	// The flow's slot binding is persisted before authorize returns.
-	record, ok, err := fixture.broker.ledger.read(authProviderID)
+	record, ok, err := fixture.broker.ledger.read(authProviderID, "connection-1")
 	if err != nil || !ok || record.FlowID != result.FlowID || record.State != authLedgerIntent {
 		t.Fatalf("ledger after authorize = %#v/%v/%v", record, ok, err)
+	}
+}
+
+// TestAuthorizeRefusesANonDefaultDeployment pins the surface closed against an
+// Amp deployment none of its pinned facts describe. The only host a relayed URL
+// may name and the only store key a harvest reads are both the default
+// deployment's, so a session pointed elsewhere can neither relay a URL nor find
+// a credential — and the refusal belongs before a login child exists rather
+// than after one has burned an authorization at the provider.
+func TestAuthorizeRefusesANonDefaultDeployment(t *testing.T) {
+	fixture := newAuthFixture(t, "login")
+
+	t.Setenv(nativeamp.AuthDeploymentEnv, "https://amp.example")
+
+	_, err := fixture.authorize("connection-1", "request-1")
+	if err == nil {
+		t.Fatal("authorize minted a flow against a deployment this surface cannot serve")
+	}
+
+	requireAuthCause(t, err, authCauseUnsupportedVariant)
+
+	flowID, _ := authFailure(t, err)[authFieldFlowID].(string)
+	if status := fixture.status(flowID); status.State != authStateFailed || status.Reason != authReasonNativeVeto {
+		t.Fatalf("state/reason = %q/%q, want failed/native_veto", status.State, status.Reason)
 	}
 }
 
@@ -111,7 +135,7 @@ func TestAuthorizeIsIdempotentAndSupersedes(t *testing.T) {
 	requireInvalidAuthField(t, err, authFieldFlowID)
 
 	// The superseded flow keeps its revision history in the ledger.
-	record, _, err := fixture.broker.ledger.read(authProviderID)
+	record, _, err := fixture.broker.ledger.read(authProviderID, "connection-1")
 	if err != nil || record.Revision != 2 {
 		t.Fatalf("ledger revision = %#v/%v", record, err)
 	}
@@ -143,7 +167,7 @@ func TestAuthorizeReplaysAcrossTerminalization(t *testing.T) {
 		t.Fatalf("the repeat drove %d native calls", again-native)
 	}
 
-	record, _, err := fixture.broker.ledger.read(authProviderID)
+	record, _, err := fixture.broker.ledger.read(authProviderID, "connection-1")
 	if err != nil || record.Revision != 1 || record.FlowID != first.FlowID {
 		t.Fatalf("ledger after the repeat = %#v/%v", record, err)
 	}

@@ -41,6 +41,14 @@ const (
 	// AuthURLHost is the only host a relayed authorization URL may name.
 	AuthURLHost = "ampcode.com"
 
+	// AuthDeploymentEnv selects which Amp deployment a command talks to. It is
+	// honoured by every ordinary command, and it is the reason the brokering
+	// legs refuse: AuthURLHost and authSecretEntryKey are both measured facts
+	// about the default deployment, so a login run against another one prints a
+	// URL this package will not relay and writes a store entry under a key it
+	// does not read.
+	AuthDeploymentEnv = "AMP_URL"
+
 	dataHomeEnv = "XDG_DATA_HOME"
 
 	authURLScanLimit = 64 * 1024
@@ -137,6 +145,23 @@ func AuthSecretPresent(dataHome string) (bool, error) {
 	return present, err
 }
 
+// AuthDeploymentSupported reports whether the login child this client would
+// start runs against the deployment every pinned fact on this surface was
+// measured against. Deriving the URL host and the store key from an arbitrary
+// deployment would ship two unmeasured shapes, so an unmeasured deployment is
+// refused instead — before a login child exists, rather than after one has
+// taken an authorization at the provider that nothing here could ever complete.
+func (c *Client) AuthDeploymentSupported() bool {
+	value, ok := environmentMap(authLoginEnv(c.options.Env, c.options.Cwd))[AuthDeploymentEnv]
+	if !ok || value == "" {
+		return true
+	}
+
+	parsed, err := url.Parse(value)
+
+	return err == nil && parsed.Host == AuthURLHost
+}
+
 // AuthLogin is one running `amp login`. It owns the child's containment
 // boundary, its pipes, and the single authorization URL it printed.
 type AuthLogin struct {
@@ -193,10 +218,12 @@ func (c *Client) StartAuthLogin(ctx context.Context) (*AuthLogin, error) {
 		return nil, errors.Join(fmt.Errorf("amp login: %w", err), shim.remove())
 	}
 
-	// Read the residence off the environment the containment boundary settled
-	// on, not the one this package asked for: a boundary that relaunches the
-	// child through a wrapper carries the native environment elsewhere.
-	dataHome := environmentMap(cmd.Env)[dataHomeEnv]
+	// The residence is the data home the containment boundary settled on, not
+	// the one this package asked for: a boundary that redirects the child's
+	// roots rewrites it. The launch publishes that environment, so the harvest
+	// depends on a stated hand-off rather than on cmd still being the object the
+	// boundary mutated.
+	dataHome := environmentMap(launch.nativeEnv)[dataHomeEnv]
 
 	pipes, err := newAuthLoginPipes()
 	if err != nil {

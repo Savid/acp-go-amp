@@ -72,6 +72,15 @@ entitlement-gated, and stored on Amp's side.
    refused.
 6. `disconnect` bumps the binding generation and releases the ledger slot.
 
+### Deployment
+
+The brokering legs run against the default Amp deployment only. The single host
+a relayed URL may name and the single store key a harvest reads are both
+measured facts about that deployment, so a session whose `AMP_URL` names another
+one is refused at `authorize` with `unsupported_variant` — before a login child
+exists — rather than minting a flow that could never relay a URL or find a key.
+Every other Amp command still honours `AMP_URL` normally.
+
 <Warning>
 The value the owner pastes back is not an authorization code to be exchanged —
 it carries the account credential in the clear and stays valid indefinitely. It
