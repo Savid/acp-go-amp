@@ -284,7 +284,7 @@ func TestDisconnectReleasesTheSlotWithoutClaimingRevocation(t *testing.T) {
 		t.Fatal("a spent binding generation disconnected again")
 	}
 
-	requireAuthCause(t, err, authCausePolicy)
+	requireAuthCause(t, err, authCauseBindingConflict)
 }
 
 func TestDisconnectRejectsAddressingAndFenceFailures(t *testing.T) {
@@ -325,15 +325,44 @@ func TestDisconnectRejectsAddressingAndFenceFailures(t *testing.T) {
 		t.Fatal("disconnect answered for an unknown session")
 	}
 
-	// No ledger entry at all is a policy refusal, not a removal.
+	// No ledger entry at all is a binding conflict, not a removal.
 	err := fixture.call(AuthDisconnectMethod, base(), nil)
 	if err == nil {
 		t.Fatal("disconnect released a slot it never recorded")
 	}
 
-	requireAuthCause(t, err, authCausePolicy)
+	requireAuthCause(t, err, authCauseBindingConflict)
 
 	fixture.mustAuthorize("connection-1")
+
+	// Amp reads its ledger by (providerId, connectionId), so a wrong connection
+	// and an absent entry are the same read; both still refuse, and a stale
+	// generation against a live entry refuses on the generation alone.
+	wrongConnection := base()
+	wrongConnection[authFieldConnectionID] = "connection-other"
+
+	err = fixture.call(AuthDisconnectMethod, wrongConnection, nil)
+	if err == nil {
+		t.Fatal("disconnect answered for a connection it never recorded")
+	}
+
+	requireAuthCause(t, err, authCauseBindingConflict)
+
+	staleGeneration := base()
+	staleGeneration[authFieldBindingGeneration] = 99
+
+	err = fixture.call(AuthDisconnectMethod, staleGeneration, nil)
+	if err == nil {
+		t.Fatal("disconnect answered against a stale binding generation")
+	}
+
+	requireAuthCause(t, err, authCauseBindingConflict)
+
+	// Neither refusal touched the entry the live binding still names.
+	live, ok, readErr := fixture.broker.ledger.read(authProviderID, "connection-1")
+	if readErr != nil || !ok || live.BindingGeneration != 1 || live.State == authLedgerRemoved {
+		t.Fatalf("a refused fence mutated the ledger: %#v/%v/%v", live, ok, readErr)
+	}
 
 	originalRead, originalMarshal := ledgerReadFile, ledgerMarshal
 

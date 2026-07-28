@@ -408,7 +408,7 @@ func TestAuthFailureShapeIsClosed(t *testing.T) {
 		authCauseTransport: true, authCauseProcess: true, authCauseTimeout: true,
 		authCauseNativeVeto: false, authCauseProviderRefused: false, authCauseHarvestFailed: false,
 		authCauseUnsupportedVariant: false, authCauseFlowExpired: false, authCauseFlowState: false,
-		authCauseFlowCancelled: false, authCausePolicy: false,
+		authCauseFlowCancelled: false, authCausePolicy: false, authCauseBindingConflict: false,
 	}
 	for cause, want := range retryable {
 		if got := authCauseRetryable(cause); got != want {
@@ -436,6 +436,7 @@ func TestAuthFlowTransitionTable(t *testing.T) {
 		{cause: authCauseHarvestFailed, state: authStateFailed, reason: authReasonHarvestFailed},
 		{cause: authCauseFlowExpired, state: authStateExpired, reason: authReasonDeadline},
 		{cause: authCausePolicy},
+		{cause: authCauseBindingConflict},
 		{cause: authCauseFlowState},
 		{cause: authCauseFlowCancelled},
 	}

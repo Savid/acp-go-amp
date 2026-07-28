@@ -64,6 +64,7 @@ const (
 	authCauseFlowState          = "flow_state"
 	authCauseFlowCancelled      = "flow_cancelled"
 	authCausePolicy             = "policy"
+	authCauseBindingConflict    = "binding_conflict"
 )
 
 // Native entry points. Every read and every login this surface performs goes
