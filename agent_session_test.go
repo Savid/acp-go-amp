@@ -223,6 +223,129 @@ func TestNewSessionAcceptsProcessEnvAPIKey(t *testing.T) {
 	}
 }
 
+func TestKeylessProviderAuthBootstrapPromptFailsBeforeNativeWork(t *testing.T) {
+	path, state := fakeAgentAmpPath(t, "")
+	t.Setenv("AMP_API_KEY", "")
+
+	agent := newTestAgent(
+		WithExecutablePath(path),
+		WithScratchDir(t.TempDir()),
+		WithProviderAuthRoot(t.TempDir()),
+		WithEnv(map[string]string{"AMP_API_KEY": ""}),
+	)
+	t.Cleanup(func() {
+		if err := agent.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	})
+
+	resp, err := agent.NewSession(context.Background(), NewSessionRequest(
+		t.TempDir(),
+		WithSessionMCPServers(StdioMCPServer("server", "unused", nil, nil)),
+	))
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	beforePrompt := readHelperJSON[[]string](t, filepath.Join(state, "args.jsonl"))
+	if len(beforePrompt) != 1 || !slices.Equal(beforePrompt[0], []string{"version"}) {
+		t.Fatalf("keyless bootstrap native calls = %#v, want version probe only", beforePrompt)
+	}
+
+	if _, promptErr := agent.Prompt(context.Background(), TextPromptRequest(resp.SessionId, "turn-1", "hello")); promptErr == nil || !strings.Contains(promptErr.Error(), "AMP_API_KEY") {
+		t.Fatalf("Prompt error = %v, want missing AMP_API_KEY", promptErr)
+	}
+
+	session, err := agent.session(resp.SessionId)
+	if err != nil {
+		t.Fatalf("session: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(session.settingsDir, "mcp.json")); !os.IsNotExist(err) {
+		t.Fatalf("MCP config created before key check: %v", err)
+	}
+	afterPrompt := readHelperJSON[[]string](t, filepath.Join(state, "args.jsonl"))
+	if !slices.EqualFunc(beforePrompt, afterPrompt, func(a, b []string) bool {
+		return slices.Equal(a, b)
+	}) {
+		t.Fatalf("prompt started native work without a key: before=%#v after=%#v", beforePrompt, afterPrompt)
+	}
+}
+
+func TestKeylessProviderAuthBootstrapChecksNativeReadiness(t *testing.T) {
+	path, _ := fakeAgentAmpPath(t, "bad-version")
+	t.Setenv("AMP_API_KEY", "")
+
+	agent := newTestAgent(
+		WithExecutablePath(path),
+		WithScratchDir(t.TempDir()),
+		WithProviderAuthRoot(t.TempDir()),
+		WithEnv(map[string]string{"AMP_API_KEY": ""}),
+	)
+	t.Cleanup(func() {
+		if err := agent.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	})
+
+	_, err := agent.NewSession(context.Background(), NewSessionRequest(t.TempDir()))
+	if err == nil || !strings.Contains(err.Error(), "below required") {
+		t.Fatalf("NewSession error = %v, want native version rejection", err)
+	}
+}
+
+func TestLoadAndResumeRemainCredentialGatedWithProviderAuth(t *testing.T) {
+	path, _ := fakeAgentAmpPath(t, "")
+	store := NewInMemorySessionStore()
+	cwd := t.TempDir()
+
+	creator := newTestAgent(
+		WithExecutablePath(path),
+		WithScratchDir(t.TempDir()),
+		WithSessionStore(store),
+		WithProviderAuthRoot(t.TempDir()),
+	)
+	resp, err := creator.NewSession(context.Background(), NewSessionRequest(cwd))
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	if err := creator.Close(); err != nil {
+		t.Fatalf("close creator: %v", err)
+	}
+
+	t.Setenv("AMP_API_KEY", "")
+	restored := newTestAgent(
+		WithExecutablePath(path),
+		WithScratchDir(t.TempDir()),
+		WithSessionStore(store),
+		WithProviderAuthRoot(t.TempDir()),
+		WithEnv(map[string]string{"AMP_API_KEY": ""}),
+	)
+	t.Cleanup(func() {
+		if err := restored.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	})
+
+	for name, load := range map[string]func() error{
+		"load": func() error {
+			_, loadErr := restored.LoadSession(context.Background(), LoadSessionRequest(resp.SessionId, cwd))
+
+			return loadErr
+		},
+		"resume": func() error {
+			_, resumeErr := restored.ResumeSession(context.Background(), ResumeSessionRequest(resp.SessionId, cwd))
+
+			return resumeErr
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := load()
+			if err == nil || !strings.Contains(err.Error(), "AMP_API_KEY") {
+				t.Fatalf("error = %v, want missing AMP_API_KEY", err)
+			}
+		})
+	}
+}
+
 func TestSessionSlotFilesystemServeAndCloseEdges(t *testing.T) {
 	ctx := context.Background()
 

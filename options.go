@@ -59,7 +59,7 @@ const (
 	RuntimeStartupConfiguration RuntimeStartupStage = "configuration"
 	// RuntimeStartupSession marks the thread-creating first-prompt spawn: amp
 	// mints the server-side thread lazily on a session's first `-x` turn, and
-	// session/new performs no native work of its own.
+	// session/new runs readiness probes but no prompt or thread-creating work.
 	RuntimeStartupSession RuntimeStartupStage = "session"
 )
 

@@ -17,7 +17,7 @@ Each ACP method resolves to a concrete Amp operation:
 
 | ACP method | Amp behavior |
 |---|---|
-| `session/new` | Mints the session id and persists the manifest; no Amp process runs and no server-side thread exists yet. |
+| `session/new` | Runs bounded readiness probes, mints the session id, and persists the manifest; no prompt runs and no server-side thread exists yet. |
 | `session/prompt` | First turn runs a thread-less `amp -x --stream-json` that creates the Amp thread; later turns run `amp threads continue --stream-json`. |
 | `session/load` | Replays stored transcript frames for display. |
 | `session/resume` | Restores adapter state without replaying history. |

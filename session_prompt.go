@@ -134,6 +134,10 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (re
 		return acp.PromptResponse{}, err
 	}
 
+	if !amp.HasAPIKey(s.env) {
+		return acp.PromptResponse{}, missingAPIKeyError()
+	}
+
 	if err := s.ensureMirrorSynced(ctx); err != nil {
 		return acp.PromptResponse{}, err
 	}

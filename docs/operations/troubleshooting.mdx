@@ -12,7 +12,8 @@ common symptoms to their causes and to the tests that pin each behavior.
 
 | Symptom | Likely cause | Where to look |
 |---|---|---|
-| Session start fails immediately | No `AMP_API_KEY` in the environment | [Authentication](/docs/features/authentication) |
+| Session start fails immediately | No `AMP_API_KEY` and no usable provider-auth broker | [Authentication](/docs/features/authentication) |
+| First prompt fails immediately after a keyless auth bootstrap | The harvested key was not redelivered as `AMP_API_KEY` | Bind the credential through `WithEnv` or session env options before prompting |
 | Prompt fails with `amp_turn_failed` (`cause: "process_exit"`) | Native `amp` exited non-zero | `message` carries the exit status and stderr tail |
 | Prompt fails with `cause: "timeout"` | `WithTurnTimeout` deadline elapsed | Raise or unset the deadline; a timeout is a failure, not a cancel |
 | Prompt is rejected with `field: "prompt.image"` | Invalid, animated, oversize, or native-envelope-breaking image input | Inspect `error`, `index`, `sizeBytes`, and `maxBytes`; see [Image input](/docs/features/models-config#image-input) |

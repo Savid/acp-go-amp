@@ -49,7 +49,7 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (r
 	}
 
 	readinessStarted := time.Now()
-	startErr := a.ensureStartup(ctx, params.Cwd, meta)
+	startErr := a.ensureNewSessionStartup(ctx, params.Cwd, meta)
 	observeRuntimeStartupStage(ctx, a.options.RuntimeResourceHooks, RuntimeResourceDiscovery, RuntimeStartupReadiness, readinessStarted, startErr)
 
 	if startErr != nil {
@@ -885,20 +885,43 @@ func (a *Agent) deleteNativeThread(ctx context.Context, id acp.SessionId, native
 	return tmp.Delete(ctx)
 }
 
-// missingAPIKeyMessage explains the session-start fail-fast: session commands
-// run inside an isolated home, so `amp login` credentials on the host are
-// invisible and the amp CLI would otherwise block forever on its interactive
-// login flow.
 const missingAPIKeyMessage = "AMP_API_KEY is not set: amp sessions run in an " +
 	"isolated home where amp login credentials are unavailable; set AMP_API_KEY " +
 	"in the process environment, WithEnv, or session env options"
 
+func (a *Agent) ensureNewSessionStartup(ctx context.Context, cwd string, meta parsedSessionMeta) error {
+	env := mergeEnv(a.options.Env, meta.options.Env)
+	if amp.HasAPIKey(env) {
+		return a.ensureStartupWithProbe(ctx, cwd, env, a.options.runtime.startupProbe)
+	}
+
+	if a.providerAuth == nil {
+		return missingAPIKeyError()
+	}
+
+	return a.ensureStartupWithProbe(
+		ctx, cwd, env,
+		func(ctx context.Context, client *amp.Client) error {
+			return client.DiscoveryProbe(ctx)
+		},
+	)
+}
+
 func (a *Agent) ensureStartup(ctx context.Context, cwd string, meta parsedSessionMeta) error {
 	env := mergeEnv(a.options.Env, meta.options.Env)
 	if !amp.HasAPIKey(env) {
-		return acp.NewInternalError(map[string]any{jsonFieldError: missingAPIKeyMessage})
+		return missingAPIKeyError()
 	}
 
+	return a.ensureStartupWithProbe(ctx, cwd, env, a.options.runtime.startupProbe)
+}
+
+func (a *Agent) ensureStartupWithProbe(
+	ctx context.Context,
+	cwd string,
+	env map[string]string,
+	probe func(context.Context, *amp.Client) error,
+) error {
 	scratchParent, err := ensureScratchParent(a.options.ScratchDir)
 	if err != nil {
 		return acp.NewInternalError(map[string]any{jsonFieldError: err.Error()})
@@ -916,11 +939,15 @@ func (a *Agent) ensureStartup(ctx context.Context, cwd string, meta parsedSessio
 	a.configureNativeClient(&options, RuntimeResourceDiscovery)
 
 	client := amp.NewClient(a.log, options)
-	if err := a.options.runtime.startupProbe(ctx, client); err != nil {
+	if err := probe(ctx, client); err != nil {
 		return nativeInternalError(err)
 	}
 
 	return nil
+}
+
+func missingAPIKeyError() error {
+	return acp.NewInternalError(map[string]any{jsonFieldError: missingAPIKeyMessage})
 }
 
 func (a *Agent) maxActiveSessions() int {

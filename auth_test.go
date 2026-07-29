@@ -266,6 +266,52 @@ func TestProviderAuthAdvertisesEightLegsAndNoInjectionKey(t *testing.T) {
 	}
 }
 
+func TestProviderAuthBootstrapsSessionWithoutAPIKey(t *testing.T) {
+	path, state := fakeAgentAmpPath(t, "login")
+	t.Setenv("AMP_API_KEY", "")
+
+	agent := newTestAgent(
+		WithExecutablePath(path),
+		WithScratchDir(t.TempDir()),
+		WithProviderAuthRoot(t.TempDir()),
+		WithEnv(map[string]string{"AMP_API_KEY": ""}),
+	)
+	t.Cleanup(func() {
+		if err := agent.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	})
+
+	resp, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	session, err := agent.session(resp.SessionId)
+	if err != nil {
+		t.Fatalf("session: %v", err)
+	}
+
+	fixture := &authFixture{
+		t:       t,
+		agent:   agent,
+		broker:  agent.providerAuth,
+		session: session,
+		root:    agent.options.ProviderAuthRoot,
+		state:   state,
+	}
+	presentation := fixture.mustAuthorize("connection-keyless")
+	if presentation.URL != fakeLoginURL || presentation.FlowID == "" {
+		t.Fatalf("authorize presentation = %#v", presentation)
+	}
+	if err := fixture.call(AuthCancelMethod, map[string]any{
+		authFieldSessionID:  string(session.id),
+		authFieldProviderID: authProviderID,
+		authFieldFlowID:     presentation.FlowID,
+	}, nil); err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+}
+
 func TestProviderAuthRejectsAnInjectionOption(t *testing.T) {
 	// Redelivery is AMP_API_KEY through WithEnv, so the per-session injection
 	// key is not a supported option in any form.

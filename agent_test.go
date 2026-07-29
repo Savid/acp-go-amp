@@ -718,8 +718,7 @@ func fakeAgentAmpPath(t *testing.T, mode string) (string, string) {
 	if runtime.GOOS == "windows" {
 		t.Skip("fake executable source is built only for local POSIX tests")
 	}
-	// Session startup fails fast without an API key; fake-binary tests always
-	// provide one so they exercise the post-auth surface.
+	// Fake-binary tests provide a key unless a test explicitly clears it.
 	t.Setenv("AMP_API_KEY", "fake-test-key")
 	dir, err := filepath.Abs(t.TempDir())
 	if err != nil {

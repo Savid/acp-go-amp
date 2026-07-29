@@ -13,7 +13,8 @@ continuity.
 ## Lifecycle
 
 - `session/new` mints the session id and persists an initial manifest, then
-  returns the select config option for `mode`. No Amp process runs, so no
+  returns the select config option for `mode`. It may run bounded native
+  readiness probes, but no prompt or thread-creating command runs, so no
   server-side thread exists until the first prompt.
 - The first `session/prompt` runs a thread-less `amp -x` execute: amp creates
   the thread, reports its id on the init frame, and the adapter records it in

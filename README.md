@@ -133,8 +133,10 @@ rejects at session start.
   advertised only while `WithProviderAuthRoot`/`-provider-auth-root` names a
   usable durable directory. The catalog is the one Amp account entry, the
   hosted paste-back URL is relayed for the owner to approve, and the resulting
-  opaque key is harvested once and redelivered as `AMP_API_KEY`. `disconnect`
-  releases the ledger slot and promises no Amp-side revocation.
+  opaque key is harvested once and redelivered as `AMP_API_KEY`. The broker
+  admits a keyless `session/new` for this flow, while the first prompt and all
+  load/resume paths remain credential-gated. `disconnect` releases the ledger
+  slot and promises no Amp-side revocation.
 - Durable mirroring through a host-provided `SessionStore`; ordinary frames are
   retained under `transcript`, while image-bearing tool frames use canonical
   artifact references backed by `_artifacts/images/` records.

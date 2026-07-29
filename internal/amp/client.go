@@ -174,18 +174,9 @@ const startupProbeThreadID = "T-00000000-0000-0000-0000-000000000000"
 const startupProbeTimeout = 30 * time.Second
 
 func (c *Client) StartupProbe(ctx context.Context) error {
-	path, err := Discover(ctx, c.options.CLIPath)
+	path, version, err := c.discoverVersion(ctx)
 	if err != nil {
 		return err
-	}
-
-	version, err := c.Version(ctx)
-	if err != nil {
-		return err
-	}
-
-	if !versionAtLeast(version, MinimumVersion) {
-		return fmt.Errorf("amp version %q is below required %s", version, MinimumVersion)
 	}
 
 	cacheKey := path + "\x00" + version
@@ -200,6 +191,32 @@ func (c *Client) StartupProbe(ctx context.Context) error {
 	probeCache.Store(cacheKey, struct{}{})
 
 	return nil
+}
+
+// DiscoveryProbe verifies the executable and version without running commands
+// that require an authenticated Amp account.
+func (c *Client) DiscoveryProbe(ctx context.Context) error {
+	_, _, err := c.discoverVersion(ctx)
+
+	return err
+}
+
+func (c *Client) discoverVersion(ctx context.Context) (string, string, error) {
+	path, err := Discover(ctx, c.options.CLIPath)
+	if err != nil {
+		return "", "", err
+	}
+
+	version, err := c.Version(ctx)
+	if err != nil {
+		return "", "", err
+	}
+
+	if !versionAtLeast(version, MinimumVersion) {
+		return "", "", fmt.Errorf("amp version %q is below required %s", version, MinimumVersion)
+	}
+
+	return path, version, nil
 }
 
 // probeSubcommands executes the required Amp subcommands for real instead of

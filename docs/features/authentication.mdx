@@ -25,9 +25,12 @@ native account setup on the host are not visible to them — the key must come
 through one of the sources above.
 
 <Warning>
-Session startup fails fast with a descriptive error when no `AMP_API_KEY` is
-available, rather than leaving the native process blocked on its interactive
-login flow. Export the key before opening a session, or broker one first.
+Without a usable provider-auth root, session startup fails fast when no
+`AMP_API_KEY` is available. With the broker enabled, `session/new` may create
+the keyless session needed to run the provider-auth methods, but its first
+prompt still fails before MCP materialization or native process activity until
+the harvested key is redelivered. `session/load` and `session/resume` always
+require the key.
 </Warning>
 
 ## Broker a login
