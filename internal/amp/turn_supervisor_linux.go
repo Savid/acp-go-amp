@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -64,10 +65,15 @@ var (
 	turnSupervisorOpenFile     = os.NewFile
 	turnSupervisorCloseOnExec  = unix.CloseOnExec
 	turnSupervisorInput        = inheritedTurnSupervisorInput
+	turnSupervisorPrctl        = unix.Prctl
 )
 
 func enableTurnSupervisor() error {
-	return unix.Prctl(unix.PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0)
+	if err := turnSupervisorPrctl(unix.PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0); err != nil {
+		return err
+	}
+
+	return turnSupervisorPrctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)
 }
 
 func inheritedTurnSupervisorInput() (io.ReadCloser, io.ReadCloser, io.WriteCloser, error) {
@@ -241,6 +247,18 @@ func turnSupervisorEnvironment() []string {
 	return []string{turnSupervisorModeEnv + "=" + turnSupervisorMode}
 }
 
+func startTurnSupervisorNative(native *exec.Cmd) (error, error) {
+	runtime.LockOSThread()
+
+	defer runtime.UnlockOSThread()
+
+	if err := turnSupervisorEnable(); err != nil {
+		return err, nil
+	}
+
+	return nil, native.Start()
+}
+
 func runTurnSupervisor(configInput io.Reader, controlInput io.Reader, readyOutput io.Writer) error {
 	var config turnSupervisorConfig
 	if err := json.NewDecoder(configInput).Decode(&config); err != nil {
@@ -249,10 +267,6 @@ func runTurnSupervisor(configInput io.Reader, controlInput io.Reader, readyOutpu
 
 	if config.Path == "" || len(config.Args) == 0 {
 		return errors.New("amp native supervisor config is incomplete")
-	}
-
-	if err := turnSupervisorEnable(); err != nil {
-		return fmt.Errorf("enable Amp native subreaper: %w", err)
 	}
 
 	signals := make(chan os.Signal, 2)
@@ -269,8 +283,13 @@ func runTurnSupervisor(configInput io.Reader, controlInput io.Reader, readyOutpu
 	native.Stderr = os.Stderr
 	configureCommand(native)
 
-	if err := native.Start(); err != nil {
-		return fmt.Errorf("start supervised Amp native root: %w", err)
+	enableErr, startErr := startTurnSupervisorNative(native)
+	if enableErr != nil {
+		return fmt.Errorf("enable Amp native supervisor privileges: %w", enableErr)
+	}
+
+	if startErr != nil {
+		return fmt.Errorf("start supervised Amp native root: %w", startErr)
 	}
 
 	waitDone := make(chan error, 1)

@@ -68,6 +68,7 @@ func restoreTurnSupervisorSeams(t *testing.T) {
 	run := turnSupervisorRun
 	openFile := turnSupervisorOpenFile
 	closeOnExec := turnSupervisorCloseOnExec
+	prctl := turnSupervisorPrctl
 	syscallKillOriginal := syscallKill
 	t.Cleanup(func() {
 		turnSupervisorExecutable = executable
@@ -92,6 +93,7 @@ func restoreTurnSupervisorSeams(t *testing.T) {
 		turnSupervisorRun = run
 		turnSupervisorOpenFile = openFile
 		turnSupervisorCloseOnExec = closeOnExec
+		turnSupervisorPrctl = prctl
 		syscallKill = syscallKillOriginal
 	})
 }
@@ -132,14 +134,34 @@ func TestTurnSupervisorBootstrapBranches(t *testing.T) {
 
 func TestInheritedTurnSupervisorInputAndEnable(t *testing.T) {
 	restoreTurnSupervisorSeams(t)
-	if err := enableTurnSupervisor(); err != nil {
-		t.Fatalf("enable subreaper: %v", err)
+	var operations []int
+	turnSupervisorPrctl = func(option int, _, _, _, _ uintptr) error {
+		operations = append(operations, option)
+
+		return nil
 	}
-	// PR_SET_CHILD_SUBREAPER is process-global and inherited by later tests.
-	// Restore the test binary immediately so shuffled execution cannot turn
-	// unrelated process-group zombies into children that this test never reaps.
-	if err := unix.Prctl(unix.PR_SET_CHILD_SUBREAPER, 0, 0, 0, 0); err != nil {
-		t.Fatalf("disable subreaper: %v", err)
+	if err := enableTurnSupervisor(); err != nil {
+		t.Fatalf("enable supervisor privileges: %v", err)
+	}
+	if !slices.Equal(operations, []int{unix.PR_SET_CHILD_SUBREAPER, unix.PR_SET_NO_NEW_PRIVS}) {
+		t.Fatalf("supervisor privilege operations = %v", operations)
+	}
+
+	turnSupervisorPrctl = func(int, uintptr, uintptr, uintptr, uintptr) error { return errors.New("subreaper") }
+	if err := enableTurnSupervisor(); err == nil || err.Error() != "subreaper" {
+		t.Fatalf("subreaper failure = %v", err)
+	}
+	call := 0
+	turnSupervisorPrctl = func(int, uintptr, uintptr, uintptr, uintptr) error {
+		call++
+		if call == 2 {
+			return errors.New("no-new-privs")
+		}
+
+		return nil
+	}
+	if err := enableTurnSupervisor(); err == nil || err.Error() != "no-new-privs" {
+		t.Fatalf("no-new-privs failure = %v", err)
 	}
 
 	turnSupervisorOpenFile = func(uintptr, string) *os.File { return nil }
@@ -180,6 +202,41 @@ func TestInheritedTurnSupervisorInputAndEnable(t *testing.T) {
 	_ = ready.Close()
 	if closeOnExec != 3 {
 		t.Fatalf("close-on-exec calls = %d", closeOnExec)
+	}
+}
+
+func TestTurnSupervisorNativeChildHasNoNewPrivileges(t *testing.T) {
+	const (
+		phaseEnv  = "ACP_GO_AMP_TEST_NO_NEW_PRIVS_PHASE"
+		statusEnv = "ACP_GO_AMP_TEST_NO_NEW_PRIVS_STATUS"
+	)
+	if os.Getenv(phaseEnv) == "child" {
+		restoreTurnSupervisorSeams(t)
+		status := os.Getenv(statusEnv)
+		config := encodeSupervisorConfig(t, turnSupervisorConfig{
+			Path: "/bin/sh",
+			Args: []string{"sh", "-c", `while read -r key value rest; do if [ "$key" = "NoNewPrivs:" ]; then printf '%s\n' "$value" > "$1"; exit 0; fi; done < /proc/self/status; exit 1`, "nnp", status},
+			Env:  []string{"PATH=/usr/bin:/bin"},
+		})
+		controlRead, controlWrite := io.Pipe()
+		defer controlRead.Close()
+		defer controlWrite.Close()
+
+		if err := runTurnSupervisor(config, controlRead, io.Discard); err != nil {
+			t.Fatalf("run native proof: %v", err)
+		}
+
+		return
+	}
+
+	status := filepath.Join(t.TempDir(), "no-new-privileges")
+	proof := exec.Command(os.Args[0], "-test.run=^TestTurnSupervisorNativeChildHasNoNewPrivileges$")
+	proof.Env = append(os.Environ(), phaseEnv+"=child", statusEnv+"="+status)
+	if output, err := proof.CombinedOutput(); err != nil {
+		t.Fatalf("native proof process: %v\n%s", err, output)
+	}
+	if value, err := os.ReadFile(status); err != nil || string(value) != "1\n" {
+		t.Fatalf("native NoNewPrivs = %q, %v", value, err)
 	}
 }
 
