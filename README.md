@@ -106,10 +106,13 @@ rejects at session start.
   stdout/stderr pipes.
 - Native-process containment: Linux runs every Amp command under a
   dedicated subreaper that adopts descendants even after `setsid(2)` and
-  requires kernel-confirmed child absence before success; Windows uses a Job
-  Object. Darwin fails closed by default and has an explicit
-  `-darwin-best-effort-containment` / `WithDarwinBestEffortContainment` opt-in
-  for bounded process-group cleanup. That mode cannot contain `setsid` escapes,
+  requires kernel-confirmed child absence before success. Windows native
+  launch fails closed because its process API cannot apply the mandatory Unix
+  UID/GID identity boundary with empty supplementary groups; cross-compilation
+  proves only that this refusal path builds, not runtime support. The standalone
+  command is Linux-only; embedded Darwin hosts have an explicit
+  `WithDarwinBestEffortContainment` opt-in for bounded process-group cleanup.
+  That mode cannot contain `setsid` escapes,
   cannot prove escaped descendants absent, and retains a numeric PGID-reuse
   collateral-signalling risk.
 - Prompt streaming for assistant messages, tool calls, and thread results.
@@ -136,7 +139,9 @@ rejects at session start.
   opaque key is harvested once and redelivered as `AMP_API_KEY`. The broker
   admits a keyless `session/new` for this flow, while the first prompt and all
   load/resume paths remain credential-gated. `disconnect` releases the ledger
-  slot and promises no Amp-side revocation.
+  slot and promises no Amp-side revocation. Darwin and Windows authorization
+  fail with `unsupported_variant` before `amp login` starts; Darwin's account
+  login has no audited browserless contract.
 - Durable mirroring through a host-provided `SessionStore`; ordinary frames are
   retained under `transcript`, while image-bearing tool frames use canonical
   artifact references backed by `_artifacts/images/` records.
@@ -166,7 +171,7 @@ make test-integration-attended
 make test-integration-keystore
 ```
 
-`test-integration-attended` drives one real Amp login and needs a human to
+`test-integration-attended` drives one real Amp login on Linux and needs a human to
 approve it; `test-integration-keystore` proves where a brokered credential is
 resident and needs a container runtime. Neither joins `make audit`, and each
 fails rather than skips once its own gate is set.
@@ -174,8 +179,8 @@ fails rather than skips once its own gate is set.
 Live integration tests require a local authenticated `amp` CLI. The live target
 sets `ACP_GO_AMP_RUN_INTEGRATION=1` and `ACP_GO_AMP_RUN_LIVE_TOKENS=1` and may
 spend model tokens. Live tests always launch Amp with isolated native HOME/XDG
-state; `AMP_API_KEY` and `AMP_URL` are injected from the process environment or
-options and are never written to the session store. If the required credentials
+state; `AMP_API_KEY` and `AMP_URL` are injected from explicit policy or
+option values and are never written to the session store. If the required credentials
 are absent, live tests fail instead of launching against the developer's real
 Amp home.
 

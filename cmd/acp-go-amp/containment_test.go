@@ -40,18 +40,15 @@ func TestRunContainmentUsage(t *testing.T) {
 	}
 }
 
-func TestRunContainmentDispatchAndOffDarwinFlag(t *testing.T) {
+func TestRunContainmentDispatchAndRemovedDarwinFlag(t *testing.T) {
 	var stderr bytes.Buffer
 	if code := run(t.Context(), []string{"containment"}, strings.NewReader(""), &bytes.Buffer{}, &stderr); code != 2 {
 		t.Fatalf("containment dispatch = %d, stderr=%q", code, stderr.String())
 	}
 
-	originalGOOS := runtimeGOOS
-	t.Cleanup(func() { runtimeGOOS = originalGOOS })
-	runtimeGOOS = "linux"
 	stderr.Reset()
-	if code := run(t.Context(), []string{"-darwin-best-effort-containment"}, strings.NewReader(""), &bytes.Buffer{}, &stderr); code != 2 || !strings.Contains(stderr.String(), "only on darwin") {
-		t.Fatalf("off-Darwin flag = %d, stderr=%q", code, stderr.String())
+	if code := run(t.Context(), []string{"-darwin-best-effort-containment"}, strings.NewReader(""), &bytes.Buffer{}, &stderr); code != 2 || !strings.Contains(stderr.String(), "flag provided but not defined") {
+		t.Fatalf("removed Darwin flag = %d, stderr=%q", code, stderr.String())
 	}
 }
 

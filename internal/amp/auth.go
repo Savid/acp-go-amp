@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 )
@@ -146,12 +147,19 @@ func AuthSecretPresent(dataHome string) (bool, error) {
 }
 
 // AuthDeploymentSupported reports whether the login child this client would
-// start runs against the deployment every pinned fact on this surface was
-// measured against. Deriving the URL host and the store key from an arbitrary
-// deployment would ship two unmeasured shapes, so an unmeasured deployment is
-// refused instead — before a login child exists, rather than after one has
-// taken an authorization at the provider that nothing here could ever complete.
+// start has both a browser-safe platform boundary and the deployment every
+// pinned fact on this surface was measured against. Unsupported platforms and
+// unmeasured deployments are refused before a login child exists.
 func (c *Client) AuthDeploymentSupported() bool {
+	platform := runtime.GOOS
+	if c.options.TestOnlyAuthLoginPlatform != "" {
+		platform = c.options.TestOnlyAuthLoginPlatform
+	}
+
+	if platform == darwinPlatform || platform == windowsPlatform {
+		return false
+	}
+
 	environment, err := authLoginEnv(c.options.Isolation, c.options.Env, c.options.Cwd)
 	if err != nil {
 		return false
@@ -187,14 +195,12 @@ type AuthLogin struct {
 }
 
 // StartAuthLogin launches the hosted paste-back login in the client's isolated
-// data home. AMP_HEADLESS_OAUTH forces the headless leg outright rather than
-// relying on amp's TTY heuristic, and AMP_API_KEY is removed: with one set,
-// `amp login` copies the ambient value into the store and exits without
-// starting a flow at all, which would hand an environment-supplied credential
-// back as a brokered one. The child runs behind a browser shim because `amp
-// login` opens a browser with no suppression flag, and that browser writes its
-// profile — cookie jar included — into the same root this package reads the
-// credential from.
+// data home. AMP_API_KEY is removed: with one set, `amp login` copies the
+// ambient value into the store and exits without starting a flow at all, which
+// would hand an environment-supplied credential back as a brokered one.
+// AMP_HEADLESS_OAUTH affects MCP OAuth, not this account-login path. Linux runs
+// behind a browser-launcher shim; platforms without a provable interception
+// boundary fail before the login child is constructed.
 func (c *Client) StartAuthLogin(ctx context.Context) (*AuthLogin, error) {
 	environment, err := authLoginEnv(c.options.Isolation, c.options.Env, c.options.Cwd)
 	if err != nil {
@@ -204,6 +210,10 @@ func (c *Client) StartAuthLogin(ctx context.Context) (*AuthLogin, error) {
 	path, err := Discover(ctx, c.options.CLIPath, environment)
 	if err != nil {
 		return nil, err
+	}
+
+	if compatibilityErr := c.checkAuthLoginCompatibility(path); compatibilityErr != nil {
+		return nil, fmt.Errorf("amp login: %w", compatibilityErr)
 	}
 
 	cmd := commandContext(context.Background(), path, c.authLoginArgs()...)
@@ -219,6 +229,9 @@ func (c *Client) StartAuthLogin(ctx context.Context) (*AuthLogin, error) {
 	shim, err := newBrowserShim(c.options.ScratchParent)
 	if err != nil {
 		return nil, fmt.Errorf("amp login: %w", err)
+	}
+	if err := handoffGeneratedNativeTree(shim.dir, c.options.Isolation); err != nil {
+		return nil, errors.Join(fmt.Errorf("amp login browser shim: %w", err), shim.remove())
 	}
 
 	cmd.Env = shim.environ(environment)

@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -15,6 +14,7 @@ import (
 )
 
 func TestRunPassesContractFlags(t *testing.T) {
+	stubProcessIsolationConfig(t)
 	originalServe := serve
 	originalAgentVersion := agentVersion
 	t.Cleanup(func() {
@@ -33,6 +33,7 @@ func TestRunPassesContractFlags(t *testing.T) {
 	agentVersion = func() string { return "v1.2.3" }
 
 	code := run(context.Background(), []string{
+		"-process-isolation-config", testProcessIsolationConfigPath,
 		"-path", "/bin/amp",
 		"-home", "/tmp/amp",
 		"-model", "ignored",
@@ -64,58 +65,13 @@ func TestRunPassesContractFlags(t *testing.T) {
 	if got.TextMapPropagator == nil {
 		t.Fatal("TextMapPropagator is nil")
 	}
-}
-
-func TestRunDarwinBestEffortFlag(t *testing.T) {
-	var got ampacp.Options
-	originalServe := serve
-	t.Cleanup(func() { serve = originalServe })
-	serve = func(_ context.Context, _ io.Reader, _ io.Writer, opts ...ampacp.Option) error {
-		for _, option := range opts {
-			option(&got)
-		}
-
-		return nil
-	}
-	var stderr bytes.Buffer
-	code := run(context.Background(), []string{"-darwin-best-effort-containment"}, bytes.NewBuffer(nil), bytes.NewBuffer(nil), &stderr)
-	if runtime.GOOS == "darwin" {
-		if code != 0 || !got.DarwinBestEffortContainment || !strings.Contains(stderr.String(), "containment=best_effort") {
-			t.Fatalf("code=%d options=%#v stderr=%q", code, got, stderr.String())
-		}
-
-		return
-	}
-	if code != 2 || got.DarwinBestEffortContainment {
-		t.Fatalf("off-Darwin code=%d options=%#v", code, got)
-	}
-}
-
-func TestRunSimulatedDarwinBestEffortFlag(t *testing.T) {
-	originalGOOS := runtimeGOOS
-	originalServe := serve
-	t.Cleanup(func() {
-		runtimeGOOS = originalGOOS
-		serve = originalServe
-	})
-	runtimeGOOS = platformDarwin
-	selected := false
-	serve = func(_ context.Context, _ io.Reader, _ io.Writer, options ...ampacp.Option) error {
-		var configured ampacp.Options
-		for _, option := range options {
-			option(&configured)
-		}
-		selected = configured.DarwinBestEffortContainment
-
-		return nil
-	}
-	var stderr bytes.Buffer
-	if code := run(context.Background(), []string{"-darwin-best-effort-containment"}, strings.NewReader(""), io.Discard, &stderr); code != 0 || !selected || !strings.Contains(stderr.String(), "containment=best_effort") {
-		t.Fatalf("Darwin flag = %d, selected=%v stderr=%q", code, selected, stderr.String())
+	if got.ProcessIsolation == nil || got.ProcessIsolation.UID != 20001 || got.ProcessIsolation.GID != 20001 {
+		t.Fatalf("ProcessIsolation = %#v", got.ProcessIsolation)
 	}
 }
 
 func TestRunSeedFiles(t *testing.T) {
+	stubProcessIsolationConfig(t)
 	originalServe := serve
 	originalAgentVersion := agentVersion
 	t.Cleanup(func() {
@@ -139,6 +95,7 @@ func TestRunSeedFiles(t *testing.T) {
 	}
 
 	code := run(context.Background(), []string{
+		"-process-isolation-config", testProcessIsolationConfigPath,
 		"-seed-file", "custom/settings.json=" + hostFile,
 		"-seed-file", "custom/settings.json=" + hostFile,
 	}, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil))
@@ -157,7 +114,8 @@ func TestRunSeedFilesErrors(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	code := run(context.Background(), []string{"-seed-file", "rel=" + filepath.Join(t.TempDir(), "missing")}, bytes.NewBuffer(nil), bytes.NewBuffer(nil), &stderr)
+	stubProcessIsolationConfig(t)
+	code := run(context.Background(), isolatedArgs("-seed-file", "rel="+filepath.Join(t.TempDir(), "missing")), bytes.NewBuffer(nil), bytes.NewBuffer(nil), &stderr)
 	if code != 2 {
 		t.Fatalf("missing host file code = %d, want 2", code)
 	}
@@ -196,6 +154,7 @@ func TestRunVersion(t *testing.T) {
 }
 
 func TestRunErrorBranches(t *testing.T) {
+	stubProcessIsolationConfig(t)
 	originalServe := serve
 	originalShutdown := shutdownOpenTelemetry
 	originalAgentVersion := agentVersion
@@ -215,7 +174,7 @@ func TestRunErrorBranches(t *testing.T) {
 	}
 	shutdownOpenTelemetry = func(context.Context, func(context.Context) error) error { return nil }
 	var stderr bytes.Buffer
-	code := run(context.Background(), nil, bytes.NewBuffer(nil), bytes.NewBuffer(nil), &stderr)
+	code := run(context.Background(), isolatedArgs(), bytes.NewBuffer(nil), bytes.NewBuffer(nil), &stderr)
 	if code != 1 {
 		t.Fatalf("serve error code = %d, want 1", code)
 	}
@@ -230,7 +189,7 @@ func TestRunErrorBranches(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	stderr.Reset()
-	code = run(ctx, nil, bytes.NewBuffer(nil), bytes.NewBuffer(nil), &stderr)
+	code = run(ctx, isolatedArgs(), bytes.NewBuffer(nil), bytes.NewBuffer(nil), &stderr)
 	if code != 1 {
 		t.Fatalf("shutdown error code = %d, want 1", code)
 	}
@@ -250,6 +209,7 @@ func TestPendingSignalAndSignalCode(t *testing.T) {
 }
 
 func TestMainExitBranch(t *testing.T) {
+	stubProcessIsolationConfig(t)
 	originalServe := serve
 	originalExit := exit
 	originalArgs := os.Args
@@ -262,7 +222,7 @@ func TestMainExitBranch(t *testing.T) {
 	serve = func(context.Context, io.Reader, io.Writer, ...ampacp.Option) error {
 		return errors.New("serve failed")
 	}
-	os.Args = []string{"acp-go-amp"}
+	os.Args = []string{"acp-go-amp", "-process-isolation-config", testProcessIsolationConfigPath}
 	exitCode := -1
 	exit = func(code int) { exitCode = code }
 

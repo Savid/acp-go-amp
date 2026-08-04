@@ -17,8 +17,8 @@ func TestProcessIsolationUnixVerificationBranches(t *testing.T) {
 
 	processIsolationGeteuid = func() int { return 11 }
 	processIsolationGetegid = func() int { return 22 }
-	processIsolationGetgroups = func() ([]int, error) { return []int{22}, nil }
-	policy := &ProcessIsolation{UID: 11, GID: 22}
+	processIsolationGetgroups = func() ([]int, error) { return nil, nil }
+	policy := &ProcessIsolation{UID: 11, GID: 22, BaseEnvironment: map[string]string{}}
 	if err := verifyProcessIsolation(policy); err != nil {
 		t.Fatal(err)
 	}
@@ -34,9 +34,9 @@ func TestProcessIsolationUnixVerificationBranches(t *testing.T) {
 	if err := verifyProcessIsolation(policy); err == nil {
 		t.Fatal("group lookup failure accepted")
 	}
-	processIsolationGetgroups = func() ([]int, error) { return []int{22, 23}, nil }
+	processIsolationGetgroups = func() ([]int, error) { return []int{22}, nil }
 	if err := verifyProcessIsolation(policy); err == nil {
-		t.Fatal("supplementary group accepted")
+		t.Fatal("primary GID repeated as a supplementary group was accepted")
 	}
 	processIsolationGeteuid = func() int { return 12 }
 	if err := verifyProcessIsolation(policy); err == nil {
@@ -51,11 +51,19 @@ func TestProcessIsolationUnixVerificationBranches(t *testing.T) {
 	if err := applyProcessIsolation(exec.Command("/usr/bin/true"), nil); err == nil {
 		t.Fatal("nil policy applied")
 	}
-	if err := applyProcessIsolation(nil, &ProcessIsolation{UID: 11, GID: 22, TestOnlyNoCredential: true}); err == nil {
+	if err := applyProcessIsolation(nil, &ProcessIsolation{UID: 11, GID: 22, BaseEnvironment: map[string]string{}, TestOnlyNoCredential: true}); err == nil {
 		t.Fatal("test-only policy bypassed nil command validation")
 	}
-	if err := applyProcessIsolation(exec.Command("/usr/bin/true"), &ProcessIsolation{UID: 11, GID: 22, TestOnlyNoCredential: true}); err != nil {
+	if err := applyProcessIsolation(exec.Command("/usr/bin/true"), &ProcessIsolation{UID: 11, GID: 22, BaseEnvironment: map[string]string{}, TestOnlyNoCredential: true}); err != nil {
 		t.Fatal(err)
+	}
+
+	cmd = exec.Command("/usr/bin/true")
+	if err := applyProcessIsolation(cmd, policy); err != nil {
+		t.Fatal(err)
+	}
+	if credential := cmd.SysProcAttr.Credential; credential == nil || credential.Uid != policy.UID || credential.Gid != policy.GID || len(credential.Groups) != 0 {
+		t.Fatalf("new process attributes carried the wrong credential: %#v", cmd.SysProcAttr)
 	}
 
 	cmd = exec.Command("/usr/bin/true")

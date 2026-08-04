@@ -12,6 +12,13 @@ var newDarwinGenerationRecord = nativeamp.NewDarwinGenerationRecord
 
 func (a *Agent) configureNativeClient(options *nativeamp.Options, kind RuntimeResourceKind) {
 	options.Isolation = nativeProcessIsolation(a.options.ProcessIsolation, a.options.testOnlyNoCredential)
+
+	options.TestOnlyAuthLoginPlatform = a.options.testOnlyAuthLoginPlatform
+
+	if options.Isolation != nil {
+		options.Isolation.TestOnlyIdentityLockRoot = a.options.testOnlyIdentityLockRoot
+	}
+
 	options.DarwinBestEffort = a.containmentMode == RuntimeContainmentBestEffort
 	options.AcquireNativeRoot = func(ctx context.Context) (func(), error) {
 		return acquireNativeRoot(ctx, a.options.RuntimeResourceHooks, kind)
@@ -70,5 +77,8 @@ func nativeProcessIsolation(isolation *ProcessIsolation, testOnlyNoCredential bo
 
 	base := cloneStringMap(isolation.BaseEnvironment)
 
-	return &nativeamp.ProcessIsolation{UID: isolation.UID, GID: isolation.GID, BaseEnvironment: base, TestOnlyNoCredential: testOnlyNoCredential}
+	return &nativeamp.ProcessIsolation{
+		UID: isolation.UID, GID: isolation.GID, BaseEnvironment: base,
+		TestOnlyNoCredential: testOnlyNoCredential,
+	}
 }

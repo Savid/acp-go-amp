@@ -160,6 +160,8 @@ type Options struct {
 	RuntimeResourceHooks        RuntimeResourceHooks
 	DarwinBestEffortContainment bool
 	testOnlyNoCredential        bool
+	testOnlyIdentityLockRoot    string
+	testOnlyAuthLoginPlatform   string
 	runtime                     runtimeOptions
 }
 
@@ -574,7 +576,7 @@ func containmentMode(options Options) RuntimeContainmentMode {
 	}
 
 	switch runtimeGOOS {
-	case platformLinux, platformWindows:
+	case platformLinux:
 		return RuntimeContainmentAuthoritative
 	case platformDarwin:
 		if options.DarwinBestEffortContainment {

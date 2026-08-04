@@ -241,6 +241,13 @@ func TestAuthDeploymentSupported(t *testing.T) {
 	if !newTestClient(t, nil, Options{}).AuthDeploymentSupported() {
 		t.Fatal("an unset deployment selector was refused")
 	}
+
+	for _, platform := range []string{darwinPlatform, windowsPlatform} {
+		client := newTestClient(t, nil, Options{TestOnlyAuthLoginPlatform: platform})
+		if client.AuthDeploymentSupported() {
+			t.Fatalf("%s account login was reported as supported", platform)
+		}
+	}
 }
 
 func TestBuildEnvScrubsTheDisclosureVariables(t *testing.T) {
@@ -497,6 +504,7 @@ func TestStartAuthLoginRejectsAnUnusableLaunch(t *testing.T) {
 	path, _ := fakeAmpPath(t, "login")
 
 	client := NewClient(nil, Options{CLIPath: path, DarwinBestEffort: true, Isolation: testProcessIsolation()})
+	client.checkAuthLoginCompatibility = func(string) error { return nil }
 	if _, err := client.StartAuthLogin(t.Context()); err == nil {
 		t.Fatal("a launch with no Darwin generation factory started a login")
 	}

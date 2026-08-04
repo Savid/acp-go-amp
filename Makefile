@@ -1,4 +1,6 @@
 .DEFAULT_GOAL := help
+
+.PHONY: test-trusted-supervisor
 .PHONY: audit build clean coverage-check docs-audit fmt fmt-check help lint modernize-check test test/cover test-cross-compile test-integration-attended test-integration-cover test-integration-keystore test-integration-live test-integration-smoke tidy vuln
 
 GOLANGCI_LINT_VERSION ?= v2.12.2
@@ -18,12 +20,18 @@ fmt-check:
 test:
 	go test -race -shuffle=on ./...
 
+## test-trusted-supervisor: run Linux root-only native authority tests
+test-trusted-supervisor:
+	@test "$$(uname -s)" = Linux
+	@test "$$(id -u)" -eq 0
+	go test -race -count=1 -v -run '^(Test.*(ProcessIsolationActual|TrustedSupervisor|AgentIdentityLock|PersistentProof|SupervisorConfigIsSealed).*)$$' ./...
+
 ## coverage-check: require 100% statement coverage with race instrumentation
 coverage-check:
 	go test -race -coverprofile=coverage.out -covermode=atomic ./...
 	@go tool cover -func=coverage.out | awk 'BEGIN { found = 0 } /^total:/ { found = 1; if ($$3 != "100.0%") { printf "total coverage %s, want 100.0%%\n", $$3; exit 1 } printf "total coverage %s\n", $$3 } END { if (!found) { print "missing total coverage line"; exit 1 } }'
 
-## test-cross-compile: compile tests and packages for the supported platforms
+## test-cross-compile: compile supported packages and fail-closed platform paths
 test-cross-compile:
 	rm -rf .tmp/cross
 	mkdir -p .tmp/cross

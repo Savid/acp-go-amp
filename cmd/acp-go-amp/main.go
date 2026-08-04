@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
-	"runtime"
 	"strings"
 
 	ampacp "github.com/savid/acp-go-amp"
@@ -18,9 +17,6 @@ var serve = ampacp.Serve
 var exit = os.Exit
 var shutdownOpenTelemetry = shutdownTelemetry
 var agentVersion = version
-var runtimeGOOS = runtime.GOOS
-
-const platformDarwin = "darwin"
 
 func main() {
 	if code := run(context.Background(), os.Args[1:], os.Stdin, os.Stdout, os.Stderr); code != 0 {
@@ -42,7 +38,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 		providerAuthDirectHome string
 		debug                  bool
 		showVersion            bool
-		darwinBestEffort       bool
+		isolationConfigPath    string
 		seedFiles              = seedFileFlag{}
 	)
 
@@ -56,23 +52,10 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 	flags.StringVar(&providerAuthDirectHome, "provider-auth-direct-home", "", "unsupported: Amp's disconnect releases only the ledger slot a connection owns, so no leg acts on a canonical native home; a non-empty value is rejected at session start")
 	flags.BoolVar(&debug, "debug", false, "enable debug logging")
 	flags.BoolVar(&showVersion, "version", false, "print adapter version and exit")
-	flags.BoolVar(&darwinBestEffort, "darwin-best-effort-containment", false, "accept Darwin process-group containment and its escaped-descendant and PGID-reuse risks")
+	flags.StringVar(&isolationConfigPath, processIsolationConfigFlag, "", "absolute path to the required root-owned mode-0600 Linux child-isolation policy")
 	flags.Var(&seedFiles, "seed-file", "seed file as <relpath>=<hostpath>, written into each session's isolated native root; repeatable")
 
 	if err := flags.Parse(args); err != nil {
-		return 2
-	}
-
-	if darwinBestEffort && runtimeGOOS != platformDarwin {
-		_, _ = fmt.Fprintln(stderr, "acp-go-amp: -darwin-best-effort-containment is valid only on darwin")
-
-		return 2
-	}
-
-	seeds, err := seedFiles.contents()
-	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "acp-go-amp: %v\n", err)
-
 		return 2
 	}
 
@@ -81,6 +64,26 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 		_, _ = fmt.Fprintln(stdout, agentVer)
 
 		return 0
+	}
+
+	if isolationConfigPath == "" {
+		_, _ = fmt.Fprintf(stderr, "acp-go-amp: -%s is required for standalone native mode\n", processIsolationConfigFlag)
+
+		return 2
+	}
+
+	isolation, err := processIsolationConfigLoader(isolationConfigPath)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "acp-go-amp: process isolation: %v\n", err)
+
+		return 1
+	}
+
+	seeds, err := seedFiles.contents()
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "acp-go-amp: %v\n", err)
+
+		return 2
 	}
 
 	level := slog.LevelInfo
@@ -98,10 +101,6 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 	}
 
 	logger = telemetry.logger
-
-	if darwinBestEffort {
-		_, _ = fmt.Fprintln(stderr, "WARNING containment=best_effort: escaped descendants may survive; numeric PGID reuse can cause collateral signalling; marker correlation is not ownership; markers can be scrubbed; native-root permits do not bound escaped provider work")
-	}
 
 	signals := forwardedSignals()
 	receivedSignals := make(chan os.Signal, 1)
@@ -125,10 +124,12 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 		ampacp.WithProviderAuthDirectHome(providerAuthDirectHome),
 		ampacp.WithLogger(logger),
 		ampacp.WithAgentVersion(agentVer),
+		ampacp.WithProcessIsolation(ampacp.ProcessIsolation{
+			UID:             isolation.UID,
+			GID:             isolation.GID,
+			BaseEnvironment: isolation.BaseEnvironment,
+		}),
 	)
-	if darwinBestEffort {
-		serveOptions = append(serveOptions, ampacp.WithDarwinBestEffortContainment())
-	}
 
 	if len(seeds) > 0 {
 		serveOptions = append(serveOptions, ampacp.WithSeedFiles(seeds))

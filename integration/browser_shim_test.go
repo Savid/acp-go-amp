@@ -13,21 +13,50 @@ import (
 	"testing"
 	"time"
 
+	dockercontainer "github.com/moby/moby/api/types/container"
 	"github.com/testcontainers/testcontainers-go"
 	tcexec "github.com/testcontainers/testcontainers-go/exec"
 	"github.com/testcontainers/testcontainers-go/wait"
+
+	"github.com/savid/acp-go-amp/internal/amp"
 )
 
 const (
-	browserShimProbePath = "/usr/local/bin/browsershim.test"
-	browserShimProbeCase = "TestLoginNeverExecsABrowserLauncher"
+	browserShimProbePath         = "/usr/local/bin/browsershim.test"
+	browserShimProbeCase         = "TestLoginNeverExecsABrowserLauncher"
+	installedAmpContainerPath    = "/usr/local/bin/amp"
+	installedAmpProbeCase        = "TestInstalledLinuxAmpLoginExecsOnlyShimLauncher"
+	installedLinuxAmpProbeEnv    = "ACP_GO_AMP_TEST_INSTALLED_LINUX_AMP"
+	networklessContainerModeName = "none"
 )
 
-// TestKeystoreLinuxLoginNeverExecsABrowserLauncher runs the login path's
-// non-execution proof on Linux. The native binary picks its launcher by GOOS —
-// `open` on darwin, `xdg-open` on everything else — so a proof that only ever
-// ran on a developer's Mac leaves the branch every Linux host takes asserted
-// and never executed.
+// TestSmokeInstalledAmpBrokeredLoginCompatibilityCanary inspects the real
+// installed binary without executing `amp login`, so the canary itself cannot
+// open a browser or initiate provider authorization. Darwin must report the
+// boundary as incompatible; Linux must prove its account-login call reaches
+// the audited bare xdg-open branch and contains no known absolute launcher.
+func TestSmokeInstalledAmpBrokeredLoginCompatibilityCanary(t *testing.T) {
+	path := integrationAmpPath(t)
+	err := amp.CheckAuthLoginBrowserCompatibility(path)
+
+	if runtime.GOOS == "darwin" {
+		if err == nil {
+			t.Fatal("Darwin brokered login was accepted without an audited headless account-login contract")
+		}
+
+		t.Logf("Darwin brokered login refused before launch: %v", err)
+
+		return
+	}
+
+	if err != nil {
+		t.Fatalf("brokered login compatibility = %v", err)
+	}
+}
+
+// TestKeystoreLinuxLoginNeverExecsABrowserLauncher runs the adapter's PATH-shim
+// non-execution proof on Linux so that boundary is exercised on the platform
+// where brokered login remains enabled.
 func TestKeystoreLinuxLoginNeverExecsABrowserLauncher(t *testing.T) {
 	requireKeystoreRuntime(t)
 
@@ -84,6 +113,77 @@ func TestKeystoreLinuxLoginNeverExecsABrowserLauncher(t *testing.T) {
 
 	if !strings.Contains(string(logs), "--- PASS: "+browserShimProbeCase) {
 		t.Fatalf("%s did not run in the container", browserShimProbeCase)
+	}
+}
+
+// TestKeystoreInstalledLinuxAmpLoginExecsOnlyShimLauncher copies the installed
+// host Linux Amp binary into a networkless, no-GUI container and executes its
+// real account-login path through the adapter. The login deployment is
+// unreachable loopback, so this proves native launcher interception without
+// initiating provider authorization or exposing host credentials.
+func TestKeystoreInstalledLinuxAmpLoginExecsOnlyShimLauncher(t *testing.T) {
+	requireKeystoreRuntime(t)
+	if runtime.GOOS != "linux" {
+		t.Skip("the installed host Amp binary is not a Linux executable")
+	}
+
+	ampPath, err := exec.LookPath("amp")
+	if err != nil {
+		t.Fatalf("the real-native Linux browser canary requires installed Amp: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+		ContainerRequest: testcontainers.ContainerRequest{
+			Image:       keystoreBaseImage(t),
+			Cmd:         []string{"sleep", "infinity"},
+			NetworkMode: dockercontainer.NetworkMode(networklessContainerModeName),
+			WaitingFor:  wait.ForExec([]string{"/bin/sh", "-c", "exit 0"}).WithStartupTimeout(2 * time.Minute),
+		},
+		Started: true,
+	})
+	if err != nil {
+		t.Fatalf("start installed Amp browser fixture: %v", err)
+	}
+
+	t.Cleanup(func() {
+		if err := container.Terminate(context.WithoutCancel(ctx)); err != nil {
+			t.Errorf("terminate installed Amp browser fixture: %v", err)
+		}
+	})
+
+	probe := buildBrowserShimProbe(t)
+	if err := container.CopyFileToContainer(ctx, probe, browserShimProbePath, 0o755); err != nil {
+		t.Fatalf("copy installed Amp browser probe: %v", err)
+	}
+	if err := container.CopyFileToContainer(ctx, ampPath, installedAmpContainerPath, 0o755); err != nil {
+		t.Fatalf("copy installed Amp binary: %v", err)
+	}
+
+	code, output, err := container.Exec(ctx, []string{
+		"/usr/bin/env",
+		installedLinuxAmpProbeEnv + "=" + installedAmpContainerPath,
+		browserShimProbePath,
+		"-test.v",
+		"-test.run", "^" + installedAmpProbeCase + "$",
+	}, tcexec.Multiplexed())
+	if err != nil {
+		t.Fatalf("run installed Amp browser probe: %v", err)
+	}
+
+	logs, readErr := io.ReadAll(output)
+	if readErr != nil {
+		t.Fatalf("read installed Amp browser probe output: %v", readErr)
+	}
+	t.Log(string(logs))
+
+	if code != 0 {
+		t.Fatalf("installed Amp browser probe exited %d", code)
+	}
+	if !strings.Contains(string(logs), "--- PASS: "+installedAmpProbeCase) {
+		t.Fatalf("%s did not run in the container", installedAmpProbeCase)
 	}
 }
 

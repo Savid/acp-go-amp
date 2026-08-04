@@ -7,6 +7,24 @@ The adapter isolates each session's native state and keeps credentials out of
 anything durable. Operators can reason about the blast radius of a single
 session and about exactly what the session store may contain.
 
+## Standalone command boundary
+
+The standalone command launches native work only on Linux and requires the
+root-owned mode-`0600` `-process-isolation-config` policy. Resolution walks
+from an open `/` descriptor with `openat` and `O_NOFOLLOW`; every ancestor
+must be root-owned and not writable by group or other, and the final single-link
+policy inode is read through the descriptor that was validated. The configured
+account home is resolved the same way, must be a target-owned mode-`0700`
+directory beneath protected root-owned ancestry, and cannot be `/root` or
+`/nonexistent`.
+
+The adapter remains root, but its ambient environment is never copied wholesale
+to the child. Only the complete literal `baseEnvironment` plus names in
+`inheritEnvironment` reach native work. The CLI refuses Darwin, Windows, and
+other platforms; Darwin best-effort containment remains an explicit
+embedded-Go option only. `-version` and Darwin containment diagnostics launch
+no native worker and are exempt.
+
 ## Per-session isolation
 
 The adapter creates an isolated native home for each ACP session. Native `HOME`,
@@ -87,18 +105,22 @@ The native login additionally runs with `AMP_API_KEY` removed, so a brokered
 login never copies an ambient environment key back out as if it had been
 brokered.
 
-Its browser launch is neutralised by two mechanisms at once, because a native
-launcher may use either. The login child runs with a scratch directory of no-op
-launchers — `open`, `xdg-open`, `x-www-browser`, `www-browser`,
-`sensible-browser` — ahead of every other entry on its `PATH`, and with
-`BROWSER` pointing into that same directory. The directory is mode `0700`,
-lives under the scratch parent (`WithScratchDir` / `-scratch-dir`), and is
-removed when the login handle closes. On Windows the login refuses to start:
-the launcher there resolves out of the system directory ahead of `PATH` and
-opens a URL through a shell builtin with no image to shadow, so no launch can
-be proven contained. Without this, a launcher that execs `open` directly opens
-a tab on the operator's desktop and the browser writes its profile — cookie jar
-included — into the directory the adapter reads the credential from.
+On Linux, its browser launch is neutralised by two mechanisms at once because a
+native launcher may use either. The login child runs with a scratch directory
+of no-op launchers — `open`, `xdg-open`, `x-www-browser`, `www-browser`, and
+`sensible-browser` — ahead of every other entry on its `PATH`, with `BROWSER`
+pointing into that same directory. The directory is mode `0700`, lives under
+the scratch parent (`WithScratchDir` / `-scratch-dir`), and is removed when the
+login handle closes.
+
+Brokered account login is unavailable on Darwin. Current Amp account login
+invokes the system browser directly, and `AMP_HEADLESS_OAUTH` controls only
+MCP-server OAuth rather than account authentication. The adapter fingerprints
+the resolved executable and refuses it before constructing `amp login`; an
+unknown build is refused until its account-login behavior has an audited
+headless contract. Windows also refuses the login before native minting and
+rejects every native Amp command at the mandatory Unix UID/GID identity
+boundary. Both platforms report `unsupported_variant` from `authorize`.
 
 ## Stream isolation
 
@@ -117,15 +139,25 @@ diagnostic surfaces.
 Linux starts every Amp command — version/readiness probes, thread lifecycle
 commands, and prompts — below an authoritative child subreaper. Descendants
 that detach with `setsid(2)` are reparented, terminated, and reaped until
-`wait4(2)` reports `ECHILD`. Windows assigns every command tree to an
-authoritative Job Object and waits for its active-process count to reach zero.
-Cancellation, timeout, and successful completion all cross the same selected
-boundary. An incomplete boundary surfaces
+`wait4(2)` reports `ECHILD`. Windows rejects every native Amp command before
+spawning because its process API cannot apply the mandatory Unix UID/GID
+identity boundary with empty supplementary groups. Cross-compiling this refusal
+path proves only that it builds, not runtime support. Cancellation, timeout,
+and successful completion all cross the same selected boundary. An incomplete
+boundary surfaces
 `ampacp.ErrProcessContainmentIncomplete`; reachable native-root and scratch
 resources are retained, and the parent-side wait remains bounded.
 
-Darwin fails closed unless the operator explicitly supplies
-`-darwin-best-effort-containment` or
+The Linux supervisor stays root and runs from `/` with a closed private
+environment. Sealed launch configuration carries the target identity and native
+environment; only the Amp command receives the configured UID/GID with no
+supplementary groups. Before native start the supervisor acquires the
+root-owned `/run/acp-go/agent-identities/<uid>.lock` and holds it until the
+descendant wait queue is empty. Amp inherits none of the launch, control, proof,
+or lock descriptors, so it cannot signal its supervisor, forge completion, or
+overlap another native tree using the same host identity.
+
+Embedded Darwin hosts fail closed unless the operator explicitly supplies
 `WithDarwinBestEffortContainment`. The opt-in creates a fresh real writable
 generation root for every native launch, starts the direct child as its own
 process-group leader, reaps that child exactly once, sends group `SIGTERM`,

@@ -9,7 +9,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
+
+const installedLinuxAmpEnv = "ACP_GO_AMP_TEST_INSTALLED_LINUX_AMP"
 
 // browserProbeDir plants an executable for every name a launcher might exec,
 // each of which records the invocation instead of opening anything. A recorded
@@ -29,10 +32,10 @@ func browserProbeDir(t *testing.T, marker string) string {
 	return dir
 }
 
-// TestLoginNeverExecsABrowserLauncher runs the real login path with a recording
-// browser launcher ahead of every other PATH entry the child inherits. The
-// control run proves the recorder fires when something execs it; the login run
-// then has to leave the recorder untouched.
+// TestLoginNeverExecsABrowserLauncher runs the adapter's login path with a
+// deterministic harness and a recording launcher ahead of every other PATH
+// entry. It proves the PATH interception used on Linux; installed-binary
+// compatibility is checked separately before this boundary is built.
 func TestLoginNeverExecsABrowserLauncher(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "launched")
 	probe := browserProbeDir(t, marker)
@@ -62,10 +65,8 @@ func TestLoginNeverExecsABrowserLauncher(t *testing.T) {
 	dir := t.TempDir()
 	resolvedFile := filepath.Join(dir, "resolved")
 	path := filepath.Join(dir, "amp")
-	// Every launcher name is exercised because the native binary picks one by
-	// GOOS: `open` on darwin and `xdg-open` everywhere else. Each name is bare so
-	// the child resolves it through the PATH it was handed, which is exactly how
-	// the native binary opens a URL.
+	// Every launcher name is exercised as a bare command so the harness resolves
+	// it through the PATH it was handed.
 	harness := "#!/bin/sh\n"
 
 	for _, name := range browserLauncherNames {
@@ -118,6 +119,77 @@ func TestLoginNeverExecsABrowserLauncher(t *testing.T) {
 		if !strings.Contains(launcher, browserShimPrefix) || filepath.Base(launcher) != browserLauncherNames[i] {
 			t.Fatalf("the child resolved %s to %q; want a shim launcher", browserLauncherNames[i], launcher)
 		}
+	}
+}
+
+// TestInstalledLinuxAmpLoginExecsOnlyShimLauncher is the real-native proof for
+// Linux brokered login. Its integration caller runs this test in a networkless,
+// no-GUI container and supplies the installed Linux Amp binary. AMP_URL points
+// at unreachable loopback, so no provider authorization can be initiated.
+func TestInstalledLinuxAmpLoginExecsOnlyShimLauncher(t *testing.T) {
+	path := os.Getenv(installedLinuxAmpEnv)
+	if path == "" {
+		t.Skipf("set %s to a real installed Linux Amp binary", installedLinuxAmpEnv)
+	}
+
+	marker := filepath.Join(t.TempDir(), "launcher")
+	originalScript := browserShimScript
+	browserShimScript = []byte("#!/bin/sh\nprintf '%s\\n' \"${0##*/}\" > \"$ACP_GO_AMP_TEST_BROWSER_MARKER\"\nexit 0\n")
+	t.Cleanup(func() { browserShimScript = originalScript })
+	home := t.TempDir()
+	settingsFile := filepath.Join(t.TempDir(), "settings.json")
+	if writeErr := os.WriteFile(settingsFile, AuthSettingsDocument(), 0o600); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+
+	client := newTestClient(t, nil, Options{
+		CLIPath:       path,
+		Cwd:           t.TempDir(),
+		SettingsFile:  settingsFile,
+		ScratchParent: t.TempDir(),
+		Env: map[string]string{
+			AuthDeploymentEnv:                "http://127.0.0.1:1",
+			"ACP_GO_AMP_TEST_BROWSER_MARKER": marker,
+			envHome:                          home,
+			envXDGCacheHome:                  filepath.Join(home, "cache"),
+			envXDGConfigHome:                 filepath.Join(home, "config"),
+			dataHomeEnv:                      t.TempDir(),
+			envXDGStateHome:                  filepath.Join(home, "state"),
+		},
+	})
+
+	login, err := client.StartAuthLogin(t.Context())
+	if err != nil {
+		t.Fatalf("start installed Linux Amp login: %v", err)
+	}
+	t.Cleanup(func() { _ = login.Close() })
+
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		launched, readErr := os.ReadFile(marker)
+		if readErr == nil {
+			if got := strings.TrimSpace(string(launched)); got != "xdg-open" {
+				t.Fatalf("installed Amp executed shim %q, want xdg-open", got)
+			}
+
+			break
+		}
+		if !errors.Is(readErr, os.ErrNotExist) {
+			t.Fatalf("read installed Amp browser marker: %v", readErr)
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("installed Amp never executed the PATH-shadowed xdg-open shim")
+		}
+
+		select {
+		case <-t.Context().Done():
+			t.Fatal(t.Context().Err())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	if closeErr := login.Close(); closeErr != nil {
+		t.Fatalf("close installed Linux Amp login: %v", closeErr)
 	}
 }
 

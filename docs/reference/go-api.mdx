@@ -26,8 +26,11 @@ otherwise return normally or with context cancellation. A host that receives
 it must retain or quarantine resources the native process may still reach.
 
 Linux uses an authoritative per-command subreaper, including for descendants
-detached with `setsid(2)`; Windows uses an authoritative Job Object. Darwin is
-`unavailable` and fails native launches closed by default. The explicit
+detached with `setsid(2)`. Windows is `unavailable` for native launch because
+the mandatory Unix UID/GID identity boundary with empty supplementary groups
+cannot be applied. A Windows cross-compile proves only that the refusal path
+builds; it is not runtime support. Darwin is `unavailable` and fails native
+launches closed by default. The explicit
 `WithDarwinBestEffortContainment` option selects bounded process-group cleanup,
 not authoritative descendant containment: a detached descendant can survive,
 markers can be scrubbed, an empty correlation scan is not proof of absence,
@@ -41,10 +44,10 @@ unsupported platforms fail closed. `Agent.ContainmentMode()` and
 | Option | Purpose |
 |---|---|
 | `WithExecutablePath` | Native `amp` executable path. |
-| `WithProcessIsolation` | Mandatory non-root UID/GID and complete replacement base environment for every native command and supervisor. |
+| `WithProcessIsolation` | Mandatory non-root UID/GID and complete replacement environment for native Amp commands. On Linux the embedded supervisor stays trusted root; only the native command receives the configured identity, with supplementary groups cleared. |
 | `WithScratchDir` | Sole parent for all ephemeral on-disk scratch (per-session isolated `HOME`/XDG directories, startup probe directory). Empty falls back to the system temp directory; created `0700` when missing. |
 | `WithInputHandoffRoot` | Absolute read root for the local handoff input form. Read-only, so it is not a materialization root. Unset rejects every handoff-form block. See [Handoff read root](#handoff-read-root). |
-| `WithProviderAuthRoot` | Absolute durable directory holding the values-free provider-auth ledger. Unset, or unusable, leaves every `_amp/auth/*` method unadvertised. See [Authentication](/docs/features/authentication#broker-a-login). |
+| `WithProviderAuthRoot` | Absolute durable directory holding the values-free provider-auth ledger. Unset, or unusable, leaves every `_amp/auth/*` method unadvertised. Darwin and Windows keep the configured method surface but refuse authorization with `unsupported_variant` before native login. See [Authentication](/docs/features/authentication#broker-a-login). |
 | `WithProviderAuthDirectHome` | Unsupported: `disconnect` releases only the ledger slot a connection owns and reads no operator home, so there is nothing for an exact-home consent gate to authorize. A non-empty value rejects at session start. |
 | `WithHome` | Unsupported: Amp has no native config/auth root. Kept on the surface for symmetry; a non-empty value rejects at session start. Use `WithScratchDir`. |
 | `WithDefaultModel` | Accepted for symmetry; non-empty values reject at session start. |

@@ -9,20 +9,33 @@ than a model provider. The adapter advertises no ACP auth methods in
 are two supported ways to get a key into a session: supply one through the
 environment, or broker one through the provider-auth methods.
 
+## Standalone credential input
+
+The standalone root supervisor never forwards its ambient environment.
+To pass `AMP_API_KEY` and `AMP_URL`, name each variable explicitly in the
+`inheritEnvironment` array of the root-owned
+`-process-isolation-config` policy. The value must be set in the supervisor
+environment or startup fails; identity, path, loader, XDG/native-home, and
+adapter-private variables cannot be inherited. File-backed or provider-broker
+credentials must live only in the explicit target-owned native home described
+by the adapter. No standalone path reads root `HOME`, root native config, or
+an unlisted root credential.
+
 ## Provide a key
 
-Set `AMP_API_KEY` so the native process can reach Amp's backend. You can supply
-it three ways:
+Set `AMP_API_KEY` so the native process can reach Amp's backend. You can
+supply it through one of these explicit paths:
 
 | Source | Scope |
 |---|---|
-| Host process environment (`AMP_API_KEY=...`) | All sessions. |
+| Standalone policy `inheritEnvironment` | All sessions, but only for names the policy explicitly lists. |
 | `WithEnv(map[string]string{...})` | All sessions started by the adapter. |
 | `AmpOptions.Env` (`_meta.amp.options.env`) | A single session. |
 
 Sessions run inside an isolated per-session home, so credentials saved by Amp's
 native account setup on the host are not visible to them — the key must come
-through one of the sources above.
+through one of the explicit sources above. Merely exporting the key in an
+embedding host does not supply it.
 
 <Warning>
 Without a usable provider-auth root, session startup fails fast when no
@@ -83,12 +96,15 @@ entitlement-gated, and stored on Amp's side.
 
 ### Deployment
 
-The brokering legs run against the default Amp deployment only. The single host
-a relayed URL may name and the single store key a harvest reads are both
-measured facts about that deployment, so a session whose `AMP_URL` names another
-one is refused at `authorize` with `unsupported_variant` — before a login child
-exists — rather than minting a flow that could never relay a URL or find a key.
-Every other Amp command still honours `AMP_URL` normally.
+The brokering legs run against the default Amp deployment on a supported login
+platform only. The single host a relayed URL may name and the single store key a
+harvest reads are both measured facts about that deployment, so a session whose
+`AMP_URL` names another one is refused at `authorize` with
+`unsupported_variant` before a login child exists. Darwin and Windows return the
+same cause before native minting: Darwin Amp account login has no audited
+browserless contract, while Windows cannot provide the mandatory Unix identity
+boundary. Every other Amp command still honours `AMP_URL` normally where the
+runtime containment policy permits it.
 
 <Warning>
 The value the owner pastes back is not an authorization code to be exchanged —

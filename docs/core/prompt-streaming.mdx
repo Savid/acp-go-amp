@@ -55,8 +55,10 @@ behavior.
 every native command, including each turn, runs below its own child subreaper.
 It adopts and terminates the whole descendant tree even when a native tool
 escapes the original process group with `setsid(2)`, and reaps until `ECHILD`.
-On Windows, the command is assigned to a Job Object and the adapter waits for
-its active-process count to reach zero. These are authoritative boundaries.
+Windows refuses the native command before spawning because the mandatory Unix
+UID/GID identity boundary with empty supplementary groups is unavailable. A
+Windows cross-compile proves only that this refusal path builds; it does not
+establish runtime support. Linux is the authoritative boundary.
 
 Prompt settlement is fenced by the selected containment result. If it is
 incomplete, the adapter returns an error matching

@@ -209,6 +209,10 @@ func newAgentSession(ctx context.Context, agent *Agent, id acp.SessionId, cwd st
 		return nil, err
 	}
 
+	if err := handoffGeneratedNativeTree(dir, agent.options.ProcessIsolation); err != nil {
+		return nil, err
+	}
+
 	mode := meta.options.Mode
 	if mode == "" {
 		mode = modeMedium

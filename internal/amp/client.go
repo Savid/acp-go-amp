@@ -26,6 +26,9 @@ const (
 	MinimumVersion              = "0.0.1784765892"
 	ampExecutableName           = authSecretsDirName
 	envHome                     = "HOME"
+	envXDGCacheHome             = "XDG_CACHE_HOME"
+	envXDGConfigHome            = "XDG_CONFIG_HOME"
+	envXDGStateHome             = "XDG_STATE_HOME"
 	maxCapturedStderrBytes      = 64 * 1024
 	defaultCloseKillAfter       = 500 * time.Millisecond
 	defaultCloseWait            = 5 * time.Second
@@ -96,6 +99,7 @@ type Options struct {
 	AcquireNativeRoot          func(context.Context) (func(), error)
 	NewDarwinGeneration        func(context.Context) (*DarwinGeneration, error)
 	WritableRoot               string
+	TestOnlyAuthLoginPlatform  string
 }
 
 // ProcessInventory queries the current absolute inventory exposed by an
@@ -112,8 +116,9 @@ type ProcessSnapshotObserver struct {
 }
 
 type Client struct {
-	log     *slog.Logger
-	options Options
+	log                         *slog.Logger
+	options                     Options
+	checkAuthLoginCompatibility func(string) error
 }
 
 func (c *Client) newProcessSnapshotObserver(ctx context.Context, tree *processTree) ProcessSnapshotObserver {
@@ -155,7 +160,25 @@ func NewClient(log *slog.Logger, options Options) *Client {
 		options.MaxLineBytes = defaultMaxJSONLineBytes
 	}
 
-	return &Client{log: log, options: options}
+	checkAuthLoginCompatibility := CheckAuthLoginBrowserCompatibility
+
+	if options.TestOnlyAuthLoginPlatform != "" {
+		if options.TestOnlyAuthLoginPlatform == linuxPlatform {
+			// Fake Amp binaries used by the login tests model the supported
+			// Linux variant behaviorally; they do not carry Amp's bundled JS.
+			checkAuthLoginCompatibility = func(string) error { return nil }
+		} else {
+			checkAuthLoginCompatibility = func(path string) error {
+				return checkAuthLoginBrowserCompatibilityOnPlatform(options.TestOnlyAuthLoginPlatform, path)
+			}
+		}
+	}
+
+	return &Client{
+		log:                         log,
+		options:                     options,
+		checkAuthLoginCompatibility: checkAuthLoginCompatibility,
+	}
 }
 
 func (c *Client) Version(ctx context.Context) (string, error) {
@@ -255,6 +278,9 @@ func (c *Client) probeSubcommands(ctx context.Context) (returnErr error) {
 	continueClient.options.MCPConfigPath = filepath.Join(filepath.Dir(settingsFile), "mcp.json")
 	if err := writeFile(continueClient.options.MCPConfigPath, []byte("{}\n"), 0o600); err != nil {
 		return fmt.Errorf("write amp startup MCP config: %w", err)
+	}
+	if err := handoffGeneratedNativeTree(filepath.Dir(settingsFile), c.options.Isolation); err != nil {
+		return fmt.Errorf("handoff amp startup settings: %w", err)
 	}
 
 	continueClient.options.Mode = "medium"

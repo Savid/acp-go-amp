@@ -14,8 +14,8 @@ var ErrProcessContainmentIncomplete = errors.New("amp process containment incomp
 
 // processTreeCommand owns the platform launch wrapper and any parent-side
 // descriptors that establish its containment boundary. Linux uses an embedded
-// subreaper supervisor, Windows uses a Job Object, and platforms without an
-// unescapable native-command boundary reject the launch.
+// subreaper supervisor, opted-in Darwin uses its best-effort process group, and
+// unsupported platforms, including Windows, reject the launch.
 type processTreeCommand struct {
 	cmd *exec.Cmd
 	// nativeEnv is the environment the containment boundary settled on for the

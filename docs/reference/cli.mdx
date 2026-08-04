@@ -6,18 +6,61 @@ description: Every flag the acp-go-amp stdio command accepts, and how stdout is 
 `acp-go-amp` runs an ACP JSON-RPC server on stdio. An ACP host launches it as a
 subprocess; stdout is reserved for JSON-RPC and diagnostics go to stderr.
 
+## Required standalone isolation policy
+
+Normal serve mode is Linux-only and requires
+`-process-isolation-config=/absolute/path/process-isolation.json`.
+`-version` and the Darwin containment diagnostic subcommands are exempt.
+The policy must be a root-owned, single-link regular file with mode `0600`.
+Every component is opened from `/` without following symlinks, and every
+ancestor must be root-owned and not writable by group or other. Unknown JSON
+fields and trailing JSON values are rejected.
+
+```json
+{
+  "uid": 20001,
+  "gid": 20001,
+  "baseEnvironment": {
+    "PATH": "/usr/local/bin:/usr/bin:/bin",
+    "HOME": "/var/lib/acp-go-amp",
+    "USER": "acp-go-amp",
+    "LOGNAME": "acp-go-amp",
+    "LANG": "C.UTF-8"
+  },
+  "inheritEnvironment": []
+}
+```
+
+The supervisor must run as root. The UID/GID must name a nonroot account with
+that same-name private primary group, no supplementary groups, and a target-owned mode
+`0700` home matching `HOME`, reached without symlinks beneath protected
+root-owned ancestry; `/root` and `/nonexistent` are forbidden. `USER` and
+`LOGNAME` must match the account.
+`PATH` must contain existing canonical absolute directories. The child gets
+only `baseEnvironment` plus variables explicitly named in
+`inheritEnvironment`; identity, search-path, loader, interpreter, XDG/native
+home, and adapter-private variables cannot be inherited. Unset or duplicate
+inheritance entries fail startup. Darwin, Windows, and other platforms refuse
+standalone native mode rather than weakening this contract.
+
+Provision the target as a locked system account with a non-login shell, its
+same-name private group, and no sudo policy. Its UID and primary GID cannot be
+shared by another account. Password locking is not a substitute for disabling
+login paths, and a locked account still needs the validated private writable
+home for native tools.
+
 ## Flags
 
 | Flag | Meaning |
 |---|---|
 | `-path` | Amp executable path. Defaults to `amp` on `PATH`. |
+| `-process-isolation-config` | Required absolute path to the standalone Linux isolation policy described above. |
 | `-scratch-dir` | Parent directory for ephemeral session scratch: the isolated per-session native HOME/XDG state, the startup probe directory, and any temp. Empty means the system temp directory. |
 | `-home` | Native config/auth root. Accepted on the adapter surface; non-empty values fail session start because Amp has no such root — its per-session isolated HOME/XDG state lives under `-scratch-dir` instead. |
-| `-provider-auth-root` | Absolute durable directory holding the values-free provider-auth ledger. Empty leaves every `_amp/auth/*` method unadvertised. See [Authentication](/docs/features/authentication#broker-a-login). |
+| `-provider-auth-root` | Absolute durable directory holding the values-free provider-auth ledger. Empty leaves every `_amp/auth/*` method unadvertised. Darwin and Windows authorization fails before native login. See [Authentication](/docs/features/authentication#broker-a-login). |
 | `-provider-auth-direct-home` | Accepted on the adapter surface; non-empty values fail session start because `disconnect` releases only the ledger slot a connection owns and reads no operator home. |
 | `-model` | Default model. Accepted on the adapter surface; non-empty values fail session start because Amp has no ACP model config option. |
 | `-seed-file` | Repeatable `<relpath>=<hostpath>`. Reads the host file and writes its contents to `<relpath>` inside each session's isolated native `HOME` before `amp` launches. See [Seed files](/docs/features/models-config#seed-files). |
-| `-darwin-best-effort-containment` | Darwin-only explicit opt-in to bounded process-group cleanup. Warns unconditionally; detached descendants can survive and numeric PGID reuse can cause collateral signalling. |
 | `-debug` | Write adapter debug logs to stderr. |
 | `-version` | Print adapter version and exit. |
 
@@ -28,7 +71,8 @@ session config option, not a serve-mode flag — see
 
 ## Darwin containment operations
 
-The command also provides two Darwin-only operational subcommands:
+The command also provides two Darwin-only operational subcommands for
+generations left by an embedded best-effort host:
 
 ```sh
 acp-go-amp containment diagnose -scratch-dir <parent>

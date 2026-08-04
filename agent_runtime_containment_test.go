@@ -27,7 +27,7 @@ func TestAgentContainmentModeAndObservation(t *testing.T) {
 	}))
 	var want RuntimeContainmentMode
 	switch runtime.GOOS {
-	case "linux", "windows":
+	case "linux":
 		want = RuntimeContainmentAuthoritative
 	default:
 		want = RuntimeContainmentUnavailable

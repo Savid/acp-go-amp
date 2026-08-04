@@ -98,6 +98,36 @@ func TestAuthorizeRefusesANonDefaultDeployment(t *testing.T) {
 	}
 }
 
+func TestAuthorizeRefusesUnsupportedLoginPlatformsBeforeNativeMint(t *testing.T) {
+	for _, platform := range []string{platformDarwin, platformWindows} {
+		t.Run(platform, func(t *testing.T) {
+			fixture := newAuthFixture(t, "login", func(options *Options) {
+				options.testOnlyAuthLoginPlatform = platform
+			})
+
+			original := authStartLogin
+			calls := 0
+			authStartLogin = func(*nativeamp.Client, context.Context) (*nativeamp.AuthLogin, error) {
+				calls++
+
+				return nil, errors.New("native login must not start")
+			}
+			t.Cleanup(func() { authStartLogin = original })
+
+			_, err := fixture.authorize("connection-1", "request-1")
+			requireAuthCause(t, err, authCauseUnsupportedVariant)
+			if calls != 0 {
+				t.Fatalf("native login calls = %d, want 0", calls)
+			}
+
+			flowID, _ := authFailure(t, err)[authFieldFlowID].(string)
+			if status := fixture.status(flowID); status.State != authStateFailed || status.Reason != authReasonNativeVeto {
+				t.Fatalf("state/reason = %q/%q, want failed/native_veto", status.State, status.Reason)
+			}
+		})
+	}
+}
+
 func TestAuthorizeIsIdempotentAndSupersedes(t *testing.T) {
 	fixture := newAuthFixture(t, "login-hang")
 

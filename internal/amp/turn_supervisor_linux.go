@@ -12,7 +12,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -70,6 +69,7 @@ var (
 	turnSupervisorSetrlimit    = unix.Setrlimit
 	turnSupervisorAcquireLock  = acquireAgentIdentityLock
 	turnSupervisorSealConfig   = unix.FcntlInt
+	turnSupervisorEffectiveUID = os.Geteuid
 )
 
 func enableTurnSupervisor() error {
@@ -145,6 +145,9 @@ func turnSupervisorBootstrap() {
 func prepareProcessTreeCommand(native *exec.Cmd, options processLaunchOptions) (*processTreeCommand, error) {
 	if err := validateProcessIsolation(options.Isolation); err != nil {
 		return nil, fmt.Errorf("prepare Amp native supervisor isolation: %w", err)
+	}
+	if err := validateTurnSupervisorIdentity(options.Isolation); err != nil {
+		return nil, fmt.Errorf("prepare Amp native supervisor identity: %w", err)
 	}
 
 	config := turnSupervisorConfig{
@@ -258,23 +261,30 @@ func writeTurnSupervisorConfig(file io.WriteSeeker, config turnSupervisorConfig)
 func turnSupervisorEnvironment() []string {
 	return []string{
 		turnSupervisorModeEnv + "=" + turnSupervisorMode,
-		"GORACE=atexit_sleep_ms=0",
 	}
 }
 
-func startTurnSupervisorNative(native *exec.Cmd, isolation *ProcessIsolation) (error, error) {
-	runtime.LockOSThread()
+func startTurnSupervisorNative(native *exec.Cmd, isolation *ProcessIsolation) (<-chan error, error, error) {
+	var privilegeErr error
+	waitDone, startErr := startCommandOnCreatorThread(func() error {
+		if err := turnSupervisorEnable(); err != nil {
+			privilegeErr = err
 
-	defer runtime.UnlockOSThread()
+			return err
+		}
+		if err := applyProcessIsolation(native, isolation); err != nil {
+			privilegeErr = fmt.Errorf("apply Amp native process isolation: %w", err)
 
-	if err := turnSupervisorEnable(); err != nil {
-		return err, nil
+			return privilegeErr
+		}
+
+		return native.Start()
+	}, native.Wait)
+	if privilegeErr != nil {
+		return nil, privilegeErr, nil
 	}
-	if err := applyProcessIsolation(native, isolation); err != nil {
-		return fmt.Errorf("apply Amp native process isolation: %w", err), nil
-	}
 
-	return nil, native.Start()
+	return waitDone, nil, startErr
 }
 
 func runTurnSupervisor(configInput io.Reader, controlInput io.Reader, readyOutput io.Writer) error {
@@ -289,6 +299,9 @@ func runTurnSupervisor(configInput io.Reader, controlInput io.Reader, readyOutpu
 	if err := validateProcessIsolation(&config.Isolation); err != nil {
 		return fmt.Errorf("validate Amp native supervisor isolation: %w", err)
 	}
+	if err := validateTurnSupervisorIdentity(&config.Isolation); err != nil {
+		return fmt.Errorf("validate Amp native supervisor identity: %w", err)
+	}
 
 	signals := make(chan os.Signal, 2)
 
@@ -301,7 +314,7 @@ func runTurnSupervisor(configInput io.Reader, controlInput io.Reader, readyOutpu
 		close(controlDone)
 	}()
 
-	identityLock, err := turnSupervisorAcquireLock(config.Isolation.UID, config.Isolation.TestOnlyNoCredential, controlDone, signals)
+	identityLock, err := turnSupervisorAcquireLock(config.Isolation.UID, config.Isolation.TestOnlyNoCredential, config.Isolation.TestOnlyIdentityLockRoot, controlDone, signals)
 	if err != nil {
 		return fmt.Errorf("acquire Amp agent identity lock: %w", err)
 	}
@@ -316,7 +329,7 @@ func runTurnSupervisor(configInput io.Reader, controlInput io.Reader, readyOutpu
 	native.Stderr = os.Stderr
 	configureCommand(native)
 
-	enableErr, startErr := startTurnSupervisorNative(native, &config.Isolation)
+	waitDone, enableErr, startErr := startTurnSupervisorNative(native, &config.Isolation)
 	if enableErr != nil {
 		return fmt.Errorf("enable Amp native supervisor privileges: %w", enableErr)
 	}
@@ -324,9 +337,6 @@ func runTurnSupervisor(configInput io.Reader, controlInput io.Reader, readyOutpu
 	if startErr != nil {
 		return fmt.Errorf("start supervised Amp native root: %w", startErr)
 	}
-
-	waitDone := make(chan error, 1)
-	go func() { waitDone <- native.Wait() }()
 
 	if _, err := io.WriteString(readyOutput, turnSupervisorReady); err != nil {
 		_ = turnSupervisorSignalGroup(native.Process.Pid, syscall.SIGKILL)
@@ -362,6 +372,22 @@ func runTurnSupervisor(configInput io.Reader, controlInput io.Reader, readyOutpu
 			_ = turnSupervisorSignalGroup(native.Process.Pid, nativeSignal)
 		}
 	}
+}
+
+func validateTurnSupervisorIdentity(isolation *ProcessIsolation) error {
+	if isolation == nil {
+		return errors.New("process isolation is required")
+	}
+
+	effectiveUID := turnSupervisorEffectiveUID()
+	if effectiveUID != 0 {
+		return fmt.Errorf("trusted root identity is required, effective uid is %d", effectiveUID)
+	}
+	if isolation.UID == uint32(effectiveUID) {
+		return errors.New("native target identity must differ from the trusted supervisor")
+	}
+
+	return nil
 }
 
 // awaitLinuxSupervisorContainment never lets the dedicated subreaper exit on

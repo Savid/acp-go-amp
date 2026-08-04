@@ -46,9 +46,10 @@ func TestProcessIsolationEnvironmentIdentityAndLookup(t *testing.T) {
 	}
 	for _, invalid := range []*ProcessIsolation{
 		nil,
+		{UID: 1, GID: 1},
 		{UID: 0, GID: 1},
 		{UID: 1, GID: 0},
-		{UID: 1, GID: 1, BaseEnvironment: map[string]string{"ACP_GO_AMP_INTERNAL_PROBE": "1"}},
+		{UID: 1, GID: 1, BaseEnvironment: map[string]string{envIsolationUID: "1"}},
 		{UID: 1, GID: 1, BaseEnvironment: map[string]string{"GOTRACEBACK": "crash"}},
 	} {
 		if validationErr := validateProcessIsolation(invalid); validationErr == nil {
@@ -87,7 +88,7 @@ func TestProcessIsolationEnvironmentIdentityAndLookup(t *testing.T) {
 	}
 	supervisorEnv, err := supervisorEnvironment(
 		[]string{"A=B", adapterSupervisorModeEnv + "=old", envIsolationUID + "=old", envIsolationGID + "=old", envIsolationTest + "=old"},
-		&ProcessIsolation{UID: 1, GID: 2, TestOnlyNoCredential: true}, "mode",
+		&ProcessIsolation{UID: 1, GID: 2, BaseEnvironment: map[string]string{}, TestOnlyNoCredential: true}, "mode",
 	)
 	if err != nil {
 		t.Fatal(err)

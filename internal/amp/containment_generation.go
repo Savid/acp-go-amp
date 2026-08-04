@@ -61,8 +61,8 @@ func (g *DarwinGeneration) prepareCommand(cmd *exec.Cmd, writableRoot string) er
 		}
 
 		for source, destination := range map[string]string{
-			baseEnv[envHome]:           home,
-			baseEnv["XDG_CONFIG_HOME"]: config,
+			baseEnv[envHome]:          home,
+			baseEnv[envXDGConfigHome]: config,
 		} {
 			if source == "" || !pathWithin(root, source) {
 				return errors.New("amp writable input is outside the wrapper-owned session root")
@@ -106,10 +106,10 @@ func (g *DarwinGeneration) prepareCommand(cmd *exec.Cmd, writableRoot string) er
 
 	overrides := map[string]string{
 		envHome:              home,
-		"XDG_CONFIG_HOME":    config,
-		"XDG_CACHE_HOME":     cache,
+		envXDGConfigHome:     config,
+		envXDGCacheHome:      cache,
 		dataHomeEnv:          data,
-		"XDG_STATE_HOME":     state,
+		envXDGStateHome:      state,
 		DarwinRuntimeIDEnv:   g.RuntimeID,
 		DarwinScratchRootEnv: g.ScratchRoot,
 	}
