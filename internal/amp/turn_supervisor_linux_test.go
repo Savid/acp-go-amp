@@ -70,6 +70,8 @@ func restoreTurnSupervisorSeams(t *testing.T) {
 	closeOnExec := turnSupervisorCloseOnExec
 	prctl := turnSupervisorPrctl
 	setrlimit := turnSupervisorSetrlimit
+	acquireLock := turnSupervisorAcquireLock
+	sealConfig := turnSupervisorSealConfig
 	syscallKillOriginal := syscallKill
 	t.Cleanup(func() {
 		turnSupervisorExecutable = executable
@@ -96,6 +98,8 @@ func restoreTurnSupervisorSeams(t *testing.T) {
 		turnSupervisorCloseOnExec = closeOnExec
 		turnSupervisorPrctl = prctl
 		turnSupervisorSetrlimit = setrlimit
+		turnSupervisorAcquireLock = acquireLock
+		turnSupervisorSealConfig = sealConfig
 		syscallKill = syscallKillOriginal
 	})
 }
@@ -151,7 +155,7 @@ func TestInheritedTurnSupervisorInputAndEnable(t *testing.T) {
 	if err := enableTurnSupervisor(); err != nil {
 		t.Fatalf("enable supervisor privileges: %v", err)
 	}
-	if !slices.Equal(operations, []int{unix.PR_SET_CHILD_SUBREAPER, unix.PR_SET_NO_NEW_PRIVS}) {
+	if !slices.Equal(operations, []int{unix.PR_SET_CHILD_SUBREAPER, unix.PR_SET_DUMPABLE, unix.PR_SET_NO_NEW_PRIVS}) {
 		t.Fatalf("supervisor privilege operations = %v", operations)
 	}
 	if !limitSet {
@@ -171,7 +175,7 @@ func TestInheritedTurnSupervisorInputAndEnable(t *testing.T) {
 	call := 0
 	turnSupervisorPrctl = func(int, uintptr, uintptr, uintptr, uintptr) error {
 		call++
-		if call == 2 {
+		if call == 3 {
 			return errors.New("no-new-privs")
 		}
 
@@ -229,6 +233,9 @@ func TestTurnSupervisorNativeChildHasSecurityLimits(t *testing.T) {
 	)
 	if os.Getenv(phaseEnv) == "child" {
 		restoreTurnSupervisorSeams(t)
+		turnSupervisorAcquireLock = func(uint32, bool, <-chan struct{}, <-chan os.Signal) (*agentIdentityLock, error) {
+			return &agentIdentityLock{}, nil
+		}
 		status := os.Getenv(statusEnv)
 		config := encodeSupervisorConfig(t, turnSupervisorConfig{
 			Path: "/bin/sh",
@@ -257,6 +264,104 @@ func TestTurnSupervisorNativeChildHasSecurityLimits(t *testing.T) {
 	}
 }
 
+func TestTrustedSupervisorRejectsNativeSignalsProofForgeryAndDaemonEscape(t *testing.T) {
+	const phaseEnv = "ACP_GO_AMP_TEST_TRUSTED_SUPERVISOR_PHASE"
+	if os.Geteuid() != 0 {
+		t.Skip("trusted supervisor credential boundary requires root")
+	}
+
+	root := os.Getenv("ACP_GO_AMP_TEST_ROOT")
+	if root == "" {
+		root = t.TempDir()
+	}
+	statusRoot := filepath.Join(root, "native")
+	if os.Getenv(phaseEnv) != "child" {
+		if err := os.Chmod(root, 0o711); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(statusRoot, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chown(statusRoot, 65534, 65534); err != nil {
+			t.Fatal(err)
+		}
+	}
+	status := filepath.Join(statusRoot, "status")
+	daemon := filepath.Join(statusRoot, "daemon.pid")
+	proof := filepath.Join(root, "proof")
+
+	if os.Getenv(phaseEnv) == "child" {
+		proofFile, err := os.OpenFile(proof, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer proofFile.Close()
+		unix.CloseOnExec(int(proofFile.Fd()))
+		controlRead, controlWrite := io.Pipe()
+		defer controlRead.Close()
+		defer controlWrite.Close()
+		script := `supervisor=$PPID
+if kill -STOP "$supervisor" 2>/dev/null; then echo stop=allowed; else echo stop=blocked; fi > "$1"
+if printf 'forged\n' > "/proc/$supervisor/fd/$3" 2>/dev/null; then echo forge=allowed; else echo forge=blocked; fi >> "$1"
+setsid sh -c 'trap "" INT TERM; while :; do sleep 30; done' & echo $! > "$2"
+if kill -KILL "$supervisor" 2>/dev/null; then echo kill=allowed; else echo kill=blocked; fi >> "$1"`
+		config := turnSupervisorConfig{
+			Path:      "/bin/sh",
+			Args:      []string{"sh", "-c", script, "probe", status, daemon, strconv.Itoa(int(proofFile.Fd()))},
+			Env:       []string{"PATH=/usr/bin:/bin"},
+			Isolation: ProcessIsolation{UID: 65534, GID: 65534},
+		}
+		if err := runTurnSupervisor(encodeSupervisorConfig(t, config), controlRead, proofFile); err != nil {
+			t.Fatalf("run trusted supervisor: %v", err)
+		}
+		return
+	}
+
+	if _, err := exec.LookPath("setsid"); err != nil {
+		t.Skip("setsid is unavailable")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+	child := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestTrustedSupervisorRejectsNativeSignalsProofForgeryAndDaemonEscape$")
+	child.Env = append(os.Environ(), phaseEnv+"=child")
+	child.Env = append(child.Env, "ACP_GO_AMP_TEST_ROOT="+root)
+	child.Dir = root
+	go func() {
+		time.Sleep(500 * time.Millisecond)
+		if child.Process != nil {
+			_ = child.Process.Signal(syscall.SIGCONT)
+		}
+	}()
+	output, err := child.CombinedOutput()
+	t.Cleanup(func() {
+		pidBytes, readErr := os.ReadFile(daemon)
+		if readErr == nil {
+			pid, _ := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
+			if pid > 0 {
+				_ = syscall.Kill(pid, syscall.SIGKILL)
+			}
+		}
+	})
+	if err != nil {
+		t.Fatalf("trusted supervisor helper: %v\n%s", err, output)
+	}
+	result, err := os.ReadFile(status)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(result) != "stop=blocked\nforge=blocked\nkill=blocked\n" {
+		t.Fatalf("native attack results = %q", result)
+	}
+	if pidBytes, err := os.ReadFile(daemon); err == nil {
+		pid, _ := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
+		if pid > 0 {
+			if process, findErr := os.FindProcess(pid); findErr == nil && process.Signal(syscall.Signal(0)) == nil {
+				t.Fatalf("daemonized native descendant %d survived containment", pid)
+			}
+		}
+	}
+}
+
 type recordingReadCloser struct {
 	io.Reader
 	closed *bool
@@ -281,23 +386,29 @@ func (c *recordingWriteCloser) Close() error {
 
 func TestPrepareTurnSupervisorBranches(t *testing.T) {
 	restoreTurnSupervisorSeams(t)
+	options := processLaunchOptions{Isolation: supervisorTestIsolation()}
 
-	if _, err := prepareProcessTreeCommand(&exec.Cmd{}, processLaunchOptions{}); err == nil {
+	if _, err := prepareProcessTreeCommand(&exec.Cmd{}, options); err == nil {
 		t.Fatal("incomplete native command was accepted")
 	}
 
 	native := exec.Command("true")
 	turnSupervisorMemfd = func(string, int) (int, error) { return 0, errors.New("memfd") }
-	if _, err := prepareProcessTreeCommand(native, processLaunchOptions{}); err == nil {
+	if _, err := prepareProcessTreeCommand(native, options); err == nil {
 		t.Fatal("memfd failure was ignored")
 	}
 
 	turnSupervisorMemfd = unix.MemfdCreate
 	turnSupervisorWriteConfig = func(io.WriteSeeker, turnSupervisorConfig) error { return errors.New("write") }
-	if _, err := prepareProcessTreeCommand(native, processLaunchOptions{}); err == nil {
+	if _, err := prepareProcessTreeCommand(native, options); err == nil {
 		t.Fatal("config write failure was ignored")
 	}
 	turnSupervisorWriteConfig = writeTurnSupervisorConfig
+	turnSupervisorSealConfig = func(uintptr, int, int) (int, error) { return 0, errors.New("seal") }
+	if _, err := prepareProcessTreeCommand(native, options); err == nil {
+		t.Fatal("config seal failure was ignored")
+	}
+	turnSupervisorSealConfig = unix.FcntlInt
 
 	pipeCalls := 0
 	turnSupervisorPipe = func() (*os.File, *os.File, error) {
@@ -308,7 +419,7 @@ func TestPrepareTurnSupervisorBranches(t *testing.T) {
 
 		return os.Pipe()
 	}
-	if _, err := prepareProcessTreeCommand(native, processLaunchOptions{}); err == nil {
+	if _, err := prepareProcessTreeCommand(native, options); err == nil {
 		t.Fatal("control pipe failure was ignored")
 	}
 
@@ -321,18 +432,18 @@ func TestPrepareTurnSupervisorBranches(t *testing.T) {
 
 		return os.Pipe()
 	}
-	if _, err := prepareProcessTreeCommand(native, processLaunchOptions{}); err == nil {
+	if _, err := prepareProcessTreeCommand(native, options); err == nil {
 		t.Fatal("readiness pipe failure was ignored")
 	}
 
 	turnSupervisorPipe = os.Pipe
 	turnSupervisorExecutable = func() (string, error) { return "", errors.New("executable") }
-	if _, err := prepareProcessTreeCommand(native, processLaunchOptions{}); err == nil {
+	if _, err := prepareProcessTreeCommand(native, options); err == nil {
 		t.Fatal("executable failure was ignored")
 	}
 
 	turnSupervisorExecutable = os.Executable
-	launch, err := prepareProcessTreeCommand(native, processLaunchOptions{})
+	launch, err := prepareProcessTreeCommand(native, options)
 	if err != nil {
 		t.Fatalf("prepare supervisor: %v", err)
 	}
@@ -408,7 +519,7 @@ func TestTurnSupervisorEnvironmentReplacesInternalMode(t *testing.T) {
 		}
 		if strings.HasPrefix(entry, "GORACE=") {
 			raceCount++
-			if entry != "GORACE=halt_on_error=1 atexit_sleep_ms=1000 atexit_sleep_ms=0" {
+			if entry != "GORACE=atexit_sleep_ms=0" {
 				t.Fatalf("supervisor GORACE = %q", entry)
 			}
 		}
@@ -430,6 +541,9 @@ func TestRunTurnSupervisorBranches(t *testing.T) {
 	turnSupervisorSignalNotify = func(chan<- os.Signal, ...os.Signal) {}
 	turnSupervisorSignalStop = func(chan<- os.Signal) {}
 	turnSupervisorProcessID = func() int { return 99 }
+	turnSupervisorAcquireLock = func(uint32, bool, <-chan struct{}, <-chan os.Signal) (*agentIdentityLock, error) {
+		return &agentIdentityLock{}, nil
+	}
 
 	if err := runTurnSupervisor(strings.NewReader("{"), strings.NewReader(""), io.Discard); err == nil {
 		t.Fatal("malformed config succeeded")
@@ -541,12 +655,19 @@ func TestRunTurnSupervisorBranches(t *testing.T) {
 
 func encodeSupervisorConfig(t *testing.T, config turnSupervisorConfig) io.Reader {
 	t.Helper()
+	if config.Isolation.UID == 0 {
+		config.Isolation = *supervisorTestIsolation()
+	}
 	var buffer bytes.Buffer
 	if err := json.NewEncoder(&buffer).Encode(config); err != nil {
 		t.Fatal(err)
 	}
 
 	return bytes.NewReader(buffer.Bytes())
+}
+
+func supervisorTestIsolation() *ProcessIsolation {
+	return &ProcessIsolation{UID: 11, GID: 22, TestOnlyNoCredential: true}
 }
 
 func TestContainLinuxSupervisorDescendantsBranches(t *testing.T) {

@@ -692,10 +692,12 @@ func (c *Client) prepareProcessLaunch(ctx context.Context, cmd *exec.Cmd) (*proc
 		return nil, errors.Join(err, finishErr)
 	}
 
-	if err := applyProcessIsolation(launch.cmd, c.options.Isolation); err != nil {
-		closeErr := launch.close()
+	if !launch.nativeIsolation {
+		if err := applyProcessIsolation(launch.cmd, c.options.Isolation); err != nil {
+			closeErr := launch.close()
 
-		return nil, errors.Join(fmt.Errorf("apply Amp process isolation: %w", err), closeErr)
+			return nil, errors.Join(fmt.Errorf("apply Amp process isolation: %w", err), closeErr)
+		}
 	}
 
 	launch.nativeEnv = append([]string(nil), cmd.Env...)

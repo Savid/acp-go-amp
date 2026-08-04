@@ -24,16 +24,17 @@ type processTreeCommand struct {
 	// preparation, and a caller that needs to know where the child will write
 	// must be handed the answer rather than infer it from a command object it
 	// happens to still share.
-	nativeEnv     []string
-	inherited     []*os.File
-	startGate     *os.File
-	control       *os.File
-	ready         *os.File
-	bestEffort    bool
-	generation    *DarwinGeneration
-	releaseNative func()
-	acquireNative func() (func(), error)
-	started       bool
+	nativeEnv       []string
+	inherited       []*os.File
+	startGate       *os.File
+	control         *os.File
+	ready           *os.File
+	bestEffort      bool
+	generation      *DarwinGeneration
+	releaseNative   func()
+	acquireNative   func() (func(), error)
+	nativeIsolation bool
+	started         bool
 }
 
 type processLaunchOptions struct {

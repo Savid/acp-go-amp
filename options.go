@@ -92,7 +92,7 @@ const (
 type Option func(*Options)
 
 // ProcessIsolation is the mandatory operating-system identity and complete
-// base environment for every native Amp process and launch supervisor.
+// base environment for every native Amp process.
 type ProcessIsolation struct {
 	UID             uint32
 	GID             uint32
@@ -281,8 +281,8 @@ func WithExecutablePath(path string) Option {
 	}
 }
 
-// WithProcessIsolation requires every Amp command, probe, authentication leg,
-// and supervisor to run as the supplied non-root identity with no
+// WithProcessIsolation requires every Amp command, probe, and authentication
+// leg to run as the supplied non-root identity with no
 // supplementary groups. BaseEnvironment replaces the adapter environment;
 // WithEnv and per-session values overlay it.
 func WithProcessIsolation(isolation ProcessIsolation) Option {
