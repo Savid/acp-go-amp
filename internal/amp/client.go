@@ -24,6 +24,8 @@ const (
 	// full flag surface, including thread-less `-x --stream-json-input` turns
 	// and --no-archive-after-execute.
 	MinimumVersion              = "0.0.1784765892"
+	ampExecutableName           = authSecretsDirName
+	envHome                     = "HOME"
 	maxCapturedStderrBytes      = 64 * 1024
 	defaultCloseKillAfter       = 500 * time.Millisecond
 	defaultCloseWait            = 5 * time.Second
@@ -52,7 +54,6 @@ const (
 var (
 	commandContext             = exec.CommandContext
 	getwd                      = os.Getwd
-	lookPath                   = exec.LookPath
 	mkdirTemp                  = os.MkdirTemp
 	removeAll                  = os.RemoveAll
 	writeFile                  = os.WriteFile
@@ -80,6 +81,7 @@ type Options struct {
 	// system temp directory itself.
 	ScratchParent string
 	Env           map[string]string
+	Isolation     *ProcessIsolation
 	Mode          string
 	MCPConfigPath string
 	MaxLineBytes  int
@@ -202,7 +204,12 @@ func (c *Client) DiscoveryProbe(ctx context.Context) error {
 }
 
 func (c *Client) discoverVersion(ctx context.Context) (string, string, error) {
-	path, err := Discover(ctx, c.options.CLIPath)
+	environment, err := BuildEnvWithIsolation(c.options.Isolation, c.options.Env, c.options.Cwd)
+	if err != nil {
+		return "", "", err
+	}
+
+	path, err := Discover(ctx, c.options.CLIPath, environment)
 	if err != nil {
 		return "", "", err
 	}
@@ -373,7 +380,12 @@ func (c *Client) Execute(ctx context.Context, input any) (*Turn, error) {
 }
 
 func (c *Client) startTurn(ctx context.Context, args []string, input any) (*Turn, error) {
-	path, err := Discover(ctx, c.options.CLIPath)
+	environment, err := BuildEnvWithIsolation(c.options.Isolation, c.options.Env, c.options.Cwd)
+	if err != nil {
+		return nil, err
+	}
+
+	path, err := Discover(ctx, c.options.CLIPath, environment)
 	if err != nil {
 		return nil, err
 	}
@@ -388,7 +400,11 @@ func (c *Client) startTurn(ctx context.Context, args []string, input any) (*Turn
 		}
 	}
 
-	cmd.Env = BuildEnv(c.options.Env, cmd.Dir)
+	cmd.Env, err = BuildEnvWithIsolation(c.options.Isolation, c.options.Env, cmd.Dir)
+	if err != nil {
+		return nil, err
+	}
+
 	if cmd.Stdin != nil {
 		return nil, errors.New("create amp stdin: exec: Stdin already set")
 	}
@@ -526,7 +542,12 @@ func (c *Client) outputWithArgs(ctx context.Context, args ...string) ([]byte, er
 		return nil, err
 	}
 
-	path, err := Discover(ctx, c.options.CLIPath)
+	environment, err := BuildEnvWithIsolation(c.options.Isolation, c.options.Env, c.options.Cwd)
+	if err != nil {
+		return nil, err
+	}
+
+	path, err := Discover(ctx, c.options.CLIPath, environment)
 	if err != nil {
 		return nil, err
 	}
@@ -538,7 +559,10 @@ func (c *Client) outputWithArgs(ctx context.Context, args ...string) ([]byte, er
 		cmd.Dir, _ = getwd()
 	}
 
-	cmd.Env = BuildEnv(c.options.Env, cmd.Dir)
+	cmd.Env, err = BuildEnvWithIsolation(c.options.Isolation, c.options.Env, cmd.Dir)
+	if err != nil {
+		return nil, err
+	}
 
 	launch, err := c.prepareProcessLaunch(ctx, cmd)
 	if err != nil {
@@ -632,6 +656,10 @@ func (c *Client) outputWithArgs(ctx context.Context, args ...string) ([]byte, er
 }
 
 func (c *Client) prepareProcessLaunch(ctx context.Context, cmd *exec.Cmd) (*processTreeCommand, error) {
+	if err := validateProcessIsolation(c.options.Isolation); err != nil {
+		return nil, fmt.Errorf("validate Amp process isolation: %w", err)
+	}
+
 	var generation *DarwinGeneration
 
 	if c.options.DarwinBestEffort {
@@ -656,11 +684,18 @@ func (c *Client) prepareProcessLaunch(ctx context.Context, cmd *exec.Cmd) (*proc
 	launch, err := prepareProcessTree(cmd, processLaunchOptions{
 		DarwinBestEffort: c.options.DarwinBestEffort,
 		Generation:       generation,
+		Isolation:        c.options.Isolation,
 	})
 	if err != nil {
 		finishErr := generation.finish(true)
 
 		return nil, errors.Join(err, finishErr)
+	}
+
+	if err := applyProcessIsolation(launch.cmd, c.options.Isolation); err != nil {
+		closeErr := launch.close()
+
+		return nil, errors.Join(fmt.Errorf("apply Amp process isolation: %w", err), closeErr)
 	}
 
 	launch.nativeEnv = append([]string(nil), cmd.Env...)
@@ -711,16 +746,21 @@ func (c *Client) globalArgs() []string {
 	return args
 }
 
-func Discover(ctx context.Context, cliPath string) (string, error) {
+func Discover(ctx context.Context, cliPath string, environments ...[]string) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
 
-	if strings.TrimSpace(cliPath) != "" {
-		return cliPath, nil
+	file := strings.TrimSpace(cliPath)
+	if file == "" {
+		file = ampExecutableName
 	}
 
-	path, err := lookPath("amp")
+	if len(environments) == 0 {
+		return "", errors.New("complete process environment is required for executable discovery")
+	}
+
+	path, err := lookPathInEnvironment(file, environments[0])
 	if err != nil {
 		return "", fmt.Errorf("find amp in PATH: %w", err)
 	}
@@ -728,21 +768,33 @@ func Discover(ctx context.Context, cliPath string) (string, error) {
 	return path, nil
 }
 
-// HasAPIKey reports whether the amp CLI would see a non-empty AMP_API_KEY
-// under BuildEnv semantics: an explicit override wins even when empty,
-// otherwise the live process environment supplies the value.
+// HasAPIKey reports whether the complete explicit environment carries a
+// non-empty AMP_API_KEY. Ambient process state is never consulted.
 func HasAPIKey(overrides map[string]string) bool {
 	value, ok := overrides["AMP_API_KEY"]
-	if !ok {
-		value = os.Getenv("AMP_API_KEY")
-	}
 
-	return strings.TrimSpace(value) != ""
+	return ok && strings.TrimSpace(value) != ""
 }
 
 func BuildEnv(overrides map[string]string, cwd string) []string {
+	env, _ := buildEnvironment(map[string]string{}, overrides, cwd)
+
+	return env
+}
+
+// BuildEnvWithIsolation constructs the complete child environment from the
+// policy base and explicit overlays. Ambient os.Environ is never consulted.
+func BuildEnvWithIsolation(isolation *ProcessIsolation, overrides map[string]string, cwd string) ([]string, error) {
+	if err := validateProcessIsolation(isolation); err != nil {
+		return nil, err
+	}
+
+	return buildEnvironment(isolation.BaseEnvironment, overrides, cwd)
+}
+
+func buildEnvironment(base map[string]string, overrides map[string]string, cwd string) ([]string, error) {
 	values := map[string]string{}
-	keys := make([]string, 0, len(os.Environ())+len(overrides)+1)
+	keys := make([]string, 0, len(base)+len(overrides)+1)
 
 	set := func(key, value string) {
 		if key == "" || isPrivateAdapterEnv(key) || isScrubbedEnv(key) {
@@ -755,11 +807,20 @@ func BuildEnv(overrides map[string]string, cwd string) []string {
 
 		values[key] = value
 	}
-	for _, item := range os.Environ() {
-		key, value, ok := strings.Cut(item, "=")
-		if ok {
-			set(key, value)
+
+	baseKeys := make([]string, 0, len(base))
+	for key := range base {
+		baseKeys = append(baseKeys, key)
+	}
+
+	sort.Strings(baseKeys)
+
+	for _, key := range baseKeys {
+		if strings.ContainsRune(key, '=') || key == "" {
+			return nil, fmt.Errorf("invalid base environment key %q", key)
 		}
+
+		set(key, base[key])
 	}
 
 	overrideKeys := make([]string, 0, len(overrides))
@@ -782,7 +843,7 @@ func BuildEnv(overrides map[string]string, cwd string) []string {
 		out = append(out, key+"="+values[key])
 	}
 
-	return out
+	return out, nil
 }
 
 // isScrubbedEnv reports the variables that never reach a spawned amp process,

@@ -11,6 +11,7 @@ import (
 var newDarwinGenerationRecord = nativeamp.NewDarwinGenerationRecord
 
 func (a *Agent) configureNativeClient(options *nativeamp.Options, kind RuntimeResourceKind) {
+	options.Isolation = nativeProcessIsolation(a.options.ProcessIsolation, a.options.testOnlyNoCredential)
 	options.DarwinBestEffort = a.containmentMode == RuntimeContainmentBestEffort
 	options.AcquireNativeRoot = func(ctx context.Context) (func(), error) {
 		return acquireNativeRoot(ctx, a.options.RuntimeResourceHooks, kind)
@@ -60,4 +61,14 @@ func (a *Agent) configureNativeClient(options *nativeamp.Options, kind RuntimeRe
 
 		return generation, nil
 	}
+}
+
+func nativeProcessIsolation(isolation *ProcessIsolation, testOnlyNoCredential bool) *nativeamp.ProcessIsolation {
+	if isolation == nil {
+		return nil
+	}
+
+	base := cloneStringMap(isolation.BaseEnvironment)
+
+	return &nativeamp.ProcessIsolation{UID: isolation.UID, GID: isolation.GID, BaseEnvironment: base, TestOnlyNoCredential: testOnlyNoCredential}
 }

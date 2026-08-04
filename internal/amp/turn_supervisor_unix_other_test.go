@@ -18,6 +18,7 @@ func TestTurnLaunchFailsClosedWithoutUnescapableContainment(t *testing.T) {
 	launch, err = prepareProcessTreeCommand(exec.Command("amp"), processLaunchOptions{
 		DarwinBestEffort: true,
 		Generation:       &DarwinGeneration{RuntimeID: "00000000000000000000000000000000", ScratchRoot: t.TempDir()},
+		Isolation:        testProcessIsolation(),
 	})
 	if runtime.GOOS == "darwin" {
 		if err != nil || launch == nil {

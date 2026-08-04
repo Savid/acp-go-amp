@@ -95,7 +95,12 @@ func turnSupervisorBootstrap() {
 		return
 	}
 
-	config, control, ready, err := turnSupervisorInput()
+	err := verifyInheritedProcessIsolation()
+	var config, control io.ReadCloser
+	var ready io.WriteCloser
+	if err == nil {
+		config, control, ready, err = turnSupervisorInput()
+	}
 	if err == nil {
 		err = turnSupervisorRun(config, control, ready)
 	}
@@ -123,7 +128,7 @@ func turnSupervisorBootstrap() {
 	turnSupervisorExit(0)
 }
 
-func prepareProcessTreeCommand(native *exec.Cmd, _ processLaunchOptions) (*processTreeCommand, error) {
+func prepareProcessTreeCommand(native *exec.Cmd, options processLaunchOptions) (*processTreeCommand, error) {
 	config := turnSupervisorConfig{
 		Path: native.Path,
 		Args: append([]string(nil), native.Args...),
@@ -174,7 +179,15 @@ func prepareProcessTreeCommand(native *exec.Cmd, _ processLaunchOptions) (*proce
 	}
 
 	helper := turnSupervisorCommand(executable) // #nosec G204 -- the current executable hosts the private supervisor mode.
-	helper.Env = turnSupervisorEnvironment()
+	helper.Env, err = supervisorEnvironment(native.Env, options.Isolation, turnSupervisorMode)
+	if err != nil {
+		_ = configFile.Close()
+		_ = controlRead.Close()
+		_ = controlWrite.Close()
+		_ = readyRead.Close()
+		_ = readyWrite.Close()
+		return nil, fmt.Errorf("prepare Amp native supervisor isolation: %w", err)
+	}
 	helper.ExtraFiles = []*os.File{configFile, controlRead, readyWrite}
 	helper.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
@@ -225,35 +238,7 @@ func writeTurnSupervisorConfig(file io.WriteSeeker, config turnSupervisorConfig)
 }
 
 func turnSupervisorEnvironment() []string {
-	env := make([]string, 0, len(os.Environ())+2)
-
-	var raceOptions string
-
-	for _, entry := range os.Environ() {
-		if strings.HasPrefix(entry, turnSupervisorModeEnv+"=") {
-			continue
-		}
-
-		if strings.HasPrefix(entry, "GORACE=") {
-			raceOptions = strings.TrimPrefix(entry, "GORACE=")
-
-			continue
-		}
-
-		env = append(env, entry)
-	}
-
-	if raceOptions != "" {
-		raceOptions += " "
-	}
-
-	raceOptions += "atexit_sleep_ms=0"
-
-	return append(
-		env,
-		turnSupervisorModeEnv+"="+turnSupervisorMode,
-		"GORACE="+raceOptions,
-	)
+	return []string{turnSupervisorModeEnv + "=" + turnSupervisorMode}
 }
 
 func runTurnSupervisor(configInput io.Reader, controlInput io.Reader, readyOutput io.Writer) error {

@@ -15,8 +15,8 @@ func TestHasAPIKey(t *testing.T) {
 	}
 
 	t.Setenv("AMP_API_KEY", "process")
-	if !HasAPIKey(nil) {
-		t.Fatal("process env key not detected")
+	if HasAPIKey(nil) {
+		t.Fatal("ambient process env key was detected")
 	}
 	if HasAPIKey(map[string]string{"AMP_API_KEY": ""}) {
 		t.Fatal("empty override did not win over process env")

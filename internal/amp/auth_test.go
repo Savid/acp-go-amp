@@ -193,7 +193,10 @@ func TestAuthReadSecretSurfacesAnUnreadableStore(t *testing.T) {
 func TestAuthLoginEnvDropsTheAmbientKey(t *testing.T) {
 	t.Setenv(authAPIKeyEnv, "ambient-key")
 
-	env := authLoginEnv(map[string]string{authAPIKeyEnv: "override-key", "AMP_URL": "https://amp.example"}, "/work")
+	env, err := authLoginEnv(testProcessIsolation(), map[string]string{authAPIKeyEnv: "override-key", "AMP_URL": "https://amp.example"}, "/work")
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	for _, entry := range env {
 		if strings.HasPrefix(entry, authAPIKeyEnv+"=") {
@@ -227,7 +230,7 @@ func TestAuthDeploymentSupported(t *testing.T) {
 	}
 
 	for value, want := range cases {
-		client := NewClient(nil, Options{Env: map[string]string{AuthDeploymentEnv: value}})
+		client := newTestClient(t, nil, Options{Env: map[string]string{AuthDeploymentEnv: value}})
 		if got := client.AuthDeploymentSupported(); got != want {
 			t.Fatalf("AuthDeploymentSupported(%q) = %v, want %v", value, got, want)
 		}
@@ -235,7 +238,7 @@ func TestAuthDeploymentSupported(t *testing.T) {
 
 	// An unset selector is the default deployment, which is what every pinned
 	// fact on this surface describes.
-	if !NewClient(nil, Options{}).AuthDeploymentSupported() {
+	if !newTestClient(t, nil, Options{}).AuthDeploymentSupported() {
 		t.Fatal("an unset deployment selector was refused")
 	}
 }
@@ -254,19 +257,19 @@ func TestBuildEnvScrubsTheDisclosureVariables(t *testing.T) {
 }
 
 func TestAuthLoginArgs(t *testing.T) {
-	bare := NewClient(nil, Options{}).authLoginArgs()
+	bare := newTestClient(t, nil, Options{}).authLoginArgs()
 	if bare[len(bare)-1] != authLoginSubcommand || slices.Contains(bare, ampArgSettingsFile) {
 		t.Fatalf("bare login args = %v", bare)
 	}
 
-	configured := NewClient(nil, Options{SettingsFile: "/s.json"}).authLoginArgs()
+	configured := newTestClient(t, nil, Options{SettingsFile: "/s.json"}).authLoginArgs()
 	if !slices.Contains(configured, ampArgSettingsFile) || !slices.Contains(configured, "/s.json") {
 		t.Fatalf("configured login args = %v", configured)
 	}
 
 	// The mode and MCP flags never ride the login command: neither selects a
 	// model turn and both would be rejected by a command that takes no turn.
-	full := NewClient(nil, Options{SettingsFile: "/s.json", Mode: "high", MCPConfigPath: "/m.json"}).authLoginArgs()
+	full := newTestClient(t, nil, Options{SettingsFile: "/s.json", Mode: "high", MCPConfigPath: "/m.json"}).authLoginArgs()
 	if slices.Contains(full, "-m") || slices.Contains(full, ampArgMCPConfig) {
 		t.Fatalf("login args carry turn flags: %v", full)
 	}
@@ -487,13 +490,13 @@ func TestAuthLoginCloseReportsAnUnsettledChild(t *testing.T) {
 }
 
 func TestStartAuthLoginRejectsAnUnusableLaunch(t *testing.T) {
-	if _, err := NewClient(nil, Options{CLIPath: ""}).StartAuthLogin(cancelledContext()); err == nil {
+	if _, err := newTestClient(t, nil, Options{CLIPath: ""}).StartAuthLogin(cancelledContext()); err == nil {
 		t.Fatal("a cancelled context started a login")
 	}
 
 	path, _ := fakeAmpPath(t, "login")
 
-	client := NewClient(nil, Options{CLIPath: path, DarwinBestEffort: true})
+	client := NewClient(nil, Options{CLIPath: path, DarwinBestEffort: true, Isolation: testProcessIsolation()})
 	if _, err := client.StartAuthLogin(t.Context()); err == nil {
 		t.Fatal("a launch with no Darwin generation factory started a login")
 	}

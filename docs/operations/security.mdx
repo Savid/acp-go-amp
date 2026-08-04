@@ -48,8 +48,8 @@ Auth material is live process state only:
 
 | Value | Supplied via | Persisted? |
 |---|---|---|
-| `AMP_API_KEY` | `WithEnv` or the process environment | Never |
-| `AMP_URL` | `WithEnv` or the process environment | Never |
+| `AMP_API_KEY` | `ProcessIsolation.BaseEnvironment` or `WithEnv` | Never |
+| `AMP_URL` | `ProcessIsolation.BaseEnvironment` or `WithEnv` | Never |
 | The value pasted into `_amp/auth/callback` | The owner, through the host | Never |
 | The relayed `_amp/auth/authorize` URL | The native login process | Never |
 | The key returned by `_amp/auth/credential` | The isolated `secrets.json` | Never |

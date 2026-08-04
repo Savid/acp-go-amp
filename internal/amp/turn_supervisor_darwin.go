@@ -9,7 +9,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"strings"
 	"syscall"
 	"time"
 )
@@ -48,7 +47,16 @@ func darwinLaunchBootstrap() {
 		return
 	}
 
-	configFile, gate, status, err := darwinLaunchInput()
+	var (
+		configFile, gate io.ReadCloser
+		status           io.WriteCloser
+	)
+
+	err := verifyInheritedProcessIsolation()
+	if err == nil {
+		configFile, gate, status, err = darwinLaunchInput()
+	}
+
 	if err == nil {
 		err = runDarwinLaunchBootstrap(configFile, gate)
 	}
@@ -212,7 +220,18 @@ func prepareProcessTreeCommand(native *exec.Cmd, options processLaunchOptions) (
 
 	helper := darwinLaunchCommand(executable) // #nosec G204 -- the current executable hosts the private launch bootstrap.
 	helper.Dir = native.Dir
-	helper.Env = darwinLaunchBootstrapEnvironment()
+
+	helper.Env, err = supervisorEnvironment(native.Env, options.Isolation, darwinLaunchBootstrapMode)
+	if err != nil {
+		_ = configFile.Close()
+		_ = gateRead.Close()
+		_ = gateWrite.Close()
+		_ = statusRead.Close()
+		_ = statusWrite.Close()
+
+		return nil, fmt.Errorf("prepare Darwin native launch isolation: %w", err)
+	}
+
 	helper.Stdin = native.Stdin
 	helper.Stdout = native.Stdout
 	helper.Stderr = native.Stderr
@@ -227,15 +246,7 @@ func prepareProcessTreeCommand(native *exec.Cmd, options processLaunchOptions) (
 }
 
 func darwinLaunchBootstrapEnvironment() []string {
-	env := []string{adapterSupervisorModeEnv + "=" + darwinLaunchBootstrapMode}
-
-	for _, entry := range os.Environ() {
-		if strings.HasPrefix(entry, "GORACE=") {
-			env = append(env, entry)
-		}
-	}
-
-	return env
+	return []string{adapterSupervisorModeEnv + "=" + darwinLaunchBootstrapMode}
 }
 
 func awaitProcessTreeReady(launch *processTreeCommand) error {

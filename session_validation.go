@@ -2,6 +2,7 @@ package ampacp
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"slices"
@@ -30,6 +31,10 @@ func (a *Agent) validateSessionStartOptions(options AmpOptions) error {
 		return unsupportedField(optionFieldProviderAuthDirectHome)
 	}
 
+	if err := validateProcessIsolationOption(a.options.ProcessIsolation); err != nil {
+		return err
+	}
+
 	if a.options.DefaultModel != "" {
 		return unsupportedField(optionModelKey)
 	}
@@ -50,6 +55,22 @@ func (a *Agent) validateSessionStartOptions(options AmpOptions) error {
 		if strings.HasPrefix(strings.ToUpper(key), privateEnvPrefix) {
 			return acp.NewInvalidParams(map[string]any{jsonFieldField: "_meta.amp.options.env." + key})
 		}
+	}
+
+	return nil
+}
+
+func validateProcessIsolationOption(isolation *ProcessIsolation) error {
+	if isolation == nil {
+		return errors.New("process isolation policy is required")
+	}
+
+	if isolation.UID == 0 || isolation.GID == 0 {
+		return errors.New("process isolation UID and GID must be nonzero")
+	}
+
+	if runtimeGOOS == platformWindows {
+		return errors.New("process isolation is unsupported on windows")
 	}
 
 	return nil

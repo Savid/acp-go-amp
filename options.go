@@ -91,6 +91,14 @@ const (
 // Option configures an Agent.
 type Option func(*Options)
 
+// ProcessIsolation is the mandatory operating-system identity and complete
+// base environment for every native Amp process and launch supervisor.
+type ProcessIsolation struct {
+	UID             uint32
+	GID             uint32
+	BaseEnvironment map[string]string
+}
+
 // ConcurrencyLimits configures ACP backpressure limits.
 type ConcurrencyLimits struct {
 	MaxActiveSessions        int
@@ -111,7 +119,8 @@ type Options struct {
 	AgentTitle   string
 	AgentVersion string
 
-	ExecutablePath string
+	ExecutablePath   string
+	ProcessIsolation *ProcessIsolation
 	// Home is unsupported: Amp has no native config/auth root, so a non-empty
 	// value is rejected at every session start. See WithHome and WithScratchDir.
 	Home         string
@@ -150,6 +159,7 @@ type Options struct {
 	TurnTimeout                 time.Duration
 	RuntimeResourceHooks        RuntimeResourceHooks
 	DarwinBestEffortContainment bool
+	testOnlyNoCredential        bool
 	runtime                     runtimeOptions
 }
 
@@ -221,6 +231,12 @@ func applyOptions(opts []Option) Options {
 		options.Env = map[string]string{}
 	}
 
+	if options.ProcessIsolation != nil {
+		cloned := *options.ProcessIsolation
+		cloned.BaseEnvironment = cloneStringMap(options.ProcessIsolation.BaseEnvironment)
+		options.ProcessIsolation = &cloned
+	}
+
 	return options
 }
 
@@ -262,6 +278,18 @@ func WithAgentVersion(version string) Option {
 func WithExecutablePath(path string) Option {
 	return func(options *Options) {
 		options.ExecutablePath = path
+	}
+}
+
+// WithProcessIsolation requires every Amp command, probe, authentication leg,
+// and supervisor to run as the supplied non-root identity with no
+// supplementary groups. BaseEnvironment replaces the adapter environment;
+// WithEnv and per-session values overlay it.
+func WithProcessIsolation(isolation ProcessIsolation) Option {
+	return func(options *Options) {
+		cloned := isolation
+		cloned.BaseEnvironment = cloneStringMap(isolation.BaseEnvironment)
+		options.ProcessIsolation = &cloned
 	}
 }
 

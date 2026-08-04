@@ -135,7 +135,7 @@ func TestDarwinClientLaunchPreparationAndPipeFailures(t *testing.T) {
 	newGeneration := func(context.Context) (*DarwinGeneration, error) {
 		return &DarwinGeneration{RuntimeID: strings.Repeat("d", 32), ScratchRoot: t.TempDir()}, nil
 	}
-	client := NewClient(nil, Options{
+	client := newTestClient(t, nil, Options{
 		CLIPath: path, Cwd: t.TempDir(), DarwinBestEffort: true,
 		NewDarwinGeneration: newGeneration,
 	})
@@ -193,7 +193,7 @@ func TestPrepareProcessLaunchPublishesTheSettledEnvironment(t *testing.T) {
 	requested := t.TempDir()
 	scratch := t.TempDir()
 
-	client := NewClient(nil, Options{DarwinBestEffort: true})
+	client := NewClient(nil, Options{DarwinBestEffort: true, Isolation: testProcessIsolation()})
 	client.options.NewDarwinGeneration = func(context.Context) (*DarwinGeneration, error) {
 		return &DarwinGeneration{ScratchRoot: scratch, RecordFinished: func(bool) error { return nil }}, nil
 	}
@@ -219,7 +219,7 @@ func TestPrepareProcessLaunchPublishesTheSettledEnvironment(t *testing.T) {
 
 func TestDarwinPrepareProcessLaunchHooksAndErrors(t *testing.T) {
 	ctx := context.Background()
-	client := NewClient(nil, Options{DarwinBestEffort: true})
+	client := NewClient(nil, Options{DarwinBestEffort: true, Isolation: testProcessIsolation()})
 	if _, err := client.prepareProcessLaunch(ctx, exec.Command("true")); !errors.Is(err, ErrProcessContainmentIncomplete) {
 		t.Fatalf("missing generation factory = %v", err)
 	}
@@ -447,12 +447,9 @@ func countArg(args []string, want string) int {
 
 func TestStartupProbeAndVersionBranches(t *testing.T) {
 	ctx := context.Background()
-	oldLookPath := lookPath
-	lookPath = func(string) (string, error) { return "", errors.New("lookpath failed") }
 	if err := newTestClient(t, nil, Options{}).StartupProbe(ctx); err == nil {
-		t.Fatal("StartupProbe discover error ignored")
+		t.Fatal("StartupProbe isolation error ignored")
 	}
-	lookPath = oldLookPath
 
 	if err := newTestClient(t, nil, Options{CLIPath: "/does/not/exist"}).StartupProbe(ctx); err == nil {
 		t.Fatal("StartupProbe version command error ignored")
@@ -729,7 +726,7 @@ func TestClientErrorBranches(t *testing.T) {
 	if _, err := Discover(cancelledContext(), ""); err == nil {
 		t.Fatal("expected canceled Discover error")
 	}
-	if got, err := Discover(context.Background(), "/tmp/custom-amp"); err != nil || got != "/tmp/custom-amp" {
+	if got, err := Discover(context.Background(), "/usr/bin/true", []string{"PATH=/usr/bin"}); err != nil || got != "/usr/bin/true" {
 		t.Fatalf("explicit Discover = %q, %v", got, err)
 	}
 	t.Setenv(adapterSupervisorModeEnv, "secret")
@@ -802,7 +799,7 @@ func TestClientErrorBranches(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", pathDir)
-	if got, err := Discover(context.Background(), ""); err != nil || got != link {
+	if got, err := Discover(context.Background(), "", []string{"PATH=" + pathDir}); err != nil || got != link {
 		t.Fatalf("PATH Discover = %q, %v", got, err)
 	}
 
@@ -886,18 +883,17 @@ func TestClientProcessSeamsReaderAndInterruptEdges(t *testing.T) {
 		t.Fatal("ListThreads output error ignored")
 	}
 
-	oldLookPath := lookPath
-	lookPath = func(string) (string, error) { return "", errors.New("lookpath failed") }
-	if _, err := newTestClient(t, nil, Options{}).Version(ctx); err == nil {
+	clientWithoutPath := newTestClient(t, nil, Options{})
+	clientWithoutPath.options.Isolation.BaseEnvironment["PATH"] = t.TempDir()
+	if _, err := clientWithoutPath.Version(ctx); err == nil {
 		t.Fatal("Version discover error ignored")
 	}
-	if _, err := newTestClient(t, nil, Options{Cwd: t.TempDir()}).Continue(ctx, "T-1", map[string]any{"type": "user"}); err == nil {
+	if _, err := clientWithoutPath.Continue(ctx, "T-1", map[string]any{"type": "user"}); err == nil {
 		t.Fatal("Continue discover error ignored")
 	}
-	if _, err := Discover(ctx, ""); err == nil {
+	if _, err := Discover(ctx, "", []string{"PATH=" + t.TempDir()}); err == nil {
 		t.Fatal("Discover lookpath error ignored")
 	}
-	lookPath = oldLookPath
 
 	oldGetwd := getwd
 	getwd = func() (string, error) { return "", errors.New("getwd failed") }

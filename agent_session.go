@@ -887,11 +887,11 @@ func (a *Agent) deleteNativeThread(ctx context.Context, id acp.SessionId, native
 
 const missingAPIKeyMessage = "AMP_API_KEY is not set: amp sessions run in an " +
 	"isolated home where amp login credentials are unavailable; set AMP_API_KEY " +
-	"in the process environment, WithEnv, or session env options"
+	"in ProcessIsolation.BaseEnvironment, WithEnv, or session env options"
 
 func (a *Agent) ensureNewSessionStartup(ctx context.Context, cwd string, meta parsedSessionMeta) error {
 	env := mergeEnv(a.options.Env, meta.options.Env)
-	if amp.HasAPIKey(env) {
+	if amp.HasAPIKey(mergeEnv(processIsolationBase(a.options.ProcessIsolation), env)) {
 		return a.ensureStartupWithProbe(ctx, cwd, env, a.options.runtime.startupProbe)
 	}
 
@@ -909,11 +909,19 @@ func (a *Agent) ensureNewSessionStartup(ctx context.Context, cwd string, meta pa
 
 func (a *Agent) ensureStartup(ctx context.Context, cwd string, meta parsedSessionMeta) error {
 	env := mergeEnv(a.options.Env, meta.options.Env)
-	if !amp.HasAPIKey(env) {
+	if !amp.HasAPIKey(mergeEnv(processIsolationBase(a.options.ProcessIsolation), env)) {
 		return missingAPIKeyError()
 	}
 
 	return a.ensureStartupWithProbe(ctx, cwd, env, a.options.runtime.startupProbe)
+}
+
+func processIsolationBase(isolation *ProcessIsolation) map[string]string {
+	if isolation == nil {
+		return nil
+	}
+
+	return isolation.BaseEnvironment
 }
 
 func (a *Agent) ensureStartupWithProbe(

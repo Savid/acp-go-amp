@@ -61,7 +61,7 @@ func (g *DarwinGeneration) prepareCommand(cmd *exec.Cmd, writableRoot string) er
 		}
 
 		for source, destination := range map[string]string{
-			baseEnv["HOME"]:            home,
+			baseEnv[envHome]:           home,
 			baseEnv["XDG_CONFIG_HOME"]: config,
 		} {
 			if source == "" || !pathWithin(root, source) {
@@ -105,7 +105,7 @@ func (g *DarwinGeneration) prepareCommand(cmd *exec.Cmd, writableRoot string) er
 	}
 
 	overrides := map[string]string{
-		"HOME":               home,
+		envHome:              home,
 		"XDG_CONFIG_HOME":    config,
 		"XDG_CACHE_HOME":     cache,
 		dataHomeEnv:          data,

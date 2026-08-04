@@ -81,9 +81,9 @@ func TestAuthorizeRelaysTheHostedPasteBackURL(t *testing.T) {
 // a credential — and the refusal belongs before a login child exists rather
 // than after one has burned an authorization at the provider.
 func TestAuthorizeRefusesANonDefaultDeployment(t *testing.T) {
-	fixture := newAuthFixture(t, "login")
-
-	t.Setenv(nativeamp.AuthDeploymentEnv, "https://amp.example")
+	fixture := newAuthFixture(t, "login", WithEnv(map[string]string{
+		nativeamp.AuthDeploymentEnv: "https://amp.example",
+	}))
 
 	_, err := fixture.authorize("connection-1", "request-1")
 	if err == nil {

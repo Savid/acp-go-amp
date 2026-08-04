@@ -46,7 +46,7 @@ func TestDarwinOutputReportsWaiterPastContainmentDeadline(t *testing.T) {
 	}
 
 	path, state := fakeAmpPath(t, "hang-list")
-	client := NewClient(nil, Options{CLIPath: path, Cwd: t.TempDir()})
+	client := newTestClient(t, nil, Options{CLIPath: path, Cwd: t.TempDir()})
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
@@ -75,5 +75,43 @@ func TestDarwinOutputReportsWaiterPastContainmentDeadline(t *testing.T) {
 	}
 	if launched != nil && launched.Process != nil {
 		_ = originalKill(-launched.Process.Pid, syscall.SIGKILL)
+	}
+}
+
+func TestDarwinClientIsolationAndNativeStartFailures(t *testing.T) {
+	originalCommand := commandContext
+	originalGroups := processIsolationGetgroups
+	t.Cleanup(func() {
+		commandContext = originalCommand
+		processIsolationGetgroups = originalGroups
+	})
+	commandContext = func(context.Context, string, ...string) *exec.Cmd {
+		return exec.Command(filepath.Join(t.TempDir(), "missing-native"))
+	}
+
+	client := newTestClient(t, nil, Options{CLIPath: "/usr/bin/true", ScratchParent: t.TempDir()})
+	if _, err := client.outputRaw(t.Context(), "--version"); err == nil {
+		t.Fatal("missing native command unexpectedly started")
+	}
+	if _, err := client.StartAuthLogin(t.Context()); err == nil {
+		t.Fatal("missing native auth command unexpectedly started")
+	}
+
+	commandContext = originalCommand
+	processIsolationGetgroups = func() ([]int, error) { return []int{os.Getegid(), os.Getegid() + 1}, nil }
+	client = NewClient(nil, Options{
+		DarwinBestEffort: true,
+		Isolation: &ProcessIsolation{
+			UID: uint32(os.Geteuid()), GID: uint32(os.Getegid()),
+			BaseEnvironment: map[string]string{"PATH": os.Getenv("PATH")},
+		},
+		NewDarwinGeneration: func(context.Context) (*DarwinGeneration, error) {
+			return &DarwinGeneration{RuntimeID: "00000000000000000000000000000001", ScratchRoot: t.TempDir()}, nil
+		},
+	})
+	cmd := exec.Command("/usr/bin/true")
+	cmd.Env = []string{"PATH=" + os.Getenv("PATH")}
+	if _, err := client.prepareProcessLaunch(t.Context(), cmd); err == nil || !strings.Contains(err.Error(), "apply Amp process isolation") {
+		t.Fatalf("unisolated current identity launch error = %v", err)
 	}
 }

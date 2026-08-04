@@ -19,13 +19,14 @@ import (
 func newBlockedPromptLifecycle(t *testing.T) (*Agent, acp.SessionId, <-chan struct{}, <-chan struct{}, chan<- struct{}) {
 	t.Helper()
 
-	agent := newTestAgent()
+	agent := newTestAgent(WithEnv(map[string]string{"AMP_API_KEY": "fake"}))
 	sessionID := acp.SessionId("T-prompt-construction")
 	agent.sessions[sessionID] = &agentSession{
 		agent:    agent,
 		id:       sessionID,
 		nativeID: string(sessionID),
 		cwd:      t.TempDir(),
+		env:      map[string]string{"AMP_API_KEY": "fake"},
 		turn:     make(chan struct{}, 1),
 	}
 	started := make(chan struct{})
@@ -50,7 +51,11 @@ func TestAgentCloseFencesInFlightPromptConstructionContainmentFailure(t *testing
 		_, err := agent.Prompt(context.Background(), TextPromptRequest(sessionID, "turn", "hello"))
 		promptErr <- err
 	}()
-	<-started
+	select {
+	case <-started:
+	case err := <-promptErr:
+		t.Fatalf("prompt construction failed before native continuation: %v", err)
+	}
 
 	closeErr := make(chan error, 1)
 	go func() { closeErr <- agent.Close() }()

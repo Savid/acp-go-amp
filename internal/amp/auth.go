@@ -152,7 +152,12 @@ func AuthSecretPresent(dataHome string) (bool, error) {
 // refused instead — before a login child exists, rather than after one has
 // taken an authorization at the provider that nothing here could ever complete.
 func (c *Client) AuthDeploymentSupported() bool {
-	value, ok := environmentMap(authLoginEnv(c.options.Env, c.options.Cwd))[AuthDeploymentEnv]
+	environment, err := authLoginEnv(c.options.Isolation, c.options.Env, c.options.Cwd)
+	if err != nil {
+		return false
+	}
+
+	value, ok := environmentMap(environment)[AuthDeploymentEnv]
 	if !ok || value == "" {
 		return true
 	}
@@ -191,7 +196,12 @@ type AuthLogin struct {
 // profile — cookie jar included — into the same root this package reads the
 // credential from.
 func (c *Client) StartAuthLogin(ctx context.Context) (*AuthLogin, error) {
-	path, err := Discover(ctx, c.options.CLIPath)
+	environment, err := authLoginEnv(c.options.Isolation, c.options.Env, c.options.Cwd)
+	if err != nil {
+		return nil, err
+	}
+
+	path, err := Discover(ctx, c.options.CLIPath, environment)
 	if err != nil {
 		return nil, err
 	}
@@ -211,7 +221,7 @@ func (c *Client) StartAuthLogin(ctx context.Context) (*AuthLogin, error) {
 		return nil, fmt.Errorf("amp login: %w", err)
 	}
 
-	cmd.Env = shim.environ(authLoginEnv(c.options.Env, cmd.Dir))
+	cmd.Env = shim.environ(environment)
 
 	launch, err := c.prepareProcessLaunch(ctx, cmd)
 	if err != nil {
@@ -275,7 +285,7 @@ func (c *Client) authLoginArgs() []string {
 // authLoginEnv builds the login child's environment: the session's own values
 // plus the headless override, with the ambient API key removed however it
 // arrived.
-func authLoginEnv(base map[string]string, cwd string) []string {
+func authLoginEnv(isolation *ProcessIsolation, base map[string]string, cwd string) ([]string, error) {
 	overrides := make(map[string]string, len(base)+1)
 	for key, value := range base {
 		overrides[key] = value
@@ -283,7 +293,10 @@ func authLoginEnv(base map[string]string, cwd string) []string {
 
 	overrides[authHeadlessOAuthEnv] = "1"
 
-	env := BuildEnv(overrides, cwd)
+	env, err := BuildEnvWithIsolation(isolation, overrides, cwd)
+	if err != nil {
+		return nil, err
+	}
 
 	kept := make([]string, 0, len(env))
 
@@ -295,7 +308,7 @@ func authLoginEnv(base map[string]string, cwd string) []string {
 		kept = append(kept, entry)
 	}
 
-	return kept
+	return kept, nil
 }
 
 type authLoginPipes struct {

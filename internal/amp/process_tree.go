@@ -40,6 +40,7 @@ type processLaunchOptions struct {
 	DarwinBestEffort bool
 	Generation       *DarwinGeneration
 	ReleaseNative    func()
+	Isolation        *ProcessIsolation
 }
 
 func (c *processTreeCommand) acquire() (func(), error) {

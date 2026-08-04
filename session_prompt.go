@@ -134,7 +134,7 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (re
 		return acp.PromptResponse{}, err
 	}
 
-	if !amp.HasAPIKey(s.env) {
+	if !amp.HasAPIKey(mergeEnv(processIsolationBase(s.agent.options.ProcessIsolation), s.env)) {
 		return acp.PromptResponse{}, missingAPIKeyError()
 	}
 
