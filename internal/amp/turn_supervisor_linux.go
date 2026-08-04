@@ -66,9 +66,13 @@ var (
 	turnSupervisorCloseOnExec  = unix.CloseOnExec
 	turnSupervisorInput        = inheritedTurnSupervisorInput
 	turnSupervisorPrctl        = unix.Prctl
+	turnSupervisorSetrlimit    = unix.Setrlimit
 )
 
 func enableTurnSupervisor() error {
+	if err := turnSupervisorSetrlimit(unix.RLIMIT_CORE, &unix.Rlimit{}); err != nil {
+		return fmt.Errorf("disable Amp native core dumps: %w", err)
+	}
 	if err := turnSupervisorPrctl(unix.PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0); err != nil {
 		return err
 	}
