@@ -132,21 +132,22 @@ func TestInstalledLinuxAmpLoginExecsOnlyShimLauncher(t *testing.T) {
 		t.Skipf("set %s to a real installed Linux Amp binary", installedLinuxAmpEnv)
 	}
 
-	marker := filepath.Join(t.TempDir(), "launcher")
 	originalScript := browserShimScript
 	browserShimScript = []byte("#!/bin/sh\nprintf '%s\\n' \"${0##*/}\" > \"$ACP_GO_AMP_TEST_BROWSER_MARKER\"\nexit 0\n")
 	t.Cleanup(func() { browserShimScript = originalScript })
+	marker := filepath.Join(t.TempDir(), "launcher")
 	home := t.TempDir()
 	settingsFile := filepath.Join(t.TempDir(), "settings.json")
 	if writeErr := os.WriteFile(settingsFile, AuthSettingsDocument(), 0o600); writeErr != nil {
 		t.Fatal(writeErr)
 	}
+	scratchParent := makeInstalledLinuxAmpScratchParent(t)
 
 	client := newTestClient(t, nil, Options{
 		CLIPath:       path,
 		Cwd:           t.TempDir(),
 		SettingsFile:  settingsFile,
-		ScratchParent: t.TempDir(),
+		ScratchParent: scratchParent,
 		Env: map[string]string{
 			AuthDeploymentEnv:                "http://127.0.0.1:1",
 			"ACP_GO_AMP_TEST_BROWSER_MARKER": marker,
@@ -191,6 +192,24 @@ func TestInstalledLinuxAmpLoginExecsOnlyShimLauncher(t *testing.T) {
 	if closeErr := login.Close(); closeErr != nil {
 		t.Fatalf("close installed Linux Amp login: %v", closeErr)
 	}
+}
+
+func makeInstalledLinuxAmpScratchParent(t *testing.T) string {
+	t.Helper()
+
+	path, err := os.MkdirTemp("/tmp", "acp-go-amp-browser-scratch-") //nolint:usetesting // The isolated native identity must traverse the fixture root.
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(path) })
+	if err = os.Chmod(path, 0o711); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Chown(path, os.Geteuid(), os.Getegid()); err != nil {
+		t.Fatal(err)
+	}
+
+	return path
 }
 
 func TestBrowserShimLeavesNothingBehind(t *testing.T) {

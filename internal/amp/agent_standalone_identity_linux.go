@@ -142,6 +142,7 @@ var agentStandaloneLockDirectorySync = unix.Fsync
 var agentStandaloneLockClose = func(file *os.File) error { return file.Close() }
 var agentStandaloneLockFstatat = unix.Fstatat
 var agentStandaloneFilesystemProbe = probeAgentStandaloneFilesystem
+var agentStandaloneProbeFstatfs = unix.Fstatfs
 var agentStandaloneProbeFcntl = unix.FcntlInt
 var agentStandaloneProbeUnlinkat = unix.Unlinkat
 var agentStandaloneProbeDirectorySync = unix.Fsync
@@ -1105,7 +1106,7 @@ func validateAgentStandaloneBinder() error {
 
 func probeAgentStandaloneFilesystem(directory *os.File, testOnly bool) (probeErr error) {
 	var filesystem unix.Statfs_t
-	if err := unix.Fstatfs(int(directory.Fd()), &filesystem); err != nil {
+	if err := agentStandaloneProbeFstatfs(int(directory.Fd()), &filesystem); err != nil {
 		return err
 	}
 	if filesystem.Flags&unix.ST_RDONLY != 0 {
