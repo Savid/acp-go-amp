@@ -19,7 +19,8 @@ func reserveScratchRoot(ctx context.Context, hooks RuntimeResourceHooks, kind Ru
 
 func nativeInternalError(err error) error {
 	requestErr := acp.NewInternalError(map[string]any{jsonFieldError: err.Error()})
-	if errors.Is(err, nativeamp.ErrProcessContainmentIncomplete) {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, nativeamp.ErrProcessContainmentIncomplete) {
 		return errors.Join(requestErr, err)
 	}
 

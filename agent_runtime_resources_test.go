@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -354,6 +355,25 @@ func TestFinalizeNativePromptRetainsIncompleteBoundary(t *testing.T) {
 	final, err = finalizeNativePrompt(response, wantErr, nil)
 	require.Equal(t, response, final)
 	require.ErrorIs(t, err, wantErr)
+}
+
+func TestNativeInternalErrorPreservesLifecycleSentinels(t *testing.T) {
+	for _, sentinel := range []error{
+		context.Canceled,
+		context.DeadlineExceeded,
+		nativeamp.ErrProcessContainmentIncomplete,
+	} {
+		err := nativeInternalError(fmt.Errorf("native startup: %w", sentinel))
+		require.ErrorIs(t, err, sentinel)
+		var requestErr *acp.RequestError
+		require.ErrorAs(t, err, &requestErr)
+	}
+
+	ordinary := errors.New("ordinary")
+	err := nativeInternalError(ordinary)
+	require.NotErrorIs(t, err, ordinary)
+	var requestErr *acp.RequestError
+	require.ErrorAs(t, err, &requestErr)
 }
 
 func TestSessionScratchReleaseContainmentBoundaries(t *testing.T) {
