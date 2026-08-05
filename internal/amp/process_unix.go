@@ -57,7 +57,14 @@ func startProcessTree(launch *processTreeCommand) (*processTree, error) {
 	launch.started = true
 
 	launch.releaseInherited()
-	waiter, beginWait := startProcessTreeWait(launch.cmd.Wait)
+
+	waitCommand := launch.cmd.Wait
+	if launch.wait != nil {
+		waitCommand = launch.wait
+		launch.completion = nil
+	}
+
+	waiter, beginWait := startProcessTreeWait(waitCommand)
 	tree := &processTree{
 		pgid:          launch.cmd.Process.Pid,
 		process:       launch.cmd.Process,

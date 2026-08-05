@@ -45,7 +45,7 @@ unsupported platforms fail closed. `Agent.ContainmentMode()` and
 |---|---|
 | `WithExecutablePath` | Native `amp` executable path. |
 | `WithProcessIsolation` | Mandatory non-root UID/GID and complete replacement environment for native Amp commands. On Linux the embedded supervisor stays trusted root; only the native command receives the configured identity, with supplementary groups cleared. |
-| `WithScratchDir` | Sole parent for all ephemeral on-disk scratch (per-session isolated `HOME`/XDG directories, startup probe directory). Empty falls back to the system temp directory; created `0700` when missing. |
+| `WithScratchDir` | Sole parent for all ephemeral on-disk scratch (per-session isolated `HOME`/XDG directories and the startup/discovery probes' isolated `HOME`/XDG/settings/MCP residence). Empty falls back to the system temp directory; created `0700` when missing. |
 | `WithInputHandoffRoot` | Absolute read root for the local handoff input form. Read-only, so it is not a materialization root. Unset rejects every handoff-form block. See [Handoff read root](#handoff-read-root). |
 | `WithProviderAuthRoot` | Absolute durable directory holding the values-free provider-auth ledger. Unset, or unusable, leaves every `_amp/auth/*` method unadvertised. Darwin and Windows keep the configured method surface but refuse authorization with `unsupported_variant` before native login. See [Authentication](/docs/features/authentication#broker-a-login). |
 | `WithProviderAuthDirectHome` | Unsupported: `disconnect` releases only the ledger slot a connection owns and reads no operator home, so there is nothing for an exact-home consent gate to authorize. A non-empty value rejects at session start. |
@@ -61,6 +61,17 @@ unsupported platforms fail closed. `Agent.ContainmentMode()` and
 | `WithRuntimeResourceHooks` | Host admission hooks for native roots and adapter scratch roots. |
 | `WithDarwinBestEffortContainment` | Darwin-only explicit opt-in to bounded process-group cleanup with escaped-descendant and PGID-reuse limitations. Invalid on other platforms. |
 | `WithTracerProvider`, `WithMeterProvider`, `WithTextMapPropagator`, `WithLogger` | Observability providers. |
+
+`ProcessIsolation.IdentityLock` and `ProcessIsolation.AuthorityDomain`
+optionally accept opaque host capabilities with `Duplicate() (*os.File, error)`
+for the already-held canonical UID lock and shared `domain.lock` lease. Each
+capability keeps ownership of its original descriptor; caller-owned duplicates
+reach only the trusted supervisor, which validates the named inodes, held locks,
+and strict matching domain record and protects them with checked `FD_CLOEXEC`.
+Set both fields together for
+host-borrowed authority or leave both nil for standalone domain, disposition,
+and UID-lock acquisition. A mixed nil/non-nil pair fails closed. Native
+processes receive neither capability nor descriptor.
 
 ## Image limits
 
@@ -150,10 +161,14 @@ ignores the nonce and `CancelRequest` remains structural.
 `ObserveProcess`, `ObserveProcessSnapshot`, `ObserveStartupStage`, and
 `ObserveContainment`.
 Admission callbacks receive `runtime`, `session`, `prompt`, or `discovery`; nil
-callbacks keep standalone use unbounded. Amp reserves its per-session settings
-root before creation and acquires a native permit for every startup probe,
-thread command, and prompt process before launch. Amp is lockless, so it never
-reports home-lock supervisors. Provider-descendant snapshots are emitted only
+callbacks keep standalone use unbounded. Before any startup/discovery child,
+Amp reserves and materializes one target-owned isolated HOME/XDG/settings/MCP
+residence under `WithScratchDir`; it removes the residence and releases the
+scratch reservation only after containment proof, retaining both on incomplete
+containment. Amp also reserves each per-session settings root before creation
+and acquires a native permit for every startup probe, thread command, and prompt
+process before launch. Amp is lockless, so it never reports home-lock
+supervisors. Provider-descendant snapshots are emitted only
 under authoritative containment and are suppressed for the entire Darwin
 best-effort lifetime, including zero. Startup observations name `spawn`,
 `readiness`, `configuration`, or `session` and carry the stage error; `session`

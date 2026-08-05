@@ -13,8 +13,8 @@ stdio or embed the agent directly in Go.
 - `internal/amp`: Amp process boundary, stream-json parsing, environment
   construction, and interrupt handling.
 - `cmd/acp-go-amp`: stdio ACP command with `-path`, `-home`, `-model`,
-  `-scratch-dir`, `-darwin-best-effort-containment`, `-debug`, `-version`, and
-  repeatable `-seed-file` flags, plus Darwin containment operations.
+  `-scratch-dir`, `-debug`, `-version`, and repeatable `-seed-file` flags, plus
+  Darwin containment operations.
 - `examples`: embeddable host examples that must stay covered by tests.
 - `integration`: smoke and live tests for installed Amp binaries.
 - `docs`: public documentation mirrored by `docs.json` navigation.

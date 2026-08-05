@@ -364,18 +364,19 @@ func TestTurnCloseReportsBoundedWaitFailure(t *testing.T) {
 
 func TestClientCommandsUseGlobalArgsAndParseOutput(t *testing.T) {
 	path, state := fakeAmpPath(t, "")
-	client := newTestClient(t, nil, Options{
-		CLIPath:       path,
-		Cwd:           t.TempDir(),
-		SettingsFile:  filepath.Join(t.TempDir(), "settings.json"),
-		Env:           map[string]string{"AMP_API_KEY": "fake"},
-		Mode:          "strange-mode",
-		MCPConfigPath: filepath.Join(t.TempDir(), "mcp.json"),
+	client := newTestProbeClient(t, nil, Options{
+		CLIPath: path,
+		Cwd:     t.TempDir(),
+		Env:     map[string]string{"AMP_API_KEY": "fake"},
+		Mode:    "strange-mode",
 	})
 	ctx := context.Background()
 
 	if version, err := client.Version(ctx); err != nil || version != MinimumVersion+"-gfake" {
 		t.Fatalf("Version = %q, %v", version, err)
+	}
+	if err := client.DiscoveryProbe(ctx); err != nil {
+		t.Fatalf("DiscoveryProbe: %v", err)
 	}
 	if err := client.StartupProbe(ctx); err != nil {
 		t.Fatalf("StartupProbe: %v", err)
@@ -447,70 +448,39 @@ func countArg(args []string, want string) int {
 
 func TestStartupProbeAndVersionBranches(t *testing.T) {
 	ctx := context.Background()
-	if err := newTestClient(t, nil, Options{}).StartupProbe(ctx); err == nil {
+	if _, _, err := NewClient(nil, Options{}).discoverVersion(ctx); err == nil {
+		t.Fatal("version discovery isolation error ignored")
+	}
+	if err := NewClient(nil, Options{}).StartupProbe(ctx); err == nil {
 		t.Fatal("StartupProbe isolation error ignored")
 	}
 
-	if err := newTestClient(t, nil, Options{CLIPath: "/does/not/exist"}).StartupProbe(ctx); err == nil {
+	if err := newTestProbeClient(t, nil, Options{CLIPath: "/does/not/exist"}).StartupProbe(ctx); err == nil {
 		t.Fatal("StartupProbe version command error ignored")
 	}
 	badVersion, _ := fakeAmpPath(t, "bad-version")
-	if err := newTestClient(t, nil, Options{CLIPath: badVersion, Cwd: t.TempDir()}).StartupProbe(ctx); err == nil || !strings.Contains(err.Error(), "below required") {
+	if err := newTestProbeClient(t, nil, Options{CLIPath: badVersion, Cwd: t.TempDir()}).StartupProbe(ctx); err == nil || !strings.Contains(err.Error(), "below required") {
 		t.Fatalf("bad version probe = %v", err)
 	}
 	badList, _ := fakeAmpPath(t, "bad-list-json")
-	if err := newTestClient(t, nil, Options{CLIPath: badList, Cwd: t.TempDir()}).StartupProbe(ctx); err == nil || !strings.Contains(err.Error(), "threads list --json probe failed") {
+	if err := newTestProbeClient(t, nil, Options{CLIPath: badList, Cwd: t.TempDir()}).StartupProbe(ctx); err == nil || !strings.Contains(err.Error(), "threads list --json probe failed") {
 		t.Fatalf("list probe = %v", err)
 	}
 	exportAbsent, _ := fakeAmpPath(t, "probe-export-absent")
-	if err := newTestClient(t, nil, Options{CLIPath: exportAbsent, Cwd: t.TempDir()}).StartupProbe(ctx); err == nil || !strings.Contains(err.Error(), "threads export probe failed") {
+	if err := newTestProbeClient(t, nil, Options{CLIPath: exportAbsent, Cwd: t.TempDir()}).StartupProbe(ctx); err == nil || !strings.Contains(err.Error(), "threads export probe failed") {
 		t.Fatalf("export method-present probe = %v", err)
 	}
 	exportMissing, _ := fakeAmpPath(t, "probe-export-missing")
-	if err := newTestClient(t, nil, Options{CLIPath: exportMissing, Cwd: t.TempDir()}).StartupProbe(ctx); err != nil {
+	if err := newTestProbeClient(t, nil, Options{CLIPath: exportMissing, Cwd: t.TempDir()}).StartupProbe(ctx); err != nil {
 		t.Fatalf("export missing-thread domain error should count as present: %v", err)
 	}
 	continueSuccess, _ := fakeAmpPath(t, "probe-continue-success")
-	if err := newTestClient(t, nil, Options{CLIPath: continueSuccess, Cwd: t.TempDir()}).StartupProbe(ctx); err == nil || !strings.Contains(err.Error(), "unexpectedly succeeded") {
+	if err := newTestProbeClient(t, nil, Options{CLIPath: continueSuccess, Cwd: t.TempDir()}).StartupProbe(ctx); err == nil || !strings.Contains(err.Error(), "unexpectedly succeeded") {
 		t.Fatalf("continue missing-thread success gate = %v", err)
 	}
 	if err := methodProbeError("threads continue", errors.New("usage"), true); err == nil || !strings.Contains(err.Error(), "did not return missing-thread") {
 		t.Fatalf("continue missing-thread usage gate = %v", err)
 	}
-	func() {
-		oldMkdirTemp := mkdirTemp
-		defer func() { mkdirTemp = oldMkdirTemp }()
-		mkdirTemp = func(string, string) (string, error) { return "", errors.New("mkdir temp failed") }
-		tempFail, _ := fakeAmpPath(t, "startup-temp-fail")
-		if err := newTestClient(t, nil, Options{CLIPath: tempFail, Cwd: t.TempDir()}).StartupProbe(ctx); err == nil || !strings.Contains(err.Error(), "create amp startup settings dir") {
-			t.Fatalf("startup temp dir failure = %v", err)
-		}
-	}()
-	func() {
-		oldWriteFile := writeFile
-		defer func() { writeFile = oldWriteFile }()
-		writeFile = func(string, []byte, os.FileMode) error { return errors.New("write settings failed") }
-		writeFail, _ := fakeAmpPath(t, "startup-write-fail")
-		if err := newTestClient(t, nil, Options{CLIPath: writeFail, Cwd: t.TempDir()}).StartupProbe(ctx); err == nil || !strings.Contains(err.Error(), "write amp startup settings file") {
-			t.Fatalf("startup settings write failure = %v", err)
-		}
-	}()
-	func() {
-		oldWriteFile := writeFile
-		defer func() { writeFile = oldWriteFile }()
-		writeFile = func(path string, data []byte, mode os.FileMode) error {
-			if filepath.Base(path) == "mcp.json" {
-				return errors.New("write MCP failed")
-			}
-
-			return oldWriteFile(path, data, mode)
-		}
-		writeFail, _ := fakeAmpPath(t, "startup-mcp-write-fail")
-		if err := newTestClient(t, nil, Options{CLIPath: writeFail, Cwd: t.TempDir()}).StartupProbe(ctx); err == nil || !strings.Contains(err.Error(), "write amp startup MCP config") {
-			t.Fatalf("startup MCP write failure = %v", err)
-		}
-	}()
-
 	if !versionAtLeast("0.0.1784765893-gx", MinimumVersion) {
 		t.Fatal("newer version rejected")
 	}
@@ -531,7 +501,7 @@ func TestStartupProbeAndVersionBranches(t *testing.T) {
 	}
 }
 
-func TestOneShotProofSentinelOutranksMissingThreadAndRetainsProbeScratch(t *testing.T) {
+func TestOneShotProofSentinelOutranksMissingThread(t *testing.T) {
 	joined := errors.Join(errors.New("Thread not found"), ErrProcessContainmentIncomplete)
 	if err := methodProbeError("threads export", joined, false); !errors.Is(err, ErrProcessContainmentIncomplete) {
 		t.Fatalf("method probe swallowed containment sentinel: %v", err)
@@ -549,7 +519,6 @@ func TestOneShotProofSentinelOutranksMissingThreadAndRetainsProbeScratch(t *test
 	}
 
 	probePath, _ := fakeAmpPath(t, "")
-	parent := t.TempDir()
 	terminateCalls := 0
 	processTreeTerminateAndWait = func(*processTree, time.Duration) error {
 		terminateCalls++
@@ -559,13 +528,9 @@ func TestOneShotProofSentinelOutranksMissingThreadAndRetainsProbeScratch(t *test
 
 		return nil
 	}
-	err := newTestClient(t, nil, Options{CLIPath: probePath, Cwd: t.TempDir(), ScratchParent: parent}).probeSubcommands(t.Context())
+	err := newTestProbeClient(t, nil, Options{CLIPath: probePath, Cwd: t.TempDir()}).probeSubcommands(t.Context())
 	if !errors.Is(err, ErrProcessContainmentIncomplete) {
 		t.Fatalf("startup probe swallowed containment sentinel: %v", err)
-	}
-	entries, readErr := os.ReadDir(parent)
-	if readErr != nil || len(entries) != 1 {
-		t.Fatalf("incomplete startup scratch = %#v, %v; want one retained root", entries, readErr)
 	}
 }
 

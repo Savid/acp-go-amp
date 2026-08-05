@@ -57,9 +57,6 @@ const (
 var (
 	commandContext             = exec.CommandContext
 	getwd                      = os.Getwd
-	mkdirTemp                  = os.MkdirTemp
-	removeAll                  = os.RemoveAll
-	writeFile                  = os.WriteFile
 	closeWriteCloser           = func(closer io.Closer) error { return closer.Close() }
 	openPipe                   = os.Pipe
 	probeCache                 sync.Map
@@ -78,10 +75,8 @@ type Options struct {
 	CLIPath      string
 	Cwd          string
 	SettingsFile string
-	// ScratchParent is the already-resolved parent directory the root package
-	// supplies for the startup probe's ephemeral settings directory. The root
-	// package owns temp-directory resolution; this package never consults the
-	// system temp directory itself.
+	// ScratchParent is the already-resolved parent for the account-login browser
+	// shim. The embedding package owns temp-directory resolution.
 	ScratchParent string
 	Env           map[string]string
 	Isolation     *ProcessIsolation
@@ -199,6 +194,10 @@ const startupProbeThreadID = "T-00000000-0000-0000-0000-000000000000"
 const startupProbeTimeout = 30 * time.Second
 
 func (c *Client) StartupProbe(ctx context.Context) error {
+	if err := c.validateProbeResidence(); err != nil {
+		return err
+	}
+
 	path, version, err := c.discoverVersion(ctx)
 	if err != nil {
 		return err
@@ -221,9 +220,48 @@ func (c *Client) StartupProbe(ctx context.Context) error {
 // DiscoveryProbe verifies the executable and version without running commands
 // that require an authenticated Amp account.
 func (c *Client) DiscoveryProbe(ctx context.Context) error {
+	if err := c.validateProbeResidence(); err != nil {
+		return err
+	}
+
 	_, _, err := c.discoverVersion(ctx)
 
 	return err
+}
+
+func (c *Client) validateProbeResidence() error {
+	root := c.options.WritableRoot
+	if root == "" || !filepath.IsAbs(root) || filepath.Clean(root) != root || root == "/" || strings.IndexByte(root, 0) >= 0 {
+		return errors.New("amp probe requires a clean absolute isolated writable root")
+	}
+
+	environment, err := BuildEnvWithIsolation(c.options.Isolation, c.options.Env, c.options.Cwd)
+	if err != nil {
+		return err
+	}
+
+	values := environmentMap(environment)
+
+	expected := []struct {
+		name string
+		got  string
+		want string
+	}{
+		{name: envHome, got: values[envHome], want: filepath.Join(root, "home")},
+		{name: envXDGConfigHome, got: values[envXDGConfigHome], want: filepath.Join(root, "xdg-config")},
+		{name: envXDGCacheHome, got: values[envXDGCacheHome], want: filepath.Join(root, "xdg-cache")},
+		{name: dataHomeEnv, got: values[dataHomeEnv], want: filepath.Join(root, "xdg-data")},
+		{name: envXDGStateHome, got: values[envXDGStateHome], want: filepath.Join(root, "xdg-state")},
+		{name: "settings file", got: c.options.SettingsFile, want: filepath.Join(root, "xdg-config", "amp", "settings.json")},
+		{name: "MCP config", got: c.options.MCPConfigPath, want: filepath.Join(root, "mcp.json")},
+	}
+	for _, value := range expected {
+		if value.got != value.want {
+			return fmt.Errorf("amp probe %s must equal %q", value.name, value.want)
+		}
+	}
+
+	return nil
 }
 
 func (c *Client) discoverVersion(ctx context.Context) (string, string, error) {
@@ -254,7 +292,7 @@ func (c *Client) discoverVersion(ctx context.Context) (string, string, error) {
 // probes for `threads export/continue/delete` against a missing id. The continue
 // probe uses an isolated settings file and the same real-turn flag surface; the
 // known-missing thread must fail before any model turn can start.
-func (c *Client) probeSubcommands(ctx context.Context) (returnErr error) {
+func (c *Client) probeSubcommands(ctx context.Context) error {
 	probeCtx, cancel := context.WithTimeout(ctx, startupProbeTimeout)
 	defer cancel()
 
@@ -262,27 +300,7 @@ func (c *Client) probeSubcommands(ctx context.Context) (returnErr error) {
 		return fmt.Errorf("amp threads list --json probe failed: %w", err)
 	}
 
-	settingsFile, cleanup, err := startupProbeSettingsFile(c.options.ScratchParent)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if ProcessContainmentComplete(returnErr) {
-			cleanup()
-		}
-	}()
-
 	continueClient := *c
-	continueClient.options.SettingsFile = settingsFile
-
-	continueClient.options.MCPConfigPath = filepath.Join(filepath.Dir(settingsFile), "mcp.json")
-	if err := writeFile(continueClient.options.MCPConfigPath, []byte("{}\n"), 0o600); err != nil {
-		return fmt.Errorf("write amp startup MCP config: %w", err)
-	}
-	if err := handoffGeneratedNativeTree(filepath.Dir(settingsFile), c.options.Isolation); err != nil {
-		return fmt.Errorf("handoff amp startup settings: %w", err)
-	}
-
 	continueClient.options.Mode = "medium"
 	// --no-archive-after-execute rides on the probe so an amp build that does
 	// not parse the flag fails startup closed instead of failing the first
@@ -311,24 +329,6 @@ func (c *Client) probeSubcommands(ctx context.Context) (returnErr error) {
 	}
 
 	return nil
-}
-
-func startupProbeSettingsFile(parent string) (string, func(), error) {
-	dir, err := mkdirTemp(parent, "acp-go-amp-startup-*")
-	if err != nil {
-		return "", nil, fmt.Errorf("create amp startup settings dir: %w", err)
-	}
-
-	cleanup := func() { _ = removeAll(dir) }
-
-	settingsFile := filepath.Join(dir, "settings.json")
-	if err := writeFile(settingsFile, []byte("{}\n"), 0o600); err != nil {
-		cleanup()
-
-		return "", nil, fmt.Errorf("write amp startup settings file: %w", err)
-	}
-
-	return settingsFile, cleanup, nil
 }
 
 // methodProbeError classifies a method-present probe result: a domain

@@ -10,10 +10,12 @@ import (
 const processIsolationConfigFlag = "process-isolation-config"
 
 type processIsolationConfig struct {
-	UID                uint32            `json:"uid"`
-	GID                uint32            `json:"gid"`
-	BaseEnvironment    map[string]string `json:"baseEnvironment"`
-	InheritEnvironment []string          `json:"inheritEnvironment"`
+	UID                 uint32            `json:"uid"`
+	GID                 uint32            `json:"gid"`
+	BaseEnvironment     map[string]string `json:"baseEnvironment"`
+	InheritEnvironment  []string          `json:"inheritEnvironment"`
+	StandaloneOwnerID   string            `json:"standaloneOwnerId"`
+	StandaloneStateRoot string            `json:"standaloneStateRoot"`
 }
 
 var processIsolationConfigLoader = loadProcessIsolationConfig
@@ -28,15 +30,6 @@ func decodeProcessIsolationConfig(data []byte) (processIsolationConfig, error) {
 
 	var config processIsolationConfig
 	if err := decoder.Decode(&config); err != nil {
-		return processIsolationConfig{}, fmt.Errorf("decode policy: %w", err)
-	}
-
-	var trailing any
-	if err := decoder.Decode(&trailing); err != io.EOF {
-		if err == nil {
-			return processIsolationConfig{}, fmt.Errorf("decode policy: trailing JSON value")
-		}
-
 		return processIsolationConfig{}, fmt.Errorf("decode policy: %w", err)
 	}
 
@@ -70,18 +63,14 @@ func scanJSONValue(decoder *json.Decoder) error {
 		return nil
 	}
 
-	switch delimiter {
-	case '{':
+	if delimiter == '{' {
 		seen := make(map[string]struct{})
 		for decoder.More() {
 			keyToken, keyErr := decoder.Token()
 			if keyErr != nil {
 				return keyErr
 			}
-			key, ok := keyToken.(string)
-			if !ok {
-				return fmt.Errorf("object key is not a string")
-			}
+			key := keyToken.(string) //nolint:errcheck // Decoder object-member tokens are strings by contract.
 			if _, exists := seen[key]; exists {
 				return fmt.Errorf("duplicate object key %q", key)
 			}
@@ -93,16 +82,14 @@ func scanJSONValue(decoder *json.Decoder) error {
 		_, endErr := decoder.Token()
 
 		return endErr
-	case '[':
-		for decoder.More() {
-			if valueErr := scanJSONValue(decoder); valueErr != nil {
-				return valueErr
-			}
-		}
-		_, endErr := decoder.Token()
-
-		return endErr
-	default:
-		return fmt.Errorf("unexpected JSON delimiter %q", delimiter)
 	}
+
+	for decoder.More() {
+		if valueErr := scanJSONValue(decoder); valueErr != nil {
+			return valueErr
+		}
+	}
+	_, endErr := decoder.Token()
+
+	return endErr
 }

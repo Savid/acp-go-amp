@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -17,9 +18,11 @@ func stubProcessIsolationConfig(t *testing.T) {
 		}
 
 		return processIsolationConfig{
-			UID:             20001,
-			GID:             20001,
-			BaseEnvironment: map[string]string{"PATH": "/usr/bin", "HOME": "/var/empty/acp", "USER": "acp", "LOGNAME": "acp"},
+			UID:                 20001,
+			GID:                 20001,
+			BaseEnvironment:     map[string]string{"PATH": "/usr/bin", "HOME": "/var/empty/acp", "USER": "acp", "LOGNAME": "acp"},
+			StandaloneOwnerID:   "test-owner",
+			StandaloneStateRoot: "/var/empty/acp",
 		}, nil
 	}
 	t.Cleanup(func() { processIsolationConfigLoader = original })
@@ -30,7 +33,7 @@ func isolatedArgs(args ...string) []string {
 }
 
 func TestDecodeProcessIsolationConfigStrict(t *testing.T) {
-	config, err := decodeProcessIsolationConfig([]byte(`{"uid":20001,"gid":20002,"baseEnvironment":{"PATH":"/usr/bin"},"inheritEnvironment":["AMP_API_KEY"]}`))
+	config, err := decodeProcessIsolationConfig([]byte(`{"uid":20001,"gid":20002,"baseEnvironment":{"PATH":"/usr/bin"},"inheritEnvironment":["AMP_API_KEY"],"standaloneOwnerId":"deployment-a","standaloneStateRoot":"/var/lib/acp"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -41,6 +44,10 @@ func TestDecodeProcessIsolationConfigStrict(t *testing.T) {
 	for _, document := range []string{
 		`{"uid":1,"gid":2,"baseEnvironment":{},"unknown":true}`,
 		`{"uid":1,"gid":2,"baseEnvironment":{}} {}`,
+		`{} @`,
+		`{1:2}`,
+		`[@]`,
+		`{"uid":"invalid","gid":2,"baseEnvironment":{}}`,
 		`{"uid":1,"uid":2,"gid":2,"baseEnvironment":{}}`,
 		`{"uid":1,"gid":2,"baseEnvironment":{"PATH":"/bin","PATH":"/usr/bin"}}`,
 		``,
@@ -58,5 +65,22 @@ func TestRunRequiresProcessIsolationConfig(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "-"+processIsolationConfigFlag+" is required") {
 		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
+func TestRunRejectsInvalidProcessIsolationConfig(t *testing.T) {
+	original := processIsolationConfigLoader
+	processIsolationConfigLoader = func(string) (processIsolationConfig, error) {
+		return processIsolationConfig{}, errors.New("invalid policy")
+	}
+	t.Cleanup(func() { processIsolationConfigLoader = original })
+
+	var stderr strings.Builder
+	code := run(
+		t.Context(), []string{"-" + processIsolationConfigFlag, "/invalid-policy"},
+		strings.NewReader(""), &strings.Builder{}, &stderr,
+	)
+	if code != 1 || !strings.Contains(stderr.String(), "process isolation: invalid policy") {
+		t.Fatalf("run code = %d, stderr = %q", code, stderr.String())
 	}
 }

@@ -352,12 +352,15 @@ func (s *agentSession) writePromptMCPConfig() (string, error) {
 	}
 
 	path := filepath.Join(s.settingsDir, "mcp.json")
+
 	var err error
+
 	if s.agent == nil || s.agent.options.ProcessIsolation == nil || s.agent.options.testOnlyNoCredential {
 		err = os.WriteFile(path, []byte(s.mcpConfigJSON), 0o600)
 	} else {
 		err = writeNativeOwnedFile(path, []byte(s.mcpConfigJSON), s.agent.options.ProcessIsolation)
 	}
+
 	if err != nil {
 		return "", fmt.Errorf("write amp MCP config: %w", err)
 	}

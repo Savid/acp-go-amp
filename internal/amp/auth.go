@@ -230,8 +230,9 @@ func (c *Client) StartAuthLogin(ctx context.Context) (*AuthLogin, error) {
 	if err != nil {
 		return nil, fmt.Errorf("amp login: %w", err)
 	}
-	if err := handoffGeneratedNativeTree(shim.dir, c.options.Isolation); err != nil {
-		return nil, errors.Join(fmt.Errorf("amp login browser shim: %w", err), shim.remove())
+
+	if handoffErr := handoffGeneratedNativeTree(shim.dir, c.options.Isolation); handoffErr != nil {
+		return nil, errors.Join(fmt.Errorf("amp login browser shim: %w", handoffErr), shim.remove())
 	}
 
 	cmd.Env = shim.environ(environment)

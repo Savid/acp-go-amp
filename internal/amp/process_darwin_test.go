@@ -17,6 +17,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 type darwinTestReadCloser struct {
@@ -170,7 +172,11 @@ func TestInheritedDarwinLaunchInputAndBoundedStatus(t *testing.T) {
 		return file
 	}
 	closeExecFD := -1
-	darwinLaunchCloseExec = func(fd int) { closeExecFD = fd }
+	darwinLaunchCloseExec = func(fd int) error {
+		closeExecFD = fd
+
+		return nil
+	}
 	config, gate, status, err := inheritedDarwinLaunchInput()
 	if err != nil || config == nil || gate == nil || status == nil || closeExecFD != int(files[2].Fd()) {
 		t.Fatalf("inherited input = (%v,%v,%v), close-on-exec=%d, err=%v", config, gate, status, closeExecFD, err)
@@ -178,6 +184,28 @@ func TestInheritedDarwinLaunchInputAndBoundedStatus(t *testing.T) {
 	_ = config.Close()
 	_ = gate.Close()
 	_ = status.Close()
+
+	files = make([]*os.File, 3)
+	for fileIndex := range files {
+		file, createErr := os.CreateTemp(t.TempDir(), "descriptor")
+		if createErr != nil {
+			t.Fatal(createErr)
+		}
+		files[fileIndex] = file
+		defer file.Close()
+	}
+	index = 0
+	darwinLaunchOpenFile = func(uintptr, string) *os.File {
+		file := files[index]
+		index++
+
+		return file
+	}
+	wantCloseExec := errors.New("close-on-exec")
+	darwinLaunchCloseExec = func(int) error { return wantCloseExec }
+	if _, _, _, err = inheritedDarwinLaunchInput(); !errors.Is(err, wantCloseExec) {
+		t.Fatalf("inherited close-on-exec failure = %v", err)
+	}
 
 	index = 0
 	darwinLaunchOpenFile = func(uintptr, string) *os.File {
@@ -198,6 +226,49 @@ func TestInheritedDarwinLaunchInputAndBoundedStatus(t *testing.T) {
 		t.Fatalf("bounded status length=%d closed=%v", writer.Len(), writer.closed)
 	}
 	reportDarwinLaunchStatus(nil, errors.New("ignored"))
+}
+
+func TestDarwinLaunchCloseOnExecChecked(t *testing.T) {
+	original := darwinLaunchFcntl
+	t.Cleanup(func() { darwinLaunchFcntl = original })
+
+	calls := 0
+	darwinLaunchFcntl = func(_ uintptr, command int, argument int) (int, error) {
+		calls++
+		if calls == 1 {
+			if command != unix.F_GETFD || argument != 0 {
+				t.Fatalf("get flags call = (%d,%d)", command, argument)
+			}
+
+			return 0, nil
+		}
+		if command != unix.F_SETFD || argument&unix.FD_CLOEXEC == 0 {
+			t.Fatalf("set flags call = (%d,%d)", command, argument)
+		}
+
+		return 0, nil
+	}
+	if err := setDarwinLaunchCloseOnExec(5); err != nil || calls != 2 {
+		t.Fatalf("checked close-on-exec calls=%d err=%v", calls, err)
+	}
+
+	want := errors.New("fcntl")
+	darwinLaunchFcntl = func(uintptr, int, int) (int, error) { return 0, want }
+	if err := setDarwinLaunchCloseOnExec(5); !errors.Is(err, want) {
+		t.Fatalf("get flags error = %v", err)
+	}
+	calls = 0
+	darwinLaunchFcntl = func(uintptr, int, int) (int, error) {
+		calls++
+		if calls == 1 {
+			return 0, nil
+		}
+
+		return 0, want
+	}
+	if err := setDarwinLaunchCloseOnExec(5); !errors.Is(err, want) {
+		t.Fatalf("set flags error = %v", err)
+	}
 }
 
 func TestAwaitDarwinNativeExecStatus(t *testing.T) {
@@ -507,7 +578,7 @@ func TestProcessTreeCommandDarwinGateAndClose(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	command := &processTreeCommand{startGate: write, control: read, ready: read}
+	command := &processTreeCommand{startGate: write, control: read, ready: read, completion: read}
 	if releaseErr := command.releaseStartGate(); releaseErr != nil {
 		t.Fatal(releaseErr)
 	}
@@ -525,6 +596,31 @@ func TestProcessTreeCommandDarwinGateAndClose(t *testing.T) {
 	}
 	if err := (&processTreeCommand{startGate: closedWrite}).releaseStartGate(); err == nil {
 		t.Fatal("closed gate release error = nil")
+	}
+}
+
+func TestProcessTreeUsesAuthoritativeCustomWait(t *testing.T) {
+	originalReady := processTreeReadyWait
+	processTreeReadyWait = func(*processTreeCommand) error { return nil }
+	t.Cleanup(func() { processTreeReadyWait = originalReady })
+
+	cmd := exec.Command("/usr/bin/true")
+	waitCalls := 0
+	launch := &processTreeCommand{
+		cmd: cmd,
+		wait: func() error {
+			waitCalls++
+
+			return cmd.Wait()
+		},
+	}
+	tree, err := startProcessTree(launch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitErr, completed := tree.waiter.await(t.Context())
+	if !completed || waitErr != nil || waitCalls != 1 {
+		t.Fatalf("custom wait completed=%t calls=%d err=%v", completed, waitCalls, waitErr)
 	}
 }
 

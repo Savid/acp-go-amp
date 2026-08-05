@@ -31,34 +31,6 @@ func handoffGeneratedNativeTreePlatform(root string, uid uint32, gid uint32) err
 	return nil
 }
 
-func validateNativeOwnedDirectoryPlatform(root string, uid uint32, gid uint32) error {
-	trustedUID := uint32(os.Geteuid())
-	trustedGID := uint32(os.Getegid())
-	directory, err := openNativeOwnershipDirectory(root, func(stat unix.Stat_t, final bool) error {
-		return validateDurableNativeAncestor(stat, final, trustedUID, trustedGID, uid, gid)
-	})
-	if err != nil {
-		return fmt.Errorf("open native-owned directory: %w", err)
-	}
-	defer directory.Close()
-
-	var stat unix.Stat_t
-	if err := unix.Fstat(int(directory.Fd()), &stat); err != nil {
-		return fmt.Errorf("inspect native-owned directory: %w", err)
-	}
-	if stat.Mode&unix.S_IFMT != unix.S_IFDIR {
-		return errors.New("native-owned path is not a directory")
-	}
-	if stat.Uid != uid || stat.Gid != gid {
-		return fmt.Errorf("native-owned directory is uid=%d gid=%d, want uid=%d gid=%d", stat.Uid, stat.Gid, uid, gid)
-	}
-	if stat.Mode&0o022 != 0 || stat.Mode&0o700 != 0o700 {
-		return fmt.Errorf("native-owned directory mode %#o is unsafe", stat.Mode&0o7777)
-	}
-
-	return nil
-}
-
 func openNativeOwnershipDirectory(name string, validate func(unix.Stat_t, bool) error) (*os.File, error) {
 	if !filepath.IsAbs(name) {
 		return nil, errors.New("native path must be absolute")

@@ -2,11 +2,74 @@ package ampacp
 
 import (
 	"encoding/json"
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/stretchr/testify/require"
 )
+
+type processIsolationCapabilityStub struct{}
+
+func (processIsolationCapabilityStub) Duplicate() (*os.File, error) { return os.Open(os.DevNull) }
+
+func TestStandaloneProcessIsolationValidation(t *testing.T) {
+	original := runtimeGOOS
+	runtimeGOOS = platformLinux
+	t.Cleanup(func() { runtimeGOOS = original })
+
+	capability := processIsolationCapabilityStub{}
+	valid := &ProcessIsolation{
+		UID: 1, GID: 2, BaseEnvironment: map[string]string{},
+		StandaloneOwnerID: "A._:@/-0zZ9", StandaloneStateRoot: "/srv/amp/state",
+	}
+	if err := validateProcessIsolationOption(valid); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name      string
+		isolation *ProcessIsolation
+	}{
+		{name: "identity only", isolation: &ProcessIsolation{UID: 1, GID: 2, IdentityLock: capability}},
+		{name: "domain only", isolation: &ProcessIsolation{UID: 1, GID: 2, AuthorityDomain: capability}},
+		{name: "borrowed with owner", isolation: &ProcessIsolation{UID: 1, GID: 2, IdentityLock: capability, AuthorityDomain: capability, StandaloneOwnerID: "owner"}},
+		{name: "bad owner", isolation: &ProcessIsolation{UID: 1, GID: 2, StandaloneOwnerID: "-owner", StandaloneStateRoot: "/srv/amp/state"}},
+		{name: "bad root", isolation: &ProcessIsolation{UID: 1, GID: 2, StandaloneOwnerID: "owner", StandaloneStateRoot: "relative"}},
+	}
+	for _, test := range tests {
+		if err := validateProcessIsolationOption(test.isolation); err == nil {
+			t.Fatalf("%s isolation accepted", test.name)
+		}
+	}
+	if err := validateProcessIsolationOption(&ProcessIsolation{
+		UID: 1, GID: 2, IdentityLock: capability, AuthorityDomain: capability,
+	}); err != nil {
+		t.Fatalf("borrowed isolation rejected: %v", err)
+	}
+
+	for _, ownerID := range []string{"", strings.Repeat("a", 257), "-owner", "owner id"} {
+		if validStandaloneOwnerID(ownerID) {
+			t.Fatalf("invalid owner id accepted: %q", ownerID)
+		}
+	}
+	if !validStandaloneOwnerID("A._:@/-0zZ9") {
+		t.Fatal("valid owner id rejected")
+	}
+
+	for _, stateRoot := range []string{
+		"", strings.Repeat("x", 4097), string([]byte{'/', 0xff}), "relative", "/srv/../state", "/",
+		"/srv/state\x00", "/var/lib/acp-go/agent-identities", "/var/lib/acp-go/agent-identities/amp", "/srv/\nstate",
+	} {
+		if validStandaloneStateRootPath(stateRoot) {
+			t.Fatalf("invalid standalone state root accepted: %q", stateRoot)
+		}
+	}
+	if !validStandaloneStateRootPath("/srv/amp/state") {
+		t.Fatal("valid standalone state root rejected")
+	}
+}
 
 func TestMCPConfig(t *testing.T) {
 	cfg, err := mcpConfigJSON([]acp.McpServer{

@@ -15,7 +15,9 @@ var (
 	processIsolationGetgroups = os.Getgroups
 )
 
-func validateProcessIsolationPlatform() error { return nil }
+func validateProcessIsolationPlatform(isolation *ProcessIsolation) error {
+	return validateStandaloneIdentityDispositionPlatform(isolation)
+}
 
 func applyProcessIsolation(cmd *exec.Cmd, isolation *ProcessIsolation) error {
 	if err := validateProcessIsolation(isolation); err != nil {

@@ -7,7 +7,7 @@ import (
 	"os/exec"
 )
 
-func validateProcessIsolationPlatform() error {
+func validateProcessIsolationPlatform(*ProcessIsolation) error {
 	return errors.New("process isolation is unsupported on this platform")
 }
 func applyProcessIsolation(_ *exec.Cmd, isolation *ProcessIsolation) error {

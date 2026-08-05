@@ -248,6 +248,10 @@ func TestAuthDeploymentSupported(t *testing.T) {
 			t.Fatalf("%s account login was reported as supported", platform)
 		}
 	}
+
+	if NewClient(nil, Options{TestOnlyAuthLoginPlatform: linuxPlatform}).AuthDeploymentSupported() {
+		t.Fatal("an invalid isolation policy was reported as auth-capable")
+	}
 }
 
 func TestBuildEnvScrubsTheDisclosureVariables(t *testing.T) {
@@ -507,6 +511,14 @@ func TestStartAuthLoginRejectsAnUnusableLaunch(t *testing.T) {
 	client.checkAuthLoginCompatibility = func(string) error { return nil }
 	if _, err := client.StartAuthLogin(t.Context()); err == nil {
 		t.Fatal("a launch with no Darwin generation factory started a login")
+	}
+
+	handoffClient := newTestClient(t, nil, Options{CLIPath: path, Cwd: t.TempDir()})
+	handoffClient.options.Isolation.TestOnlyNoCredential = false
+	handoffClient.options.Isolation.UID = uint32(os.Geteuid() + 1)
+	handoffClient.options.Isolation.GID = uint32(os.Getegid() + 1)
+	if _, err := handoffClient.StartAuthLogin(t.Context()); err == nil || !strings.Contains(err.Error(), "browser shim") {
+		t.Fatalf("unsupported login shim handoff = %v", err)
 	}
 }
 

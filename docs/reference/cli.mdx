@@ -20,6 +20,8 @@ fields and trailing JSON values are rejected.
 {
   "uid": 20001,
   "gid": 20001,
+  "standaloneOwnerId": "amp-deployment-1",
+  "standaloneStateRoot": "/var/lib/acp-go-amp",
   "baseEnvironment": {
     "PATH": "/usr/local/bin:/usr/bin:/bin",
     "HOME": "/var/lib/acp-go-amp",
@@ -30,6 +32,17 @@ fields and trailing JSON values are rejected.
   "inheritEnvironment": []
 }
 ```
+
+`standaloneOwnerId` is the nonsecret, case-sensitive deployment identity:
+1--256 ASCII bytes, beginning alphanumeric, with remaining bytes limited to
+alphanumerics and `._:@/-`. `standaloneStateRoot` is the existing dedicated
+durable provider state root, is neither `/` nor equal to or beneath
+`/var/lib/acp-go/agent-identities`. Its clean absolute UTF-8 path is limited to
+4096 bytes with no control character, and Linux resolves the complete path
+componentwise from `/` without following symlinks or magic links. Every
+ancestor is root-owned and not group/world writable; the final directory is
+owned by the configured UID:GID with mode `0700`. The authority binds its exact
+path, device, and inode.
 
 The supervisor must run as root. The UID/GID must name a nonroot account with
 that same-name private primary group, no supplementary groups, and a target-owned mode
@@ -55,7 +68,7 @@ home for native tools.
 |---|---|
 | `-path` | Amp executable path. Defaults to `amp` on `PATH`. |
 | `-process-isolation-config` | Required absolute path to the standalone Linux isolation policy described above. |
-| `-scratch-dir` | Parent directory for ephemeral session scratch: the isolated per-session native HOME/XDG state, the startup probe directory, and any temp. Empty means the system temp directory. |
+| `-scratch-dir` | Parent directory for ephemeral scratch: isolated per-session native HOME/XDG state, the startup/discovery probes' isolated HOME/XDG/settings/MCP residence, and any temp. Empty means the system temp directory. |
 | `-home` | Native config/auth root. Accepted on the adapter surface; non-empty values fail session start because Amp has no such root — its per-session isolated HOME/XDG state lives under `-scratch-dir` instead. |
 | `-provider-auth-root` | Absolute durable directory holding the values-free provider-auth ledger. Empty leaves every `_amp/auth/*` method unadvertised. Darwin and Windows authorization fails before native login. See [Authentication](/docs/features/authentication#broker-a-login). |
 | `-provider-auth-direct-home` | Accepted on the adapter surface; non-empty values fail session start because `disconnect` releases only the ledger slot a connection owns and reads no operator home. |

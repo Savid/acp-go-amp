@@ -125,9 +125,11 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 		ampacp.WithLogger(logger),
 		ampacp.WithAgentVersion(agentVer),
 		ampacp.WithProcessIsolation(ampacp.ProcessIsolation{
-			UID:             isolation.UID,
-			GID:             isolation.GID,
-			BaseEnvironment: isolation.BaseEnvironment,
+			UID:                 isolation.UID,
+			GID:                 isolation.GID,
+			BaseEnvironment:     isolation.BaseEnvironment,
+			StandaloneOwnerID:   isolation.StandaloneOwnerID,
+			StandaloneStateRoot: isolation.StandaloneStateRoot,
 		}),
 	)
 

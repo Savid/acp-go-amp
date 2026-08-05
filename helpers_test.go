@@ -18,7 +18,8 @@ func testContainmentOptions(options []Option) []Option {
 	}
 	options = append(options, WithProcessIsolation(ProcessIsolation{
 		UID: uint32(os.Geteuid()), GID: uint32(os.Getegid()),
-		BaseEnvironment: baseEnvironment,
+		BaseEnvironment:   baseEnvironment,
+		StandaloneOwnerID: "acp-go-amp-tests", StandaloneStateRoot: os.TempDir(),
 	}))
 	options = append(options, func(options *Options) {
 		options.testOnlyNoCredential = true

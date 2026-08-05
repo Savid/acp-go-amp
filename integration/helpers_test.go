@@ -362,12 +362,7 @@ func connectLiveAgentBinary(
 		t.Skipf("set %s to run compiled binary integration coverage", envAgentBinary)
 	}
 
-	args := make([]string, 0, 3)
-	if runtime.GOOS == "darwin" {
-		args = append(args, "-darwin-best-effort-containment")
-	}
-
-	args = append(args, "-path", ampPath)
+	args := []string{"-path", ampPath}
 
 	cmd := exec.Command(agentPath, args...) // #nosec G204 -- path is the test-built agent binary.
 	cmd.Env = append(os.Environ(), envAmpAPIKey+"=fake-integration-key")

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -91,12 +92,23 @@ const (
 // Option configures an Agent.
 type Option func(*Options)
 
+type ProcessIdentityLockCapability interface {
+	Duplicate() (*os.File, error)
+}
+
 // ProcessIsolation is the mandatory operating-system identity and complete
 // base environment for every native Amp process.
 type ProcessIsolation struct {
 	UID             uint32
 	GID             uint32
 	BaseEnvironment map[string]string
+	// IdentityLock is an optional trusted-supervisor descriptor for the
+	// host-global UID lock. Linux supervisors validate it and never expose it to
+	// the native Amp process. Standalone embeddings should leave it nil.
+	IdentityLock        ProcessIdentityLockCapability
+	AuthorityDomain     ProcessIdentityLockCapability
+	StandaloneOwnerID   string
+	StandaloneStateRoot string
 }
 
 // ConcurrencyLimits configures ACP backpressure limits.
@@ -309,9 +321,9 @@ func WithHome(path string) Option {
 
 // WithScratchDir sets the sole parent directory for all ephemeral on-disk
 // materialization: the per-session isolated HOME/XDG settings directories, the
-// startup probe's settings directory, and any other temporary state. An empty
-// value falls back to the system temp directory. The directory is created 0700
-// when it does not yet exist.
+// startup/discovery probes' isolated HOME/XDG/settings/MCP residence, and any
+// other temporary state. An empty value falls back to the system temp directory.
+// The directory is created 0700 when it does not yet exist.
 func WithScratchDir(dir string) Option {
 	return func(options *Options) {
 		options.ScratchDir = dir

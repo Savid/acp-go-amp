@@ -16,7 +16,10 @@ func TestProcessIsolationEnvironmentIdentityAndLookup(t *testing.T) {
 	if err := os.WriteFile(executable, []byte("#!/bin/sh\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	isolation := &ProcessIsolation{UID: 11, GID: 22, BaseEnvironment: map[string]string{"PATH": dir, "BASE": "one"}}
+	isolation := &ProcessIsolation{
+		UID: 11, GID: 22, BaseEnvironment: map[string]string{"PATH": dir, "BASE": "one"},
+		StandaloneOwnerID: "process-isolation-test", StandaloneStateRoot: "/var/lib/acp-go-amp-test",
+	}
 	environment, err := BuildEnvWithIsolation(isolation, map[string]string{"BASE": "two", "EXPLICIT": "yes"}, "/work")
 	if err != nil {
 		t.Fatal(err)
@@ -144,7 +147,10 @@ func TestRepeatedEnvironmentBuildFailsClosed(t *testing.T) {
 	if err := os.WriteFile(executable, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	policy := &ProcessIsolation{UID: 11, GID: 22, BaseEnvironment: map[string]string{"PATH": dir}}
+	policy := &ProcessIsolation{
+		UID: 11, GID: 22, BaseEnvironment: map[string]string{"PATH": dir},
+		StandaloneOwnerID: "repeated-environment-test", StandaloneStateRoot: "/var/lib/acp-go-amp-test",
+	}
 
 	originalCommand := commandContext
 	t.Cleanup(func() { commandContext = originalCommand })

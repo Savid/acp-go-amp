@@ -924,36 +924,6 @@ func processIsolationBase(isolation *ProcessIsolation) map[string]string {
 	return isolation.BaseEnvironment
 }
 
-func (a *Agent) ensureStartupWithProbe(
-	ctx context.Context,
-	cwd string,
-	env map[string]string,
-	probe func(context.Context, *amp.Client) error,
-) error {
-	scratchParent, err := ensureScratchParent(a.options.ScratchDir)
-	if err != nil {
-		return acp.NewInternalError(map[string]any{jsonFieldError: err.Error()})
-	}
-
-	options := amp.Options{
-		CLIPath:                    a.options.ExecutablePath,
-		Cwd:                        cwd,
-		Env:                        env,
-		ScratchParent:              scratchParent,
-		MaxLineBytes:               a.options.runtime.maxJSONLineBytes,
-		OnGoroutinePanic:           a.onNativeGoroutinePanic,
-		NewProcessSnapshotObserver: a.newProcessSnapshotObserver,
-	}
-	a.configureNativeClient(&options, RuntimeResourceDiscovery)
-
-	client := amp.NewClient(a.log, options)
-	if err := probe(ctx, client); err != nil {
-		return nativeInternalError(err)
-	}
-
-	return nil
-}
-
 func missingAPIKeyError() error {
 	return acp.NewInternalError(map[string]any{jsonFieldError: missingAPIKeyMessage})
 }

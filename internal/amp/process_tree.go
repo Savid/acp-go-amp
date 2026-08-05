@@ -29,6 +29,8 @@ type processTreeCommand struct {
 	startGate       *os.File
 	control         *os.File
 	ready           *os.File
+	completion      *os.File
+	wait            func() error
 	bestEffort      bool
 	generation      *DarwinGeneration
 	releaseNative   func()
@@ -150,6 +152,11 @@ func (c *processTreeCommand) close() error {
 	if c.ready != nil {
 		_ = c.ready.Close()
 		c.ready = nil
+	}
+
+	if c.completion != nil {
+		_ = c.completion.Close()
+		c.completion = nil
 	}
 
 	return finishErr

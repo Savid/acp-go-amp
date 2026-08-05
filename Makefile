@@ -1,7 +1,7 @@
 .DEFAULT_GOAL := help
 
 .PHONY: test-trusted-supervisor
-.PHONY: audit build clean coverage-check docs-audit fmt fmt-check help lint modernize-check test test/cover test-cross-compile test-integration-attended test-integration-cover test-integration-keystore test-integration-live test-integration-smoke tidy vuln
+.PHONY: audit build clean coverage-check docs-audit fmt fmt-check help lint modernize-check test test/cover test-cross-compile test-integration-attended test-integration-cover test-integration-keystore test-integration-live test-integration-native-browser test-integration-smoke tidy vuln
 
 GOLANGCI_LINT_VERSION ?= v2.12.2
 GOLANGCI_LINT := go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
@@ -24,11 +24,26 @@ test:
 test-trusted-supervisor:
 	@test "$$(uname -s)" = Linux
 	@test "$$(id -u)" -eq 0
-	go test -race -count=1 -v -run '^(Test.*(ProcessIsolationActual|TrustedSupervisor|AgentIdentityLock|PersistentProof|SupervisorConfigIsSealed).*)$$' ./...
+	@for directory in /var/lib/acp-go /var/lib/acp-go/agent-identities; do if [ ! -e "$$directory" ] && [ ! -L "$$directory" ]; then install -d -o root -g root -m 0700 "$$directory"; fi; [ "$$(stat -c '%F %u %g %a' -- "$$directory")" = 'directory 0 0 700' ] || { echo "unsafe trusted-supervisor authority directory $$directory" >&2; exit 1; }; done
+	@selector='^(Test.*(ProcessIsolationActual|TrustedSupervisor|SupervisorGuardianSIGKILL|SupervisorLivenessSIGKILL|GeneratedNative|BorrowedIdentityAdoption|BorrowedDomainAdoption|BorrowedDisposition|AgentIdentityLock|AgentStandalone|AuthorityDomain|IdentityDisposition|PersistentProof|SupervisorConfigIsSealed|CommandCreatorThread|ProviderCreator|SecurityLimits).*)$$'; listing=$$(mktemp); log=$$(mktemp); rc=$$(mktemp); module=$$(go list -m); status=$$?; \
+	[ "$$status" -eq 0 ] || { rm -f "$$listing" "$$log" "$$rc"; exit "$$status"; }; \
+	go test -list "$$selector" ./... >"$$listing"; status=$$?; \
+	[ "$$status" -eq 0 ] || { rm -f "$$listing" "$$log" "$$rc"; exit "$$status"; }; \
+	required='TrustedSupervisor SupervisorGuardianSIGKILL SupervisorGuardianSIGKILLBeforeNativeLaunchRefusesStartAndCompletesAfterECHILD SupervisorLivenessSIGKILL GeneratedNative BorrowedIdentityAdoption BorrowedDomainAdoption BorrowedDisposition AgentIdentityLock AgentStandalone AuthorityDomain IdentityDisposition CommandCreatorThread SecurityLimits ProcessIsolationActual'; case "$$module" in github.com/savid/acp-go-amp|github.com/savid/acp-go-claude|github.com/savid/acp-go-hermes|github.com/savid/acp-go-pi) ;; github.com/savid/acp-go-codex|github.com/savid/acp-go-opencode) required="$$required PersistentProof SupervisorConfigIsSealed ProviderCreator" ;; *) rm -f "$$listing" "$$log" "$$rc"; echo "unrecognized trusted-supervisor module $$module"; exit 1 ;; esac; \
+	for class in $$required; do grep -Eq "^Test.*$${class}" "$$listing" || { rm -f "$$listing" "$$log" "$$rc"; echo "trusted-supervisor selector discovered no $${class} tests"; exit 1; }; done; \
+	expected=$$(grep -Ec '^Test' "$$listing" || true); rm -f "$$listing"; \
+	[ "$$expected" -gt 0 ] || { rm -f "$$log" "$$rc"; echo 'trusted-supervisor selector discovered no tests'; exit 1; }; \
+	{ go test -race -count=1 -json -run "$$selector" ./...; echo $$? >"$$rc"; } | tee "$$log"; \
+	status=$$(cat "$$rc"); passed=$$(grep -Ec '"Action":"pass","Package":"[^"]+","Test":"Test[^/"]+"' "$$log" || true); skipped=$$(grep -Ec '"Action":"skip","Package":"[^"]+","Test":"Test[^"]+"' "$$log" || true); \
+	rm -f "$$log" "$$rc"; \
+	[ "$$status" -eq 0 ] || exit "$$status"; \
+	[ "$$passed" -eq "$$expected" ] || { echo "trusted-supervisor pass count $$passed, want $$expected"; exit 1; }; \
+	[ "$$skipped" -eq 0 ] || { echo "trusted-supervisor skip count $$skipped, want 0"; exit 1; }
 
 ## coverage-check: require 100% statement coverage with race instrumentation
 coverage-check:
 	go test -race -coverprofile=coverage.out -covermode=atomic ./...
+	@awk 'NR > 1 && $$(NF - 1) > 0 && $$NF == 0 { print "uncovered statement block: " $$0; missed = 1 } END { if (missed) exit 1 }' coverage.out
 	@go tool cover -func=coverage.out | awk 'BEGIN { found = 0 } /^total:/ { found = 1; if ($$3 != "100.0%") { printf "total coverage %s, want 100.0%%\n", $$3; exit 1 } printf "total coverage %s\n", $$3 } END { if (!found) { print "missing total coverage line"; exit 1 } }'
 
 ## test-cross-compile: compile supported packages and fail-closed platform paths
@@ -65,6 +80,17 @@ test-integration-attended:
 ## test-integration-keystore: run the three-configuration credential-residence matrix
 test-integration-keystore:
 	ACP_GO_AMP_RUN_INTEGRATION=1 ACP_GO_AMP_RUN_KEYSTORE=1 go test -race -count=1 -tags=integration -timeout=900s -v -run TestKeystore ./...
+
+## test-integration-native-browser: require one pinned native Linux launcher-interception proof
+test-integration-native-browser:
+	@log=$$(mktemp); rc=$$(mktemp); \
+	{ ACP_GO_AMP_RUN_INTEGRATION=1 go test -race -count=1 -tags=integration -timeout=1200s -v -run '^TestNativeBrowserPinnedLinuxAmpLoginExecsOnlyShimLauncher$$' ./integration/... 2>&1; echo $$? >"$$rc"; } | tee "$$log"; \
+	status=$$(cat "$$rc"); passed=$$(grep -c '^--- PASS: TestNativeBrowserPinnedLinuxAmpLoginExecsOnlyShimLauncher ' "$$log" || true); skipped=$$(grep -Ec '^[[:space:]]*--- SKIP: TestNativeBrowserPinnedLinuxAmpLoginExecsOnlyShimLauncher(/| )' "$$log" || true); empty=$$(grep -c 'no tests to run' "$$log" || true); \
+	rm -f "$$log" "$$rc"; \
+	[ "$$status" -eq 0 ] || exit "$$status"; \
+	[ "$$passed" -eq 1 ] || { echo "native browser pass count $$passed, want exactly 1"; exit 1; }; \
+	[ "$$skipped" -eq 0 ] || { echo 'required native browser canary skipped'; exit 1; }; \
+	[ "$$empty" -eq 0 ] || { echo 'required native browser selector ran no tests'; exit 1; }
 
 ## test-integration-cover: run smoke integration tests with compiled binary coverage
 test-integration-cover:
@@ -165,6 +191,12 @@ docs-audit:
 	@rg -q 'amp_auth_failed' docs/reference/acp-methods.mdx
 	@rg -q 'no Amp-side' docs/features/authentication.mdx
 	@rg -q 'AMP_DISABLE_SECRET_REDACTION' docs/operations/security.mdx
+	@rg -q 'SupervisorGuardianSIGKILL' Makefile
+	@rg -q 'SupervisorLivenessSIGKILL' Makefile
+	@rg -q 'BorrowedIdentityAdoption' Makefile
+	@rg -q 'BorrowedDomainAdoption' Makefile
+	@rg -q 'validateInheritedAgentIdentityFlock' internal/amp/agent_identity_lock_linux.go
+	@rg -q '/proc/self/fdinfo/' docs/operations/security.mdx
 
 ## audit: run local checks
 audit: fmt-check lint build test coverage-check test-cross-compile tidy vuln modernize-check docs-audit

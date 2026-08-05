@@ -750,6 +750,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -777,6 +778,9 @@ func main() {
 		}
 	}
 	record(state, "args.jsonl", args)
+	if mode == "probe-residence" {
+		recordProbeResidence(state, args)
+	}
 	if len(args) > 0 && args[len(args)-1] == "login" {
 		fakeLogin(mode, state)
 		return
@@ -990,6 +994,49 @@ func index(values []string, target string) int {
 		}
 	}
 	return -1
+}
+
+func recordProbeResidence(state string, args []string) {
+	facts := map[string]string{}
+	paths := map[string]string{
+		"home": os.Getenv("HOME"),
+		"config": os.Getenv("XDG_CONFIG_HOME"),
+		"cache": os.Getenv("XDG_CACHE_HOME"),
+		"data": os.Getenv("XDG_DATA_HOME"),
+		"state": os.Getenv("XDG_STATE_HOME"),
+		"settings": argValue(args, "--settings-file"),
+		"mcp": argValue(args, "--mcp-config"),
+	}
+	for name, path := range paths {
+		facts[name] = path
+		if path == "" {
+			continue
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			facts[name+"Error"] = err.Error()
+			continue
+		}
+		facts[name+"Mode"] = strconv.FormatUint(uint64(info.Mode().Perm()), 8)
+		if stat, ok := info.Sys().(*syscall.Stat_t); ok {
+			facts[name+"UID"] = strconv.FormatUint(uint64(stat.Uid), 10)
+			facts[name+"GID"] = strconv.FormatUint(uint64(stat.Gid), 10)
+		}
+		if info.IsDir() {
+			if err := os.WriteFile(filepath.Join(path, ".native-probe"), []byte("ok"), 0600); err != nil {
+				facts[name+"WriteError"] = err.Error()
+			}
+		}
+	}
+	record(state, "probe-residence.jsonl", facts)
+}
+
+func argValue(args []string, name string) string {
+	i := index(args, name)
+	if i < 0 || i+1 >= len(args) {
+		return ""
+	}
+	return args[i+1]
 }
 
 func fakeLogin(mode string, state string) {

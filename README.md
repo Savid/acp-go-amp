@@ -104,6 +104,9 @@ rejects at session start.
   the first prompt, `amp threads continue` afterwards — run with
   isolated native HOME/XDG state, an isolated settings file, and dedicated
   stdout/stderr pipes.
+- Startup and discovery probes run from target-owned isolated HOME/XDG,
+  settings, and MCP paths below `WithScratchDir`; the adapter removes that
+  residence only after process-containment completion is proven.
 - Native-process containment: Linux runs every Amp command under a
   dedicated subreaper that adopts descendants even after `setsid(2)` and
   requires kernel-confirmed child absence before success. Windows native

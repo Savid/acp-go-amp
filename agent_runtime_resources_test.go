@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sync"
 	"testing"
 
@@ -227,8 +226,8 @@ func TestInjectedExecuteContainmentFailureRetainsOnlyOwnedSessionScratch(t *test
 	mu.Lock()
 	require.Zero(t, acquired[RuntimeResourceDiscovery])
 	require.Zero(t, releasedNative[RuntimeResourceDiscovery])
-	require.Zero(t, reserved[RuntimeResourceDiscovery])
-	require.Zero(t, releasedScratch[RuntimeResourceDiscovery])
+	require.Equal(t, 1, reserved[RuntimeResourceDiscovery])
+	require.Equal(t, 1, releasedScratch[RuntimeResourceDiscovery])
 	require.Zero(t, acquired[RuntimeResourceSession])
 	require.Zero(t, releasedNative[RuntimeResourceSession])
 	require.Equal(t, 1, reserved[RuntimeResourceSession])
@@ -283,7 +282,7 @@ func TestExportContainmentFailureRetainsColdSessionResources(t *testing.T) {
 
 	mu.Lock()
 	require.Zero(t, releasedNative[RuntimeResourceDiscovery])
-	require.Zero(t, releasedScratch[RuntimeResourceDiscovery])
+	require.Equal(t, 1, releasedScratch[RuntimeResourceDiscovery])
 	require.Zero(t, releasedNative[RuntimeResourceSession])
 	require.Zero(t, releasedScratch[RuntimeResourceSession])
 	mu.Unlock()
@@ -481,26 +480,24 @@ func TestAmpSessionResourceAdmission(t *testing.T) {
 	_, err = discoveryBlocked.LoadSession(t.Context(), LoadSessionRequest("T-missing", t.TempDir()))
 	require.Contains(t, err.Error(), wantErr.Error())
 
-	if runtime.GOOS == "darwin" {
-		discoveryNativeReleases := 0
-		discoveryScratchBlocked := newTestAgent(WithRuntimeResourceHooks(RuntimeResourceHooks{
-			AcquireNativeRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
-				return func() { discoveryNativeReleases++ }, nil
-			},
-			ReserveScratchRoot: func(_ context.Context, kind RuntimeResourceKind) (func(), error) {
-				if kind == RuntimeResourceDiscovery {
-					return nil, wantErr
-				}
+	discoveryNativeReleases := 0
+	discoveryScratchBlocked := newTestAgent(WithRuntimeResourceHooks(RuntimeResourceHooks{
+		AcquireNativeRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
+			return func() { discoveryNativeReleases++ }, nil
+		},
+		ReserveScratchRoot: func(_ context.Context, kind RuntimeResourceKind) (func(), error) {
+			if kind == RuntimeResourceDiscovery {
+				return nil, wantErr
+			}
 
-				return func() {}, nil
-			},
-		}))
-		_, err = discoveryScratchBlocked.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
-		require.Contains(t, err.Error(), wantErr.Error())
-		_, err = discoveryScratchBlocked.LoadSession(t.Context(), LoadSessionRequest("T-missing", t.TempDir()))
-		require.Contains(t, err.Error(), wantErr.Error())
-		require.Zero(t, discoveryNativeReleases)
-	}
+			return func() {}, nil
+		},
+	}))
+	_, err = discoveryScratchBlocked.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
+	require.Contains(t, err.Error(), wantErr.Error())
+	_, err = discoveryScratchBlocked.LoadSession(t.Context(), LoadSessionRequest("T-missing", t.TempDir()))
+	require.Contains(t, err.Error(), wantErr.Error())
+	require.Zero(t, discoveryNativeReleases)
 
 	scratchBlocked := newTestAgent(WithScratchDir(t.TempDir()), WithRuntimeResourceHooks(RuntimeResourceHooks{
 		ReserveScratchRoot: func(context.Context, RuntimeResourceKind) (func(), error) { return nil, wantErr },
@@ -544,6 +541,14 @@ func TestAmpSessionResourceAdmission(t *testing.T) {
 	configSession := &agentSession{settingsDir: filepath.Join(t.TempDir(), "missing"), mcpConfigJSON: `{}`}
 	_, err = configSession.writePromptMCPConfig()
 	require.Error(t, err)
+	nativeOwnedAgent := newTestAgent()
+	nativeOwnedAgent.options.testOnlyNoCredential = false
+	nativeOwnedAgent.options.ProcessIsolation.UID = uint32(os.Geteuid())
+	nativeOwnedAgent.options.ProcessIsolation.GID = uint32(os.Getegid())
+	configSession = &agentSession{agent: nativeOwnedAgent, settingsDir: t.TempDir(), mcpConfigJSON: `{}`}
+	mcpPath, err := configSession.writePromptMCPConfig()
+	require.NoError(t, err)
+	require.FileExists(t, mcpPath)
 }
 
 func TestClosedAgentRejectsEveryFencedLifecycleMethod(t *testing.T) {

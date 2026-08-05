@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"runtime"
 	"sync/atomic"
 	"testing"
@@ -35,6 +36,47 @@ func newTestClient(t *testing.T, logger *slog.Logger, options Options) *Client {
 	return client
 }
 
+func newTestProbeClient(t *testing.T, logger *slog.Logger, options Options) *Client {
+	t.Helper()
+	root := t.TempDir()
+	settingsFile := filepath.Join(root, "xdg-config", "amp", "settings.json")
+	for _, path := range []string{
+		filepath.Join(root, "home"),
+		filepath.Join(root, "xdg-config"),
+		filepath.Join(root, "xdg-cache"),
+		filepath.Join(root, "xdg-data"),
+		filepath.Join(root, "xdg-state"),
+		filepath.Dir(settingsFile),
+	} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatalf("create probe residence: %v", err)
+		}
+	}
+	if err := os.WriteFile(settingsFile, AuthSettingsDocument(), 0o600); err != nil {
+		t.Fatalf("write probe settings: %v", err)
+	}
+	mcpFile := filepath.Join(root, "mcp.json")
+	if err := os.WriteFile(mcpFile, []byte("{}\n"), 0o600); err != nil {
+		t.Fatalf("write probe MCP config: %v", err)
+	}
+
+	env := make(map[string]string, len(options.Env)+5)
+	for key, value := range options.Env {
+		env[key] = value
+	}
+	env[envHome] = filepath.Join(root, "home")
+	env[envXDGConfigHome] = filepath.Join(root, "xdg-config")
+	env[envXDGCacheHome] = filepath.Join(root, "xdg-cache")
+	env[dataHomeEnv] = filepath.Join(root, "xdg-data")
+	env[envXDGStateHome] = filepath.Join(root, "xdg-state")
+	options.Env = env
+	options.SettingsFile = settingsFile
+	options.MCPConfigPath = mcpFile
+	options.WritableRoot = root
+
+	return newTestClient(t, logger, options)
+}
+
 func testProcessIsolation() *ProcessIsolation {
 	uid, gid := os.Geteuid(), os.Getegid()
 	if uid == 0 || gid == 0 {
@@ -45,5 +87,40 @@ func testProcessIsolation() *ProcessIsolation {
 		UID: uint32(uid), GID: uint32(gid),
 		BaseEnvironment:      map[string]string{"PATH": os.Getenv("PATH"), "HOME": os.Getenv("HOME")},
 		TestOnlyNoCredential: true,
+	}
+}
+
+func TestNewClientSelectsTheRequestedAuthCompatibilityPolicy(t *testing.T) {
+	linuxClient := NewClient(nil, Options{TestOnlyAuthLoginPlatform: linuxPlatform})
+	if err := linuxClient.checkAuthLoginCompatibility("ignored"); err != nil {
+		t.Fatalf("Linux test compatibility = %v", err)
+	}
+
+	otherClient := NewClient(nil, Options{TestOnlyAuthLoginPlatform: "unsupported"})
+	if err := otherClient.checkAuthLoginCompatibility("ignored"); err != nil {
+		t.Fatalf("unsupported-platform compatibility = %v", err)
+	}
+}
+
+func TestProbeResidenceValidation(t *testing.T) {
+	if err := NewClient(nil, Options{}).validateProbeResidence(); err == nil {
+		t.Fatal("empty probe residence accepted")
+	}
+
+	invalidIsolation := newTestProbeClient(t, nil, Options{})
+	invalidIsolation.options.Isolation = nil
+	if err := invalidIsolation.validateProbeResidence(); err == nil {
+		t.Fatal("probe residence accepted without process isolation")
+	}
+
+	mismatch := newTestProbeClient(t, nil, Options{})
+	mismatch.options.Env[envHome] = t.TempDir()
+	if err := mismatch.validateProbeResidence(); err == nil {
+		t.Fatal("probe residence accepted mismatched HOME")
+	}
+
+	valid := newTestProbeClient(t, nil, Options{})
+	if err := valid.validateProbeResidence(); err != nil {
+		t.Fatalf("valid probe residence rejected: %v", err)
 	}
 }

@@ -79,6 +79,7 @@ func nativeProcessIsolation(isolation *ProcessIsolation, testOnlyNoCredential bo
 
 	return &nativeamp.ProcessIsolation{
 		UID: isolation.UID, GID: isolation.GID, BaseEnvironment: base,
-		TestOnlyNoCredential: testOnlyNoCredential,
+		TestOnlyNoCredential: testOnlyNoCredential, IdentityLock: isolation.IdentityLock, AuthorityDomain: isolation.AuthorityDomain,
+		StandaloneOwnerID: isolation.StandaloneOwnerID, StandaloneStateRoot: isolation.StandaloneStateRoot,
 	}
 }
