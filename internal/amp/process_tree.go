@@ -17,7 +17,9 @@ var ErrProcessContainmentIncomplete = errors.New("amp process containment incomp
 // subreaper supervisor, opted-in Darwin uses its best-effort process group, and
 // unsupported platforms, including Windows, reject the launch.
 type processTreeCommand struct {
-	cmd *exec.Cmd
+	cmd           *exec.Cmd
+	onStartCancel func(func()) func() bool
+	startError    func() error
 	// nativeEnv is the environment the containment boundary settled on for the
 	// native child, published because it is not the environment the caller
 	// handed in: a boundary that redirects the child's roots rewrites it during

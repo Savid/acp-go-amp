@@ -864,6 +864,60 @@ func TestTurnSupervisorConfigAndReadinessBranches(t *testing.T) {
 	}
 }
 
+func TestBlockedStandaloneIdentityStartupHonorsCallerDeadline(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("standalone identity startup proof requires root")
+	}
+	restoreAgentIdentityLockTestSeams(t)
+	const uid, gid = uint32(62095), uint32(62096)
+	identityRoot := configureAgentIdentityLockTestRoot(t)
+	stateRoot := createAgentStandaloneProtectedStateRoot(t, uid, gid)
+	ownerID := "blocked-startup"
+	holder, err := acquireAgentStandaloneIdentity(
+		uid, gid, ownerID, stateRoot, true, identityRoot,
+		make(chan struct{}), make(chan os.Signal),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = holder.Close() })
+
+	markerRoot := t.TempDir()
+	if err = os.Chmod(markerRoot, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(markerRoot, "native-started")
+	native := exec.Command("/bin/sh", "-c", `printf started > "$1"`, "sh", marker)
+	isolation := &ProcessIsolation{
+		UID: uid, GID: gid, BaseEnvironment: map[string]string{},
+		TestOnlyNoCredential: true, TestOnlyIdentityLockRoot: identityRoot,
+		StandaloneOwnerID: ownerID, StandaloneStateRoot: stateRoot,
+	}
+	launch, err := prepareProcessTreeCommand(native, processLaunchOptions{Isolation: isolation})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+	launch.onStartCancel = func(cancel func()) func() bool { return context.AfterFunc(ctx, cancel) }
+	launch.startError = ctx.Err
+
+	started := time.Now()
+	_, err = startProcessTree(launch)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("blocked startup error = %v", err)
+	}
+	if !strings.Contains(err.Error(), "await Amp native supervisor readiness") {
+		t.Fatalf("blocked startup omitted readiness failure: %v", err)
+	}
+	if elapsed := time.Since(started); elapsed >= time.Second {
+		t.Fatalf("blocked startup cancellation took %s", elapsed)
+	}
+	if _, statErr := os.Stat(marker); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("native command started while identity remained held: %v", statErr)
+	}
+}
+
 func TestTurnSupervisorEnvironmentReplacesInternalMode(t *testing.T) {
 	t.Setenv(turnSupervisorModeEnv, "stale")
 	t.Setenv("GORACE", "halt_on_error=1 atexit_sleep_ms=1000")

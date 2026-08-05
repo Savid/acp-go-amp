@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -563,6 +564,56 @@ func TestDarwinReadinessFailureReportsUnreapedWaiter(t *testing.T) {
 	}
 	if cmd.Process != nil {
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+}
+
+func TestProcessTreeStartupCancellationInterruptsReadiness(t *testing.T) {
+	for _, supervised := range []bool{false, true} {
+		t.Run(fmt.Sprintf("supervised_%t", supervised), func(t *testing.T) {
+			readyRead, readyWrite, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = readyWrite.Close() })
+
+			ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+			defer cancel()
+			cmd := exec.Command("/usr/bin/true")
+			configureCommand(cmd)
+			launch := &processTreeCommand{
+				cmd: cmd, ready: readyRead,
+				onStartCancel: func(cancel func()) func() bool { return context.AfterFunc(ctx, cancel) },
+				startError:    ctx.Err,
+			}
+
+			var controlRead *os.File
+			if supervised {
+				controlRead, launch.control, err = os.Pipe()
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer controlRead.Close()
+			}
+
+			started := time.Now()
+			_, err = startProcessTree(launch)
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("startup error = %v", err)
+			}
+			if !strings.Contains(err.Error(), "await Darwin native exec status") {
+				t.Fatalf("startup error omitted readiness failure: %v", err)
+			}
+			if elapsed := time.Since(started); elapsed >= time.Second {
+				t.Fatalf("startup cancellation took %s", elapsed)
+			}
+
+			if controlRead != nil {
+				buffer := make([]byte, 1)
+				if _, readErr := controlRead.Read(buffer); readErr != io.EOF {
+					t.Fatalf("supervisor control read = %v, want EOF", readErr)
+				}
+			}
+		})
 	}
 }
 

@@ -83,7 +83,41 @@ func startProcessTree(launch *processTreeCommand) (*processTree, error) {
 
 	beginWait()
 
-	if err := processTreeReadyWait(launch); err != nil {
+	ready := launch.ready
+	cancellationDone := make(chan error, 1)
+	cancelStartup := func() {
+		if ready != nil {
+			_ = ready.Close()
+		}
+
+		var controlErr error
+		if tree.supervised {
+			controlErr = tree.kill()
+		}
+
+		cancellationDone <- controlErr
+	}
+
+	stopCancellation := func() bool { return true }
+	if launch.onStartCancel != nil {
+		stopCancellation = launch.onStartCancel(cancelStartup)
+	}
+
+	readyErr := processTreeReadyWait(launch)
+
+	var cancellationErr error
+	if !stopCancellation() {
+		cancellationErr = <-cancellationDone
+	}
+
+	if launch.startError != nil {
+		contextErr := launch.startError()
+		if contextErr != nil {
+			readyErr = errors.Join(contextErr, readyErr, cancellationErr)
+		}
+	}
+
+	if readyErr != nil {
 		_ = launch.close()
 		containmentErr := processTreeTerminateAndWait(tree, commandWaitTimeout)
 		waitCtx, cancelWait := context.WithTimeout(context.Background(), commandWaitTimeout)
@@ -95,7 +129,7 @@ func startProcessTree(launch *processTreeCommand) (*processTree, error) {
 			waitErr = fmt.Errorf("%w: wait for failed Amp containment launch: %v", ErrProcessContainmentIncomplete, waitErr)
 		}
 
-		return nil, errors.Join(err, waitErr, containmentErr)
+		return nil, errors.Join(readyErr, waitErr, containmentErr)
 	}
 
 	return tree, nil

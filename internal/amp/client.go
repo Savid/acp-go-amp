@@ -727,6 +727,8 @@ func (c *Client) prepareProcessLaunch(ctx context.Context, cmd *exec.Cmd) (*proc
 	}
 
 	launch.nativeEnv = append([]string(nil), cmd.Env...)
+	launch.onStartCancel = func(cancel func()) func() bool { return context.AfterFunc(ctx, cancel) }
+	launch.startError = ctx.Err
 	launch.bestEffort = c.options.DarwinBestEffort
 	launch.generation = generation
 	launch.acquireNative = func() (func(), error) {
