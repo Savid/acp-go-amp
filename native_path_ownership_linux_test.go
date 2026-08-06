@@ -26,28 +26,28 @@ func TestGeneratedNativeTreeDistinctIdentityTraversal(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(parent) })
 
-	if err := os.Chmod(parent, 0o711); err != nil {
-		t.Fatal(err)
+	if chmodErr := os.Chmod(parent, 0o711); chmodErr != nil {
+		t.Fatal(chmodErr)
 	}
 
 	control := filepath.Join(parent, "control")
 	native := filepath.Join(parent, "native")
-	if err := os.Mkdir(control, 0o700); err != nil {
-		t.Fatal(err)
+	if mkdirErr := os.Mkdir(control, 0o700); mkdirErr != nil {
+		t.Fatal(mkdirErr)
 	}
-	if err := os.WriteFile(filepath.Join(control, "secret"), []byte("root"), 0o600); err != nil {
-		t.Fatal(err)
+	if writeErr := os.WriteFile(filepath.Join(control, "secret"), []byte("root"), 0o600); writeErr != nil {
+		t.Fatal(writeErr)
 	}
-	if err := os.Mkdir(native, 0o700); err != nil {
-		t.Fatal(err)
+	if mkdirErr := os.Mkdir(native, 0o700); mkdirErr != nil {
+		t.Fatal(mkdirErr)
 	}
-	if err := os.WriteFile(filepath.Join(native, "input"), []byte("ok"), 0o600); err != nil {
-		t.Fatal(err)
+	if writeErr := os.WriteFile(filepath.Join(native, "input"), []byte("ok"), 0o600); writeErr != nil {
+		t.Fatal(writeErr)
 	}
 
 	isolation := &ProcessIsolation{UID: 65534, GID: 65534, BaseEnvironment: map[string]string{}}
-	if err := handoffGeneratedNativeTree(native, isolation); err != nil {
-		t.Fatal(err)
+	if handoffErr := handoffGeneratedNativeTree(native, isolation); handoffErr != nil {
+		t.Fatal(handoffErr)
 	}
 
 	command := exec.Command(
@@ -64,8 +64,8 @@ if cat "$2/secret" >/dev/null 2>&1; then exit 42; fi`,
 	command.SysProcAttr = &syscall.SysProcAttr{
 		Credential: &syscall.Credential{Uid: isolation.UID, Gid: isolation.GID, Groups: []uint32{}},
 	}
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("dropped-identity proof: %v: %s", err, output)
+	if output, combinedErr := command.CombinedOutput(); combinedErr != nil {
+		t.Fatalf("dropped-identity proof: %v: %s", combinedErr, output)
 	}
 
 	contents, err := os.ReadFile(filepath.Join(native, "output"))

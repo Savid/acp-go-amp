@@ -118,7 +118,7 @@ func TestTurnSupervisorCovGuardianRefusesBeforeItCanReportCompletion(t *testing.
 		restoreTurnSupervisorSeams(t)
 		turnSupervisorOpenFile = func(uintptr, string) *os.File { return nil }
 		err := runTurnSupervisorGuardian(strings.NewReader("{}"), strings.NewReader(""), io.Discard)
-		if err == nil || !strings.Contains(err.Error(), "Amp guardian completion descriptor is unavailable") {
+		if err == nil || !strings.Contains(err.Error(), "amp guardian completion descriptor is unavailable") {
 			t.Fatalf("absent guardian completion = %v", err)
 		}
 	})
@@ -155,7 +155,7 @@ func TestTurnSupervisorCovGuardianReportsCompletionForEveryPreAuthorityRefusal(t
 		"control_is_not_a_file": {
 			config:  turnSupervisorCovGuardianConfig,
 			control: func(*turnSupervisorCovGuardian) io.Reader { return strings.NewReader("") },
-			message: "Amp guardian control input is not an inheritable file",
+			message: "amp guardian control input is not an inheritable file",
 		},
 		"malformed_config": {
 			config:  func(*testing.T) io.Reader { return strings.NewReader("{") },
@@ -449,7 +449,7 @@ func TestTurnSupervisorCovGuardianContainsWhenLivenessExitsWithoutReportingDone(
 	case <-time.After(10 * time.Second):
 		t.Fatal("guardian did not end the turn when its control channel closed")
 	}
-	if err == nil || !strings.Contains(err.Error(), "Amp liveness exited without completion report") {
+	if err == nil || !strings.Contains(err.Error(), "amp liveness exited without completion report") {
 		t.Fatalf("silent liveness exit = %v", err)
 	}
 	if ready.String() != turnSupervisorReady {
@@ -488,7 +488,7 @@ func TestTurnSupervisorCovGuardianForwardsOnlyRealSignalsToTheLivenessGroup(t *t
 	err := runTurnSupervisorGuardian(
 		turnSupervisorCovGuardianConfig(t), guardian.controlRead, &ready,
 	)
-	if err == nil || !strings.Contains(err.Error(), "Amp liveness exited without completion report") {
+	if err == nil || !strings.Contains(err.Error(), "amp liveness exited without completion report") {
 		t.Fatalf("signalled liveness turn = %v", err)
 	}
 	if ready.String() != turnSupervisorReady {

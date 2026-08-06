@@ -16,7 +16,14 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const maxProcessIsolationConfigSize = 1 << 20
+const (
+	maxProcessIsolationConfigSize = 1 << 20
+	processIsolationPathEnv       = "PATH"
+	processIsolationHomeEnv       = "HOME"
+	processIsolationUserEnv       = "USER"
+	processIsolationLogNameEnv    = "LOGNAME"
+	processIsolationRootHome      = "/root"
+)
 
 var (
 	processIsolationGeteuid       = os.Geteuid
@@ -103,7 +110,7 @@ func validateProcessIsolationConfig(config processIsolationConfig) (processIsola
 	}
 
 	accountGID, err := strconv.ParseUint(account.Gid, 10, 32)
-	if err != nil || uint32(accountGID) != config.GID {
+	if err != nil || accountGID != uint64(config.GID) {
 		return processIsolationConfig{}, fmt.Errorf("gid %d is not uid %d's primary group", config.GID, config.UID)
 	}
 
@@ -175,19 +182,19 @@ func validateProcessIsolationConfig(config processIsolationConfig) (processIsola
 		finalEnvironment[name] = value
 	}
 
-	if finalEnvironment["USER"] != account.Username || finalEnvironment["LOGNAME"] != account.Username {
+	if finalEnvironment[processIsolationUserEnv] != account.Username || finalEnvironment[processIsolationLogNameEnv] != account.Username {
 		return processIsolationConfig{}, fmt.Errorf("USER and LOGNAME must both equal account name %q", account.Username)
 	}
 
-	if finalEnvironment["HOME"] != filepath.Clean(account.HomeDir) || !filepath.IsAbs(finalEnvironment["HOME"]) {
+	if finalEnvironment[processIsolationHomeEnv] != filepath.Clean(account.HomeDir) || !filepath.IsAbs(finalEnvironment[processIsolationHomeEnv]) {
 		return processIsolationConfig{}, fmt.Errorf("HOME must equal account home %q", filepath.Clean(account.HomeDir))
 	}
 
-	if err := processIsolationValidateHome(finalEnvironment["HOME"], config.UID, config.GID); err != nil {
+	if err := processIsolationValidateHome(finalEnvironment[processIsolationHomeEnv], config.UID, config.GID); err != nil {
 		return processIsolationConfig{}, err
 	}
 
-	if err := processIsolationValidatePath(finalEnvironment["PATH"]); err != nil {
+	if err := processIsolationValidatePath(finalEnvironment[processIsolationPathEnv]); err != nil {
 		return processIsolationConfig{}, err
 	}
 
@@ -198,7 +205,7 @@ func validateProcessIsolationConfig(config processIsolationConfig) (processIsola
 }
 
 func validProcessIsolationOwnerID(value string) bool {
-	if len(value) == 0 || len(value) > 256 {
+	if value == "" || len(value) > 256 {
 		return false
 	}
 
@@ -221,7 +228,7 @@ func validProcessIsolationOwnerID(value string) bool {
 }
 
 func validProcessIsolationStateRoot(value string) bool {
-	if len(value) == 0 || len(value) > 4096 || !utf8.ValidString(value) || !filepath.IsAbs(value) ||
+	if value == "" || len(value) > 4096 || !utf8.ValidString(value) || !filepath.IsAbs(value) ||
 		filepath.Clean(value) != value || value == "/" || strings.IndexByte(value, 0) >= 0 {
 		return false
 	}
@@ -242,7 +249,7 @@ func validProcessIsolationStateRoot(value string) bool {
 
 func validateTargetHome(path string, uid uint32, gid uint32) error {
 	cleaned := filepath.Clean(path)
-	if !filepath.IsAbs(path) || cleaned != path || path == "/root" || path == "/nonexistent" {
+	if !filepath.IsAbs(path) || cleaned != path || path == processIsolationRootHome || path == "/nonexistent" {
 		return fmt.Errorf("HOME %q must be a canonical private account home, not /root or /nonexistent", path)
 	}
 
@@ -422,7 +429,7 @@ func prohibitedInheritedEnvironment(name string) bool {
 	}
 
 	switch name {
-	case "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "CDPATH", "GLOBIGNORE", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "PI_CODING_AGENT_DIR", "HERMES_HOME":
+	case processIsolationPathEnv, processIsolationHomeEnv, processIsolationUserEnv, processIsolationLogNameEnv, "SHELL", "TMPDIR", "CDPATH", "GLOBIGNORE", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "PI_CODING_AGENT_DIR", "HERMES_HOME":
 		return true
 	default:
 		return false

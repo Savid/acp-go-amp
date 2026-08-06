@@ -195,7 +195,7 @@ func resolveSeedPath(root, key string) (string, string, error) {
 	}
 
 	cleaned := filepath.Clean(key)
-	if cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
+	if cleaned == "." || cleaned == handoffParentDir || strings.HasPrefix(cleaned, handoffParentDir+string(filepath.Separator)) {
 		return "", "", unsupportedField(field)
 	}
 

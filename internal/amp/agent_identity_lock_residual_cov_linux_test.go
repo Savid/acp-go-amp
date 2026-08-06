@@ -43,7 +43,7 @@ func identityLockResRewriteMarkerOnNthRead(t *testing.T, name, payload string, r
 func identityLockResCleanMarker(uid, gid uint32, key string) string {
 	return `{"version":2,"uid":` + strconv.FormatUint(uint64(uid), 10) +
 		`,"gid":` + strconv.FormatUint(uint64(gid), 10) +
-		`,"sessionKey":"` + key + `","state":"clean-ready"}` + "\n"
+		`,"ownerDigest":"` + key + `","state":"clean-ready"}` + "\n"
 }
 
 // TestIdentityLockResStandaloneDispositionCatchesAMarkerRewrittenAfterTheAudit

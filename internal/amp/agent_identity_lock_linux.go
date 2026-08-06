@@ -262,8 +262,8 @@ func adoptAgentIdentityLock(file *os.File, uid uint32, testOnly bool, testRoot s
 		}
 
 		runRoot = testRoot
-		trustedUID = uint32(os.Geteuid())
-		trustedGID = uint32(os.Getegid())
+		trustedUID = effectiveUID()
+		trustedGID = effectiveGID()
 	} else if testRoot != "" {
 		return fail(errors.New("test agent identity lock root is forbidden"))
 	}
@@ -325,8 +325,8 @@ func adoptAgentAuthorityDomain(file *os.File, testOnly bool, testRoot string) (*
 		}
 
 		runRoot = testRoot
-		trustedUID = uint32(os.Geteuid())
-		trustedGID = uint32(os.Getegid())
+		trustedUID = effectiveUID()
+		trustedGID = effectiveGID()
 	} else if testRoot != "" {
 		return fail(errors.New("test agent identity lock root is forbidden"))
 	}
@@ -346,7 +346,7 @@ func adoptAgentAuthorityDomain(file *os.File, testOnly bool, testRoot string) (*
 		return fail(err)
 	}
 
-	const name = "domain.lock"
+	name := agentAuthorityDomainLockName
 	if err = agentIdentityDirectoryFstatat(int(directory.Fd()), name, &named, unix.AT_SYMLINK_NOFOLLOW); err != nil {
 		return fail(fmt.Errorf("inspect named agent authority domain %s: %w", name, err))
 	}
@@ -401,8 +401,8 @@ func validateBorrowedAgentIdentityDisposition(uid, gid uint32, testOnly bool, te
 		}
 
 		runRoot = testRoot
-		trustedUID = uint32(os.Geteuid())
-		trustedGID = uint32(os.Getegid())
+		trustedUID = effectiveUID()
+		trustedGID = effectiveGID()
 	} else if testRoot != "" {
 		return errors.New("test agent identity lock root is forbidden")
 	}
@@ -413,8 +413,8 @@ func validateBorrowedAgentIdentityDisposition(uid, gid uint32, testOnly bool, te
 	}
 	defer directory.Close()
 
-	if err = rejectBorrowedAgentIdentityTemporaries(directory); err != nil {
-		return err
+	if rejectErr := rejectBorrowedAgentIdentityTemporaries(directory); rejectErr != nil {
+		return rejectErr
 	}
 
 	deadline := time.Now().Add(agentStandaloneClaimMax)
@@ -450,7 +450,7 @@ func validateBorrowedAgentIdentityDisposition(uid, gid uint32, testOnly bool, te
 		return fmt.Errorf("load borrowed agent identity disposition: %w", err)
 	}
 
-	if marker.State != "active" || marker.GID != gid {
+	if marker.State != agentStandaloneActive || marker.GID != gid {
 		return fmt.Errorf("borrowed agent identity uid %d does not have its matching ownerless ACTIVE disposition", uid)
 	}
 
@@ -472,8 +472,8 @@ func validateStandaloneAgentIdentityDisposition(
 		}
 
 		runRoot = testRoot
-		trustedUID = uint32(os.Geteuid())
-		trustedGID = uint32(os.Getegid())
+		trustedUID = effectiveUID()
+		trustedGID = effectiveGID()
 	} else if testRoot != "" {
 		return errors.New("test agent identity lock root is forbidden")
 	}
@@ -484,8 +484,8 @@ func validateStandaloneAgentIdentityDisposition(
 	}
 	defer directory.Close()
 
-	if err = rejectBorrowedAgentIdentityTemporaries(directory); err != nil {
-		return err
+	if rejectErr := rejectBorrowedAgentIdentityTemporaries(directory); rejectErr != nil {
+		return rejectErr
 	}
 
 	deadline := time.Now().Add(agentStandaloneClaimMax)
@@ -510,7 +510,7 @@ func validateStandaloneAgentIdentityDisposition(
 	}
 
 	sessionKey := agentStandaloneSessionKey(expected)
-	if marker.State != "active" || marker.GID != expected.GID || marker.SessionKey != sessionKey || len(marker.Paths) != 0 {
+	if marker.State != agentStandaloneActive || marker.GID != expected.GID || marker.OwnerDigest != sessionKey || len(marker.Paths) != 0 {
 		return fmt.Errorf("standalone agent identity uid %d does not retain its exact ACTIVE disposition", expected.UID)
 	}
 
@@ -573,13 +573,13 @@ func proveInheritedAgentIdentityLock(
 		}
 	}()
 
-	if err = validateAgentIdentityLockFile(contender, trustedUID, trustedGID); err != nil {
-		return err
+	if validateErr := validateAgentIdentityLockFile(contender, trustedUID, trustedGID); validateErr != nil {
+		return validateErr
 	}
 
 	var contenderStat unix.Stat_t
-	if err = agentIdentityLockFstat(contenderFD, &contenderStat); err != nil {
-		return err
+	if agentErr := agentIdentityLockFstat(contenderFD, &contenderStat); agentErr != nil {
+		return agentErr
 	}
 
 	if contenderStat.Dev != descriptor.Dev || contenderStat.Ino != descriptor.Ino {
@@ -616,8 +616,8 @@ func validateInheritedAgentIdentityFlock(file *os.File, descriptor unix.Stat_t, 
 
 		lockLines++
 
-		if err = validateInheritedAgentIdentityFlockLine(fields, descriptor, wantMode); err != nil {
-			return err
+		if validateErr := validateInheritedAgentIdentityFlockLine(fields, descriptor, wantMode); validateErr != nil {
+			return validateErr
 		}
 	}
 

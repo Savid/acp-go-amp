@@ -137,7 +137,7 @@ func TestBorrowedDispositionRequiresOwnerlessActiveWithoutMutation(t *testing.T)
 	}
 
 	clean, err := json.Marshal(agentStandaloneMarker{
-		Version: 2, UID: uid, GID: gid, SessionKey: "host-owned-session", State: "clean-ready",
+		Version: 2, UID: uid, GID: gid, OwnerDigest: "host-owned-session", State: "clean-ready",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -151,7 +151,7 @@ func TestBorrowedDispositionRequiresOwnerlessActiveWithoutMutation(t *testing.T)
 
 	for name, payload := range map[string][]byte{
 		"malformed": []byte("{}\n"),
-		"duplicate": []byte(`{"version":2,"uid":62401,"gid":62402,"sessionKey":"host-owned-session","state":"active","state":"active","leaseId":"0123456789abcdef0123456789abcdef","paths":[]}` + "\n"),
+		"duplicate": []byte(`{"version":2,"uid":62401,"gid":62402,"ownerDigest":"host-owned-session","state":"active","state":"active","leaseId":"0123456789abcdef0123456789abcdef","paths":[]}` + "\n"),
 		"trailing":  append(append([]byte(nil), before...), []byte("{}\n")...),
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -237,7 +237,7 @@ func TestStandaloneIdentityDispositionRequiresExactOwnerAndActiveWithoutMutation
 	}
 	clean, err := json.Marshal(map[string]any{
 		"version": 2, "uid": uid, "gid": gid,
-		"sessionKey": markerSessionKey(t, markerBefore), "state": "clean-ready",
+		"ownerDigest": markerSessionKey(t, markerBefore), "state": "clean-ready",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -257,7 +257,7 @@ func markerSessionKey(t *testing.T, payload []byte) string {
 		t.Fatal(err)
 	}
 
-	return marker.SessionKey
+	return marker.OwnerDigest
 }
 
 func TestBorrowedAuthorityDomainValidatesStrictCurrentRecord(t *testing.T) {
@@ -481,8 +481,8 @@ func TestAgentIdentityLockRejectsUnsafePaths(t *testing.T) {
 			t.Fatal(err)
 		}
 		path := filepath.Join(root, "acp-go", "agent-identities", "1205.lock")
-		if err := os.Chmod(path, 0o644); err != nil {
-			t.Fatal(err)
+		if chmodErr := os.Chmod(path, 0o644); chmodErr != nil {
+			t.Fatal(chmodErr)
 		}
 		if _, err = openAgentStandaloneNamedLock(
 			directory, "1205.lock", false, agentIdentityLockTrustedUID, agentIdentityLockTrustedGID,
@@ -511,8 +511,8 @@ func TestAgentIdentityLockRejectsUnsafePaths(t *testing.T) {
 			t.Fatal(err)
 		}
 		path := filepath.Join(root, "acp-go", "agent-identities", "1206.lock")
-		if err := os.Link(path, filepath.Join(root, "linked.lock")); err != nil {
-			t.Fatal(err)
+		if linkErr := os.Link(path, filepath.Join(root, "linked.lock")); linkErr != nil {
+			t.Fatal(linkErr)
 		}
 		if _, err = openAgentStandaloneNamedLock(
 			directory, "1206.lock", false, agentIdentityLockTrustedUID, agentIdentityLockTrustedGID,

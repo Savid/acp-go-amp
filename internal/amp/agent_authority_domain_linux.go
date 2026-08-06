@@ -21,6 +21,8 @@ import (
 const (
 	agentAuthorityDomainVersion    = 1
 	agentAuthorityDomainRecordName = "domain.json"
+	agentAuthorityDomainLockName   = "domain.lock"
+	agentAuthorityProcRoot         = "/proc"
 	agentAuthorityDomainMaxSize    = 64 << 10
 	agentAuthorityDomainMaxExtents = 340
 )
@@ -94,14 +96,14 @@ func loadAgentAuthorityDomainRecord(directory *os.File, ownerUID, ownerGID uint3
 	defer file.Close()
 
 	var descriptor, named unix.Stat_t
-	if err = agentAuthorityDomainFstat(fd, &descriptor); err != nil {
-		return agentAuthorityDomainRecord{}, err
+	if agentErr := agentAuthorityDomainFstat(fd, &descriptor); agentErr != nil {
+		return agentAuthorityDomainRecord{}, agentErr
 	}
 
-	if err = agentAuthorityDomainFstatat(
+	if agentErr := agentAuthorityDomainFstatat(
 		int(directory.Fd()), agentAuthorityDomainRecordName, &named, unix.AT_SYMLINK_NOFOLLOW,
-	); err != nil {
-		return agentAuthorityDomainRecord{}, err
+	); agentErr != nil {
+		return agentAuthorityDomainRecord{}, agentErr
 	}
 
 	if descriptor.Dev != named.Dev || descriptor.Ino != named.Ino ||
@@ -119,8 +121,8 @@ func loadAgentAuthorityDomainRecord(directory *os.File, ownerUID, ownerGID uint3
 		return agentAuthorityDomainRecord{}, errors.New("agent authority domain record is not valid UTF-8")
 	}
 
-	if err = rejectAgentAuthorityDuplicateJSONKeys(payload); err != nil {
-		return agentAuthorityDomainRecord{}, err
+	if rejectErr := rejectAgentAuthorityDuplicateJSONKeys(payload); rejectErr != nil {
+		return agentAuthorityDomainRecord{}, rejectErr
 	}
 
 	fields, err := exactAgentAuthorityFields(payload,
@@ -165,8 +167,8 @@ func loadAgentAuthorityDomainRecord(directory *os.File, ownerUID, ownerGID uint3
 	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.DisallowUnknownFields()
 
-	if err = decoder.Decode(&record); err != nil {
-		return agentAuthorityDomainRecord{}, err
+	if decodeErr := decoder.Decode(&record); decodeErr != nil {
+		return agentAuthorityDomainRecord{}, decodeErr
 	}
 
 	if record.Version != agentAuthorityDomainVersion || len(record.AuthorityID) != 32 ||
@@ -242,8 +244,8 @@ func currentAgentAuthorityDomain(directory *os.File) (agentAuthorityDomainRecord
 
 	return agentAuthorityDomainRecord{
 		Version:       agentAuthorityDomainVersion,
-		AuthorityRoot: agentAuthorityDomainInode{Dev: uint64(root.Dev), Ino: root.Ino},
-		Filesystem:    agentAuthorityDomainFS{Type: int64(filesystem.Type), ID: [2]int32{filesystem.Fsid.Val[0], filesystem.Fsid.Val[1]}},
+		AuthorityRoot: agentAuthorityDomainInode{Dev: root.Dev, Ino: root.Ino},
+		Filesystem:    agentAuthorityDomainFS{Type: filesystem.Type, ID: [2]int32{filesystem.Fsid.Val[0], filesystem.Fsid.Val[1]}},
 		BootID:        boot, PIDNamespace: pidNamespace, UserNamespace: userNamespace, UIDMap: uidMap, GIDMap: gidMap,
 	}, nil
 }
@@ -264,7 +266,7 @@ func validateAgentAuthorityPIDVisibility() (agentAuthorityDomainInode, error) {
 	}
 
 	var procfs unix.Statfs_t
-	if err = agentAuthorityDomainStatfs("/proc", &procfs); err != nil || int64(procfs.Type) != 0x9fa0 {
+	if err = agentAuthorityDomainStatfs("/proc", &procfs); err != nil || procfs.Type != 0x9fa0 {
 		return agentAuthorityDomainInode{}, errors.New("agent authority requires /proc to be procfs")
 	}
 
@@ -277,7 +279,7 @@ func validateAgentAuthorityPIDVisibility() (agentAuthorityDomainInode, error) {
 
 	for _, line := range strings.Split(string(mounts), "\n") {
 		fields := strings.Fields(line)
-		if len(fields) < 4 || fields[1] != "/proc" || fields[2] != "proc" {
+		if len(fields) < 4 || fields[1] != agentAuthorityProcRoot || fields[2] != "proc" {
 			continue
 		}
 
@@ -303,7 +305,7 @@ func agentAuthorityNamespaceIdentity(path string) (agentAuthorityDomainInode, er
 		return agentAuthorityDomainInode{}, err
 	}
 
-	return agentAuthorityDomainInode{Dev: uint64(stat.Dev), Ino: stat.Ino}, nil
+	return agentAuthorityDomainInode{Dev: stat.Dev, Ino: stat.Ino}, nil
 }
 
 func canonicalAgentAuthorityIDMap(path string) ([]agentAuthorityDomainExtent, error) {
@@ -321,19 +323,22 @@ func canonicalAgentAuthorityIDMap(path string) ([]agentAuthorityDomainExtent, er
 			return nil, errors.New("agent authority id map has an invalid extent")
 		}
 
-		values := make([]uint64, 3)
+		values := make([]uint32, 3)
+
 		for index, field := range fields {
-			values[index], err = strconv.ParseUint(field, 10, 32)
-			if err != nil || (index == 2 && values[index] == 0) {
+			parsed, parseErr := strconv.ParseUint(field, 10, 32)
+			if parseErr != nil || (index == 2 && parsed == 0) {
 				return nil, errors.New("agent authority id map has an invalid extent value")
 			}
+
+			values[index] = uint32(parsed)
 		}
 
-		extents = append(extents, agentAuthorityDomainExtent{Inside: uint32(values[0]), Outside: uint32(values[1]), Length: uint32(values[2])})
+		extents = append(extents, agentAuthorityDomainExtent{Inside: values[0], Outside: values[1], Length: values[2]})
 	}
 
-	if err = validateAgentAuthorityExtents(extents); err != nil {
-		return nil, err
+	if validateErr := validateAgentAuthorityExtents(extents); validateErr != nil {
+		return nil, validateErr
 	}
 
 	return extents, nil
@@ -377,7 +382,7 @@ func canonicalAgentAuthorityBootID(value string) bool {
 				return false
 			}
 		default:
-			if !((character >= '0' && character <= '9') || (character >= 'a' && character <= 'f')) {
+			if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
 				return false
 			}
 		}
@@ -474,8 +479,8 @@ func rejectAgentAuthorityDuplicateJSONKeys(payload []byte) error {
 
 				seen[key] = struct{}{}
 
-				if err = visit(); err != nil {
-					return err
+				if visitErr := visit(); visitErr != nil {
+					return visitErr
 				}
 			}
 
@@ -485,8 +490,8 @@ func rejectAgentAuthorityDuplicateJSONKeys(payload []byte) error {
 		}
 
 		for decoder.More() {
-			if err = visit(); err != nil {
-				return err
+			if visitErr := visit(); visitErr != nil {
+				return visitErr
 			}
 		}
 

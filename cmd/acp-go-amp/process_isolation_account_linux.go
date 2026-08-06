@@ -30,8 +30,8 @@ func validateTargetAccountAuthority(account *user.User, uid uint32, gid uint32) 
 		return fmt.Errorf("enumerate operating-system groups: %w", err)
 	}
 
-	if err = validatePrivateTargetAccount(passwd, groups, account, uid, gid); err != nil {
-		return err
+	if validateErr := validatePrivateTargetAccount(passwd, groups, account, uid, gid); validateErr != nil {
+		return validateErr
 	}
 
 	status, err := processIsolationAccountAuthorityCommand(ctx, "/usr/bin/passwd", "-S", account.Username)
@@ -39,13 +39,11 @@ func validateTargetAccountAuthority(account *user.User, uid uint32, gid uint32) 
 		return fmt.Errorf("read target account password status: %w", err)
 	}
 
-	if err = validateLockedTargetAccount(status, account.Username); err != nil {
-		return err
+	if validateErr := validateLockedTargetAccount(status, account.Username); validateErr != nil {
+		return validateErr
 	}
 
-	sudo := exec.CommandContext(ctx, "/usr/bin/sudo", "-n", "-U", account.Username, "-l")
-	sudo.Env = []string{"LANG=C", "LC_ALL=C", "PATH=/usr/bin:/bin"}
-	output, commandErr := sudo.CombinedOutput()
+	output, commandErr := runAccountAuthorityCombined(ctx, "/usr/bin/sudo", "-n", "-U", account.Username, "-l")
 
 	return validateTargetAccountHasNoSudo(output, commandErr, account.Username)
 }
@@ -55,6 +53,16 @@ func runAccountAuthorityCommand(ctx context.Context, path string, args ...string
 	command.Env = []string{"LANG=C", "LC_ALL=C", "PATH=/usr/bin:/bin"}
 
 	return command.Output()
+}
+
+// runAccountAuthorityCombined runs an account-authority probe that reports its
+// refusal on stderr, so the caller needs both streams. It is otherwise the same
+// fixed-environment invocation runAccountAuthorityCommand makes.
+func runAccountAuthorityCombined(ctx context.Context, path string, args ...string) ([]byte, error) {
+	command := exec.CommandContext(ctx, path, args...)
+	command.Env = []string{"LANG=C", "LC_ALL=C", "PATH=/usr/bin:/bin"}
+
+	return command.CombinedOutput()
 }
 
 func validatePrivateTargetAccount(passwd []byte, groups []byte, account *user.User, uid uint32, gid uint32) error {

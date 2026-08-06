@@ -112,7 +112,7 @@ func TestTurnSupervisorCovLivenessRefusesIncompleteInheritedDescriptors(t *testi
 			}
 
 			err := runTurnSupervisorLiveness(strings.NewReader("{}"), strings.NewReader(""), io.Discard)
-			if err == nil || !strings.Contains(err.Error(), "Amp liveness inherited descriptors are unavailable") {
+			if err == nil || !strings.Contains(err.Error(), "amp liveness inherited descriptors are unavailable") {
 				t.Fatalf("incomplete liveness descriptors = %v", err)
 			}
 			if len(opened) != len(inherited) {
@@ -416,7 +416,7 @@ func TestTurnSupervisorCovNativeRefusesAnIncompleteStandaloneAuthority(t *testin
 	err = runTurnSupervisorNative(
 		newConfig(), []io.Reader{strings.NewReader("")}, nil, io.Discard, io.Discard, 6, 7, false,
 	)
-	if err == nil || !strings.Contains(err.Error(), "Amp agent identity authority is incomplete") {
+	if err == nil || !strings.Contains(err.Error(), "amp agent identity authority is incomplete") {
 		t.Fatalf("incomplete standalone authority = %v", err)
 	}
 	if _, statErr := os.Stat(marker); !errors.Is(statErr, os.ErrNotExist) {
