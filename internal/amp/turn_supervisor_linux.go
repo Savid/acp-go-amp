@@ -1011,7 +1011,7 @@ func acquireTurnSupervisorNativeAuthority(
 			config.Isolation.TestOnlyIdentityLockRoot,
 		)
 		if adoptErr != nil {
-			return nil, nil, nil, fmt.Errorf("adopt Pi agent identity lock: %w", adoptErr)
+			return nil, nil, nil, fmt.Errorf("adopt Amp agent identity lock: %w", adoptErr)
 		}
 
 		authorityDomain, domainErr := adoptAgentAuthorityDomain(
@@ -1020,7 +1020,7 @@ func acquireTurnSupervisorNativeAuthority(
 			config.Isolation.TestOnlyIdentityLockRoot,
 		)
 		if domainErr != nil {
-			return nil, nil, nil, errors.Join(fmt.Errorf("adopt Pi agent authority domain: %w", domainErr), identityLock.Close())
+			return nil, nil, nil, errors.Join(fmt.Errorf("adopt Amp agent authority domain: %w", domainErr), identityLock.Close())
 		}
 
 		return identityLock, authorityDomain, nil, nil
@@ -1039,7 +1039,7 @@ func acquireTurnSupervisorNativeAuthority(
 			signals,
 		)
 		if acquireErr != nil {
-			return nil, nil, nil, fmt.Errorf("acquire Pi standalone agent identity authority: %w", acquireErr)
+			return nil, nil, nil, fmt.Errorf("acquire Amp standalone agent identity authority: %w", acquireErr)
 		}
 
 		return standalone.identity, standalone.authority, standalone, nil
