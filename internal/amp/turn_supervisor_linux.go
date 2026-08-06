@@ -81,6 +81,7 @@ var (
 	turnSupervisorSealConfig        = unix.FcntlInt
 	turnSupervisorEffectiveUID      = os.Geteuid
 	turnSupervisorPoll              = unix.Poll
+	turnSupervisorReadDeadline      = (*os.File).SetReadDeadline
 )
 
 func enableTurnSupervisor() error {
@@ -320,7 +321,15 @@ func awaitProcessTreeReady(launch *processTreeCommand) error {
 		launch.ready = nil
 	}()
 
-	if err := launch.ready.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+	// This deadline is armed before the guardian child claims its standalone
+	// identity and is only satisfied once the claim has completed, so it spans
+	// the claim and must clear the claim budget. Proving an identity vacant
+	// walks every task in the initial PID namespace until the set is stable,
+	// twice, so its cost scales with the host. Naming agentStandaloneClaimMax
+	// rather than repeating its value keeps the two from being tuned apart: a
+	// shorter readiness bound would cancel a claim that was still making
+	// progress and report a containment failure that never happened.
+	if err := turnSupervisorReadDeadline(launch.ready, time.Now().Add(agentStandaloneClaimMax)); err != nil {
 		return fmt.Errorf("arm Amp native supervisor readiness: %w", err)
 	}
 
@@ -487,7 +496,12 @@ func runTurnSupervisorGuardian(configInput io.Reader, controlInput io.Reader, re
 	defer peer.Close()
 	waiter := startCommandWait(liveness.Wait)
 	reader := bufio.NewReader(data)
-	if err = data.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+	// This read sits behind the authority claim, not in front of it: the
+	// guardian already holds its identity by the time it gets here, so nothing
+	// this deadline covers can still be proving an identity vacant. It is a
+	// liveness bound on a handshake with a child that is already running, and
+	// deliberately not the standalone claim maximum.
+	if err = turnSupervisorReadDeadline(data, time.Now().Add(5*time.Second)); err != nil {
 		_ = peer.Close()
 		waitErr, _ := waiter.await(context.Background())
 		containErr := turnSupervisorContain(turnSupervisorProcessID(), 0)
@@ -508,7 +522,7 @@ func runTurnSupervisorGuardian(configInput io.Reader, controlInput io.Reader, re
 
 		return errors.Join(fmt.Errorf("await Amp liveness readiness: %w", readyErr), waitErr, containErr)
 	}
-	if err = data.SetReadDeadline(time.Time{}); err != nil {
+	if err = turnSupervisorReadDeadline(data, time.Time{}); err != nil {
 		_ = peer.Close()
 
 		return err
