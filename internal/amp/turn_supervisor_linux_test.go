@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -2008,5 +2009,44 @@ func TestCommandWaitNilAndCloseWaitTimeout(t *testing.T) {
 	}
 	if incomplete != 1 {
 		t.Fatalf("Close timeout incomplete observations = %d, want 1", incomplete)
+	}
+}
+
+// TestSupervisorPollDescriptorFailsClosed proves the liveness poll narrows a
+// descriptor it cannot represent to -1 rather than to a number that could name
+// a live descriptor: poll never reports a negative entry ready, so the check
+// cannot conclude the peer is alive off a truncated value. Linux hands out
+// small descriptors, so the value is staged through the seam pollFD reads.
+func TestSupervisorPollDescriptorFailsClosed(t *testing.T) {
+	production := pollFDSource
+	t.Cleanup(func() { pollFDSource = production })
+
+	pollFDSource = func(*os.File) uintptr { return uintptr(math.MaxInt32) + 1 }
+
+	narrowed := pollFD(nil)
+	if narrowed != -1 {
+		t.Fatalf("unrepresentable descriptor narrowed to %d, want -1", narrowed)
+	}
+
+	ready, err := unix.Poll([]unix.PollFd{{Fd: narrowed, Events: unix.POLLIN | unix.POLLHUP}}, 0)
+	if err != nil {
+		t.Fatalf("poll on refused descriptor: %v", err)
+	}
+
+	if ready != 0 {
+		t.Fatalf("poll reported %d refused descriptors ready", ready)
+	}
+
+	pollFDSource = production
+
+	file, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatalf("open %s: %v", os.DevNull, err)
+	}
+
+	t.Cleanup(func() { _ = file.Close() })
+
+	if got := pollFD(file); got != int32(file.Fd()) {
+		t.Fatalf("pollFD(file) = %d, want %d", got, file.Fd())
 	}
 }
