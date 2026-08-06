@@ -990,6 +990,62 @@ func runTurnSupervisorLiveness(configInput io.Reader, controlInput io.Reader, re
 	)
 }
 
+// acquireTurnSupervisorNativeAuthority establishes the agent identity authority this
+// launch runs under: the pair the caller borrowed and passed down, the empty
+// pair the credential-free tests use, or a standalone identity claimed here.
+// The standalone result is returned alongside so the caller can release the
+// whole claim rather than the two locks it lends out.
+func acquireTurnSupervisorNativeAuthority(
+	config turnSupervisorConfig,
+	identityFD uintptr,
+	authorityFD uintptr,
+	controlDone <-chan struct{},
+	signals <-chan os.Signal,
+) (*agentIdentityLock, *agentIdentityLock, *agentStandaloneIdentity, error) {
+	switch {
+	case config.IdentityLock:
+		identityLock, adoptErr := adoptAgentIdentityLock(
+			turnSupervisorOpenFile(identityFD, "amp-agent-identity-lock"),
+			config.Isolation.UID,
+			config.Isolation.TestOnlyNoCredential || config.Isolation.TestOnlyIdentityLockRoot != "",
+			config.Isolation.TestOnlyIdentityLockRoot,
+		)
+		if adoptErr != nil {
+			return nil, nil, nil, fmt.Errorf("adopt Pi agent identity lock: %w", adoptErr)
+		}
+
+		authorityDomain, domainErr := adoptAgentAuthorityDomain(
+			turnSupervisorOpenFile(authorityFD, "amp-agent-authority-domain"),
+			config.Isolation.TestOnlyNoCredential || config.Isolation.TestOnlyIdentityLockRoot != "",
+			config.Isolation.TestOnlyIdentityLockRoot,
+		)
+		if domainErr != nil {
+			return nil, nil, nil, errors.Join(fmt.Errorf("adopt Pi agent authority domain: %w", domainErr), identityLock.Close())
+		}
+
+		return identityLock, authorityDomain, nil, nil
+	case config.Isolation.TestOnlyNoCredential &&
+		config.Isolation.StandaloneOwnerID == "" && config.Isolation.StandaloneStateRoot == "":
+		return &agentIdentityLock{}, &agentIdentityLock{}, nil, nil
+	default:
+		standalone, acquireErr := turnSupervisorAcquireStandalone(
+			config.Isolation.UID,
+			config.Isolation.GID,
+			config.Isolation.StandaloneOwnerID,
+			config.Isolation.StandaloneStateRoot,
+			config.Isolation.TestOnlyNoCredential,
+			config.Isolation.TestOnlyIdentityLockRoot,
+			controlDone,
+			signals,
+		)
+		if acquireErr != nil {
+			return nil, nil, nil, fmt.Errorf("acquire Pi standalone agent identity authority: %w", acquireErr)
+		}
+
+		return standalone.identity, standalone.authority, standalone, nil
+	}
+}
+
 func runTurnSupervisorNative(
 	configInput io.Reader,
 	controlInputs []io.Reader,
@@ -1037,54 +1093,11 @@ func runTurnSupervisorNative(
 		}()
 	}
 
-	var (
-		identityLock    *agentIdentityLock
-		authorityDomain *agentIdentityLock
-		standalone      *agentStandaloneIdentity
-		err             error
+	identityLock, authorityDomain, standalone, authorityErr := acquireTurnSupervisorNativeAuthority(
+		config, identityFD, authorityFD, controlDone, signals,
 	)
-
-	switch {
-	case config.IdentityLock:
-		identityLock, err = adoptAgentIdentityLock(
-			turnSupervisorOpenFile(identityFD, "amp-agent-identity-lock"),
-			config.Isolation.UID,
-			config.Isolation.TestOnlyNoCredential || config.Isolation.TestOnlyIdentityLockRoot != "",
-			config.Isolation.TestOnlyIdentityLockRoot,
-		)
-		if err != nil {
-			return fmt.Errorf("adopt Amp agent identity lock: %w", err)
-		}
-
-		authorityDomain, err = adoptAgentAuthorityDomain(
-			turnSupervisorOpenFile(authorityFD, "amp-agent-authority-domain"),
-			config.Isolation.TestOnlyNoCredential || config.Isolation.TestOnlyIdentityLockRoot != "",
-			config.Isolation.TestOnlyIdentityLockRoot,
-		)
-		if err != nil {
-			return errors.Join(fmt.Errorf("adopt Amp agent authority domain: %w", err), identityLock.Close())
-		}
-	case config.Isolation.TestOnlyNoCredential &&
-		config.Isolation.StandaloneOwnerID == "" && config.Isolation.StandaloneStateRoot == "":
-		identityLock = &agentIdentityLock{}
-		authorityDomain = &agentIdentityLock{}
-	default:
-		standalone, err = turnSupervisorAcquireStandalone(
-			config.Isolation.UID,
-			config.Isolation.GID,
-			config.Isolation.StandaloneOwnerID,
-			config.Isolation.StandaloneStateRoot,
-			config.Isolation.TestOnlyNoCredential,
-			config.Isolation.TestOnlyIdentityLockRoot,
-			controlDone,
-			signals,
-		)
-		if err != nil {
-			return fmt.Errorf("acquire Amp standalone agent identity authority: %w", err)
-		}
-
-		identityLock = standalone.identity
-		authorityDomain = standalone.authority
+	if authorityErr != nil {
+		return authorityErr
 	}
 
 	defer func() {
