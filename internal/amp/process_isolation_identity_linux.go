@@ -20,6 +20,7 @@ func validateStandaloneIdentityDispositionPlatform(isolation *ProcessIsolation) 
 
 func validateStandaloneIdentityDisposition(isolation *ProcessIsolation) error {
 	identityLock := isolation.IdentityLock != nil
+
 	authorityDomain := isolation.AuthorityDomain != nil
 	if identityLock != authorityDomain {
 		return errors.New("process identity lock and authority domain must be provided together")

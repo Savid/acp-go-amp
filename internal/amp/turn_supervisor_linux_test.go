@@ -175,12 +175,21 @@ func TestSupervisorIdentityDispositionRequiresExplicitAuthorityOriginAndExactSta
 	}
 
 	for name, config := range map[string]turnSupervisorConfig{
-		"missing_origin":      base,
-		"unknown_origin":      func() turnSupervisorConfig { value := base; value.AuthorityOrigin = "unknown"; return value }(),
-		"borrowed_with_owner": func() turnSupervisorConfig { value := validBorrowed; value.StandaloneOwner = &owner; return value }(),
+		"missing_origin": base,
+		"unknown_origin": func() turnSupervisorConfig {
+			value := base
+			value.AuthorityOrigin = "unknown"
+			return value
+		}(),
+		"borrowed_with_owner": func() turnSupervisorConfig {
+			value := validBorrowed
+			value.StandaloneOwner = &owner
+			return value
+		}(),
 		"standalone_no_owner": func() turnSupervisorConfig {
 			value := base
 			value.AuthorityOrigin = turnSupervisorOriginStandalone
+
 			return value
 		}(),
 		"standalone_wrong_uid": func() turnSupervisorConfig {
@@ -188,6 +197,7 @@ func TestSupervisorIdentityDispositionRequiresExplicitAuthorityOriginAndExactSta
 			wrong := owner
 			wrong.UID++
 			value.StandaloneOwner = &wrong
+
 			return value
 		}(),
 	} {
@@ -332,7 +342,10 @@ func TestInheritedTurnSupervisorInputAndEnable(t *testing.T) {
 		return file
 	}
 	closeOnExec := 0
-	turnSupervisorFcntl = func(uintptr, int, int) (int, error) { closeOnExec++; return 0, nil }
+	turnSupervisorFcntl = func(uintptr, int, int) (int, error) {
+		closeOnExec++
+		return 0, nil
+	}
 	config, control, ready, err := inheritedTurnSupervisorInput()
 	if err != nil {
 		t.Fatalf("inherited input: %v", err)
@@ -468,6 +481,7 @@ if kill -KILL "$supervisor" 2>/dev/null; then echo kill=allowed; else echo kill=
 		if err = errors.Join(waitErr, containmentErr); err != nil {
 			t.Fatalf("settle production trusted supervisor: %v", err)
 		}
+
 		return
 	}
 
@@ -1418,6 +1432,7 @@ func assertSupervisorAuthorityLocks(t *testing.T, authorityRoot string, uid uint
 				if !errors.Is(lockErr, unix.EWOULDBLOCK) && !errors.Is(lockErr, unix.EAGAIN) {
 					t.Fatalf("authority lock %q was not retained by frozen survivor: %v", name, lockErr)
 				}
+
 				break
 			}
 			if lockErr == nil {

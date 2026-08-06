@@ -88,9 +88,11 @@ func enableTurnSupervisor() error {
 	if err := turnSupervisorSetrlimit(unix.RLIMIT_CORE, &unix.Rlimit{}); err != nil {
 		return fmt.Errorf("disable Amp native core dumps: %w", err)
 	}
+
 	if err := turnSupervisorPrctl(unix.PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0); err != nil {
 		return err
 	}
+
 	if err := turnSupervisorPrctl(unix.PR_SET_DUMPABLE, 0, 0, 0, 0); err != nil {
 		return err
 	}
@@ -112,6 +114,7 @@ func inheritedTurnSupervisorInput() (io.ReadCloser, io.ReadCloser, io.WriteClose
 			_ = config.Close()
 			_ = control.Close()
 			_ = ready.Close()
+
 			return nil, nil, nil, err
 		}
 	}
@@ -124,9 +127,11 @@ func setTurnSupervisorCloseOnExec(file *os.File) error {
 	if err != nil {
 		return fmt.Errorf("read inherited Amp supervisor descriptor flags: %w", err)
 	}
+
 	if _, err = turnSupervisorFcntl(file.Fd(), unix.F_SETFD, flags|unix.FD_CLOEXEC); err != nil {
 		return fmt.Errorf("protect inherited Amp supervisor descriptor from exec: %w", err)
 	}
+
 	return nil
 }
 
@@ -140,9 +145,12 @@ func turnSupervisorBootstrap() {
 		return
 	}
 
-	var err error
-	var config, control io.ReadCloser
-	var ready io.WriteCloser
+	var (
+		err             error
+		config, control io.ReadCloser
+		ready           io.WriteCloser
+	)
+
 	config, control, ready, err = turnSupervisorInput()
 	if err == nil {
 		if mode == turnSupervisorLivenessMode {
@@ -179,6 +187,7 @@ func prepareProcessTreeCommand(native *exec.Cmd, options processLaunchOptions) (
 	if err := validateProcessIsolation(options.Isolation); err != nil {
 		return nil, fmt.Errorf("prepare Amp native supervisor isolation: %w", err)
 	}
+
 	if err := validateTurnSupervisorIdentity(options.Isolation); err != nil {
 		return nil, fmt.Errorf("prepare Amp native supervisor identity: %w", err)
 	}
@@ -186,6 +195,7 @@ func prepareProcessTreeCommand(native *exec.Cmd, options processLaunchOptions) (
 	if (options.Isolation.IdentityLock == nil) != (options.Isolation.AuthorityDomain == nil) {
 		return nil, errors.New("prepare Amp native supervisor: UID lock and authority domain must be supplied together")
 	}
+
 	config := turnSupervisorConfig{
 		Path:            native.Path,
 		Args:            append([]string(nil), native.Args...),
@@ -198,6 +208,7 @@ func prepareProcessTreeCommand(native *exec.Cmd, options processLaunchOptions) (
 	if config.IdentityLock {
 		config.AuthorityOrigin = turnSupervisorOriginBorrowed
 	}
+
 	if config.Path == "" || len(config.Args) == 0 {
 		return nil, errors.New("prepare Amp native supervisor: native command is incomplete")
 	}
@@ -213,6 +224,7 @@ func prepareProcessTreeCommand(native *exec.Cmd, options processLaunchOptions) (
 
 		return nil, writeErr
 	}
+
 	if _, sealErr := turnSupervisorSealConfig(configFile.Fd(), unix.F_ADD_SEALS, unix.F_SEAL_WRITE|unix.F_SEAL_GROW|unix.F_SEAL_SHRINK|unix.F_SEAL_SEAL); sealErr != nil {
 		_ = configFile.Close()
 
@@ -234,6 +246,7 @@ func prepareProcessTreeCommand(native *exec.Cmd, options processLaunchOptions) (
 
 		return nil, fmt.Errorf("prepare Amp native supervisor readiness: %w", err)
 	}
+
 	completionRead, completionWrite, err := turnSupervisorPipe()
 	if err != nil {
 		_ = configFile.Close()
@@ -265,6 +278,7 @@ func prepareProcessTreeCommand(native *exec.Cmd, options processLaunchOptions) (
 	helper.Stdout = native.Stdout
 	helper.Stderr = native.Stderr
 	helper.ExtraFiles = []*os.File{configFile, controlRead, readyWrite, completionWrite}
+
 	if options.Isolation.IdentityLock != nil {
 		identityLock, duplicateErr := options.Isolation.IdentityLock.Duplicate()
 		if duplicateErr != nil {
@@ -278,7 +292,9 @@ func prepareProcessTreeCommand(native *exec.Cmd, options processLaunchOptions) (
 
 			return nil, fmt.Errorf("duplicate Amp agent identity lock: %w", duplicateErr)
 		}
+
 		helper.ExtraFiles = append(helper.ExtraFiles, identityLock)
+
 		authorityDomain, duplicateErr := options.Isolation.AuthorityDomain.Duplicate()
 		if duplicateErr != nil {
 			_ = identityLock.Close()
@@ -292,8 +308,10 @@ func prepareProcessTreeCommand(native *exec.Cmd, options processLaunchOptions) (
 
 			return nil, fmt.Errorf("duplicate Amp agent authority domain: %w", duplicateErr)
 		}
+
 		helper.ExtraFiles = append(helper.ExtraFiles, authorityDomain)
 	}
+
 	helper.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	launch := &processTreeCommand{
@@ -351,6 +369,7 @@ func awaitTurnSupervisorCompletion(wait func() error, completion *os.File) error
 		return errors.Join(waitErr, ErrProcessContainmentIncomplete)
 	}
 	defer completion.Close()
+
 	line, err := bufio.NewReader(completion).ReadString('\n')
 	if err != nil {
 		return errors.Join(
@@ -358,6 +377,7 @@ func awaitTurnSupervisorCompletion(wait func() error, completion *os.File) error
 			fmt.Errorf("%w: await Amp liveness completion proof: %v", ErrProcessContainmentIncomplete, err),
 		)
 	}
+
 	if line != "complete\n" {
 		return errors.Join(
 			waitErr,
@@ -396,17 +416,20 @@ func startTurnSupervisorNative(
 	preStart func() error,
 ) (<-chan error, error, error) {
 	var privilegeErr error
+
 	waitDone, startErr := startCommandOnCreatorThread(func() error {
 		if err := turnSupervisorEnable(); err != nil {
 			privilegeErr = err
 
 			return err
 		}
+
 		if err := applyProcessIsolation(native, isolation); err != nil {
 			privilegeErr = fmt.Errorf("apply Amp native process isolation: %w", err)
 
 			return privilegeErr
 		}
+
 		if preStart != nil {
 			if err := preStart(); err != nil {
 				privilegeErr = err
@@ -417,6 +440,7 @@ func startTurnSupervisorNative(
 
 		return native.Start()
 	}, native.Wait)
+
 	if privilegeErr != nil {
 		return nil, privilegeErr, nil
 	}
@@ -430,52 +454,62 @@ func runTurnSupervisorGuardian(configInput io.Reader, controlInput io.Reader, re
 		return errors.New("Amp guardian completion descriptor is unavailable")
 	}
 	defer completion.Close()
+
 	if err := setTurnSupervisorCloseOnExec(completion); err != nil {
 		return err
 	}
+
 	controlFile, ok := controlInput.(*os.File)
 	if !ok {
-		_, _ = io.WriteString(completion, "complete\n")
+		_, _ = completion.WriteString("complete\n")
 
 		return errors.New("Amp guardian control input is not an inheritable file")
 	}
+
 	var config turnSupervisorConfig
 	if err := json.NewDecoder(configInput).Decode(&config); err != nil {
-		_, _ = io.WriteString(completion, "complete\n")
+		_, _ = completion.WriteString("complete\n")
 
 		return fmt.Errorf("decode Amp guardian config: %w", err)
 	}
+
 	if err := validateTurnSupervisorConfig(config); err != nil {
-		_, _ = io.WriteString(completion, "complete\n")
+		_, _ = completion.WriteString("complete\n")
 
 		return err
 	}
 
 	signals := make(chan os.Signal, 2)
+
 	turnSupervisorSignalNotify(signals, syscall.SIGINT, syscall.SIGTERM)
 	defer turnSupervisorSignalStop(signals)
+
 	controlDone := make(chan struct{})
+
 	go func() {
 		_, _ = io.Copy(io.Discard, controlFile)
+
 		close(controlDone)
 	}()
 
 	authority, err := acquireTurnSupervisorAuthority(config, 7, 8, controlDone, signals)
 	if err != nil {
-		_, _ = io.WriteString(completion, "complete\n")
+		_, _ = completion.WriteString("complete\n")
 
 		return err
 	}
 	defer func() { runErr = errors.Join(runErr, authority.Close()) }()
+
 	if err = turnSupervisorEnable(); err != nil {
-		_, _ = io.WriteString(completion, "complete\n")
+		_, _ = completion.WriteString("complete\n")
 
 		return fmt.Errorf("enable Amp guardian privileges: %w", err)
 	}
+
 	if err = validateTurnSupervisorAuthorityDisposition(config, authority); err != nil {
 		containErr := turnSupervisorContain(turnSupervisorProcessID(), 0)
 		if containErr == nil {
-			_, _ = io.WriteString(completion, "complete\n")
+			_, _ = completion.WriteString("complete\n")
 		}
 
 		return errors.Join(fmt.Errorf("validate Amp guardian identity disposition: %w", err), containErr)
@@ -487,13 +521,14 @@ func runTurnSupervisorGuardian(configInput io.Reader, controlInput io.Reader, re
 	if err != nil {
 		containErr := turnSupervisorContain(turnSupervisorProcessID(), 0)
 		if containErr == nil {
-			_, _ = io.WriteString(completion, "complete\n")
+			_, _ = completion.WriteString("complete\n")
 		}
 
 		return errors.Join(err, containErr)
 	}
 	defer data.Close()
 	defer peer.Close()
+
 	waiter := startCommandWait(liveness.Wait)
 	reader := bufio.NewReader(data)
 	// This read sits behind the authority claim, not in front of it: the
@@ -504,60 +539,71 @@ func runTurnSupervisorGuardian(configInput io.Reader, controlInput io.Reader, re
 	if err = turnSupervisorReadDeadline(data, time.Now().Add(5*time.Second)); err != nil {
 		_ = peer.Close()
 		waitErr, _ := waiter.await(context.Background())
+
 		containErr := turnSupervisorContain(turnSupervisorProcessID(), 0)
 		if containErr == nil {
-			_, _ = io.WriteString(completion, "complete\n")
+			_, _ = completion.WriteString("complete\n")
 		}
 
 		return errors.Join(err, waitErr, containErr)
 	}
+
 	line, readyErr := reader.ReadString('\n')
 	if readyErr != nil {
 		_ = peer.Close()
 		waitErr, _ := waiter.await(context.Background())
+
 		containErr := turnSupervisorContain(turnSupervisorProcessID(), 0)
 		if containErr == nil {
-			_, _ = io.WriteString(completion, "complete\n")
+			_, _ = completion.WriteString("complete\n")
 		}
 
 		return errors.Join(fmt.Errorf("await Amp liveness readiness: %w", readyErr), waitErr, containErr)
 	}
+
 	if err = turnSupervisorReadDeadline(data, time.Time{}); err != nil {
 		_ = peer.Close()
 
 		return err
 	}
+
 	nativePID, err := parseTurnSupervisorLivenessReady(line)
 	if err != nil {
 		_ = peer.Close()
 		waitErr, _ := waiter.await(context.Background())
+
 		containErr := turnSupervisorContain(turnSupervisorProcessID(), 0)
 		if containErr == nil {
-			_, _ = io.WriteString(completion, "complete\n")
+			_, _ = completion.WriteString("complete\n")
 		}
 
 		return errors.Join(err, waitErr, containErr)
 	}
+
 	if _, err = io.WriteString(readyOutput, turnSupervisorReady); err != nil {
 		_ = peer.Close()
 		waitErr, _ := waiter.await(context.Background())
+
 		containErr := turnSupervisorContain(turnSupervisorProcessID(), nativePID)
 		if containErr == nil {
-			_, _ = io.WriteString(completion, "complete\n")
+			_, _ = completion.WriteString("complete\n")
 		}
 
 		return errors.Join(err, waitErr, containErr)
 	}
 
 	var waitErr error
+
 	for {
 		select {
 		case <-waiter.done:
 			waitErr = waiter.err
+
 			goto livenessExited
 		case <-controlDone:
 			_ = peer.Close()
 			waitErr, _ = waiter.await(context.Background())
+
 			goto livenessExited
 		case received := <-signals:
 			nativeSignal, signalOK := received.(syscall.Signal)
@@ -569,12 +615,14 @@ func runTurnSupervisorGuardian(configInput io.Reader, controlInput io.Reader, re
 
 livenessExited:
 	doneLine, doneErr := reader.ReadString('\n')
+
 	if doneErr == nil && doneLine == "done\n" {
 		return waitErr
 	}
+
 	containErr := turnSupervisorContain(turnSupervisorProcessID(), nativePID)
 	if containErr == nil {
-		_, _ = io.WriteString(completion, "complete\n")
+		_, _ = completion.WriteString("complete\n")
 	}
 
 	return errors.Join(waitErr, fmt.Errorf("Amp liveness exited without completion report: %v", doneErr), containErr)
@@ -625,6 +673,7 @@ func (authority *turnSupervisorAuthority) Close() error {
 	if authority == nil {
 		return nil
 	}
+
 	if authority.standalone != nil {
 		return authority.standalone.Close()
 	}
@@ -645,6 +694,7 @@ func acquireTurnSupervisorAuthority(
 			identity: &agentIdentityLock{}, domain: &agentIdentityLock{},
 		}, nil
 	}
+
 	if config.IdentityLock {
 		identity, err := adoptAgentIdentityLock(
 			turnSupervisorOpenFile(identityFD, "amp-agent-identity-lock"),
@@ -655,6 +705,7 @@ func acquireTurnSupervisorAuthority(
 		if err != nil {
 			return nil, fmt.Errorf("adopt Amp agent identity lock: %w", err)
 		}
+
 		domain, err := adoptAgentAuthorityDomain(
 			turnSupervisorOpenFile(domainFD, "amp-agent-authority-domain"),
 			config.Isolation.TestOnlyNoCredential || config.Isolation.TestOnlyIdentityLockRoot != "",
@@ -666,6 +717,7 @@ func acquireTurnSupervisorAuthority(
 
 		return &turnSupervisorAuthority{identity: identity, domain: domain}, nil
 	}
+
 	standalone, err := turnSupervisorAcquireStandalone(
 		config.Isolation.UID,
 		config.Isolation.GID,
@@ -696,11 +748,13 @@ func startTurnSupervisorLiveness(
 		identity = authority.identity
 		domain = authority.domain
 	}
+
 	borrowedAuthority := identity != nil && identity.file != nil && domain != nil && domain.file != nil
 	config.IdentityLock = borrowedAuthority
 	config.AuthorityDomain = borrowedAuthority
 	config.AuthorityOrigin = ""
 	config.StandaloneOwner = nil
+
 	if borrowedAuthority {
 		if authority.standalone != nil {
 			owner := authority.standalone.owner
@@ -710,20 +764,24 @@ func startTurnSupervisorLiveness(
 			config.AuthorityOrigin = turnSupervisorOriginBorrowed
 		}
 	}
+
 	config.Isolation.IdentityLock = nil
 	config.Isolation.AuthorityDomain = nil
 	config.Isolation.StandaloneOwnerID = ""
 	config.Isolation.StandaloneStateRoot = ""
+
 	configFD, err := turnSupervisorMemfd(turnSupervisorFDName+"-liveness", unix.MFD_CLOEXEC|unix.MFD_ALLOW_SEALING)
 	if err != nil {
 		return nil, nil, nil, err
 	}
+
 	configFile := os.NewFile(uintptr(configFD), turnSupervisorFDName+"-liveness")
 	if err = turnSupervisorWriteConfig(configFile, config); err != nil {
 		_ = configFile.Close()
 
 		return nil, nil, nil, err
 	}
+
 	if _, err = turnSupervisorSealConfig(
 		configFile.Fd(), unix.F_ADD_SEALS,
 		unix.F_SEAL_WRITE|unix.F_SEAL_GROW|unix.F_SEAL_SHRINK|unix.F_SEAL_SEAL,
@@ -732,12 +790,14 @@ func startTurnSupervisorLiveness(
 
 		return nil, nil, nil, err
 	}
+
 	dataRead, dataWrite, err := turnSupervisorPipe()
 	if err != nil {
 		_ = configFile.Close()
 
 		return nil, nil, nil, err
 	}
+
 	peerRead, peerWrite, err := turnSupervisorPipe()
 	if err != nil {
 		_ = configFile.Close()
@@ -746,12 +806,14 @@ func startTurnSupervisorLiveness(
 
 		return nil, nil, nil, err
 	}
+
 	var identityDuplicate *os.File
 	if borrowedAuthority {
 		identityDuplicate, err = identity.Duplicate()
 	} else {
 		identityDuplicate, err = os.Open("/dev/null")
 	}
+
 	if err != nil {
 		_ = configFile.Close()
 		_ = dataRead.Close()
@@ -761,12 +823,14 @@ func startTurnSupervisorLiveness(
 
 		return nil, nil, nil, err
 	}
+
 	var domainDuplicate *os.File
 	if borrowedAuthority {
 		domainDuplicate, err = domain.Duplicate()
 	} else {
 		domainDuplicate, err = os.Open("/dev/null")
 	}
+
 	if err != nil {
 		_ = identityDuplicate.Close()
 		_ = configFile.Close()
@@ -777,6 +841,7 @@ func startTurnSupervisorLiveness(
 
 		return nil, nil, nil, err
 	}
+
 	executable, err := turnSupervisorExecutable()
 	if err != nil {
 		_ = identityDuplicate.Close()
@@ -789,6 +854,7 @@ func startTurnSupervisorLiveness(
 
 		return nil, nil, nil, err
 	}
+
 	liveness := turnSupervisorCommand(executable)
 	liveness.Dir = "/"
 	liveness.Env = turnSupervisorEnvironmentFor(turnSupervisorLivenessMode)
@@ -798,6 +864,7 @@ func startTurnSupervisorLiveness(
 	liveness.ExtraFiles = []*os.File{
 		configFile, control, dataWrite, identityDuplicate, domainDuplicate, completion, peerRead,
 	}
+
 	liveness.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err = liveness.Start(); err != nil {
 		_ = identityDuplicate.Close()
@@ -810,6 +877,7 @@ func startTurnSupervisorLiveness(
 
 		return nil, nil, nil, err
 	}
+
 	for _, file := range []*os.File{configFile, dataWrite, identityDuplicate, domainDuplicate, peerRead} {
 		_ = file.Close()
 	}
@@ -822,10 +890,12 @@ func parseTurnSupervisorLivenessReady(line string) (int, error) {
 	if !ok {
 		return 0, errors.New("Amp liveness readiness is not newline terminated")
 	}
+
 	pidText, ok := strings.CutPrefix(text, "ready:")
 	if !ok {
 		return 0, fmt.Errorf("invalid Amp liveness readiness %q", text)
 	}
+
 	pid, err := strconv.Atoi(pidText)
 	if err != nil || pid <= 0 {
 		return 0, fmt.Errorf("invalid Amp liveness native pid %q", pidText)
@@ -838,9 +908,11 @@ func validateTurnSupervisorConfig(config turnSupervisorConfig) error {
 	if config.Path == "" || len(config.Args) == 0 {
 		return errors.New("amp native supervisor config is incomplete")
 	}
+
 	if config.IdentityLock != config.AuthorityDomain {
 		return errors.New("Amp native supervisor identity lock and authority domain must be provided together")
 	}
+
 	switch config.AuthorityOrigin {
 	case "":
 		if config.IdentityLock || config.StandaloneOwner != nil {
@@ -862,15 +934,18 @@ func validateTurnSupervisorConfig(config turnSupervisorConfig) error {
 	default:
 		return fmt.Errorf("Amp native supervisor authority origin %q is invalid", config.AuthorityOrigin)
 	}
+
 	validation := config.Isolation
 	if config.IdentityLock {
 		placeholder := &agentIdentityLock{}
 		validation.IdentityLock = placeholder
 		validation.AuthorityDomain = placeholder
 	}
+
 	if err := validateProcessIsolation(&validation); err != nil {
 		return fmt.Errorf("validate Amp native supervisor isolation: %w", err)
 	}
+
 	if err := validateTurnSupervisorIdentity(&config.Isolation); err != nil {
 		return fmt.Errorf("validate Amp native supervisor identity: %w", err)
 	}
@@ -880,11 +955,13 @@ func validateTurnSupervisorConfig(config turnSupervisorConfig) error {
 
 func runTurnSupervisorLiveness(configInput io.Reader, controlInput io.Reader, readyOutput io.Writer) error {
 	completion := turnSupervisorOpenFile(8, "amp-turn-supervisor-completion")
+
 	peer := turnSupervisorOpenFile(9, "amp-turn-supervisor-guardian-peer")
 	if completion == nil || peer == nil {
 		if completion != nil {
 			_ = completion.Close()
 		}
+
 		if peer != nil {
 			_ = peer.Close()
 		}
@@ -893,9 +970,11 @@ func runTurnSupervisorLiveness(configInput io.Reader, controlInput io.Reader, re
 	}
 	defer completion.Close()
 	defer peer.Close()
+
 	if err := setTurnSupervisorCloseOnExec(completion); err != nil {
 		return err
 	}
+
 	if err := setTurnSupervisorCloseOnExec(peer); err != nil {
 		return err
 	}
@@ -930,17 +1009,23 @@ func runTurnSupervisorNative(
 	defer turnSupervisorSignalStop(signals)
 
 	controlDone := make(chan struct{})
+
 	var controlOnce sync.Once
+
 	for _, controlInput := range controlInputs {
 		go func(input io.Reader) {
 			_, _ = io.Copy(io.Discard, input)
+
 			controlOnce.Do(func() { close(controlDone) })
 		}(controlInput)
 	}
+
 	guardianDone := make(chan struct{})
+
 	if guardianPeer != nil {
 		go func() {
 			_, _ = io.Copy(io.Discard, guardianPeer)
+
 			close(guardianDone)
 			controlOnce.Do(func() { close(controlDone) })
 		}()
@@ -962,6 +1047,7 @@ func runTurnSupervisorNative(
 		if err != nil {
 			return fmt.Errorf("adopt Amp agent identity lock: %w", err)
 		}
+
 		authorityDomain, err = adoptAgentAuthorityDomain(
 			turnSupervisorOpenFile(authorityFD, "amp-agent-authority-domain"),
 			config.Isolation.TestOnlyNoCredential || config.Isolation.TestOnlyIdentityLockRoot != "",
@@ -988,28 +1074,36 @@ func runTurnSupervisorNative(
 		if err != nil {
 			return fmt.Errorf("acquire Amp standalone agent identity authority: %w", err)
 		}
+
 		identityLock = standalone.identity
 		authorityDomain = standalone.authority
 	}
 	defer func() {
 		if standalone != nil {
 			runErr = errors.Join(runErr, standalone.Close())
+
 			return
 		}
+
 		runErr = errors.Join(runErr, identityLock.Close(), authorityDomain.Close())
 	}()
+
 	if identityLock == nil || authorityDomain == nil {
 		return errors.New("Amp agent identity authority is incomplete")
 	}
+
 	contained := false
+
 	if publishCompletion {
 		defer func() {
 			if !contained {
 				return
 			}
+
 			if _, err := io.WriteString(completionOutput, "complete\n"); err != nil {
 				runErr = errors.Join(runErr, fmt.Errorf("publish Amp liveness completion: %w", err))
 			}
+
 			_, _ = io.WriteString(readyOutput, "done\n")
 		}()
 	}
@@ -1028,31 +1122,38 @@ func runTurnSupervisorNative(
 	nativeIsolation.AuthorityDomain = authorityDomain
 	nativeIsolation.StandaloneOwnerID = ""
 	nativeIsolation.StandaloneStateRoot = ""
+
 	if err := validateTurnSupervisorGuardianPeer(guardianPeer, guardianDone); err != nil {
 		containErr := turnSupervisorContain(turnSupervisorProcessID(), 0)
 		contained = containErr == nil
 
 		return errors.Join(err, containErr)
 	}
+
 	var lateValidationErr error
+
 	waitDone, enableErr, startErr := startTurnSupervisorNative(native, &nativeIsolation, func() error {
 		if config.AuthorityOrigin != "" {
 			testOnly := config.Isolation.TestOnlyNoCredential || config.Isolation.TestOnlyIdentityLockRoot != ""
+
 			lateValidationErr = validateTurnSupervisorConfigDisposition(config, testOnly)
 			if lateValidationErr != nil {
 				return lateValidationErr
 			}
 		}
+
 		lateValidationErr = validateTurnSupervisorGuardianPeer(guardianPeer, guardianDone)
 
 		return lateValidationErr
 	})
+
 	if lateValidationErr != nil {
 		containErr := turnSupervisorContain(turnSupervisorProcessID(), 0)
 		contained = containErr == nil
 
 		return errors.Join(lateValidationErr, containErr)
 	}
+
 	if enableErr != nil {
 		return fmt.Errorf("enable Amp native supervisor privileges: %w", enableErr)
 	}
@@ -1065,6 +1166,7 @@ func runTurnSupervisorNative(
 	if publishCompletion {
 		ready = fmt.Sprintf("ready:%d\n", native.Process.Pid)
 	}
+
 	if _, err := io.WriteString(readyOutput, ready); err != nil {
 		_ = turnSupervisorSignalGroup(native.Process.Pid, syscall.SIGKILL)
 		waitErr := <-waitDone
@@ -1080,6 +1182,7 @@ func runTurnSupervisorNative(
 			if err := turnSupervisorContain(turnSupervisorProcessID(), native.Process.Pid); err != nil {
 				return err
 			}
+
 			contained = true
 
 			return waitErr
@@ -1090,6 +1193,7 @@ func runTurnSupervisorNative(
 			if err := turnSupervisorContain(turnSupervisorProcessID(), native.Process.Pid); err != nil {
 				return err
 			}
+
 			contained = true
 
 			return waitErr
@@ -1108,6 +1212,7 @@ func validateTurnSupervisorGuardianPeer(peer *os.File, done <-chan struct{}) err
 	if peer == nil {
 		return nil
 	}
+
 	select {
 	case <-done:
 		return errors.New("Amp guardian exited before native launch")
@@ -1118,10 +1223,12 @@ func validateTurnSupervisorGuardianPeer(peer *os.File, done <-chan struct{}) err
 		Fd:     int32(peer.Fd()),
 		Events: unix.POLLIN | unix.POLLHUP | unix.POLLERR,
 	}}
+
 	ready, err := turnSupervisorPoll(poll, 0)
 	if err != nil {
 		return fmt.Errorf("poll Amp guardian before native launch: %w", err)
 	}
+
 	if ready != 0 || poll[0].Revents != 0 {
 		return errors.New("Amp guardian exited before native launch")
 	}
@@ -1138,6 +1245,7 @@ func validateTurnSupervisorIdentity(isolation *ProcessIsolation) error {
 	if effectiveUID != 0 {
 		return fmt.Errorf("trusted root identity is required, effective uid is %d", effectiveUID)
 	}
+
 	if isolation.UID == uint32(effectiveUID) {
 		return errors.New("native target identity must differ from the trusted supervisor")
 	}

@@ -76,6 +76,7 @@ func TestAgentStandaloneOwnerCloseFailurePreventsPublication(t *testing.T) {
 	previous := agentStandaloneCloseTemporary
 	agentStandaloneCloseTemporary = func(file *os.File) error {
 		require.NoError(t, file.Close())
+
 		return wantErr
 	}
 	t.Cleanup(func() { agentStandaloneCloseTemporary = previous })
@@ -95,6 +96,7 @@ func TestAgentStandaloneMarkerCloseFailurePreventsPublication(t *testing.T) {
 	previous := agentStandaloneCloseTemporary
 	agentStandaloneCloseTemporary = func(file *os.File) error {
 		require.NoError(t, file.Close())
+
 		return wantErr
 	}
 	t.Cleanup(func() { agentStandaloneCloseTemporary = previous })
@@ -115,6 +117,7 @@ func TestAgentStandaloneCancellationBeforeActiveRenamePreventsPublication(t *tes
 	agentStandaloneCloseTemporary = func(file *os.File) error {
 		err := file.Close()
 		close(canceled)
+
 		return err
 	}
 	t.Cleanup(func() { agentStandaloneCloseTemporary = previous })
@@ -137,6 +140,7 @@ func TestAgentStandaloneDomainCloseFailurePreventsPublication(t *testing.T) {
 	previous := agentStandaloneCloseTemporary
 	agentStandaloneCloseTemporary = func(file *os.File) error {
 		require.NoError(t, file.Close())
+
 		return wantErr
 	}
 	t.Cleanup(func() { agentStandaloneCloseTemporary = previous })
@@ -1091,6 +1095,7 @@ func TestAgentStandaloneFinalStateRootRevalidationAfterLastScanPreventsActive(t 
 			require.NoError(t, os.Mkdir(stateRoot, 0o700))
 			require.NoError(t, os.Chown(stateRoot, int(uid), int(gid)))
 		}
+
 		return nil
 	}
 	t.Cleanup(func() { agentStandaloneVacancyScan = previous })
@@ -1152,6 +1157,7 @@ func TestAgentStandaloneVacancyReenumeratesDisappearingTaskAndFindsReplacement(t
 			if taskReads == 1 {
 				return oldTasks, nil
 			}
+
 			return newTasks, nil
 		default:
 			return nil, os.ErrNotExist
@@ -1195,6 +1201,7 @@ func TestAgentStandaloneVacancyFailsClosedOnRepeatedTaskChurn(t *testing.T) {
 		if taskReads%2 == 1 {
 			return first, nil
 		}
+
 		return second, nil
 	}
 	agentStandaloneReadFile = func(string) ([]byte, error) {
@@ -1216,6 +1223,7 @@ func TestAgentStandaloneVacancyAllowsProcessExitDuringTaskEnumeration(t *testing
 		if path == "/proc" {
 			return processes, nil
 		}
+
 		return nil, os.ErrNotExist
 	}
 	t.Cleanup(func() { agentStandaloneReadDir = previousReadDir })
@@ -1281,6 +1289,7 @@ func openAgentStandaloneTestDirectory(t *testing.T) *os.File {
 	directory, err := os.Open(directoryPath)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, directory.Close()) })
+
 	return directory
 }
 
@@ -1303,6 +1312,7 @@ func createAgentStandaloneTestLock(
 			require.NoError(t, lock.Close())
 		}
 	})
+
 	return lock
 }
 
@@ -1336,6 +1346,7 @@ func createAgentStandaloneProtectedStateRoot(t *testing.T, uid, gid uint32) stri
 	stateRoot := filepath.Join(base, "state")
 	require.NoError(t, os.Mkdir(stateRoot, 0o700))
 	require.NoError(t, os.Chown(stateRoot, int(uid), int(gid)))
+
 	return stateRoot
 }
 
@@ -1347,6 +1358,7 @@ func agentStandaloneTestDirEntries(t *testing.T, names ...string) []os.DirEntry 
 	}
 	entries, err := os.ReadDir(directory)
 	require.NoError(t, err)
+
 	return entries
 }
 
@@ -1355,6 +1367,7 @@ func agentStandaloneTestStatus(uid, gid uint32, groups []uint32) []byte {
 	for _, group := range groups {
 		groupText += " " + strconv.FormatUint(uint64(group), 10)
 	}
+
 	return []byte(
 		"Uid:\t" + strconv.FormatUint(uint64(uid), 10) + " " + strconv.FormatUint(uint64(uid), 10) + " " +
 			strconv.FormatUint(uint64(uid), 10) + " " + strconv.FormatUint(uint64(uid), 10) + "\n" +
