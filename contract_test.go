@@ -313,7 +313,7 @@ func TestPathHomeContinuabilityAndStartup(t *testing.T) {
 		t.Fatal("empty load cwd accepted")
 	}
 
-	scratchRoot := t.TempDir()
+	scratchRoot := testScratchDir(t)
 	session, err := newAgentSession(
 		t.Context(),
 		newTestAgent(WithScratchDir(scratchRoot), WithEnv(map[string]string{"HOME": "/should/not/leak", "AMP_API_KEY": "fake"})),
@@ -531,9 +531,13 @@ func requireUnsupportedField(t *testing.T, err error, field string) {
 	}
 }
 
+// ctxWithTimeout bounds a lifecycle call so a hang fails the case instead of
+// the whole binary. It is a safety net, not a performance assertion: a real
+// native launch claims the standalone identity, which proves the identity
+// vacant across every task on the host, so the bound has to clear that.
 func ctxWithTimeout(t *testing.T) context.Context {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	t.Cleanup(cancel)
 
 	return ctx
@@ -586,7 +590,7 @@ func TestSessionDirFailurePropagates(t *testing.T) {
 }
 
 func TestWithScratchDirCreatesDirectories(t *testing.T) {
-	parent := t.TempDir()
+	parent := testScratchDir(t)
 	session, err := newAgentSession(t.Context(), newTestAgent(WithScratchDir(parent)), "T-dirs", t.TempDir(), parsedSessionMeta{}, "", nil)
 	if err != nil {
 		t.Fatal(err)

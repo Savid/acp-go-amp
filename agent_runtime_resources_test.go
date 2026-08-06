@@ -616,8 +616,12 @@ func TestActiveLoadStoreFailureAndDeleteCompletionFence(t *testing.T) {
 	require.NoError(t, agent.removeSession(t.Context(), "T-not-installed", session))
 	require.NoError(t, agent.removeSession(t.Context(), session.id, session))
 
+	// Executable discovery runs ahead of resource admission here too, so the
+	// delete agent names a fixture executable rather than depending on a host
+	// that happens to have amp installed.
+	deletePath, _ := fakeAgentAmpPath(t, "")
 	acquireErr := errors.New("delete native admission failed")
-	deleteAgent := newTestAgent(WithRuntimeResourceHooks(RuntimeResourceHooks{
+	deleteAgent := newTestAgent(WithExecutablePath(deletePath), WithRuntimeResourceHooks(RuntimeResourceHooks{
 		AcquireNativeRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
 			return nil, acquireErr
 		},
@@ -631,8 +635,12 @@ func TestActiveLoadStoreFailureAndDeleteCompletionFence(t *testing.T) {
 }
 
 func TestPendingDeleteContainmentFailureStopsEveryLifecycleRetry(t *testing.T) {
+	// The retried delete resolves the executable before it reaches resource
+	// admission, and a discovery failure is not a containment boundary, so
+	// without a fixture executable the retry reports no boundary at all.
+	pendingPath, _ := fakeAgentAmpPath(t, "")
 	newPendingAgent := func(id acp.SessionId) *Agent {
-		agent := newTestAgent(WithRuntimeResourceHooks(RuntimeResourceHooks{
+		agent := newTestAgent(WithExecutablePath(pendingPath), WithRuntimeResourceHooks(RuntimeResourceHooks{
 			AcquireNativeRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
 				return nil, ErrProcessContainmentIncomplete
 			},

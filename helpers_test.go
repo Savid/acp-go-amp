@@ -52,7 +52,7 @@ func testContainmentOptions(options []Option) []Option {
 	options = append(options, WithProcessIsolation(ProcessIsolation{
 		UID: uid, GID: gid,
 		BaseEnvironment:   baseEnvironment,
-		StandaloneOwnerID: "acp-go-amp-tests", StandaloneStateRoot: os.TempDir(),
+		StandaloneOwnerID: "acp-go-amp-tests", StandaloneStateRoot: testStandaloneStateRoot(uid, gid),
 	}))
 	options = append(options, func(options *Options) {
 		options.testOnlyNoCredential = true
@@ -66,6 +66,26 @@ func testContainmentOptions(options []Option) []Option {
 	}
 
 	return options
+}
+
+// testStandaloneStateRoot is the standalone state root every adapter-level
+// fixture claims. The authority binds it as the claimed identity's own storage,
+// so the leaf has to be a UID:GID-owned mode-0700 directory under a root-owned
+// ancestry. The ambient temp root is only the ancestry: it is root-owned and
+// world-readable, so naming it directly can never satisfy the claim.
+func testStandaloneStateRoot(uid, gid uint32) string {
+	root := filepath.Join(os.TempDir(), "acp-go-amp-standalone-state-"+strconv.Itoa(os.Getpid()))
+	if err := os.Mkdir(root, 0o700); err != nil && !os.IsExist(err) {
+		panic(err)
+	}
+	if err := os.Chown(root, int(uid), int(gid)); err != nil {
+		panic(err)
+	}
+	if err := os.Chmod(root, 0o700); err != nil {
+		panic(err)
+	}
+
+	return root
 }
 
 func testIdentityLockRoot() string {

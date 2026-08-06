@@ -1949,7 +1949,11 @@ func TestOneShotWaitTimeoutReportsIncompleteBoundary(t *testing.T) {
 			return ProcessSnapshotObserver{Incomplete: func() { incomplete++ }}
 		},
 	})
-	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	// The caller deadline is what ends the never-completing wait, so it is also
+	// this case's whole cost. It still has to outlast a real supervised launch:
+	// a launch that never reaches the wait installs no observer, and the case
+	// then reports a boundary it never exercised.
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	if _, err := client.outputRaw(ctx, "version"); !errors.Is(err, ErrProcessContainmentIncomplete) {
 		t.Fatalf("one-shot wait timeout = %v", err)

@@ -5,6 +5,7 @@ package ampacp
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"syscall"
 	"testing"
@@ -14,9 +15,24 @@ import (
 	nativeamp "github.com/savid/acp-go-amp/internal/amp"
 )
 
+// testNativeIsolation is the policy for fixtures that drive the native client
+// directly rather than through an Agent. Native launches refuse an absent
+// policy, so a bare Options value never reaches the process under test.
+func testNativeIsolation() *nativeamp.ProcessIsolation {
+	uid, gid := testIsolationIdentity()
+
+	return &nativeamp.ProcessIsolation{
+		UID: uid, GID: gid,
+		BaseEnvironment:      map[string]string{"PATH": os.Getenv("PATH"), "HOME": os.Getenv("HOME")},
+		TestOnlyNoCredential: true,
+	}
+}
+
 func TestCancelContainsDescendantBeforeReturn(t *testing.T) {
 	path, stateDir := fakeAgentAmpPath(t, "sigint-descendant")
-	client := nativeamp.NewClient(nil, nativeamp.Options{CLIPath: path, Cwd: t.TempDir()})
+	client := nativeamp.NewClient(nil, nativeamp.Options{
+		CLIPath: path, Cwd: t.TempDir(), Isolation: testNativeIsolation(),
+	})
 	turn, err := client.Continue(t.Context(), "T-agent-thread", map[string]any{"type": "user"})
 	if err != nil {
 		t.Fatalf("Continue: %v", err)
@@ -26,8 +42,12 @@ func TestCancelContainsDescendantBeforeReturn(t *testing.T) {
 	state := newPromptTurnState()
 	state.setTurn(turn)
 	agent := newTestAgent()
+	// The short cancel timeout is the SIGINT grace, so the ladder escalates at
+	// once. The close-turn wait is the ceiling on proving the isolated tree
+	// contained, which an isolated descendant reaches through the supervisor, so
+	// it gets room rather than the tightest value that has ever worked.
 	agent.options.runtime.nativeCancelTimeout = 100 * time.Millisecond
-	agent.options.runtime.nativeCloseTurnWait = time.Second
+	agent.options.runtime.nativeCloseTurnWait = 10 * time.Second
 	session := &agentSession{agent: agent, activePrompt: state}
 
 	waitForPath(t, filepath.Join(stateDir, "continue-ready"))
@@ -48,7 +68,7 @@ func TestTurnTimeoutContainsDescendantBeforeReturn(t *testing.T) {
 		WithTurnTimeout(100*time.Millisecond),
 	)
 	agent.options.runtime.nativeCancelTimeout = 100 * time.Millisecond
-	agent.options.runtime.nativeCloseTurnWait = time.Second
+	agent.options.runtime.nativeCloseTurnWait = 10 * time.Second
 	t.Cleanup(func() {
 		if err := agent.Close(); err != nil {
 			t.Errorf("Close: %v", err)
