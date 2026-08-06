@@ -17,6 +17,13 @@ var (
 	syscallKill          = syscall.Kill
 	processTreeReadyWait = awaitProcessTreeReady
 	startProcessTreeWait = startPausedCommandWait
+	// validateBestEffortLaunch is the Darwin generation check. Its Linux
+	// implementation is a constant nil, so the refusal this call guards is
+	// unreachable from any Linux input even though the guard is live on
+	// Darwin. Reaching it through a seam is the only way to hold the shared
+	// caller to its contract: a launch whose generation cannot be validated is
+	// abandoned rather than started.
+	processTreeValidateLaunch = validateBestEffortLaunch
 )
 
 type processTree struct {
@@ -77,7 +84,7 @@ func startProcessTree(launch *processTreeCommand) (*processTree, error) {
 	}
 
 	launch.control = nil
-	if err := validateBestEffortLaunch(launch, tree, beginWait); err != nil {
+	if err := processTreeValidateLaunch(launch, tree, beginWait); err != nil {
 		return nil, err
 	}
 
