@@ -141,6 +141,7 @@ var agentStandaloneLockFileSync = func(file *os.File) error { return file.Sync()
 var agentStandaloneLockDirectorySync = unix.Fsync
 var agentStandaloneLockClose = func(file *os.File) error { return file.Close() }
 var agentStandaloneLockFstatat = unix.Fstatat
+var agentStandaloneFlock = unix.Flock
 var agentStandaloneFilesystemProbe = probeAgentStandaloneFilesystem
 var agentStandaloneProbeFstatfs = unix.Fstatfs
 var agentStandaloneProbeFcntl = unix.FcntlInt
@@ -595,7 +596,9 @@ func acquireAgentStandaloneDomain(
 				return nil, currentErr
 			}
 			if record.sameDomain(current) {
-				if err = unix.Flock(int(exclusive.Fd()), unix.LOCK_SH); err != nil {
+				current.AuthorityID = record.AuthorityID
+
+				if err = agentStandaloneFlock(int(exclusive.Fd()), unix.LOCK_SH); err != nil {
 					_ = exclusive.Close()
 					return nil, err
 				}
@@ -665,7 +668,7 @@ func acquireAgentStandaloneDomain(
 					return nil, err
 				}
 			}
-			if err = unix.Flock(int(exclusive.Fd()), unix.LOCK_SH); err != nil {
+			if err = agentStandaloneFlock(int(exclusive.Fd()), unix.LOCK_SH); err != nil {
 				_ = exclusive.Close()
 				return nil, err
 			}
@@ -729,7 +732,7 @@ func acquireAgentStandaloneDomain(
 			_ = exclusive.Close()
 			return nil, err
 		}
-		if err = unix.Flock(int(exclusive.Fd()), unix.LOCK_SH); err != nil {
+		if err = agentStandaloneFlock(int(exclusive.Fd()), unix.LOCK_SH); err != nil {
 			_ = exclusive.Close()
 			return nil, err
 		}
@@ -765,7 +768,7 @@ func normalizeAgentStandaloneSharedDomainLease(
 	ownerGID uint32,
 	want agentAuthorityDomainRecord,
 ) error {
-	if err := unix.Flock(int(lease.Fd()), unix.LOCK_SH); err != nil {
+	if err := agentStandaloneFlock(int(lease.Fd()), unix.LOCK_SH); err != nil {
 		return fmt.Errorf("normalize agent authority domain shared lease: %w", err)
 	}
 
@@ -836,7 +839,7 @@ func acquireAgentStandaloneNamedLock(
 			_ = file.Close()
 			return nil, err
 		}
-		if err = unix.Flock(int(file.Fd()), operation|unix.LOCK_NB); err == nil {
+		if err = agentStandaloneFlock(int(file.Fd()), operation|unix.LOCK_NB); err == nil {
 			return file, nil
 		}
 		if !errors.Is(err, unix.EWOULDBLOCK) && !errors.Is(err, unix.EAGAIN) {
@@ -928,7 +931,7 @@ func tryAgentStandaloneNamedLock(
 	if err != nil {
 		return nil, false, err
 	}
-	if err = unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB); err == nil {
+	if err = agentStandaloneFlock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB); err == nil {
 		return file, true, nil
 	}
 	closeErr := file.Close()
@@ -1150,14 +1153,14 @@ func probeAgentStandaloneFilesystem(directory *os.File, testOnly bool) (probeErr
 	if err = unix.Fchmod(fd, 0o600); err != nil {
 		return err
 	}
-	if err = unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB); err != nil {
+	if err = agentStandaloneFlock(fd, unix.LOCK_EX|unix.LOCK_NB); err != nil {
 		return err
 	}
 	contender, err := unix.Openat(int(directory.Fd()), first, unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		return err
 	}
-	contenderErr := unix.Flock(contender, unix.LOCK_EX|unix.LOCK_NB)
+	contenderErr := agentStandaloneFlock(contender, unix.LOCK_EX|unix.LOCK_NB)
 	closeErr := unix.Close(contender)
 	if contenderErr == nil || (!errors.Is(contenderErr, unix.EWOULDBLOCK) && !errors.Is(contenderErr, unix.EAGAIN)) {
 		return errors.Join(errors.New("agent authority filesystem lacks separate-open flock exclusion"), closeErr)
@@ -1745,7 +1748,7 @@ func cleanupAgentStandaloneProbeTemporary(
 		return err
 	}
 	defer file.Close()
-	if err = unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+	if err = agentStandaloneFlock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
 		if errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EAGAIN) {
 			return fmt.Errorf("%w: %q", errAgentStandaloneProbeLive, name)
 		}
