@@ -187,10 +187,10 @@ func TestHandoffFormSelection(t *testing.T) {
 				return remote
 			}(),
 			func() acp.ContentBlock {
-				unparseable := acp.ImageBlock("", imageMIMEPNG)
-				unparseable.Image.Uri = acp.Ptr("file://\x7f/x.png")
+				unparsable := acp.ImageBlock("", imageMIMEPNG)
+				unparsable.Image.Uri = acp.Ptr("file://\x7f/x.png")
 
-				return unparseable
+				return unparsable
 			}(),
 		} {
 			_, err := promptInputWithPolicy(t.Context(), []acp.ContentBlock{block}, handoffPolicy(root, limits))
@@ -402,7 +402,7 @@ func TestHandoffURIDefects(t *testing.T) {
 	}{
 		{name: "absent", uri: nil, message: handoffURIAbsentMessage},
 		{name: "empty", uri: acp.Ptr(""), message: handoffURIAbsentMessage},
-		{name: "unparseable", uri: acp.Ptr("file://\x7f/x.png"), message: handoffURIUnparseableMessage},
+		{name: "unparsable", uri: acp.Ptr("file://\x7f/x.png"), message: handoffURIUnparsableMessage},
 		{name: "remote scheme", uri: acp.Ptr("https://example.invalid/x.png"), message: handoffURISchemeMessage},
 		{name: "remote host", uri: acp.Ptr("file://remote.invalid/x.png"), message: handoffURIRemoteHostMessage},
 		{name: "relative path", uri: acp.Ptr("file:relative/x.png"), message: handoffURIRelativeMessage},
@@ -1123,15 +1123,15 @@ func TestHandoffMessagesCarryNoObservedValues(t *testing.T) {
 		handoffDigestInvalidMessage:        true,
 		handoffSizeBytesInvalidMessage:     true,
 		handoffURIAbsentMessage:            true,
-		handoffURIUnparseableMessage:       true,
+		handoffURIUnparsableMessage:        true,
 		handoffURISchemeMessage:            true,
 		handoffURIRemoteHostMessage:        true,
 		handoffURIRelativeMessage:          true,
 	}
 
-	unparseable := acp.ImageBlock("", imageMIMEPNG)
-	unparseable.Image.Uri = acp.Ptr("file://\x7f/x.png")
-	unparseable.Image.Meta = map[string]any{metaHandoffKey: map[string]any{
+	unparsable := acp.ImageBlock("", imageMIMEPNG)
+	unparsable.Image.Uri = acp.Ptr("file://\x7f/x.png")
+	unparsable.Image.Meta = map[string]any{metaHandoffKey: map[string]any{
 		handoffFieldVersion:   handoffVersion,
 		handoffFieldDigest:    handoffDigest(data),
 		handoffFieldSizeBytes: len(data),
@@ -1179,7 +1179,7 @@ func TestHandoffMessagesCarryNoObservedValues(t *testing.T) {
 			}),
 			root: root,
 		},
-		{name: "uri is unparseable", block: unparseable, root: root},
+		{name: "uri is unparsable", block: unparsable, root: root},
 		{name: "path is outside the root", block: handoffBlock(outside, imageMIMEPNG, data), root: root},
 		{name: "path escapes through a link", block: handoffBlock(escaping, imageMIMEPNG, data), root: root},
 		{name: "path is a directory", block: handoffBlock(root, imageMIMEPNG, data), root: root},

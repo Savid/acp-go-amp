@@ -159,7 +159,7 @@ carries a `message` naming the real cause:
 
 | `error` | Meaning |
 |---|---|
-| `invalid_handoff` | the block is malformed as a block: no read root configured, a missing, non-object, unknown-field, wrong-version, bad-digest or bad-size envelope, or a URI that is absent, unparseable, not `file://`, remote-hosted, or not absolute |
+| `invalid_handoff` | the block is malformed as a block: no read root configured, a missing, non-object, unknown-field, wrong-version, bad-digest or bad-size envelope, or a URI that is absent, unparsable, not `file://`, remote-hosted, or not absolute |
 | `path_not_allowed` | the path lies outside the read root, is reached through a symlink the root refuses (any absolute symlink, or one leading out of the root), or does not name a regular file |
 | `missing_file` | the path is inside the root but absent, unopenable, or unreadable — the expected outcome when a host cleans up early |
 | `handoff_digest_mismatch` | the file's byte count or sha256 disagrees with the envelope; the adapter fails closed and never falls back to another transport |

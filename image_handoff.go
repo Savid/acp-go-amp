@@ -81,11 +81,11 @@ const (
 	handoffDigestInvalidMessage        = metaHandoffKey + " envelope digest must be 64 lowercase hex characters"
 	handoffSizeBytesInvalidMessage     = metaHandoffKey + " envelope sizeBytes is missing or not a non-negative integer"
 
-	handoffURIAbsentMessage      = "handoff image block carries no uri"
-	handoffURIUnparseableMessage = "handoff uri is not parseable"
-	handoffURISchemeMessage      = "handoff uri scheme is not " + handoffURIScheme
-	handoffURIRemoteHostMessage  = "handoff uri names a remote host"
-	handoffURIRelativeMessage    = "handoff uri path is not absolute"
+	handoffURIAbsentMessage     = "handoff image block carries no uri"
+	handoffURIUnparsableMessage = "handoff uri is not parseable"
+	handoffURISchemeMessage     = "handoff uri scheme is not " + handoffURIScheme
+	handoffURIRemoteHostMessage = "handoff uri names a remote host"
+	handoffURIRelativeMessage   = "handoff uri path is not absolute"
 )
 
 // handoffFile is the part of an opened handoff file the bounded read needs. The
@@ -361,7 +361,7 @@ func promptHandoffRequestedPath(uri *string) (string, *handoffError) {
 
 	parsed, err := url.Parse(*uri)
 	if err != nil {
-		return "", handoffInvalid(handoffURIUnparseableMessage)
+		return "", handoffInvalid(handoffURIUnparsableMessage)
 	}
 
 	if parsed.Scheme != handoffURIScheme {
