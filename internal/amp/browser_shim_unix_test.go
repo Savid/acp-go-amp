@@ -81,9 +81,12 @@ func TestLoginNeverExecsABrowserLauncher(t *testing.T) {
 	}
 
 	client := newTestClient(t, nil, Options{
-		CLIPath:       path,
-		Cwd:           t.TempDir(),
-		ScratchParent: t.TempDir(),
+		CLIPath: path,
+		Cwd:     t.TempDir(),
+		// The shim is generated under the scratch parent and handed to the
+		// isolated identity, so the parent has to be one that identity can
+		// traverse rather than a t.TempDir leaf nested under a 0700 directory.
+		ScratchParent: makeInstalledLinuxAmpScratchParent(t),
 		Env:           map[string]string{dataHomeEnv: t.TempDir()},
 	})
 

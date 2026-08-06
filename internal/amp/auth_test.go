@@ -513,8 +513,16 @@ func TestStartAuthLoginRejectsAnUnusableLaunch(t *testing.T) {
 		t.Fatal("a launch with no Darwin generation factory started a login")
 	}
 
-	handoffClient := newTestClient(t, nil, Options{CLIPath: path, Cwd: t.TempDir()})
+	// The scratch parent is a t.TempDir leaf, nested under a 0700 directory the
+	// foreign identity below cannot enter, so the shim generated there cannot be
+	// handed to it on any platform.
+	handoffClient := newTestClient(t, nil, Options{CLIPath: path, Cwd: t.TempDir(), ScratchParent: t.TempDir()})
 	handoffClient.options.Isolation.TestOnlyNoCredential = false
+	// Dropping the credential opt-out puts the policy under the standalone
+	// identity disposition Linux enforces, so it needs the owner fields or it is
+	// rejected before the shim handoff this case is about.
+	handoffClient.options.Isolation.StandaloneOwnerID = "acp-go-amp-tests"
+	handoffClient.options.Isolation.StandaloneStateRoot = "/var/lib/acp-go-amp-tests"
 	handoffClient.options.Isolation.UID = uint32(os.Geteuid() + 1)
 	handoffClient.options.Isolation.GID = uint32(os.Getegid() + 1)
 	if _, err := handoffClient.StartAuthLogin(t.Context()); err == nil || !strings.Contains(err.Error(), "browser shim") {
