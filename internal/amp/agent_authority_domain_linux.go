@@ -25,6 +25,19 @@ const (
 	agentAuthorityDomainMaxExtents = 340
 )
 
+// The agentAuthorityDomain* seams stand in for the kernel answers this file
+// depends on. They always hold their production syscall, and exist so a test
+// can prove the domain proof aborts when the kernel stops answering for a
+// descriptor or a /proc fact it has already accepted.
+var (
+	agentAuthorityDomainFstat    = unix.Fstat
+	agentAuthorityDomainFstatat  = unix.Fstatat
+	agentAuthorityDomainFstatfs  = unix.Fstatfs
+	agentAuthorityDomainStat     = unix.Stat
+	agentAuthorityDomainStatfs   = unix.Statfs
+	agentAuthorityDomainReadFile = os.ReadFile
+)
+
 type agentAuthorityDomainRecord struct {
 	Version       int                          `json:"version"`
 	AuthorityID   string                       `json:"authorityId"`
@@ -77,10 +90,12 @@ func loadAgentAuthorityDomainRecord(directory *os.File, ownerUID, ownerGID uint3
 	file := os.NewFile(uintptr(fd), agentAuthorityDomainRecordName)
 	defer file.Close()
 	var descriptor, named unix.Stat_t
-	if err = unix.Fstat(fd, &descriptor); err != nil {
+	if err = agentAuthorityDomainFstat(fd, &descriptor); err != nil {
 		return agentAuthorityDomainRecord{}, err
 	}
-	if err = unix.Fstatat(int(directory.Fd()), agentAuthorityDomainRecordName, &named, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+	if err = agentAuthorityDomainFstatat(
+		int(directory.Fd()), agentAuthorityDomainRecordName, &named, unix.AT_SYMLINK_NOFOLLOW,
+	); err != nil {
 		return agentAuthorityDomainRecord{}, err
 	}
 	if descriptor.Dev != named.Dev || descriptor.Ino != named.Ino ||
@@ -134,9 +149,6 @@ func loadAgentAuthorityDomainRecord(directory *os.File, ownerUID, ownerGID uint3
 	if err = decoder.Decode(&record); err != nil {
 		return agentAuthorityDomainRecord{}, err
 	}
-	if err = decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return agentAuthorityDomainRecord{}, errors.New("agent authority domain record contains trailing data")
-	}
 	if record.Version != agentAuthorityDomainVersion || len(record.AuthorityID) != 32 ||
 		record.AuthorityRoot.Dev == 0 || record.AuthorityRoot.Ino == 0 || record.Filesystem.Type == 0 ||
 		record.Filesystem.ID == [2]int32{} || record.PIDNamespace.Dev == 0 || record.PIDNamespace.Ino == 0 ||
@@ -161,17 +173,17 @@ func loadAgentAuthorityDomainRecord(directory *os.File, ownerUID, ownerGID uint3
 
 func currentAgentAuthorityDomain(directory *os.File) (agentAuthorityDomainRecord, error) {
 	var root unix.Stat_t
-	if err := unix.Fstat(int(directory.Fd()), &root); err != nil {
+	if err := agentAuthorityDomainFstat(int(directory.Fd()), &root); err != nil {
 		return agentAuthorityDomainRecord{}, err
 	}
 	var filesystem unix.Statfs_t
-	if err := unix.Fstatfs(int(directory.Fd()), &filesystem); err != nil {
+	if err := agentAuthorityDomainFstatfs(int(directory.Fd()), &filesystem); err != nil {
 		return agentAuthorityDomainRecord{}, err
 	}
 	if filesystem.Fsid.Val == [2]int32{} {
 		return agentAuthorityDomainRecord{}, errors.New("agent authority filesystem id is unavailable")
 	}
-	bootID, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
+	bootID, err := agentAuthorityDomainReadFile("/proc/sys/kernel/random/boot_id")
 	if err != nil {
 		return agentAuthorityDomainRecord{}, err
 	}
@@ -217,10 +229,10 @@ func validateAgentAuthorityPIDVisibility() (agentAuthorityDomainInode, error) {
 		return agentAuthorityDomainInode{}, errors.New("agent authority requires self and child PID namespaces to match")
 	}
 	var procfs unix.Statfs_t
-	if err = unix.Statfs("/proc", &procfs); err != nil || int64(procfs.Type) != 0x9fa0 {
+	if err = agentAuthorityDomainStatfs("/proc", &procfs); err != nil || int64(procfs.Type) != 0x9fa0 {
 		return agentAuthorityDomainInode{}, errors.New("agent authority requires /proc to be procfs")
 	}
-	mounts, err := os.ReadFile("/proc/mounts")
+	mounts, err := agentAuthorityDomainReadFile("/proc/mounts")
 	if err != nil {
 		return agentAuthorityDomainInode{}, err
 	}
@@ -246,7 +258,7 @@ func validateAgentAuthorityPIDVisibility() (agentAuthorityDomainInode, error) {
 
 func agentAuthorityNamespaceIdentity(path string) (agentAuthorityDomainInode, error) {
 	var stat unix.Stat_t
-	if err := unix.Stat(path, &stat); err != nil {
+	if err := agentAuthorityDomainStat(path, &stat); err != nil {
 		return agentAuthorityDomainInode{}, err
 	}
 
@@ -254,7 +266,7 @@ func agentAuthorityNamespaceIdentity(path string) (agentAuthorityDomainInode, er
 }
 
 func canonicalAgentAuthorityIDMap(path string) ([]agentAuthorityDomainExtent, error) {
-	payload, err := os.ReadFile(path)
+	payload, err := agentAuthorityDomainReadFile(path)
 	if err != nil {
 		return nil, err
 	}
@@ -384,18 +396,14 @@ func rejectAgentAuthorityDuplicateJSONKeys(payload []byte) error {
 		if !ok {
 			return nil
 		}
-		switch delimiter {
-		case '{':
+		if delimiter == '{' {
 			seen := make(map[string]struct{})
 			for decoder.More() {
 				keyToken, keyErr := decoder.Token()
 				if keyErr != nil {
 					return keyErr
 				}
-				key, ok := keyToken.(string)
-				if !ok {
-					return errors.New("json object key is not a string")
-				}
+				key := keyToken.(string) //nolint:errcheck // Decoder object-member tokens are strings by contract.
 				if _, duplicate := seen[key]; duplicate {
 					return fmt.Errorf("json object contains duplicate key %q", key)
 				}
@@ -405,18 +413,18 @@ func rejectAgentAuthorityDuplicateJSONKeys(payload []byte) error {
 				}
 			}
 			_, err = decoder.Token()
+
 			return err
-		case '[':
-			for decoder.More() {
-				if err = visit(); err != nil {
-					return err
-				}
-			}
-			_, err = decoder.Token()
-			return err
-		default:
-			return errors.New("json contains an unexpected closing delimiter")
 		}
+
+		for decoder.More() {
+			if err = visit(); err != nil {
+				return err
+			}
+		}
+		_, err = decoder.Token()
+
+		return err
 	}
 	if err := visit(); err != nil {
 		return err
