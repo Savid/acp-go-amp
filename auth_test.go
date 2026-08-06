@@ -36,7 +36,7 @@ func newAuthFixture(t *testing.T, mode string, extra ...Option) *authFixture {
 	root := t.TempDir()
 	agent := newTestAgent(append([]Option{
 		WithExecutablePath(path),
-		WithScratchDir(t.TempDir()),
+		WithScratchDir(testScratchDir(t)),
 		WithProviderAuthRoot(root),
 	}, extra...)...)
 
@@ -272,7 +272,7 @@ func TestProviderAuthBootstrapsSessionWithoutAPIKey(t *testing.T) {
 
 	agent := newTestAgent(
 		WithExecutablePath(path),
-		WithScratchDir(t.TempDir()),
+		WithScratchDir(testScratchDir(t)),
 		WithProviderAuthRoot(t.TempDir()),
 		WithEnv(map[string]string{"AMP_API_KEY": ""}),
 	)
@@ -548,7 +548,7 @@ func TestAuthSessionAccessorsAndPanicGuard(t *testing.T) {
 	<-done
 
 	// A session with no broker is a no-op rather than a nil dereference.
-	plain := newTestAgent(WithScratchDir(t.TempDir()))
+	plain := newTestAgent(WithScratchDir(testScratchDir(t)))
 	(&agentSession{agent: plain, id: "T-none"}).closeProviderAuth()
 }
 

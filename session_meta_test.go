@@ -48,7 +48,7 @@ func TestActiveOmittedEnvMeansDefaultEnv(t *testing.T) {
 
 	agent := newTestAgent(
 		WithExecutablePath(path),
-		WithScratchDir(t.TempDir()),
+		WithScratchDir(testScratchDir(t)),
 		WithEnv(map[string]string{"AMP_API_KEY": "default"}),
 	)
 	resp, err := agent.NewSession(ctx, NewSessionRequest(cwd,
@@ -68,7 +68,7 @@ func TestActiveOmittedEnvMeansDefaultEnv(t *testing.T) {
 
 	defaultAgent := newTestAgent(
 		WithExecutablePath(path),
-		WithScratchDir(t.TempDir()),
+		WithScratchDir(testScratchDir(t)),
 		WithEnv(map[string]string{"AMP_API_KEY": "default"}),
 	)
 	defaultResp, err := defaultAgent.NewSession(ctx, NewSessionRequest(cwd))
@@ -90,7 +90,7 @@ func TestColdLoadOmittedEnvBuildsDefaultEnv(t *testing.T) {
 	cwd := t.TempDir()
 	created := newTestAgent(
 		WithExecutablePath(path),
-		WithScratchDir(t.TempDir()),
+		WithScratchDir(testScratchDir(t)),
 		WithSessionStore(store),
 		WithEnv(map[string]string{"AMP_API_KEY": "create-default"}),
 	)
@@ -106,7 +106,7 @@ func TestColdLoadOmittedEnvBuildsDefaultEnv(t *testing.T) {
 
 	restored := newTestAgent(
 		WithExecutablePath(path),
-		WithScratchDir(t.TempDir()),
+		WithScratchDir(testScratchDir(t)),
 		WithSessionStore(store),
 		WithEnv(map[string]string{
 			"AMP_API_KEY": "restore-default",
@@ -128,7 +128,7 @@ func TestColdLoadOmittedEnvBuildsDefaultEnv(t *testing.T) {
 
 func TestPromptErrorAfterCallerContextCancelInterrupts(t *testing.T) {
 	path, state := fakeAgentAmpPath(t, "delayed-error")
-	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()))
+	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(testScratchDir(t)))
 	resp, err := agent.NewSession(context.Background(), NewSessionRequest(t.TempDir()))
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
@@ -159,7 +159,7 @@ func TestPromptErrorAfterCallerContextCancelInterrupts(t *testing.T) {
 
 func TestSessionPromptErrorAfterContextErrInterrupts(t *testing.T) {
 	path, state := fakeAgentAmpPath(t, "delayed-error")
-	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()))
+	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(testScratchDir(t)))
 	resp, err := agent.NewSession(context.Background(), NewSessionRequest(t.TempDir()))
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)

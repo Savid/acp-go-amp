@@ -37,10 +37,10 @@ func TestAgentLifecycleErrorBranches(t *testing.T) {
 		t.Fatal("file scratch dir accepted")
 	}
 	storeErr := &errorStore{loadErr: errors.New("load failed")}
-	if _, err := newTestAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()), WithSessionStore(storeErr)).NewSession(ctx, NewSessionRequest(t.TempDir())); err == nil {
+	if _, err := newTestAgent(WithExecutablePath(path), WithScratchDir(testScratchDir(t)), WithSessionStore(storeErr)).NewSession(ctx, NewSessionRequest(t.TempDir())); err == nil {
 		t.Fatal("persist load error ignored")
 	}
-	limited := newTestAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()), WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1}))
+	limited := newTestAgent(WithExecutablePath(path), WithScratchDir(testScratchDir(t)), WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1}))
 	if _, err := limited.NewSession(ctx, NewSessionRequest(t.TempDir())); err != nil {
 		t.Fatalf("first limited NewSession: %v", err)
 	}
@@ -69,7 +69,7 @@ func TestLoadResumeManifestAndConfigBranches(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()), WithSessionStore(store), WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 2}))
+	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(testScratchDir(t)), WithSessionStore(store), WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 2}))
 	client, cleanup := attachRecordingClient(t, agent)
 	defer cleanup()
 	if _, err := agent.LoadSession(ctx, LoadSessionRequest("T-load", cwd, WithSessionRawEvents(true))); err != nil {
@@ -122,7 +122,7 @@ func TestLoadResumeManifestAndConfigBranches(t *testing.T) {
 		}); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := newTestAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()), WithSessionStore(badStore)).LoadSession(ctx, LoadSessionRequest("T-bad", cwd)); err == nil {
+		if _, err := newTestAgent(WithExecutablePath(path), WithScratchDir(testScratchDir(t)), WithSessionStore(badStore)).LoadSession(ctx, LoadSessionRequest("T-bad", cwd)); err == nil {
 			t.Fatal("bad transcript replay accepted")
 		}
 	}
@@ -207,7 +207,7 @@ func TestRemainingAgentBranches(t *testing.T) {
 	if _, err := newTestAgent(WithExecutablePath(path), WithScratchDir(fileHome), WithSessionStore(store)).LoadSession(ctx, LoadSessionRequest("T-file", t.TempDir())); err == nil {
 		t.Fatal("load with file scratch dir accepted")
 	}
-	activeLimited := newTestAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()), WithSessionStore(store), WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 0}))
+	activeLimited := newTestAgent(WithExecutablePath(path), WithScratchDir(testScratchDir(t)), WithSessionStore(store), WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 0}))
 	activeLimited.options.ConcurrencyLimits.MaxActiveSessions = 0
 	if _, _, _, err := activeLimited.loadOrResume(ctx, "T-file", t.TempDir(), nil, nil, nil); err != nil {
 		t.Fatalf("loadOrResume direct: %v", err)
@@ -419,7 +419,7 @@ func TestActiveLoadResumeValidation(t *testing.T) {
 	ctx := context.Background()
 	path, _ := fakeAgentAmpPath(t, "")
 	cwd := t.TempDir()
-	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()))
+	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(testScratchDir(t)))
 	resp, err := agent.NewSession(ctx, NewSessionRequest(cwd))
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
@@ -472,7 +472,7 @@ func TestMirrorUnsyncedRetention(t *testing.T) {
 	path, _ := fakeAgentAmpPath(t, "")
 	cwd := t.TempDir()
 	store := &flakyReplaceStore{InMemorySessionStore: NewInMemorySessionStore()}
-	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()), WithSessionStore(store))
+	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(testScratchDir(t)), WithSessionStore(store))
 	resp, err := agent.NewSession(ctx, NewSessionRequest(cwd))
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
@@ -512,7 +512,7 @@ func TestMirrorUnsyncedRetention(t *testing.T) {
 	}
 
 	// Load replay on a fresh agent must succeed and see the retained turns.
-	restored := newTestAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()), WithSessionStore(store))
+	restored := newTestAgent(WithExecutablePath(path), WithScratchDir(testScratchDir(t)), WithSessionStore(store))
 	if _, err := restored.LoadSession(ctx, LoadSessionRequest(id, cwd)); err != nil {
 		t.Fatalf("load replay after retention: %v", err)
 	}
@@ -575,7 +575,7 @@ func TestSessionDirectBranches(t *testing.T) {
 	if _, err := newAgentSession(t.Context(), newTestAgent(WithScratchDir(fileScratch)), "T-1", "", parsedSessionMeta{}, "", nil); err == nil {
 		t.Fatal("newAgentSession with file scratch dir succeeded")
 	}
-	handoffAgent := newTestAgent(WithScratchDir(t.TempDir()))
+	handoffAgent := newTestAgent(WithScratchDir(testScratchDir(t)))
 	handoffAgent.options.ProcessIsolation.UID = uint32(os.Geteuid()) + 1
 	handoffAgent.options.ProcessIsolation.GID = uint32(os.Getegid()) + 1
 	if _, err := newAgentSession(t.Context(), handoffAgent, "T-handoff", "", parsedSessionMeta{}, "", nil); err == nil {
@@ -583,7 +583,7 @@ func TestSessionDirectBranches(t *testing.T) {
 	}
 
 	path, _ := fakeAgentAmpPath(t, "")
-	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()))
+	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(testScratchDir(t)))
 	session, err := newAgentSession(t.Context(), agent, "T-1", t.TempDir(), parsedSessionMeta{rawEvent: true}, "", nil)
 	if err != nil {
 		t.Fatal(err)

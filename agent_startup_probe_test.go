@@ -16,7 +16,7 @@ import (
 
 func TestStartupProbeUsesIsolatedTargetOwnedResidence(t *testing.T) {
 	path, state := fakeAgentAmpPath(t, "probe-residence")
-	scratch := t.TempDir()
+	scratch := testScratchDir(t)
 	forbidden := map[string]string{}
 	for _, name := range []string{envHome, envXDGConfigHome, envXDGCacheHome, envXDGDataHome, envXDGStateHome} {
 		dir := filepath.Join(t.TempDir(), strings.ToLower(name))
@@ -101,7 +101,7 @@ func TestStartupProbeUsesIsolatedTargetOwnedResidence(t *testing.T) {
 
 func TestDiscoveryProbeUsesAndRemovesIsolatedResidence(t *testing.T) {
 	path, state := fakeAgentAmpPath(t, "probe-residence")
-	scratch := t.TempDir()
+	scratch := testScratchDir(t)
 	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(scratch))
 	err := agent.ensureStartupWithProbe(t.Context(), t.TempDir(), nil, func(ctx context.Context, client *nativeamp.Client) error {
 		return client.DiscoveryProbe(ctx)
@@ -129,7 +129,7 @@ func requireNoTransientProbeRoots(t *testing.T, entries []os.DirEntry) {
 }
 
 func TestStartupProbeResidenceCleanupRequiresContainmentProof(t *testing.T) {
-	scratch := t.TempDir()
+	scratch := testScratchDir(t)
 	releases := 0
 	agent := newTestAgent(
 		WithScratchDir(scratch),
@@ -180,7 +180,7 @@ func TestStartupProbeResidenceMaterializationAndRemovalFailures(t *testing.T) {
 		original := mkdirTemp
 		t.Cleanup(func() { mkdirTemp = original })
 		mkdirTemp = func(string, string) (string, error) { return "", errors.New("mkdir temp") }
-		err := newTestAgent(WithScratchDir(t.TempDir())).runStartupWithProbe(t.Context(), t.TempDir(), nil, func(context.Context, *nativeamp.Client) error { return nil })
+		err := newTestAgent(WithScratchDir(testScratchDir(t))).runStartupWithProbe(t.Context(), t.TempDir(), nil, func(context.Context, *nativeamp.Client) error { return nil })
 		require.ErrorContains(t, err, "create Amp startup probe residence")
 	})
 
@@ -188,7 +188,7 @@ func TestStartupProbeResidenceMaterializationAndRemovalFailures(t *testing.T) {
 		original := mkdirAll
 		t.Cleanup(func() { mkdirAll = original })
 		mkdirAll = func(string, os.FileMode) error { return errors.New("mkdir home") }
-		err := newTestAgent(WithScratchDir(t.TempDir())).runStartupWithProbe(t.Context(), t.TempDir(), nil, func(context.Context, *nativeamp.Client) error { return nil })
+		err := newTestAgent(WithScratchDir(testScratchDir(t))).runStartupWithProbe(t.Context(), t.TempDir(), nil, func(context.Context, *nativeamp.Client) error { return nil })
 		require.ErrorContains(t, err, "create Amp startup probe isolated home")
 	})
 
@@ -196,7 +196,7 @@ func TestStartupProbeResidenceMaterializationAndRemovalFailures(t *testing.T) {
 		original := writeFile
 		t.Cleanup(func() { writeFile = original })
 		writeFile = func(string, []byte, os.FileMode) error { return errors.New("write settings") }
-		err := newTestAgent(WithScratchDir(t.TempDir())).runStartupWithProbe(t.Context(), t.TempDir(), nil, func(context.Context, *nativeamp.Client) error { return nil })
+		err := newTestAgent(WithScratchDir(testScratchDir(t))).runStartupWithProbe(t.Context(), t.TempDir(), nil, func(context.Context, *nativeamp.Client) error { return nil })
 		require.ErrorContains(t, err, "write Amp startup probe settings")
 	})
 
@@ -210,7 +210,7 @@ func TestStartupProbeResidenceMaterializationAndRemovalFailures(t *testing.T) {
 
 			return original(path, data, mode)
 		}
-		err := newTestAgent(WithScratchDir(t.TempDir())).runStartupWithProbe(t.Context(), t.TempDir(), nil, func(context.Context, *nativeamp.Client) error { return nil })
+		err := newTestAgent(WithScratchDir(testScratchDir(t))).runStartupWithProbe(t.Context(), t.TempDir(), nil, func(context.Context, *nativeamp.Client) error { return nil })
 		require.ErrorContains(t, err, "write Amp startup probe MCP config")
 	})
 
@@ -219,7 +219,7 @@ func TestStartupProbeResidenceMaterializationAndRemovalFailures(t *testing.T) {
 		t.Cleanup(func() { removeSessionDir = original })
 		removeSessionDir = func(string) error { return errors.New("remove residence") }
 		releases := 0
-		agent := newTestAgent(WithScratchDir(t.TempDir()), WithRuntimeResourceHooks(RuntimeResourceHooks{
+		agent := newTestAgent(WithScratchDir(testScratchDir(t)), WithRuntimeResourceHooks(RuntimeResourceHooks{
 			ReserveScratchRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
 				return func() { releases++ }, nil
 			},
@@ -238,6 +238,9 @@ func TestStartupProbeResidenceReservationAndOwnershipFailures(t *testing.T) {
 	err := agent.runStartupWithProbe(t.Context(), t.TempDir(), nil, func(context.Context, *nativeamp.Client) error { return nil })
 	require.ErrorIs(t, err, wantErr)
 
+	// A t.TempDir scratch parent nests the residence under a 0700 directory the
+	// foreign identity below cannot enter, so the handoff is refused on every
+	// platform rather than only where ownership transfer is unimplemented.
 	isolationAgent := newTestAgent(WithScratchDir(t.TempDir()))
 	isolationAgent.options.ProcessIsolation.UID++
 	isolationAgent.options.ProcessIsolation.GID++

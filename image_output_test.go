@@ -368,7 +368,7 @@ func TestPromptFailsOnImageArtifactStoreFailure(t *testing.T) {
 	path, _ := fakeAgentAmpPath(t, "image-output-store-failure")
 	agent := newTestAgent(
 		WithExecutablePath(path),
-		WithScratchDir(t.TempDir()),
+		WithScratchDir(testScratchDir(t)),
 		WithSessionStore(&imageStoreTestDouble{
 			InMemorySessionStore: NewInMemorySessionStore(),
 			appendErr:            errors.New("append failed"),
@@ -395,7 +395,7 @@ func TestPromptSurvivesNativeImageRefusal(t *testing.T) {
 	path, _ := fakeAgentAmpPath(t, "image-output-error")
 	agent := newTestAgent(
 		WithExecutablePath(path),
-		WithScratchDir(t.TempDir()),
+		WithScratchDir(testScratchDir(t)),
 	)
 	client, cleanup := attachRecordingClient(t, agent)
 	defer cleanup()

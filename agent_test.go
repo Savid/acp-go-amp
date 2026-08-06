@@ -163,7 +163,7 @@ func TestServeFakeAmpLifecycleStdoutCleanStoreReplayAndDelete(t *testing.T) {
 	cwd := t.TempDir()
 	conn, client, cleanup := startTestServe(t,
 		WithExecutablePath(path),
-		WithScratchDir(t.TempDir()),
+		WithScratchDir(testScratchDir(t)),
 		WithSessionStore(store),
 		WithEnv(map[string]string{"AMP_API_KEY": "fake"}),
 	)
@@ -427,7 +427,7 @@ func TestAgentErrorAndConformanceBranches(t *testing.T) {
 	limitPath, _ := fakeAgentAmpPath(t, "")
 	limitAgent := newTestAgent(
 		WithExecutablePath(limitPath),
-		WithScratchDir(t.TempDir()),
+		WithScratchDir(testScratchDir(t)),
 		WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: -1}),
 	)
 	if _, err := limitAgent.NewSession(context.Background(), NewSessionRequest(t.TempDir())); err == nil ||
@@ -481,7 +481,7 @@ func TestUnknownSessionErrorShape(t *testing.T) {
 	// and MUST emit the identical uniform unknown-session shape.
 	path, _ := fakeAgentAmpPath(t, "")
 	cwd := t.TempDir()
-	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()), WithSessionStore(NewInMemorySessionStore()))
+	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(testScratchDir(t)), WithSessionStore(NewInMemorySessionStore()))
 	_, err = agent.LoadSession(ctx, LoadSessionRequest("T-missing", cwd))
 	requireUnknownSessionError(t, err)
 	_, err = agent.ResumeSession(ctx, ResumeSessionRequest("T-missing", cwd))
@@ -520,7 +520,7 @@ func TestNativeMissingThreadAndDeleteFailureTombstone(t *testing.T) {
 	ctx := context.Background()
 	missingPath, _ := fakeAgentAmpPath(t, "missing")
 	store := NewInMemorySessionStore()
-	agent := newTestAgent(WithExecutablePath(missingPath), WithSessionStore(store), WithScratchDir(t.TempDir()))
+	agent := newTestAgent(WithExecutablePath(missingPath), WithSessionStore(store), WithScratchDir(testScratchDir(t)))
 	newResp, err := agent.NewSession(ctx, NewSessionRequest(t.TempDir()))
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
@@ -532,7 +532,7 @@ func TestNativeMissingThreadAndDeleteFailureTombstone(t *testing.T) {
 
 	deletePath, _ := fakeAgentAmpPath(t, "delete-fail")
 	deleteStore := NewInMemorySessionStore()
-	deleteAgent := newTestAgent(WithExecutablePath(deletePath), WithSessionStore(deleteStore), WithScratchDir(t.TempDir()))
+	deleteAgent := newTestAgent(WithExecutablePath(deletePath), WithSessionStore(deleteStore), WithScratchDir(testScratchDir(t)))
 	deleteResp, err := deleteAgent.NewSession(ctx, NewSessionRequest(t.TempDir()))
 	if err != nil {
 		t.Fatalf("NewSession delete: %v", err)

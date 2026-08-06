@@ -386,7 +386,7 @@ func TestRawEventEmitFailureDoesNotFailTurn(t *testing.T) {
 	reader := sdkmetric.NewManualReader()
 	agent := newTestAgent(
 		WithExecutablePath(path),
-		WithScratchDir(t.TempDir()),
+		WithScratchDir(testScratchDir(t)),
 		WithMeterProvider(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))),
 	)
 	resp, err := agent.NewSession(ctx, NewSessionRequest(t.TempDir(), WithSessionRawEvents(true)))
@@ -417,7 +417,7 @@ func TestRawEventEmitFailureDoesNotFailTurn(t *testing.T) {
 func TestRawEventDefaultOff(t *testing.T) {
 	ctx := context.Background()
 	path, _ := fakeAgentAmpPath(t, "")
-	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()))
+	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(testScratchDir(t)))
 	client, cleanup := attachRecordingClient(t, agent)
 	defer cleanup()
 

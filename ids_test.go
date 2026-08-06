@@ -28,7 +28,7 @@ func TestSessionIDMintingAndEmptyNativeLifecycle(t *testing.T) {
 	}
 
 	t.Setenv("AMP_API_KEY", "fake")
-	agent := newTestAgent(WithScratchDir(t.TempDir()))
+	agent := newTestAgent(WithScratchDir(testScratchDir(t)))
 	agent.options.runtime.startupProbe = func(context.Context, *amp.Client) error { return nil }
 	if _, newErr := agent.NewSession(ctx, NewSessionRequest(t.TempDir())); newErr == nil || !strings.Contains(newErr.Error(), "entropy failed") {
 		t.Fatalf("NewSession entropy failure = %v", newErr)

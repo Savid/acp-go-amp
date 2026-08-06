@@ -36,7 +36,7 @@ func TestMessageIdentityMatchesLiveResponseReplayAndContinuation(t *testing.T) {
 
 	firstAgent := newTestAgent(
 		WithExecutablePath(path),
-		WithScratchDir(t.TempDir()),
+		WithScratchDir(testScratchDir(t)),
 		WithSessionStore(store),
 		WithEnv(map[string]string{"AMP_API_KEY": "fake"}),
 	)
@@ -71,7 +71,7 @@ func TestMessageIdentityMatchesLiveResponseReplayAndContinuation(t *testing.T) {
 
 	restoredAgent := newTestAgent(
 		WithExecutablePath(path),
-		WithScratchDir(t.TempDir()),
+		WithScratchDir(testScratchDir(t)),
 		WithSessionStore(store),
 		WithEnv(map[string]string{"AMP_API_KEY": "fake"}),
 	)
@@ -110,7 +110,7 @@ func TestResumePublishesTerminalMessageIdentityWithoutHistory(t *testing.T) {
 
 	agent := newTestAgent(
 		WithExecutablePath(path),
-		WithScratchDir(t.TempDir()),
+		WithScratchDir(testScratchDir(t)),
 		WithSessionStore(store),
 	)
 	client := newIdentityAgentClient()
@@ -136,7 +136,7 @@ func TestResumePublishesTerminalMessageIdentityWithoutHistory(t *testing.T) {
 
 	failingAgent := newTestAgent(
 		WithExecutablePath(path),
-		WithScratchDir(t.TempDir()),
+		WithScratchDir(testScratchDir(t)),
 		WithSessionStore(store),
 	)
 	failingClient := newIdentityAgentClient()
@@ -149,7 +149,7 @@ func TestResumePublishesTerminalMessageIdentityWithoutHistory(t *testing.T) {
 
 	connectionlessAgent := newTestAgent(
 		WithExecutablePath(path),
-		WithScratchDir(t.TempDir()),
+		WithScratchDir(testScratchDir(t)),
 		WithSessionStore(store),
 	)
 	_, err = connectionlessAgent.ResumeSession(ctx, ResumeSessionRequest(sessionID, cwd))
@@ -168,7 +168,7 @@ func TestResumeIdentityEmptyAndMalformedTranscript(t *testing.T) {
 	})
 	emptyAgent := newTestAgent(
 		WithExecutablePath(path),
-		WithScratchDir(t.TempDir()),
+		WithScratchDir(testScratchDir(t)),
 		WithSessionStore(emptyStore),
 	)
 	emptyClient := newIdentityAgentClient()
@@ -184,7 +184,7 @@ func TestResumeIdentityEmptyAndMalformedTranscript(t *testing.T) {
 	})
 	malformedAgent := newTestAgent(
 		WithExecutablePath(path),
-		WithScratchDir(t.TempDir()),
+		WithScratchDir(testScratchDir(t)),
 		WithSessionStore(malformedStore),
 	)
 	malformedAgent.setConnection(newIdentityAgentClient())
@@ -311,7 +311,7 @@ func TestTranscriptIdentityStateFailsClosed(t *testing.T) {
 	failingStore := &transcriptLoadErrorStore{InMemorySessionStore: baseStore, err: wantErr}
 	agent := newTestAgent(
 		WithExecutablePath(path),
-		WithScratchDir(t.TempDir()),
+		WithScratchDir(testScratchDir(t)),
 		WithSessionStore(failingStore),
 		WithEnv(map[string]string{"AMP_API_KEY": "fake"}),
 	)

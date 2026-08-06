@@ -122,7 +122,7 @@ func TestAgentCloseFencesInFlightStartupContainmentFailure(t *testing.T) {
 	var mu sync.Mutex
 	releases := map[string]int{}
 	agent := newTestAgent(
-		WithScratchDir(t.TempDir()),
+		WithScratchDir(testScratchDir(t)),
 		WithRuntimeResourceHooks(RuntimeResourceHooks{
 			AcquireNativeRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
 				return func() {
@@ -177,7 +177,7 @@ func TestAgentCloseFencesInFlightStartupContainmentFailure(t *testing.T) {
 
 func TestInjectedExecuteContainmentFailureRetainsOnlyOwnedSessionScratch(t *testing.T) {
 	t.Setenv("AMP_API_KEY", "fake")
-	scratch := t.TempDir()
+	scratch := testScratchDir(t)
 
 	var mu sync.Mutex
 	acquired := map[RuntimeResourceKind]int{}
@@ -242,7 +242,7 @@ func TestInjectedExecuteContainmentFailureRetainsOnlyOwnedSessionScratch(t *test
 
 func TestExportContainmentFailureRetainsColdSessionResources(t *testing.T) {
 	t.Setenv("AMP_API_KEY", "fake")
-	scratch := t.TempDir()
+	scratch := testScratchDir(t)
 	cwd := t.TempDir()
 	store := NewInMemorySessionStore()
 	putStoredSession(t, store, "T-export-boundary", cwd, nil)
@@ -472,7 +472,7 @@ func TestSessionConstructionRetainsScratchWhenUnwindDeletionFails(t *testing.T) 
 	removeSessionDir = func(string) error { return deleteErr }
 	scratchReleases := 0
 	agent := newTestAgent(
-		WithScratchDir(t.TempDir()),
+		WithScratchDir(testScratchDir(t)),
 		WithRuntimeResourceHooks(RuntimeResourceHooks{
 			ReserveScratchRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
 				return func() { scratchReleases++ }, nil
@@ -490,8 +490,13 @@ func TestSessionConstructionRetainsScratchWhenUnwindDeletionFails(t *testing.T) 
 func TestAmpSessionResourceAdmission(t *testing.T) {
 	t.Setenv("AMP_API_KEY", "fake")
 
+	// Executable discovery runs ahead of resource admission, so every agent here
+	// names a fixture executable. Without one the case only reaches admission on
+	// a host that happens to have amp installed.
+	path, _ := fakeAgentAmpPath(t, "")
+
 	wantErr := errors.New("resource exhausted")
-	discoveryBlocked := newTestAgent(WithRuntimeResourceHooks(RuntimeResourceHooks{
+	discoveryBlocked := newTestAgent(WithExecutablePath(path), WithRuntimeResourceHooks(RuntimeResourceHooks{
 		AcquireNativeRoot: func(context.Context, RuntimeResourceKind) (func(), error) { return nil, wantErr },
 	}))
 	_, err := discoveryBlocked.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
@@ -501,7 +506,7 @@ func TestAmpSessionResourceAdmission(t *testing.T) {
 	require.Contains(t, err.Error(), wantErr.Error())
 
 	discoveryNativeReleases := 0
-	discoveryScratchBlocked := newTestAgent(WithRuntimeResourceHooks(RuntimeResourceHooks{
+	discoveryScratchBlocked := newTestAgent(WithExecutablePath(path), WithRuntimeResourceHooks(RuntimeResourceHooks{
 		AcquireNativeRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
 			return func() { discoveryNativeReleases++ }, nil
 		},
@@ -519,14 +524,13 @@ func TestAmpSessionResourceAdmission(t *testing.T) {
 	require.Contains(t, err.Error(), wantErr.Error())
 	require.Zero(t, discoveryNativeReleases)
 
-	scratchBlocked := newTestAgent(WithScratchDir(t.TempDir()), WithRuntimeResourceHooks(RuntimeResourceHooks{
+	scratchBlocked := newTestAgent(WithExecutablePath(path), WithScratchDir(testScratchDir(t)), WithRuntimeResourceHooks(RuntimeResourceHooks{
 		ReserveScratchRoot: func(context.Context, RuntimeResourceKind) (func(), error) { return nil, wantErr },
 	}))
 	_, err = newAgentSession(t.Context(), scratchBlocked, "T-session", t.TempDir(), parsedSessionMeta{}, "", nil)
 	require.Contains(t, err.Error(), wantErr.Error())
 
-	path, _ := fakeAgentAmpPath(t, "")
-	nativeBlocked := newTestAgent(WithRuntimeResourceHooks(RuntimeResourceHooks{
+	nativeBlocked := newTestAgent(WithExecutablePath(path), WithRuntimeResourceHooks(RuntimeResourceHooks{
 		AcquireNativeRoot: func(_ context.Context, kind RuntimeResourceKind) (func(), error) {
 			if kind == RuntimeResourceSession {
 				return nil, wantErr
@@ -539,7 +543,7 @@ func TestAmpSessionResourceAdmission(t *testing.T) {
 	require.Contains(t, session.Delete(t.Context()).Error(), wantErr.Error())
 	require.Contains(t, session.verifyContinuable(t.Context()).Error(), wantErr.Error())
 
-	promptBlocked := newTestAgent(WithExecutablePath(path), WithScratchDir(t.TempDir()))
+	promptBlocked := newTestAgent(WithExecutablePath(path), WithScratchDir(testScratchDir(t)))
 	created, err := promptBlocked.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = promptBlocked.Close() })

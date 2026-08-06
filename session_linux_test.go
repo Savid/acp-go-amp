@@ -44,7 +44,7 @@ func TestTurnTimeoutContainsDescendantBeforeReturn(t *testing.T) {
 	path, stateDir := fakeAgentAmpPath(t, "sigint-descendant")
 	agent := newTestAgent(
 		WithExecutablePath(path),
-		WithScratchDir(t.TempDir()),
+		WithScratchDir(testScratchDir(t)),
 		WithTurnTimeout(100*time.Millisecond),
 	)
 	agent.options.runtime.nativeCancelTimeout = 100 * time.Millisecond

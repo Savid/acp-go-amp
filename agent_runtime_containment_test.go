@@ -184,7 +184,7 @@ func TestSimulatedDarwinContainmentConfiguration(t *testing.T) {
 	want := errors.New("resource failed")
 	agent := NewAgent(
 		WithDarwinBestEffortContainment(),
-		WithScratchDir(t.TempDir()),
+		WithScratchDir(testScratchDir(t)),
 		WithLogger(slog.New(slog.NewJSONHandler(&logs, nil))),
 		WithRuntimeResourceHooks(RuntimeResourceHooks{
 			AcquireNativeRoot:  func(context.Context, RuntimeResourceKind) (func(), error) { return nil, want },
