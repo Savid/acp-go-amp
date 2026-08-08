@@ -875,7 +875,7 @@ func TestStandaloneAgentIdentityDispositionRefusesEveryDrift(t *testing.T) {
 	t.Run("owner binding is gone", func(t *testing.T) {
 		standalone, root, _ := acquire(t)
 		authority := filepath.Join(root, "acp-go", "agent-identities")
-		sessionKey := agentStandaloneSessionKey(standalone.owner)
+		ownerDigest := agentStandaloneOwnerDigest(standalone.owner)
 		directory, err := openAgentIdentityLockDirectory(
 			root, agentIdentityLockTrustedUID, agentIdentityLockTrustedGID,
 		)
@@ -884,7 +884,7 @@ func TestStandaloneAgentIdentityDispositionRefusesEveryDrift(t *testing.T) {
 		}
 		defer directory.Close()
 		affinity, err := openAgentStandaloneNamedLock(
-			directory, agentStandaloneAffinityLockName(sessionKey), true,
+			directory, agentStandaloneAffinityLockName(ownerDigest), true,
 			agentIdentityLockTrustedUID, agentIdentityLockTrustedGID,
 		)
 		if err != nil {

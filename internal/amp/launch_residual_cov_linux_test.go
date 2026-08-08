@@ -201,7 +201,20 @@ func TestLaunchResStartAbandonsALaunchItCannotValidate(t *testing.T) {
 	want := errors.New("generation is not usable")
 	original := processTreeValidateLaunch
 	t.Cleanup(func() { processTreeValidateLaunch = original })
-	processTreeValidateLaunch = func(*processTreeCommand, *processTree, func()) error { return want }
+	// The real validator releases the paused waiter on every refusal path.
+	// Capturing the release rather than calling it here keeps this case's own
+	// reap of the child, and running it at cleanup ends the waiter's goroutine
+	// with the test instead of parking it on its start gate for the whole run.
+	release := func() {}
+	t.Cleanup(func() { release() })
+	processTreeValidateLaunch = func(_ *processTreeCommand, tree *processTree, beginWait func()) error {
+		release = func() {
+			beginWait()
+			<-tree.waiter.done
+		}
+
+		return want
+	}
 
 	launch := &processTreeCommand{cmd: exec.Command("/bin/true")}
 	tree, err := startProcessTree(launch)

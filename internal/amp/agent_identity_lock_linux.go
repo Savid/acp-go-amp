@@ -509,8 +509,8 @@ func validateStandaloneAgentIdentityDisposition(
 		return fmt.Errorf("load standalone agent identity disposition: %w", err)
 	}
 
-	sessionKey := agentStandaloneSessionKey(expected)
-	if marker.State != agentStandaloneActive || marker.GID != expected.GID || marker.OwnerDigest != sessionKey || len(marker.Paths) != 0 {
+	ownerDigest := agentStandaloneOwnerDigest(expected)
+	if marker.State != agentStandaloneActive || marker.GID != expected.GID || marker.OwnerDigest != ownerDigest || len(marker.Paths) != 0 {
 		return fmt.Errorf("standalone agent identity uid %d does not retain its exact ACTIVE disposition", expected.UID)
 	}
 

@@ -79,7 +79,7 @@ func TestIdentityLockResStandaloneDispositionCatchesAMarkerRewrittenAfterTheAudi
 	var before unix.Stat_t
 	require.NoError(t, unix.Stat(markerPath, &before))
 	reads := identityLockResRewriteMarkerOnNthRead(t, markerName,
-		identityLockResCleanMarker(uid, gid, agentStandaloneSessionKey(standalone.owner)), 2,
+		identityLockResCleanMarker(uid, gid, agentStandaloneOwnerDigest(standalone.owner)), 2,
 	)
 
 	err = validateStandaloneAgentIdentityDisposition(standalone.owner, true, root)

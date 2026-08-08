@@ -75,9 +75,9 @@ func createBorrowedIdentityDispositionFixture(
 			t.Errorf("close borrowed identity lock: %v", closeErr)
 		}
 	})
-	const sessionKey = "host-owned-session"
+	const ownerDigest = "host-owned-session"
 	affinity, err := openAgentStandaloneNamedLock(
-		directory, agentStandaloneAffinityLockName(sessionKey), true, ownerUID, ownerGID,
+		directory, agentStandaloneAffinityLockName(ownerDigest), true, ownerUID, ownerGID,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -86,7 +86,7 @@ func createBorrowedIdentityDispositionFixture(
 		t.Fatal(err)
 	}
 	if err = publishAgentStandaloneActive(
-		directory, uid, gid, ownerUID, ownerGID, sessionKey, deadline, nil, nil,
+		directory, uid, gid, ownerUID, ownerGID, ownerDigest, deadline, nil, nil,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -237,7 +237,7 @@ func TestStandaloneIdentityDispositionRequiresExactOwnerAndActiveWithoutMutation
 	}
 	clean, err := json.Marshal(map[string]any{
 		"version": 2, "uid": uid, "gid": gid,
-		"ownerDigest": markerSessionKey(t, markerBefore), "state": "clean-ready",
+		"ownerDigest": markerOwnerDigest(t, markerBefore), "state": "clean-ready",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -250,7 +250,7 @@ func TestStandaloneIdentityDispositionRequiresExactOwnerAndActiveWithoutMutation
 	}
 }
 
-func markerSessionKey(t *testing.T, payload []byte) string {
+func markerOwnerDigest(t *testing.T, payload []byte) string {
 	t.Helper()
 	var marker agentStandaloneMarker
 	if err := json.Unmarshal(payload, &marker); err != nil {

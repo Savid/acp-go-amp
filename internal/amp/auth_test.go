@@ -493,7 +493,17 @@ func TestAuthLoginCloseReportsAnUnsettledChild(t *testing.T) {
 
 	t.Cleanup(func() { commandWaitTimeout = original })
 
-	login.wait, _ = startPausedCommandWait(func() error { select {} })
+	// A paused waiter stands in for a child that never settles: Close must
+	// report an incomplete containment rather than block on it. The waiter is
+	// released at cleanup so the fixture's goroutine finishes with the test
+	// instead of parking on its start gate for the rest of the run.
+	waiter, beginWait := startPausedCommandWait(func() error { return nil })
+	login.wait = waiter
+
+	t.Cleanup(func() {
+		beginWait()
+		<-waiter.done
+	})
 
 	if err := login.Close(); !errors.Is(err, ErrProcessContainmentIncomplete) {
 		t.Fatalf("Close = %v, want an incomplete containment sentinel", err)
