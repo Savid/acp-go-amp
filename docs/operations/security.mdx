@@ -163,7 +163,23 @@ boundary surfaces
 `ampacp.ErrProcessContainmentIncomplete`; reachable native-root and scratch
 resources are retained, and the parent-side wait remains bounded.
 
-Both Linux supervisors stay root and run from `/` with closed private
+A Linux deployment whose configured identity is the identity the adapter
+already runs as has no privilege boundary to cross, and the supervisor pair
+runs unprivileged instead. That arm is selected by identity equality alone, so
+a root adapter can never enter it. It skips exactly the privilege-dependent
+identity scaffolding — the trusted-root assertion, the standalone owner fields,
+the `/var/lib/acp-go/agent-identities` authority and its vacancy proof, and the
+credential change — and keeps every containment guarantee described above,
+because none of them needs privilege. The parent stamps the decision into the
+sealed launch configuration and each child re-derives it from its own identity,
+refusing a configuration that disagrees in either direction. Concurrent
+sessions then share one account's `HOME`, XDG directories, credentials and
+session journals, no host-global record excludes a second adapter from the same
+identity, and Amp can signal and inspect its supervisor. `ContainmentMode()`
+reports `shared_identity` rather than `authoritative` for exactly that reason.
+Run the adapter as root to keep the credential boundary.
+
+Both isolated Linux supervisors stay root and run from `/` with closed private
 environments. Immutable launch configuration carries the target identity and
 native environment; only Amp receives the configured UID/GID with no
 supplementary groups. Before native start both supervisors validate and retain

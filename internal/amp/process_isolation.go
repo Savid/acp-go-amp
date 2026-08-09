@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 )
@@ -26,11 +27,22 @@ type ProcessIsolation struct {
 }
 
 const (
-	envIsolationUID  = adapterPrivateEnvPrefix + "ISOLATION_UID"
-	envIsolationGID  = adapterPrivateEnvPrefix + "ISOLATION_GID"
-	envIsolationTest = adapterPrivateEnvPrefix + "ISOLATION_TEST_ONLY"
-	envValueTrue     = "true"
+	envIsolationUID       = adapterPrivateEnvPrefix + "ISOLATION_UID"
+	envIsolationGID       = adapterPrivateEnvPrefix + "ISOLATION_GID"
+	envIsolationTest      = adapterPrivateEnvPrefix + "ISOLATION_TEST_ONLY"
+	envValueTrue          = "true"
+	processIsolationLinux = "linux"
 )
+
+var processIsolationGOOS = runtime.GOOS
+
+// sharedIdentitySupervisorRemedy states what an operator can change when the
+// supervisor was asked to launch the native process under the very identity it
+// already runs as and the shape it was handed describes something else. There
+// is no privilege boundary to cross in that deployment, so the two answers are
+// to give the supervisor one, or to describe the launch as what it is.
+const sharedIdentitySupervisorRemedy = "run the supervisor as root to isolate the agent identity, " +
+	"or launch the agent under the identity the supervisor already holds"
 
 func validateProcessIsolation(isolation *ProcessIsolation) error {
 	if isolation == nil {

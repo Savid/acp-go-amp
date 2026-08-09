@@ -425,10 +425,12 @@ func TestTurnSupervisorCovNativeRefusesAnIncompleteStandaloneAuthority(t *testin
 }
 
 // TestTurnSupervisorCovNativeRefusesToStartWithoutProvableIdentity proves
-// that when the supervisor cannot prove, in the privileged window, that it
-// holds no supplementary groups, the native command is never started. The
-// isolation application is the last point where an ambient group could still
-// be carried into the native identity.
+// that when the supervisor cannot establish the native identity in the
+// privileged window, the native command is never started: the isolation
+// application is the last point at which the launch can still be abandoned.
+// It also proves the shared arm reaches that refusal without consulting
+// supplementary groups, which belong to the account the supervisor was started
+// under and which it can neither shed nor re-enter.
 func TestTurnSupervisorCovNativeRefusesToStartWithoutProvableIdentity(t *testing.T) {
 	restoreTurnSupervisorSeams(t)
 	turnSupervisorEnable = func() error { return nil }
@@ -446,7 +448,7 @@ func TestTurnSupervisorCovNativeRefusesToStartWithoutProvableIdentity(t *testing
 			uidOriginal, gidOriginal, groupsOriginal
 	})
 	processIsolationGeteuid = func() int { return 64391 }
-	processIsolationGetegid = func() int { return 64392 }
+	processIsolationGetegid = func() int { return 64393 }
 	groupsErr := errors.New("supplementary groups refused")
 	processIsolationGetgroups = func() ([]int, error) { return nil, groupsErr }
 
@@ -462,14 +464,16 @@ func TestTurnSupervisorCovNativeRefusesToStartWithoutProvableIdentity(t *testing
 		Env: []string{"PATH=/usr/bin:/bin"},
 		Isolation: ProcessIsolation{
 			UID: 64391, GID: 64392, BaseEnvironment: map[string]string{},
-			StandaloneOwnerID:   "cov-native-identity",
-			StandaloneStateRoot: "/var/tmp/acp-go-amp-cov-identity",
 		},
+		AuthorityOrigin: turnSupervisorOriginShared,
 	})
 	err := runTurnSupervisorNative(
 		config, []io.Reader{strings.NewReader("")}, nil, io.Discard, io.Discard, 6, 7, false,
 	)
-	if !errors.Is(err, groupsErr) ||
+	if errors.Is(err, groupsErr) {
+		t.Fatalf("shared identity consulted supplementary groups: %v", err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "native group 64392 cannot be entered from group 64393") ||
 		!strings.Contains(err.Error(), "apply Amp native process isolation") {
 		t.Fatalf("unprovable native identity = %v", err)
 	}

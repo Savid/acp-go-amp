@@ -18,10 +18,10 @@ func TestProcessIsolationUnixVerificationBranches(t *testing.T) {
 	processIsolationGeteuid = func() int { return 11 }
 	processIsolationGetegid = func() int { return 22 }
 	processIsolationGetgroups = func() ([]int, error) { return nil, nil }
-	policy := &ProcessIsolation{
-		UID: 11, GID: 22, BaseEnvironment: map[string]string{},
-		StandaloneOwnerID: "unix-verification-test", StandaloneStateRoot: "/var/lib/acp-go-amp-test",
-	}
+	// The seams report the policy's own identity, so on Linux this is the shared
+	// shape: a durable standalone record cannot describe an identity the
+	// verifying process already holds.
+	policy := &ProcessIsolation{UID: 11, GID: 22, BaseEnvironment: map[string]string{}}
 	if err := verifyProcessIsolation(policy); err != nil {
 		t.Fatal(err)
 	}
@@ -41,14 +41,22 @@ func TestProcessIsolationUnixVerificationBranches(t *testing.T) {
 	if err := verifyProcessIsolation(policy); err == nil {
 		t.Fatal("primary GID repeated as a supplementary group was accepted")
 	}
+	processIsolationGetgroups = func() ([]int, error) { return nil, nil }
+
+	// A policy naming an identity this process does not hold is the isolated
+	// shape, which on Linux is the one that carries the standalone record.
+	isolated := &ProcessIsolation{
+		UID: 11, GID: 22, BaseEnvironment: map[string]string{},
+		StandaloneOwnerID: "unix-verification-test", StandaloneStateRoot: "/var/lib/acp-go-amp-test",
+	}
 	processIsolationGeteuid = func() int { return 12 }
-	if err := verifyProcessIsolation(policy); err == nil {
+	if err := verifyProcessIsolation(isolated); err == nil {
 		t.Fatal("wrong identity accepted")
 	}
 	if err := verifyProcessIsolation(nil); err == nil {
 		t.Fatal("nil policy verified")
 	}
-	if err := applyProcessIsolation(nil, policy); err == nil {
+	if err := applyProcessIsolation(nil, isolated); err == nil {
 		t.Fatal("nil command accepted")
 	}
 	if err := applyProcessIsolation(exec.Command("/usr/bin/true"), nil); err == nil {
@@ -62,20 +70,20 @@ func TestProcessIsolationUnixVerificationBranches(t *testing.T) {
 	}
 
 	cmd = exec.Command("/usr/bin/true")
-	if err := applyProcessIsolation(cmd, policy); err != nil {
+	if err := applyProcessIsolation(cmd, isolated); err != nil {
 		t.Fatal(err)
 	}
-	if credential := cmd.SysProcAttr.Credential; credential == nil || credential.Uid != policy.UID || credential.Gid != policy.GID || len(credential.Groups) != 0 {
+	if credential := cmd.SysProcAttr.Credential; credential == nil || credential.Uid != isolated.UID || credential.Gid != isolated.GID || len(credential.Groups) != 0 {
 		t.Fatalf("new process attributes carried the wrong credential: %#v", cmd.SysProcAttr)
 	}
 
 	cmd = exec.Command("/usr/bin/true")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	if err := applyProcessIsolation(cmd, policy); err != nil {
+	if err := applyProcessIsolation(cmd, isolated); err != nil {
 		t.Fatal(err)
 	}
 	credential := cmd.SysProcAttr.Credential
-	if !cmd.SysProcAttr.Setpgid || credential == nil || credential.Uid != policy.UID || credential.Gid != policy.GID || len(credential.Groups) != 0 {
+	if !cmd.SysProcAttr.Setpgid || credential == nil || credential.Uid != isolated.UID || credential.Gid != isolated.GID || len(credential.Groups) != 0 {
 		t.Fatalf("credential did not preserve process attributes: %#v", cmd.SysProcAttr)
 	}
 

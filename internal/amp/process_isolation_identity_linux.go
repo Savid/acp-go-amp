@@ -34,6 +34,19 @@ func validateStandaloneIdentityDisposition(isolation *ProcessIsolation) error {
 		return nil
 	}
 
+	// A native identity that is already the supervisor's own identity cannot be
+	// recorded as a standalone one: the durable record proves an identity no
+	// live task holds, and the supervisor asking for it is such a task. The
+	// canonical shape is therefore no capabilities and no standalone fields.
+	if sharedProcessIdentity(isolation) {
+		if isolation.StandaloneOwnerID != "" || isolation.StandaloneStateRoot != "" {
+			return errors.New("standalone owner fields describe an identity the supervisor already holds; " +
+				sharedIdentitySupervisorRemedy)
+		}
+
+		return nil
+	}
+
 	if !validStandaloneOwnerID(isolation.StandaloneOwnerID) {
 		return errors.New("standalone owner id must match [A-Za-z0-9][A-Za-z0-9._:@/-]{0,255}")
 	}

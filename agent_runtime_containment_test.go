@@ -260,3 +260,121 @@ func TestSimulatedDarwinContainmentConfiguration(t *testing.T) {
 		t.Fatalf("complete release = %v, released=%d", err, released)
 	}
 }
+
+// TestContainmentModeReportsASharedAgentIdentity proves the Linux boundary
+// names the identity it actually established: the authoritative report is kept
+// for a launch that crosses a credential boundary, and a launch that runs the
+// agent under the supervisor's own identity says so instead. Root never
+// reaches the shared report, and no other platform changes.
+func TestContainmentModeReportsASharedAgentIdentity(t *testing.T) {
+	originalGOOS, originalUID := runtimeGOOS, containmentEffectiveUID
+	t.Cleanup(func() { runtimeGOOS, containmentEffectiveUID = originalGOOS, originalUID })
+
+	shared := &ProcessIsolation{UID: 1000, GID: 1000}
+	distinct := &ProcessIsolation{UID: 65534, GID: 65534}
+
+	runtimeGOOS = platformLinux
+	containmentEffectiveUID = func() int { return 1000 }
+	if got := containmentMode(Options{ProcessIsolation: shared}); got != RuntimeContainmentSharedIdentity {
+		t.Fatalf("shared identity mode = %q", got)
+	}
+	if got := containmentMode(Options{ProcessIsolation: distinct}); got != RuntimeContainmentAuthoritative {
+		t.Fatalf("distinct identity mode = %q", got)
+	}
+	if got := containmentMode(Options{}); got != RuntimeContainmentAuthoritative {
+		t.Fatalf("absent policy mode = %q", got)
+	}
+
+	containmentEffectiveUID = func() int { return 0 }
+	if got := containmentMode(Options{ProcessIsolation: shared}); got != RuntimeContainmentAuthoritative {
+		t.Fatalf("trusted root mode = %q", got)
+	}
+
+	containmentEffectiveUID = func() int { return 1000 }
+	runtimeGOOS = platformDarwin
+	if got := containmentMode(Options{ProcessIsolation: shared}); got != RuntimeContainmentUnavailable {
+		t.Fatalf("Darwin shared identity mode = %q", got)
+	}
+
+	if !RuntimeContainmentSharedIdentity.provesWholeTreeLifecycle() ||
+		!RuntimeContainmentAuthoritative.provesWholeTreeLifecycle() {
+		t.Fatal("a Linux boundary stopped proving whole-tree lifecycle")
+	}
+	if RuntimeContainmentBestEffort.provesWholeTreeLifecycle() ||
+		RuntimeContainmentUnavailable.provesWholeTreeLifecycle() {
+		t.Fatal("a weaker boundary claimed whole-tree lifecycle")
+	}
+}
+
+// TestSharedIdentityAgentKeepsItsLifecycleSurfaces proves the honest report
+// does not quietly take away what the boundary still proves: the agent
+// publishes shared_identity and keeps the descendant inventory the subreaper
+// tree makes truthful.
+func TestSharedIdentityAgentKeepsItsLifecycleSurfaces(t *testing.T) {
+	originalGOOS, originalUID := runtimeGOOS, containmentEffectiveUID
+	t.Cleanup(func() { runtimeGOOS, containmentEffectiveUID = originalGOOS, originalUID })
+
+	runtimeGOOS = platformLinux
+	containmentEffectiveUID = func() int { return 1000 }
+
+	var (
+		observed  []RuntimeContainmentMode
+		snapshots int
+	)
+	agent := NewAgent(
+		WithProcessIsolation(ProcessIsolation{
+			UID: 1000, GID: 1000, BaseEnvironment: map[string]string{"PATH": "/usr/bin"},
+		}),
+		WithRuntimeResourceHooks(RuntimeResourceHooks{
+			ObserveContainment: func(_ context.Context, mode RuntimeContainmentMode) {
+				observed = append(observed, mode)
+			},
+			ObserveProcessSnapshot: func(context.Context, RuntimeProcessKind, int) { snapshots++ },
+		}),
+	)
+	if len(observed) != 1 || observed[0] != RuntimeContainmentSharedIdentity {
+		t.Fatalf("shared identity observations = %v", observed)
+	}
+	if got := agent.ContainmentMode(); got != RuntimeContainmentSharedIdentity {
+		t.Fatalf("shared identity agent mode = %q", got)
+	}
+
+	observer := agent.newProcessSnapshotObserver(t.Context(), func() (int, bool) { return 3, true })
+	observer.Refresh(t.Context())
+	observer.Complete(t.Context())
+	if snapshots == 0 {
+		t.Fatal("shared identity agent stopped publishing descendant snapshots")
+	}
+}
+
+// TestSharedIdentityProcessIsolationOptionCarriesNoStandaloneOwnerFields proves
+// the public option validator moves with the native one: the canonical shared
+// shape is accepted, standalone fields that promise a durable record are
+// refused with a remedy, and the isolated refusals are untouched.
+func TestSharedIdentityProcessIsolationOptionCarriesNoStandaloneOwnerFields(t *testing.T) {
+	originalGOOS, originalUID := runtimeGOOS, containmentEffectiveUID
+	t.Cleanup(func() { runtimeGOOS, containmentEffectiveUID = originalGOOS, originalUID })
+
+	runtimeGOOS = platformLinux
+	containmentEffectiveUID = func() int { return 1000 }
+
+	if err := validateProcessIsolationOption(&ProcessIsolation{UID: 1000, GID: 1000}); err != nil {
+		t.Fatalf("canonical shared policy: %v", err)
+	}
+	err := validateProcessIsolationOption(&ProcessIsolation{
+		UID: 1000, GID: 1000, StandaloneOwnerID: "acp-go-amp-shared",
+	})
+	if err == nil || !strings.Contains(err.Error(), sharedIdentitySupervisorRemedy) {
+		t.Fatalf("shared owner id error = %v", err)
+	}
+	err = validateProcessIsolationOption(&ProcessIsolation{
+		UID: 1000, GID: 1000, StandaloneStateRoot: "/var/tmp/acp-go-amp-shared",
+	})
+	if err == nil || !strings.Contains(err.Error(), sharedIdentitySupervisorRemedy) {
+		t.Fatalf("shared state root error = %v", err)
+	}
+	err = validateProcessIsolationOption(&ProcessIsolation{UID: 65534, GID: 65534})
+	if err == nil || !strings.Contains(err.Error(), "standalone owner id must match") {
+		t.Fatalf("isolated policy error = %v", err)
+	}
+}

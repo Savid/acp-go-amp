@@ -81,20 +81,20 @@ func TestLaunchResPreparationRefusesAnUnverifiableIsolation(t *testing.T) {
 		processIsolationGeteuid = originalEUID
 		processIsolationGetegid = originalEGID
 	})
-	// Report the process as already running under the policy identity, which
-	// is the only shape that reaches the verification rather than the
-	// credential the launch would otherwise just set.
+	// Report the process as already running under the policy identity but not
+	// its group, which is the only shape that reaches a refusal rather than the
+	// credential the launch would otherwise just set. Supplementary groups are
+	// not consulted there: the arm changes no credential at all.
 	processIsolationGeteuid = func() int { return int(isolation.UID) }
-	processIsolationGetegid = func() int { return int(isolation.GID) }
+	processIsolationGetegid = func() int { return int(isolation.GID) + 1 }
 	isolation.TestOnlyIdentityLockRoot = t.TempDir()
-	isolation.StandaloneOwnerID = "launch-res"
-	isolation.StandaloneStateRoot = "/var/tmp/acp-go-amp-launch-res"
 	client := NewClient(nil, Options{CLIPath: "/bin/true", Isolation: isolation})
 
 	before := launchResDescriptors(t)
 	launch, err := client.prepareProcessLaunch(t.Context(), exec.Command("/bin/true"))
 	require.Nil(t, launch)
-	require.ErrorIs(t, err, groupsErr)
+	require.NotErrorIs(t, err, groupsErr)
+	require.ErrorContains(t, err, "cannot be entered from group")
 	require.ErrorContains(t, err, "apply Amp process isolation")
 	launchResAssertNoLeak(t, before)
 }

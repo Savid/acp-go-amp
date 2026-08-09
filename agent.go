@@ -73,7 +73,7 @@ func NewAgent(opts ...Option) *Agent {
 	options.RuntimeResourceHooks = instrumentRuntimeResourceHooks(options.RuntimeResourceHooks, observe)
 	mode := containmentMode(options)
 
-	providerProcesses := newProviderProcessSnapshotTracker(options.RuntimeResourceHooks, mode == RuntimeContainmentAuthoritative)
+	providerProcesses := newProviderProcessSnapshotTracker(options.RuntimeResourceHooks, mode.provesWholeTreeLifecycle())
 	if options.RuntimeResourceHooks.ObserveContainment != nil {
 		options.RuntimeResourceHooks.ObserveContainment(context.Background(), mode)
 	}
