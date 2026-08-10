@@ -95,6 +95,17 @@ var (
 	turnSupervisorReadDeadline      = (*os.File).SetReadDeadline
 )
 
+// ampSupervisorSignals is the set a trusted supervisor answers instead of
+// dying on. SIGHUP belongs in it because the kernel sends one — followed by
+// SIGCONT — to a process group that its own exit notification has just
+// orphaned while a member of it is stopped (POSIX 3.2.2.2). Killing a
+// supervisor whose peer is stopped is exactly that shape, so the surviving
+// supervisor is handed a hangup it never asked for; unhandled, Go's default
+// action ends it where it stands, abandoning the native descendants it is the
+// only subreaper for and closing the proof pipe with no proof on it. Answered,
+// a hangup runs the same containment path SIGTERM and SIGINT run.
+var ampSupervisorSignals = []os.Signal{syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP}
+
 func enableTurnSupervisor() error {
 	if err := turnSupervisorSetrlimit(unix.RLIMIT_CORE, &unix.Rlimit{}); err != nil {
 		return fmt.Errorf("disable Amp native core dumps: %w", err)
@@ -512,7 +523,7 @@ func runTurnSupervisorGuardian(configInput io.Reader, controlInput io.Reader, re
 
 	signals := make(chan os.Signal, 2)
 
-	turnSupervisorSignalNotify(signals, syscall.SIGINT, syscall.SIGTERM)
+	turnSupervisorSignalNotify(signals, ampSupervisorSignals...)
 	defer turnSupervisorSignalStop(signals)
 
 	controlDone := make(chan struct{})
@@ -1104,7 +1115,7 @@ func runTurnSupervisorNative(
 
 	signals := make(chan os.Signal, 2)
 
-	turnSupervisorSignalNotify(signals, syscall.SIGINT, syscall.SIGTERM)
+	turnSupervisorSignalNotify(signals, ampSupervisorSignals...)
 	defer turnSupervisorSignalStop(signals)
 
 	controlDone := make(chan struct{})

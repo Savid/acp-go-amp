@@ -1252,14 +1252,26 @@ type supervisorPeerDeathFixture struct {
 	uid            uint32
 }
 
+// TestProcessIsolationSupervisorGuardianSIGKILLRetainsAuthorityThroughECHILD
+// kills the stopped survivor's own parent, which orphans the survivor's process
+// group while it still holds a stopped member. The kernel answers that with a
+// SIGHUP and a SIGCONT to the whole newly orphaned group (POSIX 3.2.2.2), and
+// whether it observes the survivor still stopped is a race with this test's own
+// resume. The hangup is delivered here rather than waited for, so the case
+// asserts the behavior every time instead of on the fraction of runs the kernel
+// happened to lose that race on.
 func TestProcessIsolationSupervisorGuardianSIGKILLRetainsAuthorityThroughECHILD(t *testing.T) {
 	fixture := startSupervisorPeerDeathFixture(t, 64131, 64132, "guardian-death")
-	exerciseSupervisorPeerDeath(t, fixture, fixture.livenessPID, fixture.guardianPID)
+	exerciseSupervisorPeerDeath(t, fixture, fixture.livenessPID, fixture.guardianPID, true)
 }
 
+// TestProcessIsolationSupervisorLivenessSIGKILLRetainsAuthorityThroughECHILD is
+// the mirrored case. Killing the liveness supervisor orphans no group — the
+// guardian's parent is the host process, which outlives it — so no hangup is
+// part of this shape and none is delivered.
 func TestProcessIsolationSupervisorLivenessSIGKILLRetainsAuthorityThroughECHILD(t *testing.T) {
 	fixture := startSupervisorPeerDeathFixture(t, 64141, 64142, "liveness-death")
-	exerciseSupervisorPeerDeath(t, fixture, fixture.guardianPID, fixture.livenessPID)
+	exerciseSupervisorPeerDeath(t, fixture, fixture.guardianPID, fixture.livenessPID, false)
 }
 
 func startSupervisorPeerDeathFixture(
@@ -1369,7 +1381,13 @@ while :; do sleep 30; done
 	return fixture
 }
 
-func exerciseSupervisorPeerDeath(t *testing.T, fixture *supervisorPeerDeathFixture, survivorPID, victimPID int) {
+func exerciseSupervisorPeerDeath(
+	t *testing.T,
+	fixture *supervisorPeerDeathFixture,
+	survivorPID int,
+	victimPID int,
+	orphaned bool,
+) {
 	t.Helper()
 	if err := syscall.Kill(survivorPID, syscall.SIGSTOP); err != nil {
 		t.Fatalf("stop surviving trusted supervisor %d: %v", survivorPID, err)
@@ -1379,6 +1397,12 @@ func exerciseSupervisorPeerDeath(t *testing.T, fixture *supervisorPeerDeathFixtu
 		t.Fatalf("kill trusted supervisor peer %d: %v", victimPID, err)
 	}
 	assertSupervisorAuthorityLocks(t, fixture.authorityRoot, fixture.uid, false)
+
+	if orphaned {
+		if err := syscall.Kill(survivorPID, syscall.SIGHUP); err != nil {
+			t.Fatalf("hang up orphaned trusted supervisor %d: %v", survivorPID, err)
+		}
+	}
 
 	if err := syscall.Kill(survivorPID, syscall.SIGCONT); err != nil {
 		t.Fatalf("resume surviving trusted supervisor %d: %v", survivorPID, err)
