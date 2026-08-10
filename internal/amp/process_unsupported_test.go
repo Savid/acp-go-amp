@@ -50,6 +50,8 @@ func main() {
 			_ = os.WriteFile(ready, []byte("1"), 0o600)
 		}
 		time.Sleep(10 * time.Minute)
+	case "environment":
+		fmt.Print(os.Getenv("PATH") + "\n" + os.Getenv("PATHEXT"))
 	default:
 		fmt.Print("ordinary:" + os.Getenv("PORTABLE_HARNESS_CANARY"))
 	}
@@ -174,7 +176,7 @@ func TestPortableOrdinaryLaunchRunsCompletesAndKeepsTheAmbientEnvironment(t *tes
 	harness, ledger := portableHarness(t)
 	client := portableOrdinaryClient(t, harness, ledger, "ambient-value")
 
-	out, err := client.outputRaw(t.Context(), "version")
+	out, err := client.outputWithArgs(t.Context(), "version")
 	if err != nil {
 		t.Fatalf("ordinary portable launch: %v", err)
 	}
@@ -289,7 +291,7 @@ func TestPortableExplicitProcessIsolationIsRefusedWithoutSpawn(t *testing.T) {
 	}
 
 	client := NewClient(nil, Options{CLIPath: harness, Cwd: filepath.Dir(harness), Isolation: policy})
-	if _, err := client.outputRaw(t.Context(), "version"); err == nil {
+	if _, err := client.outputWithArgs(t.Context(), "version"); err == nil {
 		t.Fatal("explicit portable policy launched")
 	}
 	if _, err := client.startTurn(t.Context(), nil, nil); err == nil {
@@ -308,7 +310,7 @@ func TestPortableExplicitProcessIsolationIsRefusedWithoutSpawn(t *testing.T) {
 
 // TestPortableProcessTreeLifecycleBranches covers the remaining portable
 // lifecycle statements: the nil and already-finished guards, the
-// os.ErrProcessDone tolerance, and both terminateAndWait outcomes.
+// os.ErrProcessDone/EINVAL tolerance, and both terminateAndWait outcomes.
 func TestPortableProcessTreeLifecycleBranches(t *testing.T) {
 	if count, ok := (*processTree)(nil).descendantCount(); count != 0 || ok {
 		t.Fatalf("portable descendant inventory = %d, %v", count, ok)
@@ -365,8 +367,8 @@ func TestPortableProcessTreeLifecycleBranches(t *testing.T) {
 	client := portableOrdinaryClient(t, harness, ledger, "branches")
 	environment := portableEnvironment(client, t)
 
-	// A reaped child answers Kill with os.ErrProcessDone; the backend reports
-	// the termination it asked for rather than retaining that error.
+	// A reaped child answers Kill with os.ErrProcessDone or EINVAL; the backend
+	// reports the termination it asked for rather than retaining that error.
 	settledTree, settledCmd := portableTree(t, harness, environment, "exit")
 	if _, completed := settledTree.commandWait().await(t.Context()); !completed {
 		t.Fatal("portable child did not settle")
@@ -462,7 +464,7 @@ func TestPortableOrdinaryCancellationReleasesTheContext(t *testing.T) {
 
 	result := make(chan error, 1)
 	go func() {
-		_, err := client.outputRaw(ctx, "live")
+		_, err := client.outputWithArgs(ctx, "live")
 		result <- err
 	}()
 

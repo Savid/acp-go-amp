@@ -5,8 +5,10 @@ package ampacp
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -15,11 +17,23 @@ import (
 	nativeamp "github.com/savid/acp-go-amp/internal/amp"
 )
 
-// testNativeIsolation is the policy for fixtures that drive the native client
-// directly rather than through an Agent. Native launches refuse an absent
-// policy, so a bare Options value never reaches the process under test.
+var timeoutContainmentIdentitySequence atomic.Uint32
+
+// timeoutContainmentIdentity gives each standalone-authority fixture its own
+// vacant Linux identity. The authority record permanently binds a UID to its
+// state root, so reusing the family-wide 65534 fixture across -count runs or
+// concurrent packages would turn shared-fleet authority contention into a
+// false process-lifecycle failure.
+func timeoutContainmentIdentity() (uint32, uint32) {
+	uid := uint32(1_000_000_000) + uint32(os.Getpid())*256 + timeoutContainmentIdentitySequence.Add(1)
+
+	return uid, uid
+}
+
+// testNativeIsolation opts direct-client fixtures into escaped-descendant
+// containment.
 func testNativeIsolation() *nativeamp.ProcessIsolation {
-	uid, gid := testIsolationIdentity()
+	uid, gid := timeoutContainmentIdentity()
 
 	return &nativeamp.ProcessIsolation{
 		UID: uid, GID: gid,
@@ -62,10 +76,19 @@ func TestCancelContainsDescendantBeforeReturn(t *testing.T) {
 
 func TestTurnTimeoutContainsDescendantBeforeReturn(t *testing.T) {
 	path, stateDir := fakeAgentAmpPath(t, "sigint-descendant")
+	uid, gid := timeoutContainmentIdentity()
 	agent := newTestAgent(
 		WithExecutablePath(path),
 		WithScratchDir(testScratchDir(t)),
 		WithTurnTimeout(100*time.Millisecond),
+		WithProcessIsolation(ProcessIsolation{
+			UID: uid, GID: gid,
+			BaseEnvironment: map[string]string{
+				"PATH": os.Getenv("PATH"), "HOME": os.Getenv("HOME"), "AMP_API_KEY": "fake",
+			},
+			StandaloneOwnerID:   fmt.Sprintf("turn-timeout-descendant-%d", uid),
+			StandaloneStateRoot: testStandaloneStateRoot(t, uid, gid),
+		}),
 	)
 	agent.options.runtime.nativeCancelTimeout = 100 * time.Millisecond
 	agent.options.runtime.nativeCloseTurnWait = 10 * time.Second

@@ -185,7 +185,9 @@ type runtimeOptions struct {
 	nativeCloseTurnWait  time.Duration
 	nativeCommandTimeout time.Duration
 	maxJSONLineBytes     int
-	startupProbe         func(context.Context, *nativeamp.Client) error
+	// startupProbe validates the harness and answers the absolute path it
+	// validated, which the agent retains for every launch that follows.
+	startupProbe func(context.Context, *nativeamp.Client) (string, error)
 	// executeThread launches the thread-less `amp -x` turn that lazily creates
 	// the server-side thread on a session's first prompt.
 	executeThread  func(context.Context, *nativeamp.Client, any) (*nativeamp.Turn, error)
@@ -223,7 +225,7 @@ func applyOptions(opts []Option) Options {
 			nativeCommandTimeout: defaultNativeCommandTimeout,
 			maxJSONLineBytes:     defaultNativePromptLineLimit,
 			newTurnTimer:         newRealTurnTimer,
-			startupProbe: func(ctx context.Context, client *nativeamp.Client) error {
+			startupProbe: func(ctx context.Context, client *nativeamp.Client) (string, error) {
 				return client.StartupProbe(ctx)
 			},
 			executeThread: func(ctx context.Context, client *nativeamp.Client, input any) (*nativeamp.Turn, error) {
@@ -617,9 +619,17 @@ func validateContainmentOptions(options Options) error {
 	}
 
 	for key := range options.Env {
+		if invalidEnvName(key) {
+			return fmt.Errorf("environment key %q is not a valid variable name", key)
+		}
+
 		if strings.HasPrefix(strings.ToUpper(key), privateEnvPrefix) {
 			return fmt.Errorf("environment key %q uses the reserved %s prefix", key, privateEnvPrefix)
 		}
+	}
+
+	if previous, key := ambiguousEnvKeys(options.Env); key != "" {
+		return fmt.Errorf("environment keys %q and %q name the same variable", previous, key)
 	}
 
 	return nil

@@ -173,12 +173,12 @@ func TestDarwinClientLaunchPreparationAndPipeFailures(t *testing.T) {
 	if _, err := client.Continue(ctx, "T-1", map[string]any{"type": "user"}); !errors.Is(err, want) {
 		t.Fatalf("Continue generation failure = %v", err)
 	}
-	if _, err := client.outputRaw(ctx, ampArgThreads, "list"); !errors.Is(err, want) {
+	if _, err := client.outputWithArgs(ctx, ampArgThreads, "list"); !errors.Is(err, want) {
 		t.Fatalf("output generation failure = %v", err)
 	}
 	initiallyCanceled, cancelInitial := context.WithCancel(ctx)
 	cancelInitial()
-	if _, err := client.outputRaw(initiallyCanceled, ampArgThreads, "list"); !errors.Is(err, context.Canceled) {
+	if _, err := client.outputWithArgs(initiallyCanceled, ampArgThreads, "list"); !errors.Is(err, context.Canceled) {
 		t.Fatalf("output initial cancellation = %v", err)
 	}
 }
@@ -319,7 +319,7 @@ func TestDarwinOutputCancellationCompletesContainment(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		_, err := client.outputRaw(ctx, ampArgThreads, "list")
+		_, err := client.outputWithArgs(ctx, ampArgThreads, "list")
 		done <- err
 	}()
 	waitForFile(t, filepath.Join(state, "args.jsonl"))
@@ -362,6 +362,51 @@ func TestTurnCloseReportsBoundedWaitFailure(t *testing.T) {
 	}
 }
 
+// TestRetainedExecutableLaunchesWithoutResolving pins the retention contract:
+// a client given the harness a probe validated launches that exact file and
+// performs no lookup at all, so a resolution environment that could not find
+// amp — and a session environment that could find a different one — change
+// nothing. A retained path that is not absolute is refused rather than
+// resolved again.
+func TestRetainedExecutableLaunchesWithoutResolving(t *testing.T) {
+	path, _ := fakeAmpPath(t, "")
+	unresolvable := t.TempDir()
+
+	client := newTestClient(t, nil, Options{
+		CLIPath:            ampExecutableName,
+		Cwd:                t.TempDir(),
+		ResolutionEnv:      map[string]string{"PATH": unresolvable},
+		Env:                map[string]string{"PATH": unresolvable, "AMP_API_KEY": "fake"},
+		ResolvedExecutable: path,
+	})
+
+	version, err := client.Version(context.Background())
+	if err != nil || version != MinimumVersion+"-gfake" {
+		t.Fatalf("Version through the retained harness = %q, %v", version, err)
+	}
+
+	// A retained path removes lookup, not the caller's cancellation: no child
+	// starts once the context is done.
+	if _, err := client.Version(cancelledContext()); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled retained launch = %v, want context.Canceled", err)
+	}
+
+	// Skipping resolution does not skip child-environment validation.
+	invalidEnv := newTestClient(t, nil, Options{
+		Cwd:                t.TempDir(),
+		Env:                map[string]string{"": "x"},
+		ResolvedExecutable: path,
+	})
+	if _, err := invalidEnv.Version(context.Background()); err == nil || !strings.Contains(err.Error(), "invalid environment key") {
+		t.Fatalf("retained launch with an unusable child key = %v, want a refusal", err)
+	}
+
+	relative := newTestClient(t, nil, Options{Cwd: t.TempDir(), ResolvedExecutable: "amp"})
+	if _, err := relative.Version(context.Background()); err == nil || !strings.Contains(err.Error(), "not an absolute path") {
+		t.Fatalf("relative retained harness = %v, want a refusal", err)
+	}
+}
+
 func TestClientCommandsUseGlobalArgsAndParseOutput(t *testing.T) {
 	path, state := fakeAmpPath(t, "")
 	client := newTestProbeClient(t, nil, Options{
@@ -375,10 +420,10 @@ func TestClientCommandsUseGlobalArgsAndParseOutput(t *testing.T) {
 	if version, err := client.Version(ctx); err != nil || version != MinimumVersion+"-gfake" {
 		t.Fatalf("Version = %q, %v", version, err)
 	}
-	if err := client.DiscoveryProbe(ctx); err != nil {
+	if _, err := client.DiscoveryProbe(ctx); err != nil {
 		t.Fatalf("DiscoveryProbe: %v", err)
 	}
-	if err := client.StartupProbe(ctx); err != nil {
+	if _, err := client.StartupProbe(ctx); err != nil {
 		t.Fatalf("StartupProbe: %v", err)
 	}
 	records := readHelperJSON[[]string](t, filepath.Join(state, "args.jsonl"))
@@ -405,7 +450,7 @@ func TestClientCommandsUseGlobalArgsAndParseOutput(t *testing.T) {
 	if slices.Contains(startupContinue, "--effort") {
 		t.Fatalf("startup continue probe used removed --effort flag: %#v", startupContinue)
 	}
-	if err := client.StartupProbe(ctx); err != nil {
+	if _, err := client.StartupProbe(ctx); err != nil {
 		t.Fatalf("StartupProbe cached: %v", err)
 	}
 	threads, err := client.ListThreads(ctx)
@@ -452,31 +497,34 @@ func TestStartupProbeAndVersionBranches(t *testing.T) {
 	if _, _, err := NewClient(nil, missing).discoverVersion(ctx); err == nil {
 		t.Fatal("version discovery PATH error ignored")
 	}
-	if err := NewClient(nil, missing).StartupProbe(ctx); err == nil {
+	if _, err := NewClient(nil, missing).StartupProbe(ctx); err == nil {
 		t.Fatal("StartupProbe PATH error ignored")
 	}
 
-	if err := newTestProbeClient(t, nil, Options{CLIPath: "/does/not/exist"}).StartupProbe(ctx); err == nil {
+	if _, err := newTestProbeClient(t, nil, Options{CLIPath: "/does/not/exist"}).StartupProbe(ctx); err == nil {
 		t.Fatal("StartupProbe version command error ignored")
 	}
+	if _, err := newTestProbeClient(t, nil, Options{CLIPath: "/does/not/exist"}).DiscoveryProbe(ctx); err == nil {
+		t.Fatal("DiscoveryProbe version command error ignored")
+	}
 	badVersion, _ := fakeAmpPath(t, "bad-version")
-	if err := newTestProbeClient(t, nil, Options{CLIPath: badVersion, Cwd: t.TempDir()}).StartupProbe(ctx); err == nil || !strings.Contains(err.Error(), "below required") {
+	if _, err := newTestProbeClient(t, nil, Options{CLIPath: badVersion, Cwd: t.TempDir()}).StartupProbe(ctx); err == nil || !strings.Contains(err.Error(), "below required") {
 		t.Fatalf("bad version probe = %v", err)
 	}
 	badList, _ := fakeAmpPath(t, "bad-list-json")
-	if err := newTestProbeClient(t, nil, Options{CLIPath: badList, Cwd: t.TempDir()}).StartupProbe(ctx); err == nil || !strings.Contains(err.Error(), "threads list --json probe failed") {
+	if _, err := newTestProbeClient(t, nil, Options{CLIPath: badList, Cwd: t.TempDir()}).StartupProbe(ctx); err == nil || !strings.Contains(err.Error(), "threads list --json probe failed") {
 		t.Fatalf("list probe = %v", err)
 	}
 	exportAbsent, _ := fakeAmpPath(t, "probe-export-absent")
-	if err := newTestProbeClient(t, nil, Options{CLIPath: exportAbsent, Cwd: t.TempDir()}).StartupProbe(ctx); err == nil || !strings.Contains(err.Error(), "threads export probe failed") {
+	if _, err := newTestProbeClient(t, nil, Options{CLIPath: exportAbsent, Cwd: t.TempDir()}).StartupProbe(ctx); err == nil || !strings.Contains(err.Error(), "threads export probe failed") {
 		t.Fatalf("export method-present probe = %v", err)
 	}
 	exportMissing, _ := fakeAmpPath(t, "probe-export-missing")
-	if err := newTestProbeClient(t, nil, Options{CLIPath: exportMissing, Cwd: t.TempDir()}).StartupProbe(ctx); err != nil {
+	if _, err := newTestProbeClient(t, nil, Options{CLIPath: exportMissing, Cwd: t.TempDir()}).StartupProbe(ctx); err != nil {
 		t.Fatalf("export missing-thread domain error should count as present: %v", err)
 	}
 	continueSuccess, _ := fakeAmpPath(t, "probe-continue-success")
-	if err := newTestProbeClient(t, nil, Options{CLIPath: continueSuccess, Cwd: t.TempDir()}).StartupProbe(ctx); err == nil || !strings.Contains(err.Error(), "unexpectedly succeeded") {
+	if _, err := newTestProbeClient(t, nil, Options{CLIPath: continueSuccess, Cwd: t.TempDir()}).StartupProbe(ctx); err == nil || !strings.Contains(err.Error(), "unexpectedly succeeded") {
 		t.Fatalf("continue missing-thread success gate = %v", err)
 	}
 	if err := methodProbeError("threads continue", errors.New("usage"), true); err == nil || !strings.Contains(err.Error(), "did not return missing-thread") {
@@ -700,12 +748,14 @@ func TestClientErrorBranches(t *testing.T) {
 	env := BuildEnv(map[string]string{
 		"Z":                         "1",
 		"A":                         "2",
-		"":                          "ignored",
 		adapterOneShotDeathPhaseEnv: "secret",
 		adapterOneShotDeathStateEnv: "secret",
 	}, "/tmp/cwd")
 	if !slices.Contains(env, "A=2") || !slices.Contains(env, "Z=1") || !slices.Contains(env, "PWD=/tmp/cwd") {
 		t.Fatalf("env missing overrides: %#v", env)
+	}
+	if refused := BuildEnv(map[string]string{"": "ignored"}, "/tmp/cwd"); refused != nil {
+		t.Fatalf("empty override key accepted: %#v", refused)
 	}
 	for _, privateKey := range []string{
 		adapterSupervisorModeEnv,

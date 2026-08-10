@@ -147,7 +147,7 @@ func TestExplicitClientPolicyErrorBranches(t *testing.T) {
 	if err := client.validateProbeResidence(); err == nil {
 		t.Fatal("invalid explicit probe environment succeeded")
 	}
-	if err := client.DiscoveryProbe(t.Context()); err == nil {
+	if _, err := client.DiscoveryProbe(t.Context()); err == nil {
 		t.Fatal("invalid explicit discovery probe succeeded")
 	}
 	if _, _, err := client.discoverVersion(t.Context()); err == nil {
@@ -156,7 +156,7 @@ func TestExplicitClientPolicyErrorBranches(t *testing.T) {
 	if _, err := client.startTurn(t.Context(), nil, nil); err == nil {
 		t.Fatal("invalid explicit turn environment succeeded")
 	}
-	if _, err := client.outputRaw(t.Context(), "version"); err == nil {
+	if _, err := client.outputWithArgs(t.Context(), "version"); err == nil {
 		t.Fatal("invalid explicit output environment succeeded")
 	}
 	if _, err := client.prepareProcessLaunch(t.Context(), exec.Command("/bin/true")); err == nil {

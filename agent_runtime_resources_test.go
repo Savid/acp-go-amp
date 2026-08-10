@@ -140,13 +140,13 @@ func TestAgentCloseFencesInFlightStartupContainmentFailure(t *testing.T) {
 			},
 		}),
 	)
-	agent.options.runtime.startupProbe = func(ctx context.Context, _ *nativeamp.Client) error {
+	agent.options.runtime.startupProbe = func(ctx context.Context, _ *nativeamp.Client) (string, error) {
 		close(started)
 		<-ctx.Done()
 		close(cancelled)
 		<-unblock
 
-		return ErrProcessContainmentIncomplete
+		return "", ErrProcessContainmentIncomplete
 	}
 
 	requestErr := make(chan error, 1)
@@ -211,7 +211,7 @@ func TestInjectedExecuteContainmentFailureRetainsOnlyOwnedSessionScratch(t *test
 			},
 		}),
 	)
-	agent.options.runtime.startupProbe = func(context.Context, *nativeamp.Client) error { return nil }
+	agent.options.runtime.startupProbe = func(context.Context, *nativeamp.Client) (string, error) { return testHarnessPath(t), nil }
 	agent.options.runtime.executeThread = func(context.Context, *nativeamp.Client, any) (*nativeamp.Turn, error) {
 		return nil, ErrProcessContainmentIncomplete
 	}
@@ -270,7 +270,7 @@ func TestExportContainmentFailureRetainsColdSessionResources(t *testing.T) {
 			},
 		}),
 	)
-	agent.options.runtime.startupProbe = func(context.Context, *nativeamp.Client) error { return nil }
+	agent.options.runtime.startupProbe = func(context.Context, *nativeamp.Client) (string, error) { return testHarnessPath(t), nil }
 	agent.options.runtime.exportThread = func(context.Context, *nativeamp.Client, string) (json.RawMessage, error) {
 		return nil, ErrProcessContainmentIncomplete
 	}
@@ -601,7 +601,7 @@ func TestActiveLoadStoreFailureAndDeleteCompletionFence(t *testing.T) {
 	t.Setenv("AMP_API_KEY", "fake")
 	loadErr := errors.New("active transcript load failed")
 	agent := newTestAgent(WithSessionStore(&errorStore{loadErr: loadErr}))
-	agent.options.runtime.startupProbe = func(context.Context, *nativeamp.Client) error { return nil }
+	agent.options.runtime.startupProbe = func(context.Context, *nativeamp.Client) (string, error) { return testHarnessPath(t), nil }
 	agent.options.runtime.exportThread = func(context.Context, *nativeamp.Client, string) (json.RawMessage, error) {
 		return json.RawMessage(`{}`), nil
 	}

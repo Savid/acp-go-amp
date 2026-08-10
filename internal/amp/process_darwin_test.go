@@ -979,7 +979,7 @@ func TestDarwinCancellationAfterGenerationPreparationDoesNotSpawn(t *testing.T) 
 			return func() {}, nil
 		},
 	})
-	_, err := client.outputRaw(ctx, "version")
+	_, err := client.outputWithArgs(ctx, "version")
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("output error = %v", err)
 	}
@@ -1419,7 +1419,7 @@ func TestDarwinClientOutputBoundsInheritedPipesFromSetsidEscape(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 2*defaultCloseWait)
 	defer cancel()
 	started := time.Now()
-	if _, err := client.outputRaw(ctx, "pipe-escape"); err != nil {
+	if _, err := client.outputWithArgs(ctx, "pipe-escape"); err != nil {
 		t.Fatalf("selected-boundary output failed: %v", err)
 	}
 	if elapsed := time.Since(started); elapsed >= defaultCloseWait {

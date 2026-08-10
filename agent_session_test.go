@@ -184,10 +184,10 @@ func isMismatchField(err error, field string) bool {
 	}
 	data, ok := reqErr.Data.(map[string]any)
 	if !ok {
-		return strings.Contains(err.Error(), field) && strings.Contains(err.Error(), "mismatch")
+		return strings.Contains(err.Error(), field) && strings.Contains(err.Error(), valMismatch)
 	}
 
-	return data[jsonFieldError] == "mismatch" && data[jsonFieldField] == field
+	return data[jsonFieldError] == valMismatch && data[jsonFieldField] == field
 }
 
 func TestNewSessionFailsFastWithoutAPIKey(t *testing.T) {

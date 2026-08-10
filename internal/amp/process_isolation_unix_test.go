@@ -18,10 +18,10 @@ func TestProcessIsolationUnixVerificationBranches(t *testing.T) {
 	processIsolationGeteuid = func() int { return 11 }
 	processIsolationGetegid = func() int { return 22 }
 	processIsolationGetgroups = func() ([]int, error) { return nil, nil }
-	// The seams report the policy's own identity, so on Linux this is the shared
-	// shape: a durable standalone record cannot describe an identity the
-	// verifying process already holds.
-	policy := &ProcessIsolation{UID: 11, GID: 22, BaseEnvironment: map[string]string{}}
+	policy := &ProcessIsolation{
+		UID: 11, GID: 22, BaseEnvironment: map[string]string{},
+		StandaloneOwnerID: "unix-verification-test", StandaloneStateRoot: "/var/lib/acp-go-amp-test",
+	}
 	if err := verifyProcessIsolation(policy); err != nil {
 		t.Fatal(err)
 	}
@@ -43,8 +43,8 @@ func TestProcessIsolationUnixVerificationBranches(t *testing.T) {
 	}
 	processIsolationGetgroups = func() ([]int, error) { return nil, nil }
 
-	// A policy naming an identity this process does not hold is the isolated
-	// shape, which on Linux is the one that carries the standalone record.
+	// The same structurally valid policy names an identity this process does not
+	// hold after the seam changes, so verification refuses the mismatch.
 	isolated := &ProcessIsolation{
 		UID: 11, GID: 22, BaseEnvironment: map[string]string{},
 		StandaloneOwnerID: "unix-verification-test", StandaloneStateRoot: "/var/lib/acp-go-amp-test",

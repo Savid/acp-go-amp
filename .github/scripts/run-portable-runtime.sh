@@ -10,34 +10,43 @@
 # The selector must discover tests and every discovered test must pass. A skip
 # is a failure here for the same reason it is in the trusted-supervisor lane: a
 # lane that silently runs nothing is indistinguishable from a lane that passes.
+#
+# The adapter surface above the process backend carries its own portable class:
+# the Windows environment key identity, executable search rules, and the
+# environment block a child actually receives are real-host facts that a
+# cross-compile cannot establish. The root package is therefore selected by the
+# same name and held to the same discovery/pass/skip rules.
 set -eu
 
 selector='^TestPortable'
-package=./internal/amp
+packages='./internal/amp .'
 
-selected=$(go list -f '{{range .GoFiles}}{{println .}}{{end}}' "$package" | grep -Ec '^process_unsupported\.go$' || true)
+selected=$(go list -f '{{range .GoFiles}}{{println .}}{{end}}' ./internal/amp | grep -Ec '^process_unsupported\.go$' || true)
 [ "$selected" -eq 1 ] || {
 	echo "the portable runtime lane needs a !unix host that selects process_unsupported.go, not $(go env GOOS)" >&2
 	exit 1
 }
 
-listing=$(mktemp)
 log=$(mktemp)
-rc=$(mktemp)
-cleanup() { rm -f "$listing" "$log" "$rc"; }
+cleanup() { rm -f "$log"; }
 trap cleanup EXIT HUP INT TERM
 
-go test -list "$selector" "$package" >"$listing"
+expected=0
+for package in $packages; do
+	discovered=$(go test -list "$selector" "$package" | grep -Ec '^TestPortable' || true)
+	[ "$discovered" -gt 0 ] || {
+		echo "portable runtime selector discovered no tests in $package" >&2
+		exit 1
+	}
+	expected=$((expected + discovered))
+done
 
-expected=$(grep -Ec '^TestPortable' "$listing" || true)
-[ "$expected" -gt 0 ] || {
-	echo 'portable runtime selector discovered no tests' >&2
-	exit 1
-}
-
-{ go test -race -count=1 -json -timeout="${GO_TEST_TIMEOUT:-40m}" -run "$selector" "$package"; echo $? >"$rc"; } | tee "$log"
-
-status=$(cat "$rc")
+if go test -race -count=1 -json -timeout="${GO_TEST_TIMEOUT:-40m}" -run "$selector" $packages >"$log"; then
+	status=0
+else
+	status=$?
+fi
+cat "$log"
 passed=$(grep -Ec '"Action":"pass","Package":"[^"]+","Test":"TestPortable[^/"]*"' "$log" || true)
 skipped=$(grep -Ec '"Action":"skip","Package":"[^"]+","Test":"TestPortable[^"]*"' "$log" || true)
 

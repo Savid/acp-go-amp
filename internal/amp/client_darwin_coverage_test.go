@@ -50,7 +50,7 @@ func TestDarwinOutputReportsWaiterPastContainmentDeadline(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		_, err := client.outputRaw(ctx, ampArgThreads, "list")
+		_, err := client.outputWithArgs(ctx, ampArgThreads, "list")
 		done <- err
 	}()
 	argsPath := filepath.Join(state, "args.jsonl")
@@ -88,7 +88,7 @@ func TestDarwinClientIsolationAndNativeStartFailures(t *testing.T) {
 	}
 
 	client := newTestClient(t, nil, Options{CLIPath: "/usr/bin/true", ScratchParent: t.TempDir()})
-	if _, err := client.outputRaw(t.Context(), "--version"); err == nil {
+	if _, err := client.outputWithArgs(t.Context(), "--version"); err == nil {
 		t.Fatal("missing native command unexpectedly started")
 	}
 	if _, err := client.StartAuthLogin(t.Context()); err == nil {

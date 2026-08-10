@@ -9,8 +9,11 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -81,22 +84,81 @@ func TestLaunchResPreparationRefusesAnUnverifiableIsolation(t *testing.T) {
 		processIsolationGeteuid = originalEUID
 		processIsolationGetegid = originalEGID
 	})
-	// Report the process as already running under the policy identity but not
-	// its group, which is the only shape that reaches a refusal rather than the
-	// credential the launch would otherwise just set. Supplementary groups are
-	// not consulted there: the arm changes no credential at all.
+	// Report the process as already running under the complete standalone policy
+	// identity. This reaches verification rather than installing a credential,
+	// so the supplementary-group failure is the refusal under test.
 	processIsolationGeteuid = func() int { return int(isolation.UID) }
-	processIsolationGetegid = func() int { return int(isolation.GID) + 1 }
+	processIsolationGetegid = func() int { return int(isolation.GID) }
 	isolation.TestOnlyIdentityLockRoot = t.TempDir()
+	isolation.StandaloneOwnerID = "launch-residual-unverifiable"
+	isolation.StandaloneStateRoot = "/var/tmp/acp-go-amp-launch-residual"
 	client := NewClient(nil, Options{CLIPath: "/bin/true", Isolation: isolation})
 
 	before := launchResDescriptors(t)
 	launch, err := client.prepareProcessLaunch(t.Context(), exec.Command("/bin/true"))
 	require.Nil(t, launch)
-	require.NotErrorIs(t, err, groupsErr)
-	require.ErrorContains(t, err, "cannot be entered from group")
+	require.ErrorIs(t, err, groupsErr)
 	require.ErrorContains(t, err, "apply Amp process isolation")
 	launchResAssertNoLeak(t, before)
+}
+
+func TestLaunchResRefusesMixedDarwinAndIsolationPolicies(t *testing.T) {
+	isolation := testProcessIsolation()
+	isolation.StandaloneOwnerID = "launch-residual-mixed-policy"
+	isolation.StandaloneStateRoot = "/var/tmp/acp-go-amp-launch-residual-mixed-policy"
+	client := NewClient(nil, Options{DarwinBestEffort: true, Isolation: isolation})
+
+	launch, err := client.prepareProcessLaunch(t.Context(), exec.Command("/bin/true"))
+	require.Nil(t, launch)
+	require.ErrorContains(t, err, "cannot be combined")
+}
+
+func TestLaunchResOutputReportsWaiterPastContainmentDeadline(t *testing.T) {
+	originalPrepare := prepareProcessTree
+	originalTerminate := processTreeTerminateAndWait
+	originalKill := syscallKill
+	originalTimeout := commandWaitTimeout
+	originalCommand := commandContext
+	t.Cleanup(func() {
+		prepareProcessTree = originalPrepare
+		processTreeTerminateAndWait = originalTerminate
+		syscallKill = originalKill
+		commandWaitTimeout = originalTimeout
+		commandContext = originalCommand
+	})
+
+	prepareProcessTree = func(cmd *exec.Cmd, _ processLaunchOptions) (*processTreeCommand, error) {
+		configureCommand(cmd)
+
+		return &processTreeCommand{cmd: cmd}, nil
+	}
+	processTreeTerminateAndWait = func(*processTree, time.Duration) error { return nil }
+	syscallKill = func(int, syscall.Signal) error { return nil }
+	commandWaitTimeout = time.Millisecond
+
+	var launched *exec.Cmd
+	commandContext = func(ctx context.Context, path string, args ...string) *exec.Cmd {
+		launched = exec.CommandContext(ctx, path, args...)
+
+		return launched
+	}
+
+	path, state := fakeAmpPath(t, "hang-list")
+	client := newTestClient(t, nil, Options{CLIPath: path, Cwd: t.TempDir()})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := client.outputWithArgs(ctx, ampArgThreads, "list")
+		done <- err
+	}()
+	waitForFile(t, filepath.Join(state, "args.jsonl"))
+	cancel()
+	err := <-done
+	require.ErrorIs(t, err, ErrProcessContainmentIncomplete)
+	require.ErrorContains(t, err, "wait for contained Amp command")
+	if launched != nil && launched.Process != nil {
+		_ = originalKill(-launched.Process.Pid, syscall.SIGKILL)
+	}
 }
 
 // TestLaunchResOutputAbandonsACancelledOrUnstartableLaunch proves the

@@ -20,13 +20,18 @@ type startupProbeResidence struct {
 	mcpFile      string
 }
 
+// ensureStartupWithProbe validates the harness before a session exists.
+// sessionEnv is the caller's session environment, and only the named operation
+// values are lifted out of it: the probe children run on the static base, so
+// neither the version probe nor the method probes can be pointed at a different
+// binary or a different helper by a session's raw PATH.
 func (a *Agent) ensureStartupWithProbe(
 	ctx context.Context,
 	cwd string,
-	env map[string]string,
-	probe func(context.Context, *amp.Client) error,
+	sessionEnv map[string]string,
+	probe func(context.Context, *amp.Client) (string, error),
 ) error {
-	if err := a.runStartupWithProbe(ctx, cwd, env, probe); err != nil {
+	if err := a.runStartupWithProbe(ctx, cwd, sessionEnv, probe); err != nil {
 		return nativeInternalError(err)
 	}
 
@@ -36,8 +41,8 @@ func (a *Agent) ensureStartupWithProbe(
 func (a *Agent) runStartupWithProbe(
 	ctx context.Context,
 	cwd string,
-	env map[string]string,
-	probe func(context.Context, *amp.Client) error,
+	sessionEnv map[string]string,
+	probe func(context.Context, *amp.Client) (string, error),
 ) (returnErr error) {
 	scratchRelease, err := reserveScratchRoot(ctx, a.options.RuntimeResourceHooks, RuntimeResourceDiscovery)
 	if err != nil {
@@ -63,18 +68,22 @@ func (a *Agent) runStartupWithProbe(
 		return fmt.Errorf("handoff Amp startup probe residence: %w", err)
 	}
 
-	isolatedEnv := mergeEnv(env, nil)
-	isolatedEnv[envHome] = residence.home
-	isolatedEnv[envXDGConfigHome] = residence.config
-	isolatedEnv[envXDGCacheHome] = residence.cache
-	isolatedEnv[envXDGDataHome] = residence.data
-	isolatedEnv[envXDGStateHome] = residence.state
+	// The probe environment is the static one: the ordinary or isolation base
+	// the native boundary supplies, the agent-scoped WithEnv phase, the named
+	// operation values the authenticated method probes need, and the
+	// adapter-managed probe residence last. The session's raw PATH is absent.
+	probeEnv := composeEnv(
+		a.options.Env,
+		operationSessionEnv(sessionEnv),
+		managedSessionEnv(residence.home, residence.config, residence.cache, residence.data, residence.state),
+	)
 
 	options := amp.Options{
 		CLIPath:                    a.options.ExecutablePath,
 		Cwd:                        cwd,
 		SettingsFile:               residence.settingsFile,
-		Env:                        isolatedEnv,
+		Env:                        probeEnv,
+		ResolutionEnv:              composeEnv(a.options.Env),
 		MCPConfigPath:              residence.mcpFile,
 		MaxLineBytes:               a.options.runtime.maxJSONLineBytes,
 		OnGoroutinePanic:           a.onNativeGoroutinePanic,
@@ -83,7 +92,14 @@ func (a *Agent) runStartupWithProbe(
 	}
 	a.configureNativeClient(&options, RuntimeResourceDiscovery)
 
-	return probe(ctx, amp.NewClient(a.log, options))
+	path, probeErr := probe(ctx, amp.NewClient(a.log, options))
+	if probeErr != nil {
+		return probeErr
+	}
+
+	// The harness that just passed version and startup validation is the one
+	// every later launch runs, so resolution never happens again.
+	return a.retainHarnessPath(path)
 }
 
 func materializeStartupProbeResidence(parent string) (startupProbeResidence, error) {

@@ -1050,7 +1050,7 @@ func TestNativeOwnedFileWriteTransfersOwnershipOnCreation(t *testing.T) {
 	require.Equal(t, nativeOwnedCovUID, created.Uid)
 	require.Equal(t, nativeOwnedCovGID, created.Gid)
 	require.Equal(t, uint32(0o600), created.Mode&0o7777)
-	require.Equal(t, uint64(1), created.Nlink)
+	require.Equal(t, uint64(1), uint64(created.Nlink))
 	payload, err := os.ReadFile(path)
 	require.NoError(t, err)
 	require.Equal(t, "{\"a\":1}\n", string(payload))

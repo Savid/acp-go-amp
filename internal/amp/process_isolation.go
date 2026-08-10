@@ -44,7 +44,12 @@ func CaptureOrdinaryEnvironment() map[string]string {
 
 	for _, entry := range ordinaryEnvironmentEntries() {
 		key, value, ok := strings.Cut(entry, "=")
-		if !ok || key == "" || isPrivateAdapterEnv(key) || isScrubbedEnv(key) {
+		if !ok {
+			continue
+		}
+
+		key = launchEnvironmentKey(key)
+		if key == "" || isPrivateAdapterEnv(key) || isScrubbedEnv(key) {
 			continue
 		}
 
@@ -72,7 +77,8 @@ func validateProcessIsolation(isolation *ProcessIsolation) error {
 			return fmt.Errorf("process isolation base environment contains invalid key %q", key)
 		}
 
-		if isPrivateAdapterEnv(key) || isScrubbedEnv(key) {
+		canonicalKey := launchEnvironmentKey(key)
+		if isPrivateAdapterEnv(canonicalKey) || isScrubbedEnv(canonicalKey) {
 			return fmt.Errorf("process isolation base environment contains forbidden key %q", key)
 		}
 	}
@@ -89,6 +95,67 @@ func environmentValue(env []string, name string) string {
 	}
 
 	return ""
+}
+
+// ordinaryExecutableSearchRules carries the platform facts inherited-process
+// executable lookup depends on. Keeping the rules as data lets every host
+// exercise Windows lookup while the build-tagged selector still chooses the
+// rules used by real launches.
+type ordinaryExecutableSearchRules struct {
+	pathSeparators     string
+	extensions         []string
+	requireExecuteBit  bool
+	foldEnvironmentKey bool
+}
+
+func unixOrdinaryExecutableRules() ordinaryExecutableSearchRules {
+	return ordinaryExecutableSearchRules{pathSeparators: string(os.PathSeparator), requireExecuteBit: true}
+}
+
+func windowsOrdinaryExecutableRules(environment []string) ordinaryExecutableSearchRules {
+	return ordinaryExecutableSearchRules{
+		pathSeparators:     `:\/`,
+		extensions:         ordinaryWindowsExecutableExtensions(ordinaryEnvironmentValue(environment, "PATHEXT", true)),
+		foldEnvironmentKey: true,
+	}
+}
+
+func ordinaryEnvironmentValue(environment []string, name string, fold bool) string {
+	value := ""
+
+	for _, entry := range environment {
+		key, candidate, ok := strings.Cut(entry, "=")
+		if ok && (key == name || fold && strings.EqualFold(key, name)) {
+			value = candidate
+		}
+	}
+
+	return value
+}
+
+const defaultWindowsExecutableExtensions = ".com;.exe;.bat;.cmd"
+
+func ordinaryWindowsExecutableExtensions(value string) []string {
+	if value == "" {
+		value = defaultWindowsExecutableExtensions
+	}
+
+	extensions := make([]string, 0, 4)
+
+	for _, extension := range strings.Split(value, ";") {
+		extension = strings.ToLower(strings.TrimSpace(extension))
+		if extension == "" {
+			continue
+		}
+
+		if extension[0] != '.' {
+			extension = "." + extension
+		}
+
+		extensions = append(extensions, extension)
+	}
+
+	return extensions
 }
 
 func lookPathInEnvironment(file string, environment []string) (string, error) {
@@ -123,6 +190,15 @@ func lookPathInEnvironment(file string, environment []string) (string, error) {
 }
 
 func lookPathInOrdinaryEnvironment(file string, environment []string, cwd string) (string, error) {
+	return lookPathInOrdinaryEnvironmentWithRules(file, environment, cwd, ordinaryExecutableRules(environment))
+}
+
+func lookPathInOrdinaryEnvironmentWithRules(
+	file string,
+	environment []string,
+	cwd string,
+	rules ordinaryExecutableSearchRules,
+) (string, error) {
 	if file == "" {
 		return "", errors.New("executable name is empty")
 	}
@@ -144,21 +220,55 @@ func lookPathInOrdinaryEnvironment(file string, environment []string, cwd string
 		return filepath.Join(cwd, path)
 	}
 
-	if strings.ContainsRune(file, os.PathSeparator) {
-		return executableFile(resolve(file))
+	if strings.ContainsAny(file, rules.pathSeparators) {
+		return ordinaryExecutableFile(resolve(file), rules)
 	}
 
-	for _, dir := range filepath.SplitList(environmentValue(environment, "PATH")) {
+	search := ordinaryEnvironmentValue(environment, "PATH", rules.foldEnvironmentKey)
+	for _, dir := range filepath.SplitList(search) {
 		if dir == "" {
 			dir = "."
 		}
 
-		if path, err := executableFile(filepath.Join(resolve(dir), file)); err == nil {
+		if path, err := ordinaryExecutableFile(filepath.Join(resolve(dir), file), rules); err == nil {
 			return path, nil
 		}
 	}
 
 	return "", fmt.Errorf("executable %q not found in PATH", file)
+}
+
+func ordinaryExecutableFile(path string, rules ordinaryExecutableSearchRules) (string, error) {
+	if len(rules.extensions) == 0 {
+		return matchOrdinaryExecutableFile(path, rules.requireExecuteBit)
+	}
+
+	if filepath.Ext(path) != "" {
+		if resolved, err := matchOrdinaryExecutableFile(path, rules.requireExecuteBit); err == nil {
+			return resolved, nil
+		}
+	}
+
+	for _, extension := range rules.extensions {
+		if resolved, err := matchOrdinaryExecutableFile(path+extension, rules.requireExecuteBit); err == nil {
+			return resolved, nil
+		}
+	}
+
+	return "", fmt.Errorf("%q has no executable extension", path)
+}
+
+func matchOrdinaryExecutableFile(path string, requireExecuteBit bool) (string, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", err
+	}
+
+	if !info.Mode().IsRegular() || requireExecuteBit && info.Mode()&0o111 == 0 {
+		return "", fmt.Errorf("%q is not executable", path)
+	}
+
+	return path, nil
 }
 
 func executableFile(path string) (string, error) {

@@ -693,7 +693,7 @@ func (s *agentSession) applyActiveRequest(meta parsedSessionMeta, cwd string, mc
 		return mismatchField("mcpServers")
 	}
 
-	if !maps.Equal(activeRequestEnv(s.env), activeRequestEnv(mergeEnv(s.agent.options.Env, meta.options.Env))) {
+	if !maps.Equal(activeRequestEnv(s.env), activeRequestEnv(composeEnv(s.agent.options.Env, meta.options.Env))) {
 		return mismatchField(optionEnvKey)
 	}
 
@@ -891,9 +891,8 @@ const missingAPIKeyMessage = "AMP_API_KEY is not set: amp sessions run in an " +
 	"session env options"
 
 func (a *Agent) ensureNewSessionStartup(ctx context.Context, cwd string, meta parsedSessionMeta) error {
-	env := mergeEnv(a.options.Env, meta.options.Env)
-	if amp.HasAPIKey(mergeEnv(a.nativeEnvironmentBase(), env)) {
-		return a.ensureStartupWithProbe(ctx, cwd, env, a.options.runtime.startupProbe)
+	if amp.HasAPIKey(composeEnv(a.nativeEnvironmentBase(), a.options.Env, meta.options.Env)) {
+		return a.ensureStartupWithProbe(ctx, cwd, meta.options.Env, a.options.runtime.startupProbe)
 	}
 
 	if a.providerAuth == nil {
@@ -901,20 +900,19 @@ func (a *Agent) ensureNewSessionStartup(ctx context.Context, cwd string, meta pa
 	}
 
 	return a.ensureStartupWithProbe(
-		ctx, cwd, env,
-		func(ctx context.Context, client *amp.Client) error {
+		ctx, cwd, meta.options.Env,
+		func(ctx context.Context, client *amp.Client) (string, error) {
 			return client.DiscoveryProbe(ctx)
 		},
 	)
 }
 
 func (a *Agent) ensureStartup(ctx context.Context, cwd string, meta parsedSessionMeta) error {
-	env := mergeEnv(a.options.Env, meta.options.Env)
-	if !amp.HasAPIKey(mergeEnv(a.nativeEnvironmentBase(), env)) {
+	if !amp.HasAPIKey(composeEnv(a.nativeEnvironmentBase(), a.options.Env, meta.options.Env)) {
 		return missingAPIKeyError()
 	}
 
-	return a.ensureStartupWithProbe(ctx, cwd, env, a.options.runtime.startupProbe)
+	return a.ensureStartupWithProbe(ctx, cwd, meta.options.Env, a.options.runtime.startupProbe)
 }
 
 func (a *Agent) nativeEnvironmentBase() map[string]string {

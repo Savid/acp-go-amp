@@ -35,8 +35,12 @@ const (
 	// file this package writes.
 	authNativeSecretsSetting = "amp.experimental.cli.nativeSecretsStorage.enabled"
 
+	// AuthAPIKeyEnv carries the Amp credential. It is the one operation value
+	// every authenticated command needs, wherever that command was started
+	// from.
+	//
 	//nolint:gosec // G101 false positive: this is an environment variable name, not a credential.
-	authAPIKeyEnv        = "AMP_API_KEY"
+	AuthAPIKeyEnv        = "AMP_API_KEY"
 	authHeadlessOAuthEnv = "AMP_HEADLESS_OAUTH"
 
 	// AuthURLHost is the only host a relayed authorization URL may name.
@@ -207,7 +211,7 @@ func (c *Client) StartAuthLogin(ctx context.Context) (*AuthLogin, error) {
 		return nil, err
 	}
 
-	path, err := c.discover(ctx, environment, c.options.Cwd)
+	path, err := c.resolveExecutable(ctx, c.options.Cwd)
 	if err != nil {
 		return nil, err
 	}
@@ -300,12 +304,7 @@ func (c *Client) authLoginArgs() []string {
 // plus the headless override, with the ambient API key removed however it
 // arrived.
 func authLoginEnv(isolation *ProcessIsolation, ordinary, base map[string]string, cwd string) ([]string, error) {
-	overrides := make(map[string]string, len(base)+1)
-	for key, value := range base {
-		overrides[key] = value
-	}
-
-	overrides[authHeadlessOAuthEnv] = "1"
+	managed := map[string]string{authHeadlessOAuthEnv: "1"}
 
 	var (
 		env []string
@@ -313,9 +312,9 @@ func authLoginEnv(isolation *ProcessIsolation, ordinary, base map[string]string,
 	)
 
 	if isolation != nil {
-		env, err = BuildEnvWithIsolation(isolation, overrides, cwd)
+		env, err = buildIsolatedEnvironment(isolation, cwd, base, managed)
 	} else {
-		env, err = buildEnvironment(ordinary, overrides, cwd)
+		env, err = buildEnvironment(cwd, ordinary, base, managed)
 	}
 
 	if err != nil {
@@ -325,7 +324,7 @@ func authLoginEnv(isolation *ProcessIsolation, ordinary, base map[string]string,
 	kept := make([]string, 0, len(env))
 
 	for _, entry := range env {
-		if key, _, ok := strings.Cut(entry, "="); ok && key == authAPIKeyEnv {
+		if key, _, ok := strings.Cut(entry, "="); ok && key == AuthAPIKeyEnv {
 			continue
 		}
 

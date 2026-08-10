@@ -54,9 +54,16 @@ func (a *Agent) validateSessionStartOptions(options AmpOptions) error {
 	}
 
 	for key := range options.Env {
-		if strings.HasPrefix(strings.ToUpper(key), privateEnvPrefix) {
+		if invalidEnvName(key) || strings.HasPrefix(strings.ToUpper(key), privateEnvPrefix) {
 			return acp.NewInvalidParams(map[string]any{jsonFieldField: "_meta.amp.options.env." + key})
 		}
+	}
+
+	if _, key := ambiguousEnvKeys(options.Env); key != "" {
+		return acp.NewInvalidParams(map[string]any{
+			jsonFieldError: valAmbiguous,
+			jsonFieldField: "_meta.amp.options.env." + key,
+		})
 	}
 
 	return nil
@@ -185,7 +192,7 @@ func validateSessionPaths(cwd string, additionalDirs []string) error {
 }
 
 func mismatchField(field string) error {
-	return acp.NewInvalidParams(map[string]any{jsonFieldError: "mismatch", jsonFieldField: field})
+	return acp.NewInvalidParams(map[string]any{jsonFieldError: valMismatch, jsonFieldField: field})
 }
 
 // reserveMCPName enforces the adapter's MCP-name contract for the declaration at

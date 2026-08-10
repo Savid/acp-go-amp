@@ -57,14 +57,11 @@ func turnSupervisorCovAssertNoLeak(t *testing.T, before map[string]struct{}) {
 	}
 }
 
-// TestTurnSupervisorCovPrepareRefusesIncompleteIsolationAndAuthorityPairs
-// proves that the parent side refuses to build a supervised launch whenever
-// the isolation policy is absent or incomplete, or when only one half of the
-// borrowed authority pair is supplied. A supervisor started with half an
-// authority pair would run the native command with an identity nobody can
-// revalidate downstream, so the refusal must happen before any descriptor is
-// created.
-func TestTurnSupervisorCovPrepareRefusesIncompleteIsolationAndAuthorityPairs(t *testing.T) {
+// TestTurnSupervisorCovPrepareSelectsOrdinaryAndRefusesIncompleteIsolation
+// proves that an absent policy selects a plain ordinary command, while an
+// explicitly incomplete policy and a half borrowed-authority pair still fail
+// closed before any supervisor descriptor is created.
+func TestTurnSupervisorCovPrepareSelectsOrdinaryAndRefusesIncompleteIsolation(t *testing.T) {
 	restoreTurnSupervisorSeams(t)
 
 	if err := validateTurnSupervisorIdentity(nil); err == nil ||
@@ -73,8 +70,18 @@ func TestTurnSupervisorCovPrepareRefusesIncompleteIsolationAndAuthorityPairs(t *
 	}
 
 	before := turnSupervisorCovDescriptors(t)
+	ordinary, err := prepareProcessTreeCommand(exec.Command("/bin/true"), processLaunchOptions{})
+	if err != nil {
+		t.Fatalf("ordinary preparation = %v", err)
+	}
+	if ordinary == nil || ordinary.cmd == nil || ordinary.nativeIsolation || ordinary.control != nil || len(ordinary.inherited) != 0 {
+		t.Fatalf("ordinary preparation acquired supervisor state: %#v", ordinary)
+	}
+	if err := ordinary.close(); err != nil {
+		t.Fatalf("close ordinary preparation = %v", err)
+	}
+
 	for name, isolation := range map[string]*ProcessIsolation{
-		"absent":     nil,
 		"zero_ident": {BaseEnvironment: map[string]string{}},
 		"no_environ": {UID: 11, GID: 22},
 	} {

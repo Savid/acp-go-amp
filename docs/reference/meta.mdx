@@ -28,7 +28,7 @@ Unknown keys fail closed; foreign namespaces are ignored.
 
 | Field | Accepted values |
 |---|---|
-| `options.env` | Map of environment overrides. |
+| `options.env` | Map of environment overrides, including the session's complete raw `PATH`. |
 | `options.mode` | `low`, `medium`, `high`. |
 | `options.model` | Present for symmetry; any value fails with the uniform unsupported error. |
 | `options.outputSchema` | Present for symmetry; any presence fails with the uniform unsupported error. |
@@ -36,6 +36,32 @@ Unknown keys fail closed; foreign namespaces are ignored.
 
 Unknown keys under `_meta.amp`, `_meta.amp.rawEvent`, or `_meta.amp.options`
 fail closed. Foreign metadata namespaces are ignored.
+
+## Environment composition
+
+The prompt child's environment is composed in phases: the process environment or
+`ProcessIsolation.BaseEnvironment`, then `WithEnv`, then `options.env`, then the
+adapter-managed isolated `HOME` and `XDG_*` roots and the trace carrier. A later
+phase replaces an earlier value, so the managed residence cannot be redirected
+by any caller value and the session's `options.env` owns the whole raw `PATH`
+the prompt process runs with.
+
+The `amp` executable is resolved and version-probed before any session exists,
+against the static base alone — the process environment or
+`ProcessIsolation.BaseEnvironment` plus `WithEnv`. The exact absolute file that
+passed validation is the file every later child runs, so a directory named by a
+session `PATH` can never select the harness. Children that are not prompts — the
+startup probes, thread export, thread delete, and account login — run on that
+same static base plus the adapter-managed residence and the session's
+`AMP_API_KEY` and `AMP_URL`. Every other `options.env` value, the raw `PATH`
+among them, reaches the prompt child alone.
+
+Windows resolves variable names without regard to case, so on Windows every
+equal-fold spelling is one variable: `Path` supplied by `WithEnv` and `PATH`
+supplied by `options.env` compose into the single `PATH` the session named. A
+key that cannot be a variable name, and — on Windows — a single map that names
+one variable under two spellings, are refused with the uniform invalid-params
+error rather than resolved by chance.
 
 ## Emitted metadata
 

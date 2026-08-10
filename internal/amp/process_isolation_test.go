@@ -11,6 +11,19 @@ import (
 	"testing"
 )
 
+// requireRefusedEnvironmentPhases pins that a key which cannot name an
+// environment variable is refused on every composition phase, not only on the
+// base one.
+func requireRefusedEnvironmentPhases(t *testing.T, cases ...[]map[string]string) {
+	t.Helper()
+
+	for _, phases := range cases {
+		if _, err := buildEnvironment("", phases...); err == nil {
+			t.Fatalf("invalid environment key accepted in %#v", phases)
+		}
+	}
+}
+
 func TestProcessIsolationEnvironmentIdentityAndLookup(t *testing.T) {
 	t.Setenv("AMBIENT_ISOLATION_CANARY", "must-not-leak")
 	dir := t.TempDir()
@@ -46,9 +59,10 @@ func TestProcessIsolationEnvironmentIdentityAndLookup(t *testing.T) {
 	if _, buildErr := BuildEnvWithIsolation(&ProcessIsolation{UID: 1, GID: 1, BaseEnvironment: map[string]string{"BAD=KEY": "x"}}, nil, ""); buildErr == nil {
 		t.Fatal("invalid base key accepted")
 	}
-	if _, buildErr := buildEnvironment(map[string]string{"BAD=KEY": "x"}, nil, ""); buildErr == nil {
-		t.Fatal("low-level invalid base key accepted")
-	}
+	requireRefusedEnvironmentPhases(t,
+		[]map[string]string{{"BAD=KEY": "x"}},
+		[]map[string]string{nil, {"": "x"}},
+	)
 	for _, invalid := range []*ProcessIsolation{
 		nil,
 		{UID: 1, GID: 1},
@@ -123,6 +137,7 @@ func TestOrdinaryEnvironmentAndPATHRemainPortable(t *testing.T) {
 	t.Cleanup(func() { ordinaryEnvironmentEntries = original })
 	ordinaryEnvironmentEntries = func() []string {
 		return []string{
+			"MALFORMED",
 			"PATH=.",
 			"KEEP=value",
 			"ACP_GO_AMP_INTERNAL_SECRET=private",
@@ -161,6 +176,49 @@ func TestOrdinaryEnvironmentAndPATHRemainPortable(t *testing.T) {
 	}
 }
 
+// TestWindowsOrdinaryExecutableRulesAcceptGeneratedExecutables exercises the
+// Windows rules on every host. Windows regular files have no Unix execute bit,
+// PATH keys are case-insensitive, and a bare name is extended only according
+// to the supplied PATHEXT value.
+func TestWindowsOrdinaryExecutableRulesAcceptGeneratedExecutables(t *testing.T) {
+	ignored := t.TempDir()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(ignored, "amp.cmd"), []byte("ignored"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	executable := filepath.Join(dir, "amp.exe")
+	if err := os.WriteFile(executable, []byte("MZ"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	environment := []string{"Path=" + ignored, "PathExt=.CMD", "PATH=" + dir, "PATHEXT=EXE;.CMD"}
+	rules := windowsOrdinaryExecutableRules(environment)
+	if got, err := lookPathInOrdinaryEnvironmentWithRules("amp", environment, dir, rules); err != nil || got != executable {
+		t.Fatalf("Windows bare-name lookup = %q, %v", got, err)
+	}
+	if got, err := lookPathInOrdinaryEnvironmentWithRules(executable, environment, dir, rules); err != nil || got != executable {
+		t.Fatalf("Windows qualified lookup = %q, %v", got, err)
+	}
+
+	cmdOnly := []string{"Path=" + dir, "PATHEXT=.CMD"}
+	if _, err := lookPathInOrdinaryEnvironmentWithRules("amp", cmdOnly, dir, windowsOrdinaryExecutableRules(cmdOnly)); err == nil {
+		t.Fatal("Windows lookup ignored the supplied PATHEXT")
+	}
+
+	if got := ordinaryWindowsExecutableExtensions(""); len(got) != 4 || got[1] != ".exe" {
+		t.Fatalf("Windows default executable extensions = %#v", got)
+	}
+	if got := ordinaryWindowsExecutableExtensions(";"); len(got) != 0 {
+		t.Fatalf("separator-only PATHEXT extensions = %#v", got)
+	}
+	if got := ordinaryEnvironmentValue(nil, "PATH", true); got != "" {
+		t.Fatalf("missing ordinary environment value = %q", got)
+	}
+	if _, err := ordinaryExecutableFile(dir, unixOrdinaryExecutableRules()); err == nil {
+		t.Fatal("ordinary executable lookup accepted a directory")
+	}
+}
+
 func TestOrdinaryClientRunsWithoutProcessIsolation(t *testing.T) {
 	dir := t.TempDir()
 	executable := filepath.Join(dir, "amp")
@@ -175,7 +233,7 @@ func TestOrdinaryClientRunsWithoutProcessIsolation(t *testing.T) {
 			"PATH": os.Getenv("PATH"),
 		},
 	})
-	out, err := client.outputRaw(t.Context(), "version")
+	out, err := client.outputWithArgs(t.Context(), "version")
 	if err != nil {
 		t.Fatalf("ordinary launch: %v", err)
 	}

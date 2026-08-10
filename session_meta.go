@@ -148,22 +148,13 @@ func unsupportedField(path string) error {
 	return acp.NewInvalidParams(map[string]any{jsonFieldError: valUnsupported, jsonFieldField: path})
 }
 
-func mergeEnv(base, session map[string]string) map[string]string {
-	out := cloneStringMap(base)
-	if out == nil {
-		out = map[string]string{}
-	}
-
-	for key, value := range session {
-		out[key] = value
-	}
-
-	return out
-}
-
+// activeRequestEnv drops the adapter-managed residence phase from a composed
+// environment so an active request is compared on the caller-supplied values
+// alone. The managed keys are already canonical, so the deletion covers every
+// spelling the caller could have used.
 func activeRequestEnv(env map[string]string) map[string]string {
 	out := cloneStringMap(env)
-	for _, key := range []string{envHome, envXDGConfigHome, envXDGCacheHome, envXDGDataHome, envXDGStateHome} {
+	for key := range managedSessionEnv("", "", "", "", "") {
 		delete(out, key)
 	}
 

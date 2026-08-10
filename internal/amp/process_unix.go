@@ -170,14 +170,8 @@ func (t *processTree) finish(err error) error {
 	return errors.Join(err, t.finishErr)
 }
 
-// settled reports whether the memoized direct-child waiter has already
-// published its result.
-//
-// An ordinary tree addresses its child by the numeric process-group ID
-// captured at launch. Once the direct child is reaped the kernel is free to
-// hand that number to an unrelated group, so a signal sent afterwards is not a
-// no-op — it can reach a stranger. Every ordinary signal is gated on this
-// check, including the first interrupt Turn.Close issues.
+// settled gates every ordinary process-group operation because a reaped
+// leader's numeric PGID can be reused.
 func (t *processTree) settled() bool {
 	if t == nil {
 		return false
@@ -186,8 +180,8 @@ func (t *processTree) settled() bool {
 	return t.waiter.settled()
 }
 
-// signalOrdinary signals the ordinary process group only while the direct
-// child has not settled.
+// signalOrdinary signals the ordinary process group only before direct-child
+// settlement.
 func (t *processTree) signalOrdinary(signal syscall.Signal) error {
 	if t.settled() {
 		return nil

@@ -53,6 +53,9 @@ func TestOutputWaitsForDescendantTreeQuiescence(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("authoritative escaped-descendant containment is Linux-only")
 	}
+	if os.Geteuid() != 0 {
+		t.Skip("authoritative escaped-descendant containment requires a trusted root supervisor")
+	}
 	dir := t.TempDir()
 	pidFile := filepath.Join(dir, "child.pid")
 	script := filepath.Join(dir, "amp")
@@ -62,11 +65,12 @@ func TestOutputWaitsForDescendantTreeQuiescence(t *testing.T) {
 	}
 
 	client := newTestClient(t, nil, Options{
-		CLIPath: script,
-		Cwd:     dir,
-		Env:     map[string]string{"AMP_CHILD_PID_FILE": pidFile},
+		CLIPath:   script,
+		Cwd:       dir,
+		Env:       map[string]string{"AMP_CHILD_PID_FILE": pidFile},
+		Isolation: testProcessIsolation(),
 	})
-	if _, outputErr := client.outputRaw(t.Context(), "descendant"); outputErr != nil {
+	if _, outputErr := client.outputWithArgs(t.Context(), "descendant"); outputErr != nil {
 		t.Fatalf("contained output: %v", outputErr)
 	}
 
@@ -87,6 +91,9 @@ func TestOutputCancellationTerminatesContainedTree(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("authoritative escaped-descendant containment is Linux-only")
 	}
+	if os.Geteuid() != 0 {
+		t.Skip("authoritative escaped-descendant containment requires a trusted root supervisor")
+	}
 	dir := t.TempDir()
 	pidFile := filepath.Join(dir, "child.pid")
 	script := filepath.Join(dir, "amp")
@@ -96,21 +103,22 @@ func TestOutputCancellationTerminatesContainedTree(t *testing.T) {
 	}
 
 	client := newTestClient(t, nil, Options{
-		CLIPath: script,
-		Cwd:     dir,
-		Env:     map[string]string{"AMP_CHILD_PID_FILE": pidFile},
+		CLIPath:   script,
+		Cwd:       dir,
+		Env:       map[string]string{"AMP_CHILD_PID_FILE": pidFile},
+		Isolation: testProcessIsolation(),
 	})
 	cancelled, cancel := context.WithCancel(t.Context())
 	cancel()
 
-	if _, outputErr := client.outputRaw(cancelled, "cancelled-before-start"); !errors.Is(outputErr, context.Canceled) {
+	if _, outputErr := client.outputWithArgs(cancelled, "cancelled-before-start"); !errors.Is(outputErr, context.Canceled) {
 		t.Fatalf("pre-start cancellation = %v, want context.Canceled", outputErr)
 	}
 
 	running, stop := context.WithTimeout(t.Context(), 50*time.Millisecond)
 	defer stop()
 
-	if _, outputErr := client.outputRaw(running, "cancel-running"); outputErr == nil {
+	if _, outputErr := client.outputWithArgs(running, "cancel-running"); outputErr == nil {
 		t.Fatal("running cancellation unexpectedly succeeded")
 	}
 
@@ -144,27 +152,32 @@ func TestAuthoritativeProcessTreeFailureBranches(t *testing.T) {
 		t.Fatal("process containment classification mismatch")
 	}
 
-	tree := &processTree{pgid: 12345}
-	syscallKill = func(int, syscall.Signal) error { return syscall.EPERM }
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reader.Close() })
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	tree := &processTree{pgid: 12345, supervised: true, control: writer}
+	syscallKill = func(int, syscall.Signal) error { return nil }
 	if err := tree.terminateAndWait(time.Millisecond); !errors.Is(err, ErrProcessContainmentIncomplete) {
 		t.Fatalf("terminate failure = %v", err)
 	}
 
 	calls := 0
-	tree = &processTree{pgid: 12345}
+	tree = &processTree{pgid: 12345, supervised: true}
 	syscallKill = func(_ int, signal syscall.Signal) error {
 		calls++
-		if signal == syscall.Signal(0) {
-			return syscall.ESRCH
-		}
 
-		return nil
+		return syscall.ESRCH
 	}
 	if err := tree.terminateAndWait(time.Second); err != nil {
 		t.Fatalf("complete group: %v", err)
 	}
-	if calls != 2 {
-		t.Fatalf("syscall calls = %d, want kill plus probe", calls)
+	if calls != 1 {
+		t.Fatalf("syscall calls = %d, want one quiescence probe", calls)
 	}
 
 	syscallKill = func(_ int, signal syscall.Signal) error {
@@ -174,7 +187,7 @@ func TestAuthoritativeProcessTreeFailureBranches(t *testing.T) {
 
 		return nil
 	}
-	tree = &processTree{pgid: 12345}
+	tree = &processTree{pgid: 12345, supervised: true}
 	if err := tree.terminateAndWait(time.Second); !errors.Is(err, ErrProcessContainmentIncomplete) {
 		t.Fatalf("probe failure = %v", err)
 	}
@@ -186,7 +199,7 @@ func TestAuthoritativeProcessTreeFailureBranches(t *testing.T) {
 
 		return nil
 	}
-	tree = &processTree{pgid: 12345}
+	tree = &processTree{pgid: 12345, supervised: true}
 	if err := tree.terminateAndWait(time.Millisecond); !errors.Is(err, ErrProcessContainmentIncomplete) {
 		t.Fatalf("live group timeout = %v", err)
 	}

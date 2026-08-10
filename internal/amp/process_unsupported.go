@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -16,10 +17,10 @@ import (
 // prove no termination is attempted after the direct-child waiter settles.
 //
 // A process that finished between the liveness check and the call completed
-// the termination this backend asked for, so os.ErrProcessDone is discarded
-// rather than retained as the operation result.
+// the termination this backend asked for. Go reports that released handle as
+// os.ErrProcessDone or EINVAL, so neither is retained as the operation result.
 var killProcessHandle = func(process *os.Process) error {
-	if err := process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+	if err := process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) && !errors.Is(err, syscall.EINVAL) {
 		return err
 	}
 

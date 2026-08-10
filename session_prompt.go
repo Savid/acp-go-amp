@@ -134,7 +134,7 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (re
 		return acp.PromptResponse{}, err
 	}
 
-	if !amp.HasAPIKey(mergeEnv(s.agent.nativeEnvironmentBase(), s.env)) {
+	if !amp.HasAPIKey(composeEnv(s.agent.nativeEnvironmentBase(), s.env)) {
 		return acp.PromptResponse{}, missingAPIKeyError()
 	}
 
@@ -177,7 +177,11 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (re
 	}
 
 	s.agent.observe.RecordAmpProcessStart(continueCtx)
-	promptClient := s.clientWithEnv(s.agent.observe.InjectTraceEnv(continueCtx, s.env), mcpConfigPath, RuntimeResourcePrompt)
+	// The trace carrier is the last phase: it composes over the session
+	// environment under the platform key identity, so a caller-supplied
+	// traceparent spelling can never displace the propagated context.
+	promptEnv := composeEnv(s.env, s.agent.observe.InjectTraceEnv(continueCtx, nil))
+	promptClient := s.clientWithEnv(promptEnv, mcpConfigPath, RuntimeResourcePrompt)
 
 	// The first prompt runs a thread-less `amp -x` execute: amp creates the
 	// server-side thread only now, so a session that is never prompted never

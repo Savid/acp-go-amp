@@ -8,8 +8,10 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -297,7 +299,7 @@ func TestPromptInputAndEmitBranches(t *testing.T) {
 	if err := classifyNativePromptError(errors.New("plain")); err == nil || !strings.Contains(err.Error(), "plain") {
 		t.Fatalf("plain native error = %v", err)
 	}
-	if got := mergeEnv(nil, nil); len(got) != 0 {
+	if got := composeEnv(nil, nil); len(got) != 0 {
 		t.Fatalf("empty env = %#v", got)
 	}
 }
@@ -622,5 +624,457 @@ func TestSessionDirectBranches(t *testing.T) {
 	}
 	if err := session.Delete(ctx); err != nil {
 		t.Fatalf("Delete: %v", err)
+	}
+}
+
+// The marker prints the path it was resolved to, so a recorded run names the
+// exact file the native process found on the PATH it received.
+const carrierMarkerSource = `package main
+
+import (
+	"fmt"
+	"os"
+)
+
+func main() { fmt.Println(os.Args[0]) }
+`
+
+// carrierMarkerBinary compiles the marker once per test.
+func carrierMarkerBinary(t *testing.T) string {
+	t.Helper()
+
+	dir := t.TempDir()
+	source := filepath.Join(dir, "marker.go")
+
+	if err := os.WriteFile(source, []byte(carrierMarkerSource), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	binary := filepath.Join(dir, "marker")
+	if out, err := exec.Command("go", "build", "-o", binary, source).CombinedOutput(); err != nil {
+		t.Fatalf("build carrier marker: %v\n%s", err, out)
+	}
+
+	return binary
+}
+
+// carrierDirectory materializes one session-scoped operation directory: the
+// session's own marker command plus an amp stand-in that must never be chosen,
+// because executable resolution belongs to the static agent base. The stand-in
+// records its own launch before failing, so "was never selected" is an
+// observation rather than an inference from a passing turn.
+func carrierDirectory(t *testing.T, marker, name, state string) string {
+	t.Helper()
+
+	dir := t.TempDir()
+
+	data, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, name), data, 0o700); err != nil { // #nosec G306 -- executable test marker.
+		t.Fatal(err)
+	}
+
+	shadow := "#!/bin/sh\nprintf '%s\\n' \"$0\" >> '" + filepath.Join(state, shadowLogName) + "'\n" +
+		"echo 'session PATH shadowed the amp harness' >&2\nexit 9\n"
+	if err := os.WriteFile(filepath.Join(dir, "amp"), []byte(shadow), 0o700); err != nil { // #nosec G306 -- executable test stub.
+		t.Fatal(err)
+	}
+
+	return dir
+}
+
+// shadowLogName is where a planted session-directory amp records that it ran.
+const shadowLogName = "shadow-amp.log"
+
+// requireNoShadowedHarness pins that the amp planted on a session PATH was
+// never launched at all.
+func requireNoShadowedHarness(t *testing.T, state string) {
+	t.Helper()
+
+	data, err := os.ReadFile(filepath.Join(state, shadowLogName))
+	if errors.Is(err, os.ErrNotExist) {
+		return
+	}
+
+	if err != nil {
+		t.Fatalf("read shadow harness log: %v", err)
+	}
+
+	t.Fatalf("the amp planted on a session PATH ran: %s", data)
+}
+
+// carrier is one logical session's complete session-scoped configuration. Amp
+// declares no ordered path option, so the raw env.PATH is the whole search path
+// its short-lived prompt process runs with.
+type carrier struct {
+	bearer string
+	dir    string
+	marker string
+}
+
+func (c carrier) env() map[string]string {
+	return map[string]string{
+		"AMP_API_KEY":        c.bearer,
+		"PATH":               c.dir,
+		"AMP_CARRIER_MARKER": c.marker,
+	}
+}
+
+type carrierRun struct {
+	Name     string `json:"name"`
+	Path     string `json:"path"`
+	Bearer   string `json:"bearer"`
+	Resolved string `json:"resolved"`
+	Output   string `json:"output"`
+	Error    string `json:"error"`
+	RunError string `json:"runError"`
+}
+
+func carrierRuns(t *testing.T, state string) []carrierRun {
+	t.Helper()
+
+	data, err := os.ReadFile(filepath.Join(state, "marker.jsonl"))
+	if err != nil {
+		t.Fatalf("read recorded marker runs: %v", err)
+	}
+
+	runs := make([]carrierRun, 0, 4)
+	for line := range strings.SplitSeq(strings.TrimSpace(string(data)), "\n") {
+		var run carrierRun
+		if err := json.Unmarshal([]byte(line), &run); err != nil {
+			t.Fatalf("decode recorded marker run %q: %v", line, err)
+		}
+
+		runs = append(runs, run)
+	}
+
+	return runs
+}
+
+// requireCarrierRuns pins that every native turn recorded since offset resolved
+// and ran its own session's marker out of its own raw PATH, and that no other
+// session's values appear anywhere in it.
+func requireCarrierRuns(t *testing.T, runs []carrierRun, offset int, want map[string]carrier) {
+	t.Helper()
+
+	seen := map[string]int{}
+
+	for _, run := range runs[offset:] {
+		expected, known := want[run.Bearer]
+		if !known {
+			t.Fatalf("a native turn carried unexpected bearer %q", run.Bearer)
+		}
+
+		if run.Error != "" || run.RunError != "" {
+			t.Fatalf("marker %q did not run: %s %s", run.Name, run.Error, run.RunError)
+		}
+
+		if run.Name != expected.marker {
+			t.Fatalf("bearer %q ran marker %q, want %q", run.Bearer, run.Name, expected.marker)
+		}
+
+		resolved := filepath.Join(expected.dir, expected.marker)
+		if run.Resolved != resolved || run.Output != resolved {
+			t.Fatalf("marker resolved to %q and reported %q, want %q", run.Resolved, run.Output, resolved)
+		}
+
+		// Amp owns no ordered path option, so the session's raw PATH is the
+		// whole search path and its first component is the operation directory.
+		components := filepath.SplitList(run.Path)
+		if run.Path != expected.dir || len(components) != 1 || components[0] != expected.dir {
+			t.Fatalf("bearer %q ran with PATH %q, want exactly %q", run.Bearer, run.Path, expected.dir)
+		}
+
+		seen[run.Bearer]++
+	}
+
+	for bearer := range want {
+		if seen[bearer] == 0 {
+			t.Fatalf("no native turn ran for bearer %q", bearer)
+		}
+	}
+}
+
+func newCarrierSession(t *testing.T, agent *Agent, c carrier) (acp.SessionId, string) {
+	t.Helper()
+
+	cwd := t.TempDir()
+
+	resp, err := agent.NewSession(context.Background(), NewSessionRequest(cwd, WithSessionAmpOptions(
+		NewAmpOptions(WithAmpEnv(c.env())),
+	)))
+	if err != nil {
+		t.Fatalf("prepare carrier session for %q: %v", c.bearer, err)
+	}
+
+	return resp.SessionId, cwd
+}
+
+func promptCarriersConcurrently(t *testing.T, agent *Agent, ids ...acp.SessionId) {
+	t.Helper()
+
+	var wait sync.WaitGroup
+
+	errs := make([]error, len(ids))
+
+	for index, id := range ids {
+		wait.Go(func() {
+			_, errs[index] = agent.Prompt(context.Background(), TextPromptRequest(id, "test-turn", "x"))
+		})
+	}
+
+	wait.Wait()
+
+	for index, err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent prompt %d: %v", index, err)
+		}
+	}
+}
+
+// TestAmpSessionCarrierRunsRealMarkersAndRotatesWithoutCrossing is the amp side
+// of the six-carrier session-CLI acceptance. Amp declares no ordered path
+// option, so one complete raw PATH in session env is the whole carrier. Two
+// sessions run concurrent turns that resolve and execute their own marker
+// command out of their own PATH, a second turn follows a resume, one carrier is
+// rotated across a close-and-re-prepare boundary, and the retired values reach
+// nothing afterwards. Each operation directory also holds an amp stand-in that
+// exits nonzero: a session PATH that could shadow the harness would fail every
+// turn instead of running the real one.
+func TestAmpSessionCarrierRunsRealMarkersAndRotatesWithoutCrossing(t *testing.T) {
+	harness, state := fakeAgentAmpPath(t, "record-env")
+
+	t.Setenv("AMP_API_KEY", "")
+
+	marker := carrierMarkerBinary(t)
+	first := carrier{bearer: "bearer-first", marker: "amp-marker-first"}
+	second := carrier{bearer: "bearer-second", marker: "amp-marker-second"}
+	rotated := carrier{bearer: "bearer-rotated", marker: "amp-marker-rotated"}
+
+	for _, c := range []*carrier{&first, &second, &rotated} {
+		c.dir = carrierDirectory(t, marker, c.marker, state)
+	}
+
+	// The static agent base owns executable resolution: only this PATH may
+	// select the amp harness.
+	agent := newTestAgent(
+		WithScratchDir(testScratchDir(t)),
+		WithEnv(map[string]string{"PATH": filepath.Dir(harness)}),
+	)
+	t.Cleanup(func() { _ = agent.Close() })
+
+	ctx := context.Background()
+	firstID, firstCwd := newCarrierSession(t, agent, first)
+	secondID, secondCwd := newCarrierSession(t, agent, second)
+
+	promptCarriersConcurrently(t, agent, firstID, secondID)
+	requireCarrierRuns(t, carrierRuns(t, state), 0, map[string]carrier{
+		first.bearer: first, second.bearer: second,
+	})
+
+	// A second turn after a resume keeps each session on its own carrier.
+	settled := len(carrierRuns(t, state))
+	for id, request := range map[acp.SessionId]acp.ResumeSessionRequest{
+		firstID:  ResumeSessionRequest(firstID, firstCwd, WithSessionAmpOptions(NewAmpOptions(WithAmpEnv(first.env())))),
+		secondID: ResumeSessionRequest(secondID, secondCwd, WithSessionAmpOptions(NewAmpOptions(WithAmpEnv(second.env())))),
+	} {
+		if _, err := agent.ResumeSession(ctx, request); err != nil {
+			t.Fatalf("resume %s: %v", id, err)
+		}
+	}
+
+	promptCarriersConcurrently(t, agent, firstID, secondID)
+	requireCarrierRuns(t, carrierRuns(t, state), settled, map[string]carrier{
+		first.bearer: first, second.bearer: second,
+	})
+
+	// Rotation happens at the idle close-and-re-prepare boundary: the session
+	// holding the retired bearer and directory is closed, and a fresh one
+	// carries the new values.
+	if _, err := agent.CloseSession(ctx, acp.CloseSessionRequest{SessionId: firstID}); err != nil {
+		t.Fatalf("close the rotated-out session: %v", err)
+	}
+
+	settled = len(carrierRuns(t, state))
+	settledChildren := len(childEnvironments(t, state))
+	rotatedID, _ := newCarrierSession(t, agent, rotated)
+
+	promptCarriersConcurrently(t, agent, secondID, rotatedID)
+	requireCarrierRuns(t, carrierRuns(t, state), settled, map[string]carrier{
+		second.bearer: second, rotated.bearer: rotated,
+	})
+
+	for _, entries := range childEnvironments(t, state)[settledChildren:] {
+		for _, value := range entries {
+			if strings.Contains(value, first.bearer) || strings.Contains(value, first.dir) {
+				t.Fatalf("a retired carrier value survived rotation: %q", value)
+			}
+		}
+	}
+
+	// No compatibility behavior survives the rotation: the closed session is
+	// gone rather than retried against the new carrier, and the untouched
+	// session refuses to adopt the rotated one on an active request.
+	if _, err := agent.Prompt(ctx, TextPromptRequest(firstID, "test-turn", "x")); err == nil {
+		t.Fatal("a prompt on the rotated-out session succeeded")
+	}
+
+	_, err := agent.ResumeSession(ctx, ResumeSessionRequest(secondID, secondCwd, WithSessionAmpOptions(
+		NewAmpOptions(WithAmpEnv(rotated.env())),
+	)))
+	requireInvalidParamsData(t, err, map[string]any{jsonFieldError: valMismatch, jsonFieldField: optionEnvKey})
+
+	requireNoShadowedHarness(t, state)
+}
+
+// TestAmpStaticProbeEnvironmentIsSeparateFromThePromptCarrier is the Unix half
+// of the probe/prompt cut, stated by correlating each recorded argv with the
+// environment that exact child received. `amp version` and the startup
+// method-present probes run on the static agent PATH; only the prompt receives
+// the session's complete raw PATH. The session directory holds a real amp that
+// would record its own launch and fail the turn, and it never runs; the marker
+// command in that same directory is resolved and executed by the prompt child,
+// so the carrier is live rather than merely present.
+func TestAmpStaticProbeEnvironmentIsSeparateFromThePromptCarrier(t *testing.T) {
+	harness, state := fakeAgentAmpPath(t, "record-env")
+
+	t.Setenv("AMP_API_KEY", "")
+
+	agentDir := filepath.Dir(harness)
+	sessionDir := carrierDirectory(t, carrierMarkerBinary(t), "amp-marker", state)
+
+	agent := newTestAgent(
+		WithScratchDir(testScratchDir(t)),
+		WithEnv(map[string]string{"PATH": agentDir, "AMP_API_KEY": "agent-key"}),
+	)
+	t.Cleanup(func() { _ = agent.Close() })
+
+	ctx := context.Background()
+	resp, err := agent.NewSession(ctx, NewSessionRequest(t.TempDir(), WithSessionAmpOptions(NewAmpOptions(
+		WithAmpEnv(map[string]string{
+			"PATH":               sessionDir,
+			"AMP_API_KEY":        "session-key",
+			"AMP_CARRIER_MARKER": "amp-marker",
+		}),
+	))))
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+
+	if _, promptErr := agent.Prompt(ctx, TextPromptRequest(resp.SessionId, "test-turn", "x")); promptErr != nil {
+		t.Fatalf("Prompt: %v", promptErr)
+	}
+
+	runs := childRuns(t, state)
+	requireProbeAndPromptPaths(t, runs, agentDir, sessionDir)
+
+	for _, run := range runs {
+		// The credential is a named operation value, so the authenticated
+		// probes and the prompt agree on the key admission approved.
+		requireChildEnv(t, run.Env, "AMP_API_KEY", "session-key")
+
+		if run.isPrompt() {
+			requireChildEnv(t, run.Env, "AMP_CARRIER_MARKER", "amp-marker")
+
+			continue
+		}
+
+		if values := childEnvValues(run.Env, "AMP_CARRIER_MARKER"); len(values) != 0 {
+			t.Fatalf("probe child %v received session-only values %#v", run.Args, values)
+		}
+	}
+
+	// The harness that passed version and startup validation is retained, so a
+	// later launch runs that exact file and resolves nothing again. Repointing
+	// the static agent PATH at a decoy amp after the probe changes nothing: the
+	// next turn still runs the validated harness and the decoy never starts.
+	agent.options.Env["PATH"] = carrierDirectory(t, carrierMarkerBinary(t), "decoy-marker", state)
+
+	if _, promptErr := agent.Prompt(ctx, TextPromptRequest(resp.SessionId, "test-turn", "again")); promptErr != nil {
+		t.Fatalf("Prompt after the static PATH moved: %v", promptErr)
+	}
+
+	requireNoShadowedHarness(t, state)
+	requireCarrierRuns(t, carrierRuns(t, state), 0, map[string]carrier{
+		"session-key": {bearer: "session-key", dir: sessionDir, marker: "amp-marker"},
+	})
+}
+
+// TestConsumerHeldBearerCarriesAcrossAgentRebuild pins the other half of the
+// carrier: a bearer a consumer holds and re-supplies through WithEnv survives
+// an Agent rebuild and a cold load, a session value overrides it consistently
+// in both the preflight gate and the child, and dropping it makes the stored
+// session unusable rather than falling back to anything.
+func TestConsumerHeldBearerCarriesAcrossAgentRebuild(t *testing.T) {
+	path, state := fakeAgentAmpPath(t, "record-env")
+
+	t.Setenv("AMP_API_KEY", "")
+
+	store := NewInMemorySessionStore()
+	scratch := testScratchDir(t)
+	cwd := t.TempDir()
+
+	build := func(bearer string) *Agent {
+		options := []Option{WithExecutablePath(path), WithScratchDir(scratch), WithSessionStore(store)}
+		if bearer != "" {
+			options = append(options, WithEnv(map[string]string{"AMP_API_KEY": bearer}))
+		}
+
+		agent := newTestAgent(options...)
+		t.Cleanup(func() { _ = agent.Close() })
+
+		return agent
+	}
+
+	ctx := context.Background()
+	held := build("consumer-key")
+
+	resp, err := held.NewSession(ctx, NewSessionRequest(cwd))
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	if _, promptErr := held.Prompt(ctx, TextPromptRequest(resp.SessionId, "test-turn", "x")); promptErr != nil {
+		t.Fatalf("Prompt: %v", promptErr)
+	}
+
+	rebuilt := build("consumer-key")
+	if _, loadErr := rebuilt.LoadSession(ctx, LoadSessionRequest(resp.SessionId, cwd)); loadErr != nil {
+		t.Fatalf("cold load with the consumer-held bearer: %v", loadErr)
+	}
+
+	settled := len(childEnvironments(t, state))
+	if _, promptErr := rebuilt.Prompt(ctx, TextPromptRequest(resp.SessionId, "test-turn", "again")); promptErr != nil {
+		t.Fatalf("Prompt after rebuild: %v", promptErr)
+	}
+
+	for _, entries := range childEnvironments(t, state)[settled:] {
+		requireChildEnv(t, entries, "AMP_API_KEY", "consumer-key")
+	}
+
+	// A session value outranks the consumer-held one in the same direction at
+	// the gate and in the child.
+	overridden, err := rebuilt.NewSession(ctx, NewSessionRequest(t.TempDir(), WithSessionAmpOptions(
+		NewAmpOptions(WithAmpEnv(map[string]string{"AMP_API_KEY": "session-key"})),
+	)))
+	if err != nil {
+		t.Fatalf("NewSession with a session bearer: %v", err)
+	}
+
+	settled = len(childEnvironments(t, state))
+	if _, promptErr := rebuilt.Prompt(ctx, TextPromptRequest(overridden.SessionId, "test-turn", "x")); promptErr != nil {
+		t.Fatalf("Prompt with a session bearer: %v", promptErr)
+	}
+
+	for _, entries := range childEnvironments(t, state)[settled:] {
+		requireChildEnv(t, entries, "AMP_API_KEY", "session-key")
+	}
+
+	// Dropping the consumer-held bearer cannot reuse the stored session.
+	_, err = build("").LoadSession(ctx, LoadSessionRequest(resp.SessionId, cwd))
+	if err == nil || !strings.Contains(err.Error(), "AMP_API_KEY is not set") {
+		t.Fatalf("load without the consumer-held bearer = %v, want the missing-key refusal", err)
 	}
 }

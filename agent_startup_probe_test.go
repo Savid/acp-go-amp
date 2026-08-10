@@ -103,7 +103,7 @@ func TestDiscoveryProbeUsesAndRemovesIsolatedResidence(t *testing.T) {
 	path, state := fakeAgentAmpPath(t, "probe-residence")
 	scratch := testScratchDir(t)
 	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(scratch))
-	err := agent.ensureStartupWithProbe(t.Context(), t.TempDir(), nil, func(ctx context.Context, client *nativeamp.Client) error {
+	err := agent.ensureStartupWithProbe(t.Context(), t.TempDir(), nil, func(ctx context.Context, client *nativeamp.Client) (string, error) {
 		return client.DiscoveryProbe(ctx)
 	})
 	require.NoError(t, err)
@@ -115,6 +115,34 @@ func TestDiscoveryProbeUsesAndRemovesIsolatedResidence(t *testing.T) {
 	entries, readErr := os.ReadDir(scratch)
 	require.NoError(t, readErr)
 	requireNoTransientProbeRoots(t, entries)
+}
+
+// TestStartupProbeRetainsTheValidatedHarness pins that the agent keeps the
+// exact absolute harness the probe validated, and that a probe answering
+// anything else is a failure rather than a reason to resolve again.
+func TestStartupProbeRetainsTheValidatedHarness(t *testing.T) {
+	path, _ := fakeAgentAmpPath(t, "record-env")
+	agent := newTestAgent(
+		WithExecutablePath(path),
+		WithScratchDir(testScratchDir(t)),
+		WithEnv(map[string]string{"AMP_API_KEY": "fake"}),
+	)
+	t.Cleanup(func() { _ = agent.Close() })
+
+	require.Empty(t, agent.retainedHarnessPath())
+
+	_, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
+	require.NoError(t, err)
+	require.Equal(t, path, agent.retainedHarnessPath())
+
+	broken := newTestAgent(WithScratchDir(testScratchDir(t)))
+	t.Cleanup(func() { _ = broken.Close() })
+
+	err = broken.runStartupWithProbe(t.Context(), t.TempDir(), nil,
+		func(context.Context, *nativeamp.Client) (string, error) { return "amp", nil },
+	)
+	require.ErrorContains(t, err, "unusable harness path")
+	require.Empty(t, broken.retainedHarnessPath())
 }
 
 func requireNoTransientProbeRoots(t *testing.T, entries []os.DirEntry) {
@@ -141,8 +169,8 @@ func TestStartupProbeResidenceCleanupRequiresContainmentProof(t *testing.T) {
 	)
 
 	wantErr := errors.New("probe failed")
-	err := agent.runStartupWithProbe(t.Context(), t.TempDir(), nil, func(context.Context, *nativeamp.Client) error {
-		return wantErr
+	err := agent.runStartupWithProbe(t.Context(), t.TempDir(), nil, func(context.Context, *nativeamp.Client) (string, error) {
+		return "", wantErr
 	})
 	require.ErrorIs(t, err, wantErr)
 	require.Equal(t, 1, releases)
@@ -150,8 +178,8 @@ func TestStartupProbeResidenceCleanupRequiresContainmentProof(t *testing.T) {
 	require.NoError(t, readErr)
 	require.Empty(t, entries)
 
-	err = agent.runStartupWithProbe(t.Context(), t.TempDir(), nil, func(context.Context, *nativeamp.Client) error {
-		return nativeamp.ErrProcessContainmentIncomplete
+	err = agent.runStartupWithProbe(t.Context(), t.TempDir(), nil, func(context.Context, *nativeamp.Client) (string, error) {
+		return "", nativeamp.ErrProcessContainmentIncomplete
 	})
 	require.ErrorIs(t, err, nativeamp.ErrProcessContainmentIncomplete)
 	require.Equal(t, 1, releases)
@@ -171,7 +199,7 @@ func TestStartupProbeResidenceMaterializationAndRemovalFailures(t *testing.T) {
 				return func() { releases++ }, nil
 			},
 		}))
-		err := agent.runStartupWithProbe(t.Context(), t.TempDir(), nil, func(context.Context, *nativeamp.Client) error { return nil })
+		err := agent.runStartupWithProbe(t.Context(), t.TempDir(), nil, func(context.Context, *nativeamp.Client) (string, error) { return testHarnessPath(t), nil })
 		require.Error(t, err)
 		require.Equal(t, 1, releases)
 	})
@@ -180,7 +208,7 @@ func TestStartupProbeResidenceMaterializationAndRemovalFailures(t *testing.T) {
 		original := mkdirTemp
 		t.Cleanup(func() { mkdirTemp = original })
 		mkdirTemp = func(string, string) (string, error) { return "", errors.New("mkdir temp") }
-		err := newTestAgent(WithScratchDir(testScratchDir(t))).runStartupWithProbe(t.Context(), t.TempDir(), nil, func(context.Context, *nativeamp.Client) error { return nil })
+		err := newTestAgent(WithScratchDir(testScratchDir(t))).runStartupWithProbe(t.Context(), t.TempDir(), nil, func(context.Context, *nativeamp.Client) (string, error) { return testHarnessPath(t), nil })
 		require.ErrorContains(t, err, "create Amp startup probe residence")
 	})
 
@@ -188,7 +216,7 @@ func TestStartupProbeResidenceMaterializationAndRemovalFailures(t *testing.T) {
 		original := mkdirAll
 		t.Cleanup(func() { mkdirAll = original })
 		mkdirAll = func(string, os.FileMode) error { return errors.New("mkdir home") }
-		err := newTestAgent(WithScratchDir(testScratchDir(t))).runStartupWithProbe(t.Context(), t.TempDir(), nil, func(context.Context, *nativeamp.Client) error { return nil })
+		err := newTestAgent(WithScratchDir(testScratchDir(t))).runStartupWithProbe(t.Context(), t.TempDir(), nil, func(context.Context, *nativeamp.Client) (string, error) { return testHarnessPath(t), nil })
 		require.ErrorContains(t, err, "create Amp startup probe isolated home")
 	})
 
@@ -196,7 +224,7 @@ func TestStartupProbeResidenceMaterializationAndRemovalFailures(t *testing.T) {
 		original := writeFile
 		t.Cleanup(func() { writeFile = original })
 		writeFile = func(string, []byte, os.FileMode) error { return errors.New("write settings") }
-		err := newTestAgent(WithScratchDir(testScratchDir(t))).runStartupWithProbe(t.Context(), t.TempDir(), nil, func(context.Context, *nativeamp.Client) error { return nil })
+		err := newTestAgent(WithScratchDir(testScratchDir(t))).runStartupWithProbe(t.Context(), t.TempDir(), nil, func(context.Context, *nativeamp.Client) (string, error) { return testHarnessPath(t), nil })
 		require.ErrorContains(t, err, "write Amp startup probe settings")
 	})
 
@@ -210,7 +238,7 @@ func TestStartupProbeResidenceMaterializationAndRemovalFailures(t *testing.T) {
 
 			return original(path, data, mode)
 		}
-		err := newTestAgent(WithScratchDir(testScratchDir(t))).runStartupWithProbe(t.Context(), t.TempDir(), nil, func(context.Context, *nativeamp.Client) error { return nil })
+		err := newTestAgent(WithScratchDir(testScratchDir(t))).runStartupWithProbe(t.Context(), t.TempDir(), nil, func(context.Context, *nativeamp.Client) (string, error) { return testHarnessPath(t), nil })
 		require.ErrorContains(t, err, "write Amp startup probe MCP config")
 	})
 
@@ -224,7 +252,7 @@ func TestStartupProbeResidenceMaterializationAndRemovalFailures(t *testing.T) {
 				return func() { releases++ }, nil
 			},
 		}))
-		err := agent.runStartupWithProbe(t.Context(), t.TempDir(), nil, func(context.Context, *nativeamp.Client) error { return nil })
+		err := agent.runStartupWithProbe(t.Context(), t.TempDir(), nil, func(context.Context, *nativeamp.Client) (string, error) { return testHarnessPath(t), nil })
 		require.ErrorContains(t, err, "remove residence")
 		require.Zero(t, releases)
 	})
@@ -235,7 +263,7 @@ func TestStartupProbeResidenceReservationAndOwnershipFailures(t *testing.T) {
 	agent := newTestAgent(WithRuntimeResourceHooks(RuntimeResourceHooks{
 		ReserveScratchRoot: func(context.Context, RuntimeResourceKind) (func(), error) { return nil, wantErr },
 	}))
-	err := agent.runStartupWithProbe(t.Context(), t.TempDir(), nil, func(context.Context, *nativeamp.Client) error { return nil })
+	err := agent.runStartupWithProbe(t.Context(), t.TempDir(), nil, func(context.Context, *nativeamp.Client) (string, error) { return testHarnessPath(t), nil })
 	require.ErrorIs(t, err, wantErr)
 
 	isolationAgent := NewAgent(
@@ -245,6 +273,6 @@ func TestStartupProbeResidenceReservationAndOwnershipFailures(t *testing.T) {
 			BaseEnvironment: map[string]string{},
 		}),
 	)
-	err = isolationAgent.runStartupWithProbe(t.Context(), t.TempDir(), nil, func(context.Context, *nativeamp.Client) error { return nil })
+	err = isolationAgent.runStartupWithProbe(t.Context(), t.TempDir(), nil, func(context.Context, *nativeamp.Client) (string, error) { return testHarnessPath(t), nil })
 	require.ErrorContains(t, err, "handoff Amp startup probe residence")
 }

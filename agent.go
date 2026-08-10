@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
+	"path/filepath"
 	"slices"
 	"sync"
 
@@ -43,6 +45,36 @@ type Agent struct {
 	containmentMode  RuntimeContainmentMode
 	configurationErr error
 	providerAuth     *providerAuth
+
+	// harnessMu guards harnessPath, the exact absolute amp binary the version
+	// and startup probes validated against the static base. Every child this
+	// agent launches afterwards runs that file, so no session environment can
+	// substitute a different harness later.
+	harnessMu   sync.Mutex
+	harnessPath string
+}
+
+// retainHarnessPath records the harness a probe validated. An empty or relative
+// answer is a broken probe rather than a reason to resolve again.
+func (a *Agent) retainHarnessPath(path string) error {
+	if !filepath.IsAbs(path) {
+		return fmt.Errorf("amp startup probe reported unusable harness path %q", path)
+	}
+
+	a.harnessMu.Lock()
+	a.harnessPath = path
+	a.harnessMu.Unlock()
+
+	return nil
+}
+
+// retainedHarnessPath is the validated harness every later launch runs, or ""
+// before any probe has validated one.
+func (a *Agent) retainedHarnessPath() string {
+	a.harnessMu.Lock()
+	defer a.harnessMu.Unlock()
+
+	return a.harnessPath
 }
 
 var newAgentForServe = NewAgent

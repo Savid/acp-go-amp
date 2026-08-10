@@ -191,15 +191,15 @@ func TestAuthReadSecretSurfacesAnUnreadableStore(t *testing.T) {
 }
 
 func TestAuthLoginEnvDropsTheAmbientKey(t *testing.T) {
-	t.Setenv(authAPIKeyEnv, "ambient-key")
+	t.Setenv(AuthAPIKeyEnv, "ambient-key")
 
-	env, err := authLoginEnv(testProcessIsolation(), nil, map[string]string{authAPIKeyEnv: "override-key", "AMP_URL": "https://amp.example"}, "/work")
+	env, err := authLoginEnv(testProcessIsolation(), nil, map[string]string{AuthAPIKeyEnv: "override-key", "AMP_URL": "https://amp.example"}, "/work")
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	for _, entry := range env {
-		if strings.HasPrefix(entry, authAPIKeyEnv+"=") {
+		if strings.HasPrefix(entry, AuthAPIKeyEnv+"=") {
 			t.Fatalf("login env kept the api key: %q", entry)
 		}
 	}
@@ -341,14 +341,14 @@ func TestStartAuthLoginRelaysThePrintedURL(t *testing.T) {
 }
 
 func TestStartAuthLoginScrubsTheAmbientKeyFromTheChild(t *testing.T) {
-	t.Setenv(authAPIKeyEnv, "ambient-key")
+	t.Setenv(AuthAPIKeyEnv, "ambient-key")
 
 	dataHome := t.TempDir()
 	path, state := fakeAmpPath(t, "login-settled")
 	client := newTestClient(t, nil, Options{
 		CLIPath: path,
 		Cwd:     t.TempDir(),
-		Env:     map[string]string{"XDG_DATA_HOME": dataHome, authAPIKeyEnv: "override-key"},
+		Env:     map[string]string{"XDG_DATA_HOME": dataHome, AuthAPIKeyEnv: "override-key"},
 	})
 
 	login, err := client.StartAuthLogin(t.Context())
@@ -364,7 +364,7 @@ func TestStartAuthLoginScrubsTheAmbientKeyFromTheChild(t *testing.T) {
 
 	for _, entries := range readHelperJSON[[]string](t, filepath.Join(state, "login-env.jsonl")) {
 		for _, entry := range entries {
-			if strings.HasPrefix(entry, authAPIKeyEnv+"=") {
+			if strings.HasPrefix(entry, AuthAPIKeyEnv+"=") {
 				t.Fatalf("the login child saw an ambient key: %q", entry)
 			}
 		}

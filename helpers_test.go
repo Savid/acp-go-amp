@@ -10,6 +10,16 @@ import (
 	"testing"
 )
 
+// testHarnessPath stands in for the absolute harness a real probe resolves and
+// validates. The agent retains whatever a probe answers, so a stubbed probe
+// must answer an absolute path; the tests that use this one never launch a
+// child from it.
+func testHarnessPath(t *testing.T) string {
+	t.Helper()
+
+	return filepath.Join(t.TempDir(), "amp")
+}
+
 // testScratchDir is a scratch parent the isolated identity can enter. Trees
 // generated under it are handed to that identity, and the handoff walks the
 // whole ancestry: a t.TempDir leaf sits under a 0700 directory no other

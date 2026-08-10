@@ -77,8 +77,22 @@ type Options struct {
 	SettingsFile string
 	// ScratchParent is the already-resolved parent for the account-login browser
 	// shim. The embedding package owns temp-directory resolution.
-	ScratchParent       string
-	Env                 map[string]string
+	ScratchParent string
+	// Env is the complete child environment overlay this client's children
+	// receive. A prompt client carries the logical session's own values
+	// including its raw PATH; a probe or one-shot client carries the static
+	// agent-scoped values plus only the operation values it was given.
+	Env map[string]string
+	// ResolutionEnv is the static agent-scoped overlay the executable is
+	// resolved and version-probed against. Session values never take part, so a
+	// directory a host places on a session PATH reaches the child it was meant
+	// for and can never shadow the amp harness itself.
+	ResolutionEnv map[string]string
+	// ResolvedExecutable is the exact absolute harness the version and startup
+	// probes validated. When it is set every child of this client launches that
+	// file directly: no lookup runs at all, so no later environment can select
+	// a different binary than the one that passed validation.
+	ResolvedExecutable  string
 	Isolation           *ProcessIsolation
 	OrdinaryEnvironment map[string]string
 	Mode                string
@@ -182,7 +196,19 @@ func NewClient(log *slog.Logger, options Options) *Client {
 }
 
 func (c *Client) Version(ctx context.Context) (string, error) {
-	out, err := c.outputRaw(ctx, "version")
+	path, err := c.resolveExecutable(ctx, c.options.Cwd)
+	if err != nil {
+		return "", err
+	}
+
+	return c.versionAt(ctx, path)
+}
+
+// versionAt runs `amp version` on one already-resolved harness. The probe
+// resolves once and reports the version of exactly that file, so the path the
+// caller retains is the path whose version was validated.
+func (c *Client) versionAt(ctx context.Context, path string) (string, error) {
+	out, err := c.outputAtPath(ctx, path, "version")
 	if err != nil {
 		return "", err
 	}
@@ -198,40 +224,55 @@ const startupProbeThreadID = "T-00000000-0000-0000-0000-000000000000"
 
 const startupProbeTimeout = 30 * time.Second
 
-func (c *Client) StartupProbe(ctx context.Context) error {
+// StartupProbe validates the harness and returns the exact absolute file that
+// passed. Every probe child runs that file, and the caller retains it for the
+// session launches that follow.
+func (c *Client) StartupProbe(ctx context.Context) (string, error) {
 	if err := c.validateProbeResidence(); err != nil {
-		return err
+		return "", err
 	}
 
 	path, version, err := c.discoverVersion(ctx)
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	cacheKey := path + "\x00" + version
 	if _, ok := probeCache.Load(cacheKey); ok {
-		return nil
+		return path, nil
 	}
 
-	if err := c.probeSubcommands(ctx); err != nil {
-		return err
+	if err := c.pinnedTo(path).probeSubcommands(ctx); err != nil {
+		return "", err
 	}
 
 	probeCache.Store(cacheKey, struct{}{})
 
-	return nil
+	return path, nil
 }
 
 // DiscoveryProbe verifies the executable and version without running commands
 // that require an authenticated Amp account.
-func (c *Client) DiscoveryProbe(ctx context.Context) error {
+func (c *Client) DiscoveryProbe(ctx context.Context) (string, error) {
 	if err := c.validateProbeResidence(); err != nil {
-		return err
+		return "", err
 	}
 
-	_, _, err := c.discoverVersion(ctx)
+	path, _, err := c.discoverVersion(ctx)
+	if err != nil {
+		return "", err
+	}
 
-	return err
+	return path, nil
+}
+
+// pinnedTo returns a copy of this client whose every child launches the exact
+// resolved harness, without re-running discovery.
+func (c *Client) pinnedTo(path string) *Client {
+	pinned := *c
+	pinned.options.ResolvedExecutable = path
+
+	return &pinned
 }
 
 func (c *Client) validateProbeResidence() error {
@@ -270,17 +311,12 @@ func (c *Client) validateProbeResidence() error {
 }
 
 func (c *Client) discoverVersion(ctx context.Context) (string, string, error) {
-	environment, err := c.buildEnvironment(c.options.Env, c.options.Cwd)
+	path, err := c.resolveExecutable(ctx, c.options.Cwd)
 	if err != nil {
 		return "", "", err
 	}
 
-	path, err := c.discover(ctx, environment, c.options.Cwd)
-	if err != nil {
-		return "", "", err
-	}
-
-	version, err := c.Version(ctx)
+	version, err := c.versionAt(ctx, path)
 	if err != nil {
 		return "", "", err
 	}
@@ -426,7 +462,7 @@ func (c *Client) startTurn(ctx context.Context, args []string, input any) (*Turn
 		return nil, err
 	}
 
-	path, err := c.discover(ctx, environment, cwd)
+	path, err := c.resolveExecutable(ctx, cwd)
 	if err != nil {
 		return nil, err
 	}
@@ -563,26 +599,36 @@ func (c *Client) output(ctx context.Context, args ...string) ([]byte, error) {
 	return c.outputWithArgs(ctx, append(c.globalArgs(), args...)...)
 }
 
-func (c *Client) outputRaw(ctx context.Context, args ...string) ([]byte, error) {
-	return c.outputWithArgs(ctx, args...)
-}
-
 func (c *Client) outputWithArgs(ctx context.Context, args ...string) ([]byte, error) {
-	if err := ctx.Err(); err != nil {
+	path, err := c.resolveExecutable(ctx, c.commandCwd())
+	if err != nil {
 		return nil, err
 	}
 
+	return c.outputAtPath(ctx, path, args...)
+}
+
+// commandCwd is the directory a one-shot command runs in.
+func (c *Client) commandCwd() string {
 	cwd := c.options.Cwd
 	if cwd == "" {
 		cwd, _ = getwd()
 	}
 
-	environment, err := c.buildEnvironment(c.options.Env, cwd)
-	if err != nil {
+	return cwd
+}
+
+// outputAtPath runs one short-lived command on an already-resolved harness, so
+// the caller decides which file runs and the child environment never re-enters
+// executable selection.
+func (c *Client) outputAtPath(ctx context.Context, path string, args ...string) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 
-	path, err := c.discover(ctx, environment, cwd)
+	cwd := c.commandCwd()
+
+	environment, err := c.buildEnvironment(c.options.Env, cwd)
 	if err != nil {
 		return nil, err
 	}
@@ -805,6 +851,28 @@ func Discover(ctx context.Context, cliPath string, environments ...[]string) (st
 	return path, nil
 }
 
+// resolveExecutable yields the amp harness this client launches. A retained
+// path is the file the version and startup probes already validated, so it is
+// used verbatim and no lookup runs. Otherwise the harness is found against the
+// static base — the policy or ordinary environment plus the agent-scoped
+// overlay — and never against the logical session's own environment.
+func (c *Client) resolveExecutable(ctx context.Context, cwd string) (string, error) {
+	if retained := c.options.ResolvedExecutable; retained != "" {
+		if !filepath.IsAbs(retained) {
+			return "", fmt.Errorf("retained amp harness %q is not an absolute path", retained)
+		}
+
+		return retained, nil
+	}
+
+	environment, err := c.buildEnvironment(c.options.ResolutionEnv, cwd)
+	if err != nil {
+		return "", err
+	}
+
+	return c.discover(ctx, environment, cwd)
+}
+
 func (c *Client) discover(ctx context.Context, environment []string, cwd string) (string, error) {
 	if c.options.Isolation != nil {
 		return Discover(ctx, c.options.CLIPath, environment)
@@ -823,16 +891,25 @@ func (c *Client) discover(ctx context.Context, environment []string, cwd string)
 	return path, nil
 }
 
-// HasAPIKey reports whether the supplied environment carries a non-empty
-// AMP_API_KEY.
+// HasAPIKey reports whether the supplied environment delivers a non-empty
+// AMP_API_KEY under this platform's environment key identity. Equal-fold
+// spellings are resolved exactly as buildEnvironment resolves them within one
+// phase — sorted, last wins — so the gate reads the value the child would
+// actually receive rather than an arbitrary map entry.
 func HasAPIKey(overrides map[string]string) bool {
-	value, ok := overrides["AMP_API_KEY"]
+	delivered, found := "", false
 
-	return ok && strings.TrimSpace(value) != ""
+	for _, key := range sortedEnvironmentKeys(overrides) {
+		if launchEnvironmentKey(key) == AuthAPIKeyEnv {
+			delivered, found = overrides[key], true
+		}
+	}
+
+	return found && strings.TrimSpace(delivered) != ""
 }
 
 func BuildEnv(overrides map[string]string, cwd string) []string {
-	env, _ := buildEnvironment(map[string]string{}, overrides, cwd)
+	env, _ := buildEnvironment(cwd, overrides)
 
 	return env
 }
@@ -840,27 +917,41 @@ func BuildEnv(overrides map[string]string, cwd string) []string {
 // BuildEnvWithIsolation constructs the complete child environment from the
 // policy base and explicit overlays. Ambient os.Environ is never consulted.
 func BuildEnvWithIsolation(isolation *ProcessIsolation, overrides map[string]string, cwd string) ([]string, error) {
+	return buildIsolatedEnvironment(isolation, cwd, overrides)
+}
+
+func buildIsolatedEnvironment(isolation *ProcessIsolation, cwd string, phases ...map[string]string) ([]string, error) {
 	if err := validateProcessIsolation(isolation); err != nil {
 		return nil, err
 	}
 
-	return buildEnvironment(isolation.BaseEnvironment, overrides, cwd)
+	return buildEnvironment(cwd, append([]map[string]string{isolation.BaseEnvironment}, phases...)...)
 }
 
 func (c *Client) buildEnvironment(overrides map[string]string, cwd string) ([]string, error) {
 	if c.options.Isolation != nil {
-		return BuildEnvWithIsolation(c.options.Isolation, overrides, cwd)
+		return buildIsolatedEnvironment(c.options.Isolation, cwd, overrides)
 	}
 
-	return buildEnvironment(c.options.OrdinaryEnvironment, overrides, cwd)
+	return buildEnvironment(cwd, c.options.OrdinaryEnvironment, overrides)
 }
 
-func buildEnvironment(base map[string]string, overrides map[string]string, cwd string) ([]string, error) {
-	values := map[string]string{}
-	keys := make([]string, 0, len(base)+len(overrides)+1)
+// buildEnvironment applies the supplied phases left to right and appends the
+// adapter-managed working directory last. A later phase replaces an earlier
+// key under the platform environment key identity, so the child receives
+// exactly one entry per variable and the final phase always wins.
+func buildEnvironment(cwd string, phases ...map[string]string) ([]string, error) {
+	capacity := 1
+	for _, phase := range phases {
+		capacity += len(phase)
+	}
+
+	values := make(map[string]string, capacity)
+	keys := make([]string, 0, capacity)
 
 	set := func(key, value string) {
-		if key == "" || isPrivateAdapterEnv(key) || isScrubbedEnv(key) {
+		key = launchEnvironmentKey(key)
+		if isPrivateAdapterEnv(key) || isScrubbedEnv(key) {
 			return
 		}
 
@@ -871,30 +962,14 @@ func buildEnvironment(base map[string]string, overrides map[string]string, cwd s
 		values[key] = value
 	}
 
-	baseKeys := make([]string, 0, len(base))
-	for key := range base {
-		baseKeys = append(baseKeys, key)
-	}
+	for _, phase := range phases {
+		for _, key := range sortedEnvironmentKeys(phase) {
+			if key == "" || strings.ContainsRune(key, '=') {
+				return nil, fmt.Errorf("invalid environment key %q", key)
+			}
 
-	sort.Strings(baseKeys)
-
-	for _, key := range baseKeys {
-		if strings.ContainsRune(key, '=') || key == "" {
-			return nil, fmt.Errorf("invalid base environment key %q", key)
+			set(key, phase[key])
 		}
-
-		set(key, base[key])
-	}
-
-	overrideKeys := make([]string, 0, len(overrides))
-	for key := range overrides {
-		overrideKeys = append(overrideKeys, key)
-	}
-
-	sort.Strings(overrideKeys)
-
-	for _, key := range overrideKeys {
-		set(key, overrides[key])
 	}
 
 	if cwd != "" {
@@ -907,6 +982,17 @@ func buildEnvironment(base map[string]string, overrides map[string]string, cwd s
 	}
 
 	return out, nil
+}
+
+func sortedEnvironmentKeys(env map[string]string) []string {
+	keys := make([]string, 0, len(env))
+	for key := range env {
+		keys = append(keys, key)
+	}
+
+	sort.Strings(keys)
+
+	return keys
 }
 
 // isScrubbedEnv reports the variables that never reach a spawned amp process,
@@ -1012,6 +1098,7 @@ type Turn struct {
 	errs            chan error
 	stderrMu        sync.Mutex
 	stderrTail      bytes.Buffer
+	stderrDone      chan struct{}
 	waitOnce        sync.Once
 	waitState       *commandWait
 	waitFunc        func() error
@@ -1075,6 +1162,7 @@ func (t *Turn) Send(ctx context.Context, payload any) error {
 }
 
 func (t *Turn) start(ctx context.Context) {
+	t.stderrDone = make(chan struct{})
 	go t.drainStderr(ctx)
 	go t.readStdout(ctx)
 }
@@ -1085,6 +1173,11 @@ func (t *Turn) readStdout(ctx context.Context) {
 	defer close(t.errs)
 	defer func() {
 		if err := t.wait(); err != nil {
+			select {
+			case <-t.stderrDone:
+			case <-time.After(defaultCloseKillAfter):
+			}
+
 			t.sendErr(t.exitError(err))
 		}
 	}()
@@ -1121,6 +1214,7 @@ func (t *Turn) readStdout(ctx context.Context) {
 
 func (t *Turn) drainStderr(ctx context.Context) {
 	defer t.recoverGoroutine(ctx, "amp stderr drain")
+	defer close(t.stderrDone)
 
 	scanner := bufio.NewScanner(t.stderr)
 	for scanner.Scan() {

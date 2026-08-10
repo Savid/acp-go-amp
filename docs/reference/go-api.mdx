@@ -57,7 +57,7 @@ lifecycle ownership remain in effect.
 | `WithProviderAuthDirectHome` | Unsupported: `disconnect` releases only the ledger slot a connection owns and reads no operator home, so there is nothing for an exact-home consent gate to authorize. A non-empty value rejects at session start. |
 | `WithHome` | Unsupported: Amp has no native config/auth root. Kept on the surface for symmetry; a non-empty value rejects at session start. Use `WithScratchDir`. |
 | `WithDefaultModel` | Accepted for symmetry; non-empty values reject at session start. |
-| `WithEnv` | Environment overlaid on the sanitized ordinary environment, or on `ProcessIsolation.BaseEnvironment` when explicit isolation is configured (e.g. `AMP_API_KEY`). |
+| `WithEnv` | Environment overlaid on the sanitized ordinary environment, or on `ProcessIsolation.BaseEnvironment` when explicit isolation is configured (e.g. `AMP_API_KEY`). It is also the only caller phase that takes part in executable resolution and the version and startup probes. Session `_meta.amp.options.env` overlays it for the prompt child; see [Environment composition](/docs/reference/meta#environment-composition). |
 | `WithSessionStore` | Durable mirror; see [Session store](/docs/features/session-store). |
 | `WithSessionStoreLoadTimeout` | Bound on every store read (default `10s`); writes use a fixed `60s` bound. |
 | `WithConcurrencyLimits` | Caps on concurrent native work. |

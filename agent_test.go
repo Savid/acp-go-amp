@@ -778,6 +778,12 @@ func main() {
 		}
 	}
 	record(state, "args.jsonl", args)
+	if mode == "record-env" {
+		record(state, "env.jsonl", os.Environ())
+		// One correlated record per child, so a proof can say which command
+		// observed which environment instead of assuming every child is alike.
+		record(state, "child.jsonl", map[string]any{"args": args, "env": os.Environ()})
+	}
 	if mode == "probe-residence" {
 		recordProbeResidence(state, args)
 	}
@@ -971,6 +977,9 @@ func main() {
 			os.Stdout.WriteString("{\"type\":\"result\",\"subtype\":\"success\",\"duration_ms\":1,\"is_error\":false,\"num_turns\":1,\"result\":\"done\",\"session_id\":\"T-agent-thread\"}\n")
 			return
 		}
+		if mode == "record-env" {
+			recordCarrierMarker(state)
+		}
 		initMode := "medium"
 		if i := index(args, "-m"); i >= 0 && i+1 < len(args) {
 			initMode = args[i+1]
@@ -985,6 +994,30 @@ func main() {
 		os.Stderr.WriteString("unknown threads subcommand\n")
 		os.Exit(2)
 	}
+}
+
+// recordCarrierMarker resolves and runs the session's marker command from the
+// PATH this process actually received, which is the only place a session's raw
+// PATH can be observed doing work.
+func recordCarrierMarker(state string) {
+	name := os.Getenv("AMP_CARRIER_MARKER")
+	if name == "" {
+		return
+	}
+	facts := map[string]string{"name": name, "path": os.Getenv("PATH"), "bearer": os.Getenv("AMP_API_KEY")}
+	resolved, err := exec.LookPath(name)
+	if err != nil {
+		facts["error"] = err.Error()
+		record(state, "marker.jsonl", facts)
+		return
+	}
+	facts["resolved"] = resolved
+	out, runErr := exec.Command(resolved).Output()
+	if runErr != nil {
+		facts["runError"] = runErr.Error()
+	}
+	facts["output"] = strings.TrimSpace(string(out))
+	record(state, "marker.jsonl", facts)
 }
 
 func index(values []string, target string) int {

@@ -326,9 +326,11 @@ func (p *providerAuth) authSession(id string) (*agentSession, error) {
 }
 
 // authDataHome reports the session's isolated XDG_DATA_HOME, which is where amp
-// keeps the account credential in file mode.
+// keeps the account credential in file mode. It reads the environment the login
+// child actually receives, so the residence this surface harvests from is the
+// one that child was launched with.
 func (s *agentSession) authDataHome() string {
-	return s.env[envXDGDataHome]
+	return s.operationEnv[envXDGDataHome]
 }
 
 // lifetimeEnded reports whether this session record has been closed or deleted.

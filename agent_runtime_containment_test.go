@@ -333,8 +333,9 @@ type ordinaryHarnessLaunch struct {
 // run. Every invocation appends the identity it ran as and the private adapter
 // environment it was handed, so the canonical containment tests can count
 // spawns and classify each one instead of inferring either from constructed
-// options. An ordinary launch carries no ACP_GO_AMP_INTERNAL_ key at all; the
-// hardened launcher consumes and scrubs its private handoff before native exec.
+// options. An ordinary launch carries no adapter-private environment key at
+// all; the hardened launcher consumes and scrubs its private handoff before
+// native exec.
 const ordinaryAmpHarnessSource = `package main
 
 import (

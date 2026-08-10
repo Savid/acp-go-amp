@@ -143,6 +143,26 @@ func TestTurnSupervisorRequiresDistinctTrustedRoot(t *testing.T) {
 	}
 }
 
+func TestStartTurnSupervisorNativeReportsIsolationApplicationFailure(t *testing.T) {
+	restoreTurnSupervisorSeams(t)
+	turnSupervisorEnable = func() error { return nil }
+	isolation := &ProcessIsolation{
+		UID: 11, GID: 22,
+		BaseEnvironment:      map[string]string{"INVALID=KEY": "value"},
+		StandaloneOwnerID:    "native-apply-failure",
+		StandaloneStateRoot:  "/var/tmp/acp-go-amp-native-apply-failure",
+		TestOnlyNoCredential: true,
+	}
+
+	waitDone, privilegeErr, startErr := startTurnSupervisorNative(
+		exec.Command("/bin/true"), isolation, nil,
+	)
+	if waitDone != nil || startErr != nil || privilegeErr == nil ||
+		!strings.Contains(privilegeErr.Error(), "apply Amp native process isolation") {
+		t.Fatalf("native isolation refusal = wait %v privilege %v start %v", waitDone, privilegeErr, startErr)
+	}
+}
+
 func TestSupervisorIdentityDispositionRejectsMixedCapabilities(t *testing.T) {
 	restoreTurnSupervisorSeams(t)
 	config := turnSupervisorConfig{
@@ -1741,10 +1761,11 @@ func TestOneShotSupervisorContainsTreeAfterAdapterDeath(t *testing.T) {
 
 		go func() {
 			_, err := newTestClient(t, nil, Options{
-				CLIPath: path,
-				Cwd:     filepath.Dir(path),
-				Env:     map[string]string{"AMP_CHILD_PID_FILE": filepath.Join(state, "child.pid")},
-			}).outputRaw(context.Background(), "parent-death")
+				CLIPath:   path,
+				Cwd:       filepath.Dir(path),
+				Env:       map[string]string{"AMP_CHILD_PID_FILE": filepath.Join(state, "child.pid")},
+				Isolation: testProcessIsolation(),
+			}).outputWithArgs(context.Background(), "parent-death")
 			result <- err
 		}()
 
@@ -1769,6 +1790,9 @@ func TestOneShotSupervisorContainsTreeAfterAdapterDeath(t *testing.T) {
 
 			time.Sleep(10 * time.Millisecond)
 		}
+	}
+	if os.Geteuid() != 0 {
+		t.Skip("one-shot supervisor containment requires trusted root")
 	}
 
 	dir := t.TempDir()
@@ -1873,7 +1897,7 @@ func TestPreparedCommandAndClientErrorBranches(t *testing.T) {
 	if _, err := client.Continue(t.Context(), "T-1", map[string]any{"type": "user"}); err == nil {
 		t.Fatal("Continue prepare failure was ignored")
 	}
-	if _, err := client.outputRaw(t.Context(), "version"); err == nil || !strings.Contains(err.Error(), "prepare") {
+	if _, err := client.outputWithArgs(t.Context(), "version"); err == nil || !strings.Contains(err.Error(), "prepare") {
 		t.Fatalf("one-shot prepare failure = %v", err)
 	}
 
@@ -1899,7 +1923,7 @@ func TestPreparedCommandAndClientErrorBranches(t *testing.T) {
 
 				return &processTreeCommand{cmd: cmd}, nil
 			}
-			if _, err := client.outputRaw(t.Context(), "threads", "list"); err == nil {
+			if _, err := client.outputWithArgs(t.Context(), "threads", "list"); err == nil {
 				t.Fatal("prepared one-shot pipe conflict succeeded")
 			}
 		})
@@ -1909,7 +1933,7 @@ func TestPreparedCommandAndClientErrorBranches(t *testing.T) {
 	processTreeTerminateAndWait = func(*processTree, time.Duration) error {
 		return ErrProcessContainmentIncomplete
 	}
-	if _, err := client.outputRaw(t.Context(), "threads", "list"); !errors.Is(err, ErrProcessContainmentIncomplete) {
+	if _, err := client.outputWithArgs(t.Context(), "threads", "list"); !errors.Is(err, ErrProcessContainmentIncomplete) {
 		t.Fatalf("empty-stderr proof failure = %v", err)
 	}
 
@@ -1977,7 +2001,7 @@ func TestOneShotWaitTimeoutReportsIncompleteBoundary(t *testing.T) {
 	// then reports a boundary it never exercised.
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
-	if _, err := client.outputRaw(ctx, "version"); !errors.Is(err, ErrProcessContainmentIncomplete) {
+	if _, err := client.outputWithArgs(ctx, "version"); !errors.Is(err, ErrProcessContainmentIncomplete) {
 		t.Fatalf("one-shot wait timeout = %v", err)
 	}
 	if incomplete != 1 {

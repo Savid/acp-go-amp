@@ -78,6 +78,8 @@ const (
 	valUser              = "user"
 	valRequired          = "required"
 	valDuplicate         = "duplicate"
+	valAmbiguous         = "ambiguous"
+	valMismatch          = "mismatch"
 	reasonUnserializable = "unserializable"
 
 	modeLow    = "low"
@@ -121,7 +123,12 @@ type agentSession struct {
 	updatedUnix           int64
 	additionalDirectories []string
 	mcpConfigJSON         string
+	// env is the prompt child's complete environment, including the host's raw
+	// PATH carrier. operationEnv is what every other child of this session
+	// receives: the static agent base, the named operation values, and the
+	// adapter-managed residence, with no session PATH.
 	env                   map[string]string
+	operationEnv          map[string]string
 	rawEvents             bool
 	rawEventMu            sync.Mutex
 	rawEventSeq           atomic.Int64
@@ -218,12 +225,15 @@ func newAgentSession(ctx context.Context, agent *Agent, id acp.SessionId, cwd st
 		mode = modeMedium
 	}
 
-	env := mergeEnv(agent.options.Env, meta.options.Env)
-	env[envHome] = homeDir
-	env[envXDGConfigHome] = configDir
-	env[envXDGCacheHome] = cacheDir
-	env[envXDGDataHome] = dataDir
-	env[envXDGStateHome] = stateDir
+	managed := managedSessionEnv(homeDir, configDir, cacheDir, dataDir, stateDir)
+
+	// env is the complete session child environment, raw PATH carrier and all.
+	// Only a prompt child receives it. Every other child this session starts
+	// runs on operationEnv: the static agent base plus the named operation
+	// values, so a directory on the session PATH reaches the prompt it was
+	// meant for and reaches nothing else.
+	env := composeEnv(agent.options.Env, meta.options.Env, managed)
+	operationEnv := composeEnv(agent.options.Env, operationSessionEnv(meta.options.Env), managed)
 
 	session := &agentSession{
 		agent:                 agent,
@@ -235,6 +245,7 @@ func newAgentSession(ctx context.Context, agent *Agent, id acp.SessionId, cwd st
 		additionalDirectories: append([]string(nil), additionalDirs...),
 		mcpConfigJSON:         mcpConfigJSON,
 		env:                   env,
+		operationEnv:          operationEnv,
 		rawEvents:             meta.rawEvent,
 		settingsDir:           dir,
 		settingsFile:          settingsFile,
@@ -246,8 +257,10 @@ func newAgentSession(ctx context.Context, agent *Agent, id acp.SessionId, cwd st
 	return session, nil
 }
 
+// client is the session's non-prompt client: thread export, thread delete, and
+// account login run on the static operation environment.
 func (s *agentSession) client() *amp.Client {
-	return s.clientWithEnv(s.env, "", RuntimeResourceSession)
+	return s.clientWithEnv(s.operationEnv, "", RuntimeResourceSession)
 }
 
 func (s *agentSession) clientWithEnv(env map[string]string, mcpConfigPath string, kind RuntimeResourceKind) *amp.Client {
@@ -256,6 +269,8 @@ func (s *agentSession) clientWithEnv(env map[string]string, mcpConfigPath string
 		Cwd:                        s.cwd,
 		SettingsFile:               s.settingsFile,
 		Env:                        env,
+		ResolutionEnv:              composeEnv(s.agent.options.Env),
+		ResolvedExecutable:         s.agent.retainedHarnessPath(),
 		Mode:                       s.mode,
 		MCPConfigPath:              mcpConfigPath,
 		MaxLineBytes:               s.agent.options.runtime.maxJSONLineBytes,
