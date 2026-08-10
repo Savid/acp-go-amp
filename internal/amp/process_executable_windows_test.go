@@ -57,7 +57,7 @@ func TestPortableWindowsEnvironmentPrecedence(t *testing.T) {
 			"pwd":                             "base",
 			"gotraceback":                     "crash",
 			"amp_disable_secret_redaction":    "1",
-			"acp_go_amp_internal_test_secret": "secret",
+			strings.ToLower(adapterPrivateEnvPrefix) + "test_secret": "secret",
 		},
 		ResolutionEnv: map[string]string{"PATH": harnessDir, "PATHEXT": ".EXE"},
 		Env: map[string]string{
@@ -77,7 +77,7 @@ func TestPortableWindowsEnvironmentPrecedence(t *testing.T) {
 			t.Fatalf("%s values = %#v, want [%q]", key, values, want)
 		}
 	}
-	for _, key := range []string{"GOTRACEBACK", "AMP_DISABLE_SECRET_REDACTION", "ACP_GO_AMP_INTERNAL_TEST_SECRET"} {
+	for _, key := range []string{"GOTRACEBACK", "AMP_DISABLE_SECRET_REDACTION", adapterPrivateEnvPrefix + "TEST_SECRET"} {
 		if values := windowsEnvironmentValues(environment, key); len(values) != 0 {
 			t.Fatalf("filtered %s values = %#v", key, values)
 		}

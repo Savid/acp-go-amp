@@ -466,7 +466,7 @@ func ordinaryHarnessLaunches(t *testing.T, state string) []ordinaryHarnessLaunch
 // and no descendant inventory was published for it.
 func TestAgentSessionDefaultsToOrdinaryExecution(t *testing.T) {
 	t.Setenv("AMP_API_KEY", "ambient-key")
-	t.Setenv("ACP_GO_AMP_TEST_CANARY", "ambient-canary")
+	t.Setenv("ACP_GO_AMP_TEST_ACTUAL_AMBIENT", "ambient-canary")
 
 	harness, state := ordinaryAmpHarness(t)
 
@@ -564,7 +564,7 @@ func TestAgentSessionDefaultsToOrdinaryExecution(t *testing.T) {
 	if options.Isolation != nil {
 		t.Fatalf("ordinary native isolation = %#v, want nil", options.Isolation)
 	}
-	if options.OrdinaryEnvironment["ACP_GO_AMP_TEST_CANARY"] != "ambient-canary" ||
+	if options.OrdinaryEnvironment["ACP_GO_AMP_TEST_ACTUAL_AMBIENT"] != "ambient-canary" ||
 		options.OrdinaryEnvironment["AMP_API_KEY"] != "ambient-key" {
 		t.Fatalf("ordinary environment missed ambient values: %#v", options.OrdinaryEnvironment)
 	}
@@ -577,7 +577,7 @@ func TestAgentSessionDefaultsToOrdinaryExecution(t *testing.T) {
 // the ordinary launcher.
 func TestExplicitProcessIsolationPreservesPolicy(t *testing.T) {
 	t.Setenv("AMP_API_KEY", "ambient-key")
-	t.Setenv("ACP_GO_AMP_TEST_CANARY", "ambient-canary")
+	t.Setenv("ACP_GO_AMP_TEST_ACTUAL_AMBIENT", "ambient-canary")
 
 	harness, state := ordinaryAmpHarness(t)
 
@@ -603,7 +603,7 @@ func TestExplicitProcessIsolationPreservesPolicy(t *testing.T) {
 	if isolation.UID != policy.UID || isolation.GID != policy.GID {
 		t.Fatalf("explicit identity = %d:%d, want %d:%d", isolation.UID, isolation.GID, policy.UID, policy.GID)
 	}
-	if _, ambient := isolation.BaseEnvironment["ACP_GO_AMP_TEST_CANARY"]; ambient {
+	if _, ambient := isolation.BaseEnvironment["ACP_GO_AMP_TEST_ACTUAL_AMBIENT"]; ambient {
 		t.Fatal("explicit policy absorbed ambient environment")
 	}
 	if isolation.BaseEnvironment["AMP_API_KEY"] != "policy-key" {

@@ -40,8 +40,8 @@ process isolation. `WithDarwinBestEffortContainment` and
 `RuntimeResourceHooks.ObserveContainment` report `authoritative`,
 `shared_identity`, `best_effort`, or `unavailable`.
 
-`shared_identity` means ordinary current-identity execution. It creates no UID
-authority record, acquires no isolation capability, and does not publish
+`shared_identity` means ordinary non-authoritative current-identity execution.
+It creates no UID authority record, acquires no isolation capability, and does not publish
 provider-descendant snapshots. Per-session HOME/XDG roots and direct child
 lifecycle ownership remain in effect.
 

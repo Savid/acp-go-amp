@@ -135,13 +135,15 @@ func TestProcessIsolationEnvironmentIdentityAndLookup(t *testing.T) {
 func TestOrdinaryEnvironmentAndPATHRemainPortable(t *testing.T) {
 	original := ordinaryEnvironmentEntries
 	t.Cleanup(func() { ordinaryEnvironmentEntries = original })
+	privateKey := adapterPrivateEnvPrefix + "SECRET"
+	privateKeyLower := strings.ToLower(privateKey)
 	ordinaryEnvironmentEntries = func() []string {
 		return []string{
 			"MALFORMED",
 			"PATH=.",
 			"KEEP=value",
-			"ACP_GO_AMP_INTERNAL_SECRET=private",
-			"acp_go_amp_internal_lower=private",
+			privateKey + "=private",
+			privateKeyLower + "=private",
 			"GOTRACEBACK=crash",
 			"AMP_DISABLE_SECRET_REDACTION=1",
 		}
@@ -151,7 +153,7 @@ func TestOrdinaryEnvironmentAndPATHRemainPortable(t *testing.T) {
 	if base["KEEP"] != "value" || base["PATH"] != "." {
 		t.Fatalf("ordinary capture = %#v", base)
 	}
-	for _, key := range []string{"ACP_GO_AMP_INTERNAL_SECRET", "acp_go_amp_internal_lower", "GOTRACEBACK", "AMP_DISABLE_SECRET_REDACTION"} {
+	for _, key := range []string{privateKey, privateKeyLower, "GOTRACEBACK", "AMP_DISABLE_SECRET_REDACTION"} {
 		if _, ok := base[key]; ok {
 			t.Fatalf("ordinary capture retained %q", key)
 		}

@@ -70,7 +70,7 @@ home for native tools.
 | Flag | Meaning |
 |---|---|
 | `-path` | Amp executable path. Defaults to `amp` on `PATH`. |
-| `-process-isolation-config` | Optional absolute path to the standalone Linux isolation policy described above. Omitted launches native work as the current identity. |
+| `-process-isolation-config` | optional absolute path to the standalone Linux isolation policy described above. Omitted launches native work as the current identity. |
 | `-scratch-dir` | Parent directory for ephemeral scratch: isolated per-session native HOME/XDG state, the startup/discovery probes' isolated HOME/XDG/settings/MCP residence, and any temp. Empty means the system temp directory. |
 | `-home` | Native config/auth root. Accepted on the adapter surface; non-empty values fail session start because Amp has no such root — its per-session isolated HOME/XDG state lives under `-scratch-dir` instead. |
 | `-provider-auth-root` | Absolute durable directory holding the values-free provider-auth ledger. Empty leaves every `_amp/auth/*` method unadvertised. Darwin and Windows authorization fails before native login. See [Authentication](/docs/features/authentication#broker-a-login). |
