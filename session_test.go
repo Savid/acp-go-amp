@@ -575,13 +575,13 @@ func TestSessionDirectBranches(t *testing.T) {
 	if _, err := newAgentSession(t.Context(), newTestAgent(WithScratchDir(fileScratch)), "T-1", "", parsedSessionMeta{}, "", nil); err == nil {
 		t.Fatal("newAgentSession with file scratch dir succeeded")
 	}
-	// A t.TempDir leaf sits under a 0700 ancestry only the effective identity may
-	// traverse, so a session generated there can never be handed to any other
-	// identity. That holds for a root test runner too, where the chown itself
-	// would otherwise succeed.
-	handoffAgent := newTestAgent(WithScratchDir(t.TempDir()))
-	handoffAgent.options.ProcessIsolation.UID = uint32(os.Geteuid()) + 1
-	handoffAgent.options.ProcessIsolation.GID = uint32(os.Getegid()) + 1
+	handoffAgent := NewAgent(
+		WithScratchDir(t.TempDir()),
+		WithProcessIsolation(ProcessIsolation{
+			UID: uint32(os.Geteuid()) + 1, GID: uint32(os.Getegid()) + 1,
+			BaseEnvironment: map[string]string{},
+		}),
+	)
 	if _, err := newAgentSession(t.Context(), handoffAgent, "T-handoff", "", parsedSessionMeta{}, "", nil); err == nil {
 		t.Fatal("unsupported session ownership handoff succeeded")
 	}

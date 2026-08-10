@@ -566,13 +566,15 @@ func TestAmpSessionResourceAdmission(t *testing.T) {
 	_, err = configSession.writePromptMCPConfig()
 	require.Error(t, err)
 	nativeOwnedAgent := newTestAgent()
-	nativeOwnedAgent.options.testOnlyNoCredential = false
-	nativeOwnedAgent.options.ProcessIsolation.UID = uint32(os.Geteuid())
-	nativeOwnedAgent.options.ProcessIsolation.GID = uint32(os.Getegid())
 	configSession = &agentSession{agent: nativeOwnedAgent, settingsDir: t.TempDir(), mcpConfigJSON: `{}`}
 	mcpPath, err := configSession.writePromptMCPConfig()
 	require.NoError(t, err)
 	require.FileExists(t, mcpPath)
+	explicitOwnedAgent := &Agent{options: Options{ProcessIsolation: &ProcessIsolation{
+		UID: uint32(os.Geteuid()), GID: uint32(os.Getegid()), BaseEnvironment: map[string]string{},
+	}}}
+	configSession = &agentSession{agent: explicitOwnedAgent, settingsDir: t.TempDir(), mcpConfigJSON: `{}`}
+	_, _ = configSession.writePromptMCPConfig()
 }
 
 func TestClosedAgentRejectsEveryFencedLifecycleMethod(t *testing.T) {

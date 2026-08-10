@@ -18,6 +18,10 @@ func configureCommand(cmd *exec.Cmd) {
 }
 
 func (t *processTree) terminateAndWait(timeout time.Duration) error {
+	if t != nil && !t.supervised {
+		return t.terminateOrdinary(timeout)
+	}
+
 	return t.terminateAndWaitAuthoritative(timeout)
 }
 

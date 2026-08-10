@@ -324,7 +324,7 @@ func TestGeneratedNativeCovAncestorUnderASharedIdentityAcceptsOnlyRootAncestors(
 			stat: directory(0o777, 0, 0),
 			want: "generated native ancestor mode 0777 is writable without sticky protection",
 		},
-		"root-owned ancestor the shared identity cannot traverse": {
+		"root-owned ancestor the target identity cannot traverse": {
 			stat: directory(0o700, 0, 0),
 			want: "generated native path ancestry is not traversable by the target identity",
 		},

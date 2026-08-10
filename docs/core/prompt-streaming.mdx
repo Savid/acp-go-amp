@@ -51,25 +51,25 @@ behavior.
 
 ## Cancel and stop reasons
 
-`session/cancel` sends an interrupt to the active prompt boundary. On Linux,
-every native command, including each turn, runs below its own child subreaper.
+`session/cancel` sends an interrupt to the active prompt boundary. Ordinary
+execution owns and reaps the direct native child without claiming escaped
+descendant absence. With explicit Linux process isolation, every native
+command, including each turn, runs below its own child subreaper.
 It adopts and terminates the whole descendant tree even when a native tool
 escapes the original process group with `setsid(2)`, and reaps until `ECHILD`.
-Windows refuses the native command before spawning because the mandatory Unix
-UID/GID identity boundary with empty supplementary groups is unavailable. A
-Windows cross-compile proves only that this refusal path builds; it does not
-establish runtime support. Linux is the authoritative boundary.
+Non-Linux platforms refuse explicit isolation but support ordinary execution.
+Explicit Linux isolation is the authoritative boundary.
 
 Prompt settlement is fenced by the selected containment result. If it is
 incomplete, the adapter returns an error matching
 `ampacp.ErrProcessContainmentIncomplete` and retains resources the native
 process may still reach. The wait is bounded.
 
-Darwin fails native launches closed by default. With the explicit best-effort
+Darwin uses ordinary execution by default. With the explicit best-effort
 opt-in, the adapter reaps the direct child and runs the fixed TERM/KILL ladder
 against its original process group. It does not wait for or claim absence of a
 `setsid(2)` escapee, so escaped processes or zombies may survive a settled
-prompt. Other unsupported platforms fail closed.
+prompt. The best-effort opt-in is mutually exclusive with process isolation.
 
 A successful prompt returns exactly one terminal result, and this adapter
 emits only two of the ACP stop reasons: `end_turn` for a completed turn and

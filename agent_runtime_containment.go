@@ -4,42 +4,19 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 
 	nativeamp "github.com/savid/acp-go-amp/internal/amp"
 )
 
 var newDarwinGenerationRecord = nativeamp.NewDarwinGenerationRecord
 
-// containmentEffectiveUID is the seam the shared-identity report is derived
-// through. The mode is selected from a faked GOOS in tests, so the identity it
-// is compared against has to be selectable there too.
-var containmentEffectiveUID = os.Geteuid
-
-// sharedProcessIdentity reports whether the configured native identity is the
-// identity this process already runs as. Root never qualifies: a zero effective
-// uid is the trusted supervisor identity, and the native uid is required to be
-// nonzero.
-func sharedProcessIdentity(isolation *ProcessIsolation) bool {
-	if isolation == nil {
-		return false
-	}
-
-	effectiveUID := containmentEffectiveUID()
-
-	return effectiveUID > 0 && uint64(isolation.UID) == uint64(effectiveUID)
-}
-
-// provesWholeTreeLifecycle reports whether the selected boundary can prove that
-// every process it started has exited. Both Linux boundaries can: they differ
-// in whether the agent runs under its own credentials, not in what the
-// subreaper observes.
 func (mode RuntimeContainmentMode) provesWholeTreeLifecycle() bool {
-	return mode == RuntimeContainmentAuthoritative || mode == RuntimeContainmentSharedIdentity
+	return mode == RuntimeContainmentAuthoritative
 }
 
 func (a *Agent) configureNativeClient(options *nativeamp.Options, kind RuntimeResourceKind) {
-	options.Isolation = a.nativeIsolation()
+	options.Isolation = nativeProcessIsolation(a.options.ProcessIsolation, a.options.testOnlyNoCredential)
+	options.OrdinaryEnvironment = cloneStringMap(a.ordinaryEnvironment)
 
 	options.TestOnlyAuthLoginPlatform = a.options.testOnlyAuthLoginPlatform
 
@@ -110,36 +87,4 @@ func nativeProcessIsolation(isolation *ProcessIsolation, testOnlyNoCredential bo
 		TestOnlyNoCredential: testOnlyNoCredential, IdentityLock: isolation.IdentityLock, AuthorityDomain: isolation.AuthorityDomain,
 		StandaloneOwnerID: isolation.StandaloneOwnerID, StandaloneStateRoot: isolation.StandaloneStateRoot,
 	}
-}
-
-// captureImplicitIsolation snapshots the ordinary current-identity launch
-// policy exactly once, at agent construction, and only when no explicit policy
-// was configured. Every native client is then handed a clone of this one
-// capture, so the implicit base environment is deterministic for the agent's
-// whole lifetime.
-func captureImplicitIsolation(options Options) *nativeamp.ProcessIsolation {
-	if options.ProcessIsolation != nil {
-		return nil
-	}
-
-	return nativeamp.ImplicitProcessIsolation()
-}
-
-// nativeIsolation is the launch policy every native client runs under: the
-// explicit policy when one was configured, otherwise a clone of the implicit
-// current-identity capture.
-func (a *Agent) nativeIsolation() *nativeamp.ProcessIsolation {
-	if isolation := nativeProcessIsolation(a.options.ProcessIsolation, a.options.testOnlyNoCredential); isolation != nil {
-		return isolation
-	}
-
-	if a.implicitIsolation == nil {
-		return nil
-	}
-
-	clone := *a.implicitIsolation
-	clone.BaseEnvironment = cloneStringMap(a.implicitIsolation.BaseEnvironment)
-	clone.TestOnlyNoCredential = a.options.testOnlyNoCredential
-
-	return &clone
 }

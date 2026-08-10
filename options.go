@@ -49,12 +49,8 @@ type RuntimeContainmentMode string
 const (
 	RuntimeContainmentAuthoritative RuntimeContainmentMode = "authoritative"
 	RuntimeContainmentBestEffort    RuntimeContainmentMode = "best_effort"
-	// RuntimeContainmentSharedIdentity is the boundary a supervisor proves when
-	// the native identity is the identity it already runs as. The subreaper
-	// tree, the descendant reaping and the process-group teardown are the
-	// authoritative ones, so whole-tree lifecycle is still proven; what is
-	// absent is the credential separation between the supervisor and the agent,
-	// and the host-global record of who holds the identity.
+	// RuntimeContainmentSharedIdentity reports ordinary current-identity
+	// execution. It makes no whole-tree lifecycle or descendant-inventory claim.
 	RuntimeContainmentSharedIdentity RuntimeContainmentMode = "shared_identity"
 	RuntimeContainmentUnavailable    RuntimeContainmentMode = "unavailable"
 )
@@ -103,10 +99,8 @@ type ProcessIdentityLockCapability interface {
 	Duplicate() (*os.File, error)
 }
 
-// ProcessIsolation is an explicit operating-system identity and complete base
-// environment for every native Amp process. Omitting it launches native work
-// as the current identity with a deterministic capture of the ambient
-// environment as the base.
+// ProcessIsolation is an explicit Linux operating-system identity and complete
+// base environment for every native Amp process.
 type ProcessIsolation struct {
 	UID             uint32
 	GID             uint32
@@ -308,9 +302,8 @@ func WithExecutablePath(path string) Option {
 // probe, and authentication leg to run as the supplied non-root identity with
 // no supplementary groups. BaseEnvironment replaces the adapter environment;
 // WithEnv and per-session values overlay it. Omitting the option is the
-// ordinary default — native work runs as the current identity, root or not,
-// over a deterministically captured clone of the ambient environment. An
-// invalid explicit policy fails closed before any native spawn.
+// ordinary default — native work runs as the current identity, root or not.
+// An invalid explicit policy fails closed before any native spawn.
 func WithProcessIsolation(isolation ProcessIsolation) Option {
 	return func(options *Options) {
 		cloned := isolation
@@ -595,32 +588,32 @@ func cloneAnySlice(in []any) []any {
 }
 
 func containmentMode(options Options) RuntimeContainmentMode {
-	if options.DarwinBestEffortContainment && runtimeGOOS != platformDarwin {
+	if options.DarwinBestEffortContainment && (runtimeGOOS != platformDarwin || options.ProcessIsolation != nil) {
 		return RuntimeContainmentUnavailable
 	}
 
-	switch runtimeGOOS {
-	case platformLinux:
-		// Omission launches the native tree as the identity this process
-		// already runs as, so shared identity is the only truthful report; an
-		// authoritative claim belongs solely to an explicit distinct identity.
-		if options.ProcessIsolation == nil || sharedProcessIdentity(options.ProcessIsolation) {
-			return RuntimeContainmentSharedIdentity
+	if options.ProcessIsolation != nil {
+		if runtimeGOOS != platformLinux {
+			return RuntimeContainmentUnavailable
 		}
 
 		return RuntimeContainmentAuthoritative
-	case platformDarwin:
-		if options.DarwinBestEffortContainment {
-			return RuntimeContainmentBestEffort
-		}
 	}
 
-	return RuntimeContainmentUnavailable
+	if options.DarwinBestEffortContainment {
+		return RuntimeContainmentBestEffort
+	}
+
+	return RuntimeContainmentSharedIdentity
 }
 
 func validateContainmentOptions(options Options) error {
 	if options.DarwinBestEffortContainment && runtimeGOOS != platformDarwin {
 		return errors.New("darwin best-effort containment is supported only on darwin")
+	}
+
+	if options.DarwinBestEffortContainment && options.ProcessIsolation != nil {
+		return errors.New("darwin best-effort containment cannot be combined with process isolation")
 	}
 
 	for key := range options.Env {

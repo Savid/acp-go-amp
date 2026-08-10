@@ -3,6 +3,7 @@ package amp
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -116,67 +117,80 @@ func TestProcessIsolationEnvironmentIdentityAndLookup(t *testing.T) {
 	}
 }
 
-func TestClientFailsClosedWithoutProcessIsolation(t *testing.T) {
-	client := NewClient(nil, Options{})
-	if client.AuthDeploymentSupported() {
-		t.Fatal("auth deployment accepted without isolation")
+func TestOrdinaryEnvironmentAndPATHRemainPortable(t *testing.T) {
+	original := ordinaryEnvironmentEntries
+	t.Cleanup(func() { ordinaryEnvironmentEntries = original })
+	ordinaryEnvironmentEntries = func() []string {
+		return []string{
+			"PATH=.",
+			"KEEP=value",
+			"ACP_GO_AMP_INTERNAL_SECRET=private",
+			"acp_go_amp_internal_lower=private",
+			"GOTRACEBACK=crash",
+			"AMP_DISABLE_SECRET_REDACTION=1",
+		}
 	}
-	if _, err := client.StartAuthLogin(t.Context()); err == nil {
-		t.Fatal("auth login started without isolation")
-	}
-	if _, err := authLoginEnv(nil, nil, ""); err == nil {
-		t.Fatal("auth environment built without isolation")
-	}
-	if err := client.DiscoveryProbe(t.Context()); err == nil {
-		t.Fatal("discovery succeeded without isolation")
-	}
-	if _, err := client.startTurn(t.Context(), nil, nil); err == nil {
-		t.Fatal("turn started without isolation")
-	}
-	if _, err := client.outputWithArgs(t.Context(), "--version"); err == nil {
-		t.Fatal("command started without isolation")
-	}
-	if _, err := client.prepareProcessLaunch(t.Context(), exec.Command("/usr/bin/true")); err == nil {
-		t.Fatal("launch prepared without isolation")
-	}
-}
 
-func TestRepeatedEnvironmentBuildFailsClosed(t *testing.T) {
+	base := CaptureOrdinaryEnvironment()
+	if base["KEEP"] != "value" || base["PATH"] != "." {
+		t.Fatalf("ordinary capture = %#v", base)
+	}
+	for _, key := range []string{"ACP_GO_AMP_INTERNAL_SECRET", "acp_go_amp_internal_lower", "GOTRACEBACK", "AMP_DISABLE_SECRET_REDACTION"} {
+		if _, ok := base[key]; ok {
+			t.Fatalf("ordinary capture retained %q", key)
+		}
+	}
+
 	dir := t.TempDir()
 	executable := filepath.Join(dir, "amp")
 	if err := os.WriteFile(executable, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	policy := &ProcessIsolation{
-		UID: 11, GID: 22, BaseEnvironment: map[string]string{"PATH": dir},
-		StandaloneOwnerID: "repeated-environment-test", StandaloneStateRoot: "/var/lib/acp-go-amp-test",
-	}
-
-	originalCommand := commandContext
-	t.Cleanup(func() { commandContext = originalCommand })
-
-	client := NewClient(nil, Options{CLIPath: executable, Isolation: policy})
-	commandContext = func(context.Context, string, ...string) *exec.Cmd {
-		client.options.Isolation = nil
-
-		return exec.Command("/usr/bin/true")
-	}
-	if _, err := client.startTurn(t.Context(), nil, nil); err == nil {
-		t.Fatal("turn accepted isolation removed during construction")
-	}
-
-	client = NewClient(nil, Options{CLIPath: executable, Isolation: policy})
-	if _, err := client.outputWithArgs(t.Context(), "--version"); err == nil {
-		t.Fatal("command accepted isolation removed during construction")
-	}
-
-	failing := filepath.Join(dir, "failing-amp")
-	if err := os.WriteFile(failing, []byte("#!/bin/sh\nexit 1\n"), 0o700); err != nil {
+	client := NewClient(nil, Options{Cwd: dir, OrdinaryEnvironment: base})
+	environment, err := client.buildEnvironment(nil, dir)
+	if err != nil {
 		t.Fatal(err)
 	}
-	commandContext = originalCommand
-	client = newTestClient(t, nil, Options{CLIPath: failing})
-	if _, _, err := client.discoverVersion(t.Context()); err == nil {
-		t.Fatal("failed version probe accepted")
+	if got, err := client.discover(t.Context(), environment, dir); err != nil || got != executable {
+		t.Fatalf("ordinary relative PATH lookup = %q, %v", got, err)
+	}
+	client.options.CLIPath = "./amp"
+	if got, err := client.discover(t.Context(), environment, dir); err != nil || got != executable {
+		t.Fatalf("ordinary relative executable lookup = %q, %v", got, err)
+	}
+}
+
+func TestOrdinaryClientRunsWithoutProcessIsolation(t *testing.T) {
+	dir := t.TempDir()
+	executable := filepath.Join(dir, "amp")
+	if err := os.WriteFile(executable, []byte("#!/bin/sh\nprintf 'ordinary:%s' \"$(id -u)\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	client := NewClient(nil, Options{
+		CLIPath: executable,
+		Cwd:     dir,
+		OrdinaryEnvironment: map[string]string{
+			"PATH": os.Getenv("PATH"),
+		},
+	})
+	out, err := client.outputRaw(t.Context(), "version")
+	if err != nil {
+		t.Fatalf("ordinary launch: %v", err)
+	}
+	if got, want := string(out), fmt.Sprintf("ordinary:%d", os.Geteuid()); got != want {
+		t.Fatalf("ordinary identity = %q, want %q", got, want)
+	}
+	if client.options.Isolation != nil {
+		t.Fatalf("ordinary launch fabricated policy %#v", client.options.Isolation)
+	}
+
+	launch, err := client.prepareProcessLaunch(t.Context(), exec.Command(executable))
+	if err != nil {
+		t.Fatalf("prepare ordinary launch: %v", err)
+	}
+	defer launch.close()
+	if launch.nativeIsolation || launch.control != nil || len(launch.inherited) != 0 {
+		t.Fatalf("ordinary launch acquired isolation authority: %#v", launch)
 	}
 }

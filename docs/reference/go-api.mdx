@@ -25,44 +25,39 @@ an incomplete selected containment boundary. `Serve` preserves an
 otherwise return normally or with context cancellation. A host that receives
 it must retain or quarantine resources the native process may still reach.
 
-Linux uses an authoritative per-command subreaper, including for descendants
-detached with `setsid(2)`. Windows is `unavailable` for native launch because
-the mandatory Unix UID/GID identity boundary with empty supplementary groups
-cannot be applied. A Windows cross-compile proves only that the refusal path
-builds; it is not runtime support. Darwin is `unavailable` and fails native
-launches closed by default. The explicit
+Omitting `WithProcessIsolation` uses ordinary portable execution as the
+adapter's current identity, root or non-root. This reports `shared_identity`
+and makes no descendant-inventory or whole-tree quiescence claim. Explicit
+process isolation is Linux-only and uses an authoritative per-command
+subreaper, including for descendants detached with `setsid(2)`. The explicit
 `WithDarwinBestEffortContainment` option selects bounded process-group cleanup,
 not authoritative descendant containment: a detached descendant can survive,
 markers can be scrubbed, an empty correlation scan is not proof of absence,
 and signalling a numeric PGID has a reuse/collateral-signal race. Other
-unsupported platforms fail closed. `Agent.ContainmentMode()` and
+platforms continue to support ordinary execution while refusing explicit
+process isolation. `WithDarwinBestEffortContainment` and
+`WithProcessIsolation` are mutually exclusive. `Agent.ContainmentMode()` and
 `RuntimeResourceHooks.ObserveContainment` report `authoritative`,
 `shared_identity`, `best_effort`, or `unavailable`.
 
-`shared_identity` is the Linux boundary an adapter that never held privilege
-establishes: the configured native identity is the identity the adapter
-already runs as, so the supervisor stays unprivileged and requests no
-credential change. The subreaper tree, descendant reaping, process-group
-teardown and readiness handshake are the authoritative ones, so whole-tree
-lifecycle is still proven. What is absent is the credential separation between
-the adapter and the native process, and the host-global record of which
-process holds the identity: concurrent sessions share one account's `HOME`,
-XDG directories and credentials, and the native process can signal and inspect
-the adapter. Run the adapter as root to keep those guarantees.
+`shared_identity` means ordinary current-identity execution. It creates no UID
+authority record, acquires no isolation capability, and does not publish
+provider-descendant snapshots. Per-session HOME/XDG roots and direct child
+lifecycle ownership remain in effect.
 
 ## Common options
 
 | Option | Purpose |
 |---|---|
 | `WithExecutablePath` | Native `amp` executable path. |
-| `WithProcessIsolation` | Optional explicit hardening: a non-root UID/GID and complete replacement environment for native Amp commands. On Linux the embedded supervisor stays trusted root; only the native command receives the configured identity, with supplementary groups cleared. When the configured identity is the one the adapter already runs as, the supervisor stays unprivileged, requests no credential change, and reports `shared_identity`. Omitting the option launches native work as the current identity — root or not — over a deterministic clone of the ambient environment, also reported as `shared_identity` on Linux. |
+| `WithProcessIsolation` | Optional Linux-only hardening: a non-root UID/GID and complete replacement environment for native Amp commands. The embedded supervisor must be trusted root and the target identity must be distinct; only Amp receives the target identity, with supplementary groups cleared. Invalid or unsupported explicit policy fails closed with no ordinary fallback. Omitting the option launches native work ordinarily as the current identity, root or non-root. |
 | `WithScratchDir` | Sole parent for all ephemeral on-disk scratch (per-session isolated `HOME`/XDG directories and the startup/discovery probes' isolated `HOME`/XDG/settings/MCP residence). Empty falls back to the system temp directory; created `0700` when missing. |
 | `WithInputHandoffRoot` | Absolute read root for the local handoff input form. Read-only, so it is not a materialization root. Unset rejects every handoff-form block. See [Handoff read root](#handoff-read-root). |
 | `WithProviderAuthRoot` | Absolute durable directory holding the values-free provider-auth ledger. Unset, or unusable, leaves every `_amp/auth/*` method unadvertised. Darwin and Windows keep the configured method surface but refuse authorization with `unsupported_variant` before native login. See [Authentication](/docs/features/authentication#broker-a-login). |
 | `WithProviderAuthDirectHome` | Unsupported: `disconnect` releases only the ledger slot a connection owns and reads no operator home, so there is nothing for an exact-home consent gate to authorize. A non-empty value rejects at session start. |
 | `WithHome` | Unsupported: Amp has no native config/auth root. Kept on the surface for symmetry; a non-empty value rejects at session start. Use `WithScratchDir`. |
 | `WithDefaultModel` | Accepted for symmetry; non-empty values reject at session start. |
-| `WithEnv` | Environment overlaid on `ProcessIsolation.BaseEnvironment` for native processes (e.g. `AMP_API_KEY`). |
+| `WithEnv` | Environment overlaid on the sanitized ordinary environment, or on `ProcessIsolation.BaseEnvironment` when explicit isolation is configured (e.g. `AMP_API_KEY`). |
 | `WithSessionStore` | Durable mirror; see [Session store](/docs/features/session-store). |
 | `WithSessionStoreLoadTimeout` | Bound on every store read (default `10s`); writes use a fixed `60s` bound. |
 | `WithConcurrencyLimits` | Caps on concurrent native work. |
@@ -70,7 +65,7 @@ the adapter. Run the adapter as root to keep those guarantees.
 | `WithSeedFiles` | Relative-path → contents written into each session's isolated native `HOME` before `amp` launches. See [Seed files](/docs/features/models-config#seed-files). Accepted but inert for model routing — Amp is locked to its hosted backend. |
 | `WithTurnTimeout` | Optional per-turn deadline (default `0`, no deadline); on expiry the turn fails with `cause: "timeout"`. |
 | `WithRuntimeResourceHooks` | Host admission hooks for native roots and adapter scratch roots. |
-| `WithDarwinBestEffortContainment` | Darwin-only explicit opt-in to bounded process-group cleanup with escaped-descendant and PGID-reuse limitations. Invalid on other platforms. |
+| `WithDarwinBestEffortContainment` | Darwin-only explicit opt-in to bounded process-group cleanup with escaped-descendant and PGID-reuse limitations. Invalid on other platforms and mutually exclusive with `WithProcessIsolation`. |
 | `WithTracerProvider`, `WithMeterProvider`, `WithTextMapPropagator`, `WithLogger` | Observability providers. |
 
 `ProcessIsolation.IdentityLock` and `ProcessIsolation.AuthorityDomain`

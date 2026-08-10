@@ -25,15 +25,7 @@ func TestAgentContainmentModeAndObservation(t *testing.T) {
 			observed = append(observed, mode)
 		},
 	}))
-	var want RuntimeContainmentMode
-	switch runtime.GOOS {
-	case "linux":
-		// No explicit policy means the native tree runs as this process's own
-		// identity, and the report says so.
-		want = RuntimeContainmentSharedIdentity
-	default:
-		want = RuntimeContainmentUnavailable
-	}
+	want := RuntimeContainmentSharedIdentity
 	if got := defaultAgent.ContainmentMode(); got != want {
 		t.Fatalf("default mode = %q, want %q", got, want)
 	}
@@ -263,133 +255,62 @@ func TestSimulatedDarwinContainmentConfiguration(t *testing.T) {
 	}
 }
 
-// TestContainmentModeReportsASharedAgentIdentity proves the Linux boundary
-// names the identity it actually established: the authoritative report is kept
-// for a launch that crosses a credential boundary, and a launch that runs the
-// agent under the supervisor's own identity says so instead. An omitted policy
-// is such a launch by construction — root or not — and no other platform
-// changes.
-func TestContainmentModeReportsASharedAgentIdentity(t *testing.T) {
-	originalGOOS, originalUID := runtimeGOOS, containmentEffectiveUID
-	t.Cleanup(func() { runtimeGOOS, containmentEffectiveUID = originalGOOS, originalUID })
+func TestContainmentModeReportsOrdinaryExecutionWithoutAuthority(t *testing.T) {
+	originalGOOS := runtimeGOOS
+	t.Cleanup(func() { runtimeGOOS = originalGOOS })
 
-	shared := &ProcessIsolation{UID: 1000, GID: 1000}
-	distinct := &ProcessIsolation{UID: 65534, GID: 65534}
+	for _, platform := range []string{platformLinux, platformDarwin, platformWindows, "freebsd"} {
+		runtimeGOOS = platform
+		if got := containmentMode(Options{}); got != RuntimeContainmentSharedIdentity {
+			t.Fatalf("%s ordinary mode = %q", platform, got)
+		}
+	}
 
 	runtimeGOOS = platformLinux
-	containmentEffectiveUID = func() int { return 1000 }
-	if got := containmentMode(Options{ProcessIsolation: shared}); got != RuntimeContainmentSharedIdentity {
-		t.Fatalf("shared identity mode = %q", got)
+	if got := containmentMode(Options{ProcessIsolation: &ProcessIsolation{UID: 65534, GID: 65534}}); got != RuntimeContainmentAuthoritative {
+		t.Fatalf("Linux explicit mode = %q", got)
 	}
-	if got := containmentMode(Options{ProcessIsolation: distinct}); got != RuntimeContainmentAuthoritative {
-		t.Fatalf("distinct identity mode = %q", got)
-	}
-	if got := containmentMode(Options{}); got != RuntimeContainmentSharedIdentity {
-		t.Fatalf("absent policy mode = %q", got)
-	}
-
-	containmentEffectiveUID = func() int { return 0 }
-	if got := containmentMode(Options{ProcessIsolation: shared}); got != RuntimeContainmentAuthoritative {
-		t.Fatalf("trusted root mode = %q", got)
-	}
-	if got := containmentMode(Options{}); got != RuntimeContainmentSharedIdentity {
-		t.Fatalf("absent policy root mode = %q", got)
-	}
-
-	containmentEffectiveUID = func() int { return 1000 }
 	runtimeGOOS = platformDarwin
-	if got := containmentMode(Options{ProcessIsolation: shared}); got != RuntimeContainmentUnavailable {
-		t.Fatalf("Darwin shared identity mode = %q", got)
+	if got := containmentMode(Options{ProcessIsolation: &ProcessIsolation{UID: 65534, GID: 65534}}); got != RuntimeContainmentUnavailable {
+		t.Fatalf("Darwin explicit mode = %q", got)
 	}
 
-	if !RuntimeContainmentSharedIdentity.provesWholeTreeLifecycle() ||
-		!RuntimeContainmentAuthoritative.provesWholeTreeLifecycle() {
-		t.Fatal("a Linux boundary stopped proving whole-tree lifecycle")
+	if !RuntimeContainmentAuthoritative.provesWholeTreeLifecycle() {
+		t.Fatal("authoritative containment stopped proving whole-tree lifecycle")
 	}
-	if RuntimeContainmentBestEffort.provesWholeTreeLifecycle() ||
-		RuntimeContainmentUnavailable.provesWholeTreeLifecycle() {
-		t.Fatal("a weaker boundary claimed whole-tree lifecycle")
+	for _, mode := range []RuntimeContainmentMode{RuntimeContainmentSharedIdentity, RuntimeContainmentBestEffort, RuntimeContainmentUnavailable} {
+		if mode.provesWholeTreeLifecycle() {
+			t.Fatalf("mode %q claimed whole-tree lifecycle", mode)
+		}
 	}
 }
 
-// TestSharedIdentityAgentKeepsItsLifecycleSurfaces proves the honest report
-// does not quietly take away what the boundary still proves: the agent
-// publishes shared_identity and keeps the descendant inventory the subreaper
-// tree makes truthful.
-func TestSharedIdentityAgentKeepsItsLifecycleSurfaces(t *testing.T) {
-	originalGOOS, originalUID := runtimeGOOS, containmentEffectiveUID
-	t.Cleanup(func() { runtimeGOOS, containmentEffectiveUID = originalGOOS, originalUID })
-
-	runtimeGOOS = platformLinux
-	containmentEffectiveUID = func() int { return 1000 }
-
-	var (
-		observed  []RuntimeContainmentMode
-		snapshots int
-	)
-	agent := NewAgent(
-		WithProcessIsolation(ProcessIsolation{
-			UID: 1000, GID: 1000, BaseEnvironment: map[string]string{"PATH": "/usr/bin"},
-		}),
-		WithRuntimeResourceHooks(RuntimeResourceHooks{
-			ObserveContainment: func(_ context.Context, mode RuntimeContainmentMode) {
-				observed = append(observed, mode)
-			},
-			ObserveProcessSnapshot: func(context.Context, RuntimeProcessKind, int) { snapshots++ },
-		}),
-	)
-	if len(observed) != 1 || observed[0] != RuntimeContainmentSharedIdentity {
-		t.Fatalf("shared identity observations = %v", observed)
-	}
-	if got := agent.ContainmentMode(); got != RuntimeContainmentSharedIdentity {
-		t.Fatalf("shared identity agent mode = %q", got)
-	}
+func TestOrdinaryExecutionPublishesNoDescendantInventory(t *testing.T) {
+	var snapshots int
+	agent := NewAgent(WithRuntimeResourceHooks(RuntimeResourceHooks{
+		ObserveProcessSnapshot: func(context.Context, RuntimeProcessKind, int) { snapshots++ },
+	}))
 
 	observer := agent.newProcessSnapshotObserver(t.Context(), func() (int, bool) { return 3, true })
 	observer.Refresh(t.Context())
 	observer.Complete(t.Context())
-	if snapshots == 0 {
-		t.Fatal("shared identity agent stopped publishing descendant snapshots")
+	observer.Incomplete()
+	if snapshots != 0 {
+		t.Fatalf("ordinary execution published %d descendant snapshots", snapshots)
 	}
 }
 
-// TestSharedIdentityProcessIsolationOptionCarriesNoStandaloneOwnerFields proves
-// the public option validator moves with the native one: the canonical shared
-// shape is accepted, standalone fields that promise a durable record are
-// refused with a remedy, and the isolated refusals are untouched.
-func TestSharedIdentityProcessIsolationOptionCarriesNoStandaloneOwnerFields(t *testing.T) {
-	originalGOOS, originalUID := runtimeGOOS, containmentEffectiveUID
-	t.Cleanup(func() { runtimeGOOS, containmentEffectiveUID = originalGOOS, originalUID })
-
+func TestExplicitProcessIsolationAlwaysRequiresAuthority(t *testing.T) {
+	originalGOOS := runtimeGOOS
+	t.Cleanup(func() { runtimeGOOS = originalGOOS })
 	runtimeGOOS = platformLinux
-	containmentEffectiveUID = func() int { return 1000 }
 
-	if err := validateProcessIsolationOption(&ProcessIsolation{UID: 1000, GID: 1000}); err != nil {
-		t.Fatalf("canonical shared policy: %v", err)
-	}
-	err := validateProcessIsolationOption(&ProcessIsolation{
-		UID: 1000, GID: 1000, StandaloneOwnerID: "acp-go-amp-shared",
-	})
-	if err == nil || !strings.Contains(err.Error(), sharedIdentitySupervisorRemedy) {
-		t.Fatalf("shared owner id error = %v", err)
-	}
-	err = validateProcessIsolationOption(&ProcessIsolation{
-		UID: 1000, GID: 1000, StandaloneStateRoot: "/var/tmp/acp-go-amp-shared",
-	})
-	if err == nil || !strings.Contains(err.Error(), sharedIdentitySupervisorRemedy) {
-		t.Fatalf("shared state root error = %v", err)
-	}
-	err = validateProcessIsolationOption(&ProcessIsolation{UID: 65534, GID: 65534})
+	err := validateProcessIsolationOption(&ProcessIsolation{UID: 1000, GID: 1000})
 	if err == nil || !strings.Contains(err.Error(), "standalone owner id must match") {
-		t.Fatalf("isolated policy error = %v", err)
+		t.Fatalf("authority-free explicit policy error = %v", err)
 	}
 }
 
-// TestAgentSessionDefaultsToOrdinaryExecution proves omitting
-// WithProcessIsolation is the ordinary default: session establishment
-// succeeds, the ambient credential is honored through the implicit base
-// environment, and every native client is handed a clone of the one
-// current-identity capture rather than an isolation policy.
 func TestAgentSessionDefaultsToOrdinaryExecution(t *testing.T) {
 	t.Setenv("AMP_API_KEY", "ambient-key")
 	t.Setenv("ACP_GO_AMP_TEST_CANARY", "ambient-canary")
@@ -415,39 +336,17 @@ func TestAgentSessionDefaultsToOrdinaryExecution(t *testing.T) {
 		t.Fatalf("session = %q, probes = %d", resp.SessionId, probes)
 	}
 
-	isolation := agent.nativeIsolation()
-	if isolation == nil || !isolation.Implicit {
-		t.Fatalf("native isolation = %#v, want implicit capture", isolation)
+	var options nativeamp.Options
+	agent.configureNativeClient(&options, RuntimeResourcePrompt)
+	if options.Isolation != nil {
+		t.Fatalf("ordinary native isolation = %#v, want nil", options.Isolation)
 	}
-	if int64(isolation.UID) != int64(os.Geteuid()) || int64(isolation.GID) != int64(os.Getegid()) {
-		t.Fatalf("implicit identity = %d:%d, process runs as %d:%d", isolation.UID, isolation.GID, os.Geteuid(), os.Getegid())
-	}
-	if isolation.BaseEnvironment["ACP_GO_AMP_TEST_CANARY"] != "ambient-canary" ||
-		isolation.BaseEnvironment["AMP_API_KEY"] != "ambient-key" {
-		t.Fatalf("implicit base environment missed ambient values: %#v", isolation.BaseEnvironment)
-	}
-	if isolation.IdentityLock != nil || isolation.AuthorityDomain != nil ||
-		isolation.StandaloneOwnerID != "" || isolation.StandaloneStateRoot != "" {
-		t.Fatalf("implicit capture carries isolation authority: %#v", isolation)
-	}
-
-	isolation.BaseEnvironment["ACP_GO_AMP_TEST_CANARY"] = "mutated"
-	if agent.nativeIsolation().BaseEnvironment["ACP_GO_AMP_TEST_CANARY"] != "ambient-canary" {
-		t.Fatal("implicit capture is shared rather than cloned")
-	}
-
-	if sharedProcessIdentity(nil) {
-		t.Fatal("a nil policy reported an explicit shared identity")
-	}
-	if (&Agent{}).nativeIsolation() != nil {
-		t.Fatal("an agent without any capture produced a launch policy")
+	if options.OrdinaryEnvironment["ACP_GO_AMP_TEST_CANARY"] != "ambient-canary" ||
+		options.OrdinaryEnvironment["AMP_API_KEY"] != "ambient-key" {
+		t.Fatalf("ordinary environment missed ambient values: %#v", options.OrdinaryEnvironment)
 	}
 }
 
-// TestExplicitProcessIsolationPreservesPolicy proves supplying
-// WithProcessIsolation stays explicit hardening: the policy reaches native
-// clients verbatim with no ambient environment mixed in, and an invalid
-// policy fails session establishment closed with no ordinary-mode fallback.
 func TestExplicitProcessIsolationPreservesPolicy(t *testing.T) {
 	t.Setenv("ACP_GO_AMP_TEST_CANARY", "ambient-canary")
 
@@ -462,8 +361,10 @@ func TestExplicitProcessIsolationPreservesPolicy(t *testing.T) {
 	}
 
 	agent := NewAgent(WithProcessIsolation(policy))
-	isolation := agent.nativeIsolation()
-	if isolation == nil || isolation.Implicit {
+	var nativeOptions nativeamp.Options
+	agent.configureNativeClient(&nativeOptions, RuntimeResourcePrompt)
+	isolation := nativeOptions.Isolation
+	if isolation == nil {
 		t.Fatalf("native isolation = %#v, want the explicit policy", isolation)
 	}
 	if isolation.UID != policy.UID || isolation.GID != policy.GID {
@@ -475,10 +376,6 @@ func TestExplicitProcessIsolationPreservesPolicy(t *testing.T) {
 	if isolation.BaseEnvironment["AMP_API_KEY"] != "policy-key" {
 		t.Fatalf("explicit base environment = %#v", isolation.BaseEnvironment)
 	}
-	if agent.implicitIsolation != nil {
-		t.Fatal("explicit policy still captured an implicit fallback")
-	}
-
 	invalid := NewAgent(WithProcessIsolation(ProcessIsolation{UID: 0, GID: 0}))
 	if _, err := invalid.NewSession(t.Context(), NewSessionRequest(t.TempDir())); err == nil {
 		t.Fatal("invalid explicit policy did not fail session establishment")

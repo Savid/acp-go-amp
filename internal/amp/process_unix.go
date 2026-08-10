@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"sync"
 	"syscall"
+	"time"
 )
 
 var (
@@ -194,6 +195,59 @@ func (t *processTree) kill() error {
 	}
 
 	return signalProcessGroupID(t.pgid, syscall.SIGKILL)
+}
+
+func (t *processTree) terminateOrdinary(timeout time.Duration) error {
+	if t == nil {
+		return nil
+	}
+
+	t.cleanupOnce.Do(func() {
+		select {
+		case <-t.waiter.done:
+			t.cleanupErr = t.finish(nil)
+
+			return
+		default:
+		}
+
+		_ = signalProcessGroupID(t.pgid, syscall.SIGTERM)
+		if t.releaseWaiter != nil {
+			t.releaseWaiter()
+		}
+
+		phase := timeout / 2
+		if phase <= 0 {
+			phase = timeout
+		}
+
+		waitCtx, cancel := context.WithTimeout(context.Background(), phase)
+		_, completed := t.waiter.await(waitCtx)
+
+		cancel()
+
+		if completed {
+			t.cleanupErr = t.finish(nil)
+
+			return
+		}
+
+		_ = signalProcessGroupID(t.pgid, syscall.SIGKILL)
+		waitCtx, cancel = context.WithTimeout(context.Background(), timeout-phase)
+		_, completed = t.waiter.await(waitCtx)
+
+		cancel()
+
+		if !completed {
+			t.cleanupErr = t.finish(fmt.Errorf("%w: direct Amp process remained live", ErrProcessContainmentIncomplete))
+
+			return
+		}
+
+		t.cleanupErr = t.finish(nil)
+	})
+
+	return t.cleanupErr
 }
 
 func interruptProcess(cmd *exec.Cmd) error {

@@ -20,12 +20,12 @@ account home is resolved the same way, must be a target-owned mode-`0700`
 directory beneath protected root-owned ancestry, and cannot be `/root` or
 `/nonexistent`.
 
-The adapter remains root, but its ambient environment is never copied wholesale
-to the child. Only the complete literal `baseEnvironment` plus names in
-`inheritEnvironment` reach native work. The CLI refuses Darwin, Windows, and
-other platforms; Darwin best-effort containment remains an explicit
-embedded-Go option only. `-version` and Darwin containment diagnostics launch
-no native worker and are exempt.
+In hardened mode the adapter remains root, but its ambient environment is never
+copied wholesale to the child. Only the complete literal `baseEnvironment`
+plus names in `inheritEnvironment` reach native work. Non-Linux platforms
+refuse this explicit policy without disabling ordinary execution. Darwin
+best-effort containment remains an embedded-Go option only. `-version` and
+Darwin containment diagnostics launch no native worker and are exempt.
 
 ## Per-session isolation
 
@@ -68,8 +68,8 @@ Auth material is live process state only:
 
 | Value | Supplied via | Persisted? |
 |---|---|---|
-| `AMP_API_KEY` | `ProcessIsolation.BaseEnvironment` or `WithEnv` | Never |
-| `AMP_URL` | `ProcessIsolation.BaseEnvironment` or `WithEnv` | Never |
+| `AMP_API_KEY` | Sanitized ordinary environment, `ProcessIsolation.BaseEnvironment`, or `WithEnv` | Never |
+| `AMP_URL` | Sanitized ordinary environment, `ProcessIsolation.BaseEnvironment`, or `WithEnv` | Never |
 | The value pasted into `_amp/auth/callback` | The owner, through the host | Never |
 | The relayed `_amp/auth/authorize` URL | The native login process | Never |
 | The key returned by `_amp/auth/credential` | The isolated `secrets.json` | Never |
@@ -139,49 +139,45 @@ diagnostic surfaces.
 ## Native-process containment
 
 Before version discovery or readiness probing, the adapter creates one
-mode-`0700`, target-owned residence below `WithScratchDir` / `-scratch-dir`.
+mode-`0700` residence below `WithScratchDir` / `-scratch-dir`, owned by the
+ordinary current identity or by the explicit Linux target identity.
 Every probe child receives isolated `HOME`, `XDG_CONFIG_HOME`,
 `XDG_CACHE_HOME`, `XDG_DATA_HOME`, and `XDG_STATE_HOME` paths there plus the
 residence's mode-`0600` settings and MCP files; values from the raw policy
 environment cannot reach the child. The adapter removes this residence and
-releases its scratch reservation only after containment completion is proven.
+releases its scratch reservation only after the selected process boundary
+settles.
 If proof is incomplete, or removal fails, the residence remains quarantined
 and the reservation stays held. Darwin's best-effort boundary copies these
 inputs into the target-owned per-command generation below the same scratch
 parent before launch, then applies the same proof-gated lifetime rule.
 
-Linux starts every Amp command — version/readiness probes, thread lifecycle
-commands, and prompts — below an independent trusted-root guardian/liveness pair
-of subreapers.
+Ordinary mode starts every Amp command directly as the adapter's current
+identity, root or non-root. It acquires no UID authority, applies no credential
+change, publishes no provider-descendant inventory, and makes no whole-tree
+quiescence claim. The adapter still owns the direct child lifecycle, isolated
+per-session HOME/XDG paths, environment scrubbing, cancellation, and native-root
+admission release at that selected boundary. This is the portable default.
+
+Explicit Linux isolation starts every Amp command — version/readiness probes,
+thread lifecycle commands, and prompts — below an independent trusted-root
+guardian/liveness pair of subreapers.
 Both trusted processes exist before native launch and retain duplicates of the
 same authority leases. If either one dies, the survivor adopts, terminates, and
 reaps ordinary, new-process-group, and `setsid(2)` descendants until `wait4(2)`
-reports `ECHILD`. Windows rejects every native Amp command before
-spawning because its process API cannot apply the mandatory Unix UID/GID
-identity boundary with empty supplementary groups. Cross-compiling this refusal
-path proves only that it builds, not runtime support. Cancellation, timeout,
-and successful completion all cross the same selected boundary. An incomplete
+reports `ECHILD`. Non-Linux platforms reject explicit isolation, with no
+fallback from an explicit request to ordinary execution. Cancellation,
+timeout, and successful completion all cross the selected boundary. An incomplete
 boundary surfaces
 `ampacp.ErrProcessContainmentIncomplete`; reachable native-root and scratch
 resources are retained, and the parent-side wait remains bounded.
 
-A Linux deployment whose configured identity is the identity the adapter
-already runs as has no privilege boundary to cross, and the supervisor pair
-runs unprivileged instead. That arm is selected by identity equality alone, so
-a root adapter can never enter it. It skips exactly the privilege-dependent
-identity scaffolding — the trusted-root assertion, the standalone owner fields,
-the `/var/lib/acp-go/agent-identities` authority and its vacancy proof, and the
-credential change — and keeps every containment guarantee described above,
-because none of them needs privilege. The parent stamps the decision into the
-sealed launch configuration and each child re-derives it from its own identity,
-refusing a configuration that disagrees in either direction. Concurrent
-sessions then share one account's `HOME`, XDG directories, credentials and
-session journals, no host-global record excludes a second adapter from the same
-identity, and Amp can signal and inspect its supervisor. `ContainmentMode()`
-reports `shared_identity` rather than `authoritative` for exactly that reason.
-Run the adapter as root to keep the credential boundary.
+An explicit Linux policy never becomes ordinary execution because its UID/GID
+matches the adapter. The trusted supervisor must run as root and the target
+must be a distinct non-root identity; a current-UID request is refused. There
+is no unprivileged guardian, shared-authority stamp, or no-credential fallback.
 
-Both isolated Linux supervisors stay root and run from `/` with closed private
+Both explicit Linux supervisors stay root and run from `/` with closed private
 environments. Immutable launch configuration carries the target identity and
 native environment; only Amp receives the configured UID/GID with no
 supplementary groups. Before native start both supervisors validate and retain
@@ -312,13 +308,16 @@ same-directory atomic rename,
 and directory sync. Each newly created directory level is parent-synced before
 any lock becomes authoritative.
 
-Embedded Darwin hosts fail closed unless the operator explicitly supplies
-`WithDarwinBestEffortContainment`. The opt-in creates a fresh real writable
+Embedded Darwin hosts use ordinary current-identity execution by default. The
+optional `WithDarwinBestEffortContainment` mode creates a fresh real writable
 generation root for every native launch, starts the direct child as its own
 process-group leader, reaps that child exactly once, sends group `SIGTERM`,
 escalates to `SIGKILL` after 500 ms, and polls the original group for one fixed
 five-second total deadline. It records `containment=best_effort` and emits an
 unconditional warning.
+
+Darwin best-effort containment cannot be combined with
+`WithProcessIsolation`; explicit process isolation is Linux-only.
 
 This Darwin boundary does not contain descendants that call `setsid(2)` or
 otherwise escape the original group. Such processes can become zombies or

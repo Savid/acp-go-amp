@@ -208,3 +208,62 @@ func TestInterruptReturnsSignalError(t *testing.T) {
 		t.Fatalf("Interrupt should propagate signal error, got %v", err)
 	}
 }
+
+func TestOrdinaryProcessTerminationBranches(t *testing.T) {
+	if err := (*processTree)(nil).terminateOrdinary(time.Second); err != nil {
+		t.Fatal(err)
+	}
+
+	completed := make(chan struct{})
+	close(completed)
+	released := 0
+	tree := &processTree{
+		waiter:        &commandWait{done: completed},
+		releaseNative: func() { released++ },
+	}
+	if err := tree.terminateOrdinary(time.Second); err != nil || released != 1 {
+		t.Fatalf("completed ordinary process = %v, releases=%d", err, released)
+	}
+
+	originalKill := syscallKill
+	t.Cleanup(func() { syscallKill = originalKill })
+
+	termDone := make(chan struct{})
+	termReleased := 0
+	syscallKill = func(int, syscall.Signal) error {
+		select {
+		case <-termDone:
+		default:
+			close(termDone)
+		}
+
+		return nil
+	}
+	tree = &processTree{
+		pgid:          10,
+		waiter:        &commandWait{done: termDone},
+		releaseWaiter: func() { termReleased++ },
+	}
+	if err := tree.terminateOrdinary(20 * time.Millisecond); err != nil || termReleased != 1 {
+		t.Fatalf("TERM ordinary process = %v, waiter releases=%d", err, termReleased)
+	}
+
+	killDone := make(chan struct{})
+	syscallKill = func(_ int, signal syscall.Signal) error {
+		if signal == syscall.SIGKILL {
+			close(killDone)
+		}
+
+		return nil
+	}
+	tree = &processTree{pgid: 11, waiter: &commandWait{done: killDone}}
+	if err := tree.terminateOrdinary(20 * time.Millisecond); err != nil {
+		t.Fatalf("KILL ordinary process = %v", err)
+	}
+
+	syscallKill = func(int, syscall.Signal) error { return nil }
+	tree = &processTree{pgid: 12, waiter: &commandWait{done: make(chan struct{})}}
+	if err := tree.terminateOrdinary(0); !errors.Is(err, ErrProcessContainmentIncomplete) {
+		t.Fatalf("unsettled ordinary process = %v", err)
+	}
+}

@@ -242,9 +242,9 @@ func TestProcessIsolationOptionIsRefusedOnWindows(t *testing.T) {
 	require.ErrorContains(
 		t,
 		validateProcessIsolationOption(isolation),
-		"process isolation is unsupported on windows",
+		"process isolation is supported only on linux",
 	)
 
 	runtimeGOOS = platformDarwin
-	require.NoError(t, validateProcessIsolationOption(isolation))
+	require.ErrorContains(t, validateProcessIsolationOption(isolation), "process isolation is supported only on linux")
 }

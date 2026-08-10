@@ -80,10 +80,8 @@ func TestDarwinOutputReportsWaiterPastContainmentDeadline(t *testing.T) {
 
 func TestDarwinClientIsolationAndNativeStartFailures(t *testing.T) {
 	originalCommand := commandContext
-	originalGroups := processIsolationGetgroups
 	t.Cleanup(func() {
 		commandContext = originalCommand
-		processIsolationGetgroups = originalGroups
 	})
 	commandContext = func(context.Context, string, ...string) *exec.Cmd {
 		return exec.Command(filepath.Join(t.TempDir(), "missing-native"))
@@ -98,7 +96,6 @@ func TestDarwinClientIsolationAndNativeStartFailures(t *testing.T) {
 	}
 
 	commandContext = originalCommand
-	processIsolationGetgroups = func() ([]int, error) { return []int{os.Getegid(), os.Getegid() + 1}, nil }
 	client = NewClient(nil, Options{
 		DarwinBestEffort: true,
 		Isolation: &ProcessIsolation{
@@ -111,7 +108,7 @@ func TestDarwinClientIsolationAndNativeStartFailures(t *testing.T) {
 	})
 	cmd := exec.Command("/usr/bin/true")
 	cmd.Env = []string{"PATH=" + os.Getenv("PATH")}
-	if _, err := client.prepareProcessLaunch(t.Context(), cmd); err == nil || !strings.Contains(err.Error(), "apply Amp process isolation") {
-		t.Fatalf("unisolated current identity launch error = %v", err)
+	if _, err := client.prepareProcessLaunch(t.Context(), cmd); err == nil || !strings.Contains(err.Error(), "cannot be combined") {
+		t.Fatalf("combined Darwin containment and isolation error = %v", err)
 	}
 }

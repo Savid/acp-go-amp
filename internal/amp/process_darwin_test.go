@@ -53,9 +53,9 @@ func TestConfigureCommandDarwin(t *testing.T) {
 	}
 }
 
-func TestDarwinLaunchFailsClosedWithoutExplicitOptIn(t *testing.T) {
+func TestDarwinOrdinaryLaunchNeedsNoContainmentOptIn(t *testing.T) {
 	launch, err := prepareProcessTreeCommand(exec.Command("true"), processLaunchOptions{})
-	if launch != nil || !errors.Is(err, ErrProcessContainmentIncomplete) {
+	if launch == nil || err != nil {
 		t.Fatalf("launch = %#v, error = %v", launch, err)
 	}
 }
@@ -348,7 +348,6 @@ func TestDarwinMissingNativeExecutableFailsBeforeLaunchAdmission(t *testing.T) {
 	launch, err := prepareProcessTreeCommand(exec.Command(filepath.Join(t.TempDir(), "missing-native")), processLaunchOptions{
 		DarwinBestEffort: true,
 		Generation:       generation,
-		Isolation:        testProcessIsolation(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -391,7 +390,7 @@ func TestPrepareDarwinLaunchResourceFailures(t *testing.T) {
 		darwinLaunchExecutable = originalExecutable
 	})
 
-	options := processLaunchOptions{DarwinBestEffort: true, Generation: &DarwinGeneration{ScratchRoot: t.TempDir()}, Isolation: testProcessIsolation()}
+	options := processLaunchOptions{DarwinBestEffort: true, Generation: &DarwinGeneration{ScratchRoot: t.TempDir()}}
 	if _, err := prepareProcessTreeCommand(exec.Command("true"), processLaunchOptions{DarwinBestEffort: true}); !errors.Is(err, ErrProcessContainmentIncomplete) {
 		t.Fatalf("missing generation error = %v", err)
 	}
@@ -467,8 +466,8 @@ func TestPrepareDarwinLaunchResourceFailures(t *testing.T) {
 		t.Fatalf("executable error = %v", err)
 	}
 	darwinLaunchExecutable = originalExecutable
-	options.Isolation = nil
-	if _, err := prepareProcessTreeCommand(exec.Command("true"), options); err == nil || !strings.Contains(err.Error(), "isolation") {
+	options.Isolation = testProcessIsolation()
+	if _, err := prepareProcessTreeCommand(exec.Command("true"), options); err == nil || !strings.Contains(err.Error(), "unsupported on darwin") {
 		t.Fatalf("isolation error = %v", err)
 	}
 }
@@ -690,7 +689,7 @@ func TestDarwinNativeAdmissionRejectionFinalizesUnspawnedGeneration(t *testing.T
 			return nil
 		},
 	}
-	launch, err := prepareProcessTreeCommand(exec.Command("true"), processLaunchOptions{DarwinBestEffort: true, Generation: generation, Isolation: testProcessIsolation()})
+	launch, err := prepareProcessTreeCommand(exec.Command("true"), processLaunchOptions{DarwinBestEffort: true, Generation: generation})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -711,7 +710,7 @@ func TestDarwinNativeAdmissionRejectionSurfacesFinalizationFailure(t *testing.T)
 		ScratchRoot:    t.TempDir(),
 		RecordFinished: func(bool) error { return cleanupErr },
 	}
-	launch, err := prepareProcessTreeCommand(exec.Command("true"), processLaunchOptions{DarwinBestEffort: true, Generation: generation, Isolation: testProcessIsolation()})
+	launch, err := prepareProcessTreeCommand(exec.Command("true"), processLaunchOptions{DarwinBestEffort: true, Generation: generation})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -732,7 +731,7 @@ func TestDarwinStartProcessTreeFailureBoundaries(t *testing.T) {
 
 	newLaunch := func(t *testing.T, generation *DarwinGeneration) *processTreeCommand {
 		t.Helper()
-		launch, err := prepareProcessTreeCommand(exec.Command("true"), processLaunchOptions{DarwinBestEffort: true, Generation: generation, Isolation: testProcessIsolation()})
+		launch, err := prepareProcessTreeCommand(exec.Command("true"), processLaunchOptions{DarwinBestEffort: true, Generation: generation})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -953,7 +952,6 @@ func TestDarwinCancellationAfterGenerationPreparationDoesNotSpawn(t *testing.T) 
 	client := NewClient(nil, Options{
 		CLIPath:          "/usr/bin/true",
 		DarwinBestEffort: true,
-		Isolation:        testProcessIsolation(),
 		NewDarwinGeneration: func(context.Context) (*DarwinGeneration, error) {
 			cancel()
 
@@ -1342,7 +1340,7 @@ func TestDarwinFastExitAndSameGroupDescendant(t *testing.T) {
 	for _, script := range []string{"exit 0", "sleep 30 & wait"} {
 		cmd := exec.Command("sh", "-c", script)
 		generation := &DarwinGeneration{RuntimeID: "00000000000000000000000000000000", ScratchRoot: t.TempDir()}
-		launch, err := prepareProcessTreeCommand(cmd, processLaunchOptions{DarwinBestEffort: true, Generation: generation, Isolation: testProcessIsolation()})
+		launch, err := prepareProcessTreeCommand(cmd, processLaunchOptions{DarwinBestEffort: true, Generation: generation})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1366,7 +1364,7 @@ func TestDarwinSetsidEscapeSurvivesSelectedBoundary(t *testing.T) {
 		"ACP_GO_AMP_DARWIN_CONTAINMENT_READY_FILE="+readyFile,
 	)
 	generation := &DarwinGeneration{RuntimeID: "00000000000000000000000000000000", ScratchRoot: t.TempDir()}
-	launch, err := prepareProcessTreeCommand(cmd, processLaunchOptions{DarwinBestEffort: true, Generation: generation, Isolation: testProcessIsolation()})
+	launch, err := prepareProcessTreeCommand(cmd, processLaunchOptions{DarwinBestEffort: true, Generation: generation})
 	if err != nil {
 		t.Fatal(err)
 	}

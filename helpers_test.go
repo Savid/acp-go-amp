@@ -41,30 +41,11 @@ func testIsolationIdentity() (uint32, uint32) {
 	return uint32(uid), uint32(gid)
 }
 
-// testIsolationClaimsStandaloneAuthority reports whether the fixture identity
-// is one this runner can claim a durable standalone authority for. The claim
-// records an identity no live task holds and binds a state root owned by it,
-// so a runner that is already the fixture identity can neither prove the
-// vacancy nor create the storage: that runner describes the shared shape,
-// which carries no standalone owner fields at all.
 func testIsolationClaimsStandaloneAuthority(uid uint32) bool {
 	return uid != uint32(os.Geteuid())
 }
 
 func testContainmentOptions(options []Option) []Option {
-	baseEnvironment := map[string]string{"PATH": os.Getenv("PATH"), "HOME": os.Getenv("HOME")}
-	for _, key := range []string{"AMP_API_KEY", "AMP_URL"} {
-		if value, ok := os.LookupEnv(key); ok {
-			baseEnvironment[key] = value
-		}
-	}
-	uid, gid := testIsolationIdentity()
-	isolation := ProcessIsolation{UID: uid, GID: gid, BaseEnvironment: baseEnvironment}
-	if testIsolationClaimsStandaloneAuthority(uid) {
-		isolation.StandaloneOwnerID = "acp-go-amp-tests"
-		isolation.StandaloneStateRoot = testStandaloneStateRoot(uid, gid)
-	}
-	options = append(options, WithProcessIsolation(isolation))
 	options = append(options, func(options *Options) {
 		options.testOnlyNoCredential = true
 		options.testOnlyIdentityLockRoot = testIdentityLockRoot()

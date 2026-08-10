@@ -14,7 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestStartupProbeUsesIsolatedTargetOwnedResidence(t *testing.T) {
+func TestStartupProbeUsesOrdinaryCurrentIdentityResidence(t *testing.T) {
 	path, state := fakeAgentAmpPath(t, "probe-residence")
 	scratch := testScratchDir(t)
 	forbidden := map[string]string{}
@@ -31,10 +31,10 @@ func TestStartupProbeUsesIsolatedTargetOwnedResidence(t *testing.T) {
 		WithEnv(map[string]string{"AMP_API_KEY": "fake"}),
 	)
 	for key, value := range forbidden {
-		agent.options.ProcessIsolation.BaseEnvironment[key] = value
+		agent.ordinaryEnvironment[key] = value
 	}
-	wantUID := strconv.FormatUint(uint64(agent.options.ProcessIsolation.UID), 10)
-	wantGID := strconv.FormatUint(uint64(agent.options.ProcessIsolation.GID), 10)
+	wantUID := strconv.Itoa(os.Geteuid())
+	wantGID := strconv.Itoa(os.Getegid())
 
 	_, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
 	require.NoError(t, err)
@@ -238,12 +238,13 @@ func TestStartupProbeResidenceReservationAndOwnershipFailures(t *testing.T) {
 	err := agent.runStartupWithProbe(t.Context(), t.TempDir(), nil, func(context.Context, *nativeamp.Client) error { return nil })
 	require.ErrorIs(t, err, wantErr)
 
-	// A t.TempDir scratch parent nests the residence under a 0700 directory the
-	// foreign identity below cannot enter, so the handoff is refused on every
-	// platform rather than only where ownership transfer is unimplemented.
-	isolationAgent := newTestAgent(WithScratchDir(t.TempDir()))
-	isolationAgent.options.ProcessIsolation.UID++
-	isolationAgent.options.ProcessIsolation.GID++
+	isolationAgent := NewAgent(
+		WithScratchDir(t.TempDir()),
+		WithProcessIsolation(ProcessIsolation{
+			UID: uint32(os.Geteuid()) + 1, GID: uint32(os.Getegid()) + 1,
+			BaseEnvironment: map[string]string{},
+		}),
+	)
 	err = isolationAgent.runStartupWithProbe(t.Context(), t.TempDir(), nil, func(context.Context, *nativeamp.Client) error { return nil })
 	require.ErrorContains(t, err, "handoff Amp startup probe residence")
 }

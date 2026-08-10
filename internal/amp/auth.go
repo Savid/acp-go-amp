@@ -160,7 +160,7 @@ func (c *Client) AuthDeploymentSupported() bool {
 		return false
 	}
 
-	environment, err := authLoginEnv(c.options.Isolation, c.options.Env, c.options.Cwd)
+	environment, err := authLoginEnv(c.options.Isolation, c.options.OrdinaryEnvironment, c.options.Env, c.options.Cwd)
 	if err != nil {
 		return false
 	}
@@ -202,12 +202,12 @@ type AuthLogin struct {
 // behind a browser-launcher shim; platforms without a provable interception
 // boundary fail before the login child is constructed.
 func (c *Client) StartAuthLogin(ctx context.Context) (*AuthLogin, error) {
-	environment, err := authLoginEnv(c.options.Isolation, c.options.Env, c.options.Cwd)
+	environment, err := authLoginEnv(c.options.Isolation, c.options.OrdinaryEnvironment, c.options.Env, c.options.Cwd)
 	if err != nil {
 		return nil, err
 	}
 
-	path, err := Discover(ctx, c.options.CLIPath, environment)
+	path, err := c.discover(ctx, environment, c.options.Cwd)
 	if err != nil {
 		return nil, err
 	}
@@ -299,7 +299,7 @@ func (c *Client) authLoginArgs() []string {
 // authLoginEnv builds the login child's environment: the session's own values
 // plus the headless override, with the ambient API key removed however it
 // arrived.
-func authLoginEnv(isolation *ProcessIsolation, base map[string]string, cwd string) ([]string, error) {
+func authLoginEnv(isolation *ProcessIsolation, ordinary, base map[string]string, cwd string) ([]string, error) {
 	overrides := make(map[string]string, len(base)+1)
 	for key, value := range base {
 		overrides[key] = value
@@ -307,7 +307,17 @@ func authLoginEnv(isolation *ProcessIsolation, base map[string]string, cwd strin
 
 	overrides[authHeadlessOAuthEnv] = "1"
 
-	env, err := BuildEnvWithIsolation(isolation, overrides, cwd)
+	var (
+		env []string
+		err error
+	)
+
+	if isolation != nil {
+		env, err = BuildEnvWithIsolation(isolation, overrides, cwd)
+	} else {
+		env, err = buildEnvironment(ordinary, overrides, cwd)
+	}
+
 	if err != nil {
 		return nil, err
 	}

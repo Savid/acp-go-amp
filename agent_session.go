@@ -892,7 +892,7 @@ const missingAPIKeyMessage = "AMP_API_KEY is not set: amp sessions run in an " +
 
 func (a *Agent) ensureNewSessionStartup(ctx context.Context, cwd string, meta parsedSessionMeta) error {
 	env := mergeEnv(a.options.Env, meta.options.Env)
-	if amp.HasAPIKey(mergeEnv(a.processIsolationBase(), env)) {
+	if amp.HasAPIKey(mergeEnv(a.nativeEnvironmentBase(), env)) {
 		return a.ensureStartupWithProbe(ctx, cwd, env, a.options.runtime.startupProbe)
 	}
 
@@ -910,27 +910,19 @@ func (a *Agent) ensureNewSessionStartup(ctx context.Context, cwd string, meta pa
 
 func (a *Agent) ensureStartup(ctx context.Context, cwd string, meta parsedSessionMeta) error {
 	env := mergeEnv(a.options.Env, meta.options.Env)
-	if !amp.HasAPIKey(mergeEnv(a.processIsolationBase(), env)) {
+	if !amp.HasAPIKey(mergeEnv(a.nativeEnvironmentBase(), env)) {
 		return missingAPIKeyError()
 	}
 
 	return a.ensureStartupWithProbe(ctx, cwd, env, a.options.runtime.startupProbe)
 }
 
-// processIsolationBase is the base environment credential checks consult: the
-// explicit policy's base when one is configured, otherwise the implicit
-// current-identity capture, so an ambient AMP_API_KEY keeps working when the
-// isolation option is omitted.
-func (a *Agent) processIsolationBase() map[string]string {
+func (a *Agent) nativeEnvironmentBase() map[string]string {
 	if a.options.ProcessIsolation != nil {
 		return a.options.ProcessIsolation.BaseEnvironment
 	}
 
-	if a.implicitIsolation != nil {
-		return a.implicitIsolation.BaseEnvironment
-	}
-
-	return nil
+	return a.ordinaryEnvironment
 }
 
 func missingAPIKeyError() error {

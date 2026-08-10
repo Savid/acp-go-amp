@@ -15,13 +15,11 @@ import (
 )
 
 type Agent struct {
-	options Options
-	log     *slog.Logger
-	store   SessionStore
-	observe *observer.Observer
-	// implicitIsolation is the one-time current-identity capture native
-	// launches clone when no explicit ProcessIsolation was configured.
-	implicitIsolation *nativeamp.ProcessIsolation
+	options             Options
+	log                 *slog.Logger
+	store               SessionStore
+	observe             *observer.Observer
+	ordinaryEnvironment map[string]string
 
 	lifecycleDone chan struct{}
 	lifecycleWG   sync.WaitGroup
@@ -93,7 +91,7 @@ func NewAgent(opts ...Option) *Agent {
 		log:                  log,
 		store:                store,
 		observe:              observe,
-		implicitIsolation:    captureImplicitIsolation(options),
+		ordinaryEnvironment:  nativeamp.CaptureOrdinaryEnvironment(),
 		sessions:             make(map[acp.SessionId]*agentSession),
 		deleted:              make(map[acp.SessionId]struct{}),
 		pendingNativeDeletes: make(map[acp.SessionId]string),

@@ -116,10 +116,13 @@ func TestTurnSupervisorRequiresDistinctTrustedRoot(t *testing.T) {
 	restoreTurnSupervisorSeams(t)
 
 	turnSupervisorEffectiveUID = func() int { return 1000 }
-	if err := validateTurnSupervisorIdentity(supervisorTestIsolation()); err == nil || !strings.Contains(err.Error(), "trusted root") {
+	currentIdentity := supervisorTestIsolation()
+	currentIdentity.UID = 1000
+	currentIdentity.GID = 1000
+	if err := validateTurnSupervisorIdentity(currentIdentity); err == nil || !strings.Contains(err.Error(), "trusted root") {
 		t.Fatalf("non-root identity validation = %v", err)
 	}
-	if _, err := prepareProcessTreeCommand(exec.Command("/bin/true"), processLaunchOptions{Isolation: supervisorTestIsolation()}); err == nil || !strings.Contains(err.Error(), "trusted root") {
+	if _, err := prepareProcessTreeCommand(exec.Command("/bin/true"), processLaunchOptions{Isolation: currentIdentity}); err == nil || !strings.Contains(err.Error(), "trusted root") {
 		t.Fatalf("non-root parent preparation = %v", err)
 	}
 	config := encodeSupervisorConfig(t, turnSupervisorConfig{Path: "/bin/true", Args: []string{"/bin/true"}, Isolation: *supervisorTestIsolation()})

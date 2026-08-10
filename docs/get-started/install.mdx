@@ -38,7 +38,8 @@ See [Authentication](/docs/features/authentication).
 
 ## Provision Linux identity authority
 
-Linux installations must persist the shared identity-lock root:
+Linux installations that enable explicit process isolation must persist the
+shared identity-lock root. Ordinary current-identity execution does not use it:
 
 ```sh
 sudo install -d -o root -g root -m 0700 \

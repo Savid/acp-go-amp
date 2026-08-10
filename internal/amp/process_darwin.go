@@ -26,9 +26,13 @@ func configureCommand(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 }
 
-func (t *processTree) terminateAndWait(_ time.Duration) error {
+func (t *processTree) terminateAndWait(timeout time.Duration) error {
 	if t == nil {
 		return nil
+	}
+
+	if t.generation == nil {
+		return t.terminateOrdinary(timeout)
 	}
 
 	t.cleanupOnce.Do(func() {

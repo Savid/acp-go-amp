@@ -106,14 +106,13 @@ rejects at session start.
   stdout/stderr pipes.
 - Startup and discovery probes run from target-owned isolated HOME/XDG,
   settings, and MCP paths below `WithScratchDir`; the adapter removes that
-  residence only after process-containment completion is proven.
-- Native-process containment: Linux runs every Amp command under a
-  dedicated subreaper that adopts descendants even after `setsid(2)` and
-  requires kernel-confirmed child absence before success. Windows native
-  launch fails closed because its process API cannot apply the mandatory Unix
-  UID/GID identity boundary with empty supplementary groups; cross-compilation
-  proves only that this refusal path builds, not runtime support. The standalone
-  command is Linux-only; embedded Darwin hosts have an explicit
+  residence only after the selected process boundary settles.
+- Native-process containment: ordinary mode runs Amp directly as the current
+  identity on supported platforms and makes no whole-tree or descendant-count
+  claim. Optional explicit Linux isolation uses a trusted-root subreaper that
+  adopts descendants even after `setsid(2)` and requires kernel-confirmed child
+  absence before success. Explicit isolation is refused elsewhere with no
+  ordinary fallback. Embedded Darwin hosts also have an optional
   `WithDarwinBestEffortContainment` opt-in for bounded process-group cleanup.
   That mode cannot contain `setsid` escapes,
   cannot prove escaped descendants absent, and retains a numeric PGID-reuse

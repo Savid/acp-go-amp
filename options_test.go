@@ -186,7 +186,7 @@ func TestContainmentModeAndValidationAcrossPlatforms(t *testing.T) {
 		t.Fatalf("Linux explicit mode = %q", got)
 	}
 	runtimeGOOS = platformWindows
-	if got := containmentMode(Options{}); got != RuntimeContainmentUnavailable {
+	if got := containmentMode(Options{}); got != RuntimeContainmentSharedIdentity {
 		t.Fatalf("Windows mode = %q", got)
 	}
 	runtimeGOOS = platformLinux
@@ -201,8 +201,14 @@ func TestContainmentModeAndValidationAcrossPlatforms(t *testing.T) {
 	if got := containmentMode(Options{DarwinBestEffortContainment: true}); got != RuntimeContainmentBestEffort {
 		t.Fatalf("Darwin opt-in mode = %q", got)
 	}
-	if got := containmentMode(Options{}); got != RuntimeContainmentUnavailable {
+	if got := containmentMode(Options{}); got != RuntimeContainmentSharedIdentity {
 		t.Fatalf("Darwin default mode = %q", got)
+	}
+	if got := containmentMode(Options{DarwinBestEffortContainment: true, ProcessIsolation: &ProcessIsolation{UID: 1, GID: 1}}); got != RuntimeContainmentUnavailable {
+		t.Fatalf("Darwin combined mode = %q", got)
+	}
+	if err := validateContainmentOptions(Options{DarwinBestEffortContainment: true, ProcessIsolation: &ProcessIsolation{UID: 1, GID: 1}}); err == nil {
+		t.Fatal("Darwin containment and process isolation combination was accepted")
 	}
 	if err := validateContainmentOptions(Options{Env: map[string]string{"acp_go_amp_internal_bad": "value"}}); err == nil {
 		t.Fatal("reserved private environment was accepted")
@@ -213,8 +219,12 @@ func TestContainmentModeAndValidationAcrossPlatforms(t *testing.T) {
 }
 
 func TestProcessIsolationOptionClonesAndFailsClosed(t *testing.T) {
-	if (&Agent{}).processIsolationBase() != nil {
+	if (&Agent{}).nativeEnvironmentBase() != nil {
 		t.Fatal("agent without any isolation capture exposed a base environment")
+	}
+	explicitBase := map[string]string{"PATH": "/policy/bin"}
+	if got := (&Agent{options: Options{ProcessIsolation: &ProcessIsolation{BaseEnvironment: explicitBase}}}).nativeEnvironmentBase(); got["PATH"] != "/policy/bin" {
+		t.Fatalf("explicit native environment base = %#v", got)
 	}
 	if err := NewAgent().validateSessionStartOptions(AmpOptions{}); err != nil {
 		t.Fatalf("session start rejected omitted isolation: %v", err)

@@ -15,8 +15,9 @@ var testDarwinRuntimeID atomic.Uint64
 
 func newTestClient(t *testing.T, logger *slog.Logger, options Options) *Client {
 	t.Helper()
-	options.Isolation = testProcessIsolation()
-	options.Isolation.TestOnlyIdentityLockRoot = t.TempDir()
+	if options.Isolation != nil {
+		options.Isolation.TestOnlyIdentityLockRoot = t.TempDir()
+	}
 	if options.TestOnlyAuthLoginPlatform == "" {
 		options.TestOnlyAuthLoginPlatform = "linux"
 	}
@@ -77,11 +78,6 @@ func newTestProbeClient(t *testing.T, logger *slog.Logger, options Options) *Cli
 	return newTestClient(t, logger, options)
 }
 
-// testProcessIsolation is the identity the native fixtures launch under. A root
-// runner isolates to the substitute the policy's nonzero rule forces, so the
-// fixture describes the isolated arm; an unprivileged runner can only describe
-// the identity it already holds, which is the shared arm and carries no
-// standalone owner fields.
 func testProcessIsolation() *ProcessIsolation {
 	uid, gid := os.Geteuid(), os.Getegid()
 	if uid == 0 || gid == 0 {
@@ -110,12 +106,6 @@ func TestNewClientSelectsTheRequestedAuthCompatibilityPolicy(t *testing.T) {
 func TestProbeResidenceValidation(t *testing.T) {
 	if err := NewClient(nil, Options{}).validateProbeResidence(); err == nil {
 		t.Fatal("empty probe residence accepted")
-	}
-
-	invalidIsolation := newTestProbeClient(t, nil, Options{})
-	invalidIsolation.options.Isolation = nil
-	if err := invalidIsolation.validateProbeResidence(); err == nil {
-		t.Fatal("probe residence accepted without process isolation")
 	}
 
 	mismatch := newTestProbeClient(t, nil, Options{})

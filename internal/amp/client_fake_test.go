@@ -193,7 +193,7 @@ func TestPrepareProcessLaunchPublishesTheSettledEnvironment(t *testing.T) {
 	requested := t.TempDir()
 	scratch := t.TempDir()
 
-	client := NewClient(nil, Options{DarwinBestEffort: true, Isolation: testProcessIsolation()})
+	client := NewClient(nil, Options{DarwinBestEffort: true})
 	client.options.NewDarwinGeneration = func(context.Context) (*DarwinGeneration, error) {
 		return &DarwinGeneration{ScratchRoot: scratch, RecordFinished: func(bool) error { return nil }}, nil
 	}
@@ -219,7 +219,7 @@ func TestPrepareProcessLaunchPublishesTheSettledEnvironment(t *testing.T) {
 
 func TestDarwinPrepareProcessLaunchHooksAndErrors(t *testing.T) {
 	ctx := context.Background()
-	client := NewClient(nil, Options{DarwinBestEffort: true, Isolation: testProcessIsolation()})
+	client := NewClient(nil, Options{DarwinBestEffort: true})
 	if _, err := client.prepareProcessLaunch(ctx, exec.Command("true")); !errors.Is(err, ErrProcessContainmentIncomplete) {
 		t.Fatalf("missing generation factory = %v", err)
 	}
@@ -448,11 +448,12 @@ func countArg(args []string, want string) int {
 
 func TestStartupProbeAndVersionBranches(t *testing.T) {
 	ctx := context.Background()
-	if _, _, err := NewClient(nil, Options{}).discoverVersion(ctx); err == nil {
-		t.Fatal("version discovery isolation error ignored")
+	missing := Options{OrdinaryEnvironment: map[string]string{"PATH": t.TempDir()}}
+	if _, _, err := NewClient(nil, missing).discoverVersion(ctx); err == nil {
+		t.Fatal("version discovery PATH error ignored")
 	}
-	if err := NewClient(nil, Options{}).StartupProbe(ctx); err == nil {
-		t.Fatal("StartupProbe isolation error ignored")
+	if err := NewClient(nil, missing).StartupProbe(ctx); err == nil {
+		t.Fatal("StartupProbe PATH error ignored")
 	}
 
 	if err := newTestProbeClient(t, nil, Options{CLIPath: "/does/not/exist"}).StartupProbe(ctx); err == nil {
@@ -849,7 +850,7 @@ func TestClientProcessSeamsReaderAndInterruptEdges(t *testing.T) {
 	}
 
 	clientWithoutPath := newTestClient(t, nil, Options{})
-	clientWithoutPath.options.Isolation.BaseEnvironment["PATH"] = t.TempDir()
+	clientWithoutPath.options.OrdinaryEnvironment["PATH"] = t.TempDir()
 	if _, err := clientWithoutPath.Version(ctx); err == nil {
 		t.Fatal("Version discover error ignored")
 	}

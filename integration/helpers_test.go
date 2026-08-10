@@ -33,9 +33,8 @@ const (
 
 var integrationLogger = slog.New(slog.DiscardHandler)
 
-// integrationContainmentOptions accepts Darwin process-group containment on
-// behalf of the integration tier. Darwin containment fails closed without an
-// explicit caller opt-in, so every agent this package builds has to make it.
+// integrationContainmentOptions exercises Darwin's optional process-group
+// containment for integration agents.
 func integrationContainmentOptions(options []ampacp.Option) []ampacp.Option {
 	if runtime.GOOS == "darwin" {
 		return append(options, ampacp.WithDarwinBestEffortContainment())

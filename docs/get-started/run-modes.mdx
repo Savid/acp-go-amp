@@ -16,7 +16,8 @@ mode is Linux-only and is selected by giving the root supervisor
 file schema, account/home checks, closed environment, and explicit
 `inheritEnvironment` behavior are documented in the
 [CLI reference](/docs/reference/cli). There is no Darwin or Windows
-standalone-launch fallback.
+explicit-isolation fallback; omitting the policy remains ordinary portable
+execution on supported platforms.
 
 An ACP host launches the command and speaks JSON-RPC over its stdio:
 
@@ -46,11 +47,13 @@ ACP input/output streams:
 ```go
 err := ampacp.Serve(ctx, input, output,
 	ampacp.WithExecutablePath("amp"),
-	ampacp.WithProcessIsolation(ampacp.ProcessIsolation{UID: 20001, GID: 20001, BaseEnvironment: isolationEnvironment}),
 	ampacp.WithScratchDir("/path/to/scratch"),
 	ampacp.WithSessionStore(ampacp.NewInMemorySessionStore()),
 )
 ```
+
+Linux hosts that deliberately run a trusted-root supervisor can add
+`WithProcessIsolation`; ordinary embedding does not require it.
 
 Every command flag has an option equivalent (`-path` ↔ `WithExecutablePath`,
 `-scratch-dir` ↔ `WithScratchDir`, `-home` ↔ `WithHome` (unsupported),

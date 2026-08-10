@@ -77,12 +77,13 @@ type Options struct {
 	SettingsFile string
 	// ScratchParent is the already-resolved parent for the account-login browser
 	// shim. The embedding package owns temp-directory resolution.
-	ScratchParent string
-	Env           map[string]string
-	Isolation     *ProcessIsolation
-	Mode          string
-	MCPConfigPath string
-	MaxLineBytes  int
+	ScratchParent       string
+	Env                 map[string]string
+	Isolation           *ProcessIsolation
+	OrdinaryEnvironment map[string]string
+	Mode                string
+	MCPConfigPath       string
+	MaxLineBytes        int
 	// OnGoroutinePanic is invoked with the recovered value when a turn-owned
 	// goroutine panics, so the embedding agent can log the panic instead of
 	// crashing the process. A nil handler leaves the panic to propagate.
@@ -153,6 +154,10 @@ func NewClient(log *slog.Logger, options Options) *Client {
 
 	if options.MaxLineBytes <= 0 {
 		options.MaxLineBytes = defaultMaxJSONLineBytes
+	}
+
+	if options.Isolation == nil && options.OrdinaryEnvironment == nil {
+		options.OrdinaryEnvironment = CaptureOrdinaryEnvironment()
 	}
 
 	checkAuthLoginCompatibility := CheckAuthLoginBrowserCompatibility
@@ -235,7 +240,7 @@ func (c *Client) validateProbeResidence() error {
 		return errors.New("amp probe requires a clean absolute isolated writable root")
 	}
 
-	environment, err := BuildEnvWithIsolation(c.options.Isolation, c.options.Env, c.options.Cwd)
+	environment, err := c.buildEnvironment(c.options.Env, c.options.Cwd)
 	if err != nil {
 		return err
 	}
@@ -265,12 +270,12 @@ func (c *Client) validateProbeResidence() error {
 }
 
 func (c *Client) discoverVersion(ctx context.Context) (string, string, error) {
-	environment, err := BuildEnvWithIsolation(c.options.Isolation, c.options.Env, c.options.Cwd)
+	environment, err := c.buildEnvironment(c.options.Env, c.options.Cwd)
 	if err != nil {
 		return "", "", err
 	}
 
-	path, err := Discover(ctx, c.options.CLIPath, environment)
+	path, err := c.discover(ctx, environment, c.options.Cwd)
 	if err != nil {
 		return "", "", err
 	}
@@ -406,30 +411,29 @@ func (c *Client) Execute(ctx context.Context, input any) (*Turn, error) {
 }
 
 func (c *Client) startTurn(ctx context.Context, args []string, input any) (*Turn, error) {
-	environment, err := BuildEnvWithIsolation(c.options.Isolation, c.options.Env, c.options.Cwd)
-	if err != nil {
-		return nil, err
-	}
+	cwd := c.options.Cwd
+	if cwd == "" {
+		var err error
 
-	path, err := Discover(ctx, c.options.CLIPath, environment)
-	if err != nil {
-		return nil, err
-	}
-
-	cmd := commandContext(context.Background(), path, args...)
-
-	cmd.Dir = c.options.Cwd
-	if cmd.Dir == "" {
-		cmd.Dir, err = getwd()
+		cwd, err = getwd()
 		if err != nil {
 			return nil, fmt.Errorf("get working directory: %w", err)
 		}
 	}
 
-	cmd.Env, err = BuildEnvWithIsolation(c.options.Isolation, c.options.Env, cmd.Dir)
+	environment, err := c.buildEnvironment(c.options.Env, cwd)
 	if err != nil {
 		return nil, err
 	}
+
+	path, err := c.discover(ctx, environment, cwd)
+	if err != nil {
+		return nil, err
+	}
+
+	cmd := commandContext(context.Background(), path, args...)
+	cmd.Dir = cwd
+	cmd.Env = environment
 
 	if cmd.Stdin != nil {
 		return nil, errors.New("create amp stdin: exec: Stdin already set")
@@ -568,27 +572,24 @@ func (c *Client) outputWithArgs(ctx context.Context, args ...string) ([]byte, er
 		return nil, err
 	}
 
-	environment, err := BuildEnvWithIsolation(c.options.Isolation, c.options.Env, c.options.Cwd)
+	cwd := c.options.Cwd
+	if cwd == "" {
+		cwd, _ = getwd()
+	}
+
+	environment, err := c.buildEnvironment(c.options.Env, cwd)
 	if err != nil {
 		return nil, err
 	}
 
-	path, err := Discover(ctx, c.options.CLIPath, environment)
+	path, err := c.discover(ctx, environment, cwd)
 	if err != nil {
 		return nil, err
 	}
 
 	cmd := commandContext(context.Background(), path, args...)
-
-	cmd.Dir = c.options.Cwd
-	if cmd.Dir == "" {
-		cmd.Dir, _ = getwd()
-	}
-
-	cmd.Env, err = BuildEnvWithIsolation(c.options.Isolation, c.options.Env, cmd.Dir)
-	if err != nil {
-		return nil, err
-	}
+	cmd.Dir = cwd
+	cmd.Env = environment
 
 	launch, err := c.prepareProcessLaunch(ctx, cmd)
 	if err != nil {
@@ -682,8 +683,14 @@ func (c *Client) outputWithArgs(ctx context.Context, args ...string) ([]byte, er
 }
 
 func (c *Client) prepareProcessLaunch(ctx context.Context, cmd *exec.Cmd) (*processTreeCommand, error) {
-	if err := validateProcessIsolation(c.options.Isolation); err != nil {
-		return nil, fmt.Errorf("validate Amp process isolation: %w", err)
+	if c.options.Isolation != nil {
+		if err := validateProcessIsolation(c.options.Isolation); err != nil {
+			return nil, fmt.Errorf("validate Amp process isolation: %w", err)
+		}
+	}
+
+	if c.options.DarwinBestEffort && c.options.Isolation != nil {
+		return nil, errors.New("darwin best-effort containment cannot be combined with process isolation")
 	}
 
 	var generation *DarwinGeneration
@@ -718,7 +725,7 @@ func (c *Client) prepareProcessLaunch(ctx context.Context, cmd *exec.Cmd) (*proc
 		return nil, errors.Join(err, finishErr)
 	}
 
-	if !launch.nativeIsolation {
+	if c.options.Isolation != nil && !launch.nativeIsolation {
 		if err := applyProcessIsolation(launch.cmd, c.options.Isolation); err != nil {
 			closeErr := launch.close()
 
@@ -798,8 +805,26 @@ func Discover(ctx context.Context, cliPath string, environments ...[]string) (st
 	return path, nil
 }
 
-// HasAPIKey reports whether the complete explicit environment carries a
-// non-empty AMP_API_KEY. Ambient process state is never consulted.
+func (c *Client) discover(ctx context.Context, environment []string, cwd string) (string, error) {
+	if c.options.Isolation != nil {
+		return Discover(ctx, c.options.CLIPath, environment)
+	}
+
+	file := strings.TrimSpace(c.options.CLIPath)
+	if file == "" {
+		file = ampExecutableName
+	}
+
+	path, err := lookPathInOrdinaryEnvironment(file, environment, cwd)
+	if err != nil {
+		return "", fmt.Errorf("find amp in PATH: %w", err)
+	}
+
+	return path, nil
+}
+
+// HasAPIKey reports whether the supplied environment carries a non-empty
+// AMP_API_KEY.
 func HasAPIKey(overrides map[string]string) bool {
 	value, ok := overrides["AMP_API_KEY"]
 
@@ -820,6 +845,14 @@ func BuildEnvWithIsolation(isolation *ProcessIsolation, overrides map[string]str
 	}
 
 	return buildEnvironment(isolation.BaseEnvironment, overrides, cwd)
+}
+
+func (c *Client) buildEnvironment(overrides map[string]string, cwd string) ([]string, error) {
+	if c.options.Isolation != nil {
+		return BuildEnvWithIsolation(c.options.Isolation, overrides, cwd)
+	}
+
+	return buildEnvironment(c.options.OrdinaryEnvironment, overrides, cwd)
 }
 
 func buildEnvironment(base map[string]string, overrides map[string]string, cwd string) ([]string, error) {

@@ -193,7 +193,7 @@ func TestAuthReadSecretSurfacesAnUnreadableStore(t *testing.T) {
 func TestAuthLoginEnvDropsTheAmbientKey(t *testing.T) {
 	t.Setenv(authAPIKeyEnv, "ambient-key")
 
-	env, err := authLoginEnv(testProcessIsolation(), map[string]string{authAPIKeyEnv: "override-key", "AMP_URL": "https://amp.example"}, "/work")
+	env, err := authLoginEnv(testProcessIsolation(), nil, map[string]string{authAPIKeyEnv: "override-key", "AMP_URL": "https://amp.example"}, "/work")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -249,7 +249,7 @@ func TestAuthDeploymentSupported(t *testing.T) {
 		}
 	}
 
-	if NewClient(nil, Options{TestOnlyAuthLoginPlatform: linuxPlatform}).AuthDeploymentSupported() {
+	if NewClient(nil, Options{TestOnlyAuthLoginPlatform: linuxPlatform, Isolation: &ProcessIsolation{}}).AuthDeploymentSupported() {
 		t.Fatal("an invalid isolation policy was reported as auth-capable")
 	}
 }
@@ -517,16 +517,19 @@ func TestStartAuthLoginRejectsAnUnusableLaunch(t *testing.T) {
 
 	path, _ := fakeAmpPath(t, "login")
 
-	client := NewClient(nil, Options{CLIPath: path, DarwinBestEffort: true, Isolation: testProcessIsolation()})
+	client := NewClient(nil, Options{CLIPath: path, DarwinBestEffort: true})
 	client.checkAuthLoginCompatibility = func(string) error { return nil }
 	if _, err := client.StartAuthLogin(t.Context()); err == nil {
 		t.Fatal("a launch with no Darwin generation factory started a login")
+	}
+	if runtime.GOOS != linuxPlatform {
+		return
 	}
 
 	// The scratch parent is a t.TempDir leaf, nested under a 0700 directory the
 	// foreign identity below cannot enter, so the shim generated there cannot be
 	// handed to it on any platform.
-	handoffClient := newTestClient(t, nil, Options{CLIPath: path, Cwd: t.TempDir(), ScratchParent: t.TempDir()})
+	handoffClient := newTestClient(t, nil, Options{CLIPath: path, Cwd: t.TempDir(), ScratchParent: t.TempDir(), Isolation: testProcessIsolation()})
 	handoffClient.options.Isolation.TestOnlyNoCredential = false
 	// Dropping the credential opt-out puts the policy under the standalone
 	// identity disposition Linux enforces, so it needs the owner fields or it is

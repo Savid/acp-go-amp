@@ -9,16 +9,15 @@ import (
 	"testing"
 )
 
-func TestTurnLaunchFailsClosedWithoutUnescapableContainment(t *testing.T) {
+func TestTurnLaunchSupportsOrdinaryExecution(t *testing.T) {
 	launch, err := prepareProcessTreeCommand(exec.Command("amp"), processLaunchOptions{})
-	if launch != nil || !errors.Is(err, ErrProcessContainmentIncomplete) {
-		t.Fatalf("turn launch = %#v, %v; want containment failure", launch, err)
+	if launch == nil || err != nil {
+		t.Fatalf("ordinary turn launch = %#v, %v", launch, err)
 	}
 
 	launch, err = prepareProcessTreeCommand(exec.Command("amp"), processLaunchOptions{
 		DarwinBestEffort: true,
 		Generation:       &DarwinGeneration{RuntimeID: "00000000000000000000000000000000", ScratchRoot: t.TempDir()},
-		Isolation:        testProcessIsolation(),
 	})
 	if runtime.GOOS == "darwin" {
 		if err != nil || launch == nil {

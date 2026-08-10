@@ -55,11 +55,7 @@ func darwinLaunchBootstrap() {
 		status           io.WriteCloser
 	)
 
-	err := verifyInheritedProcessIsolation()
-	if err == nil {
-		configFile, gate, status, err = darwinLaunchInput()
-	}
-
+	configFile, gate, status, err := darwinLaunchInput()
 	if err == nil {
 		err = runDarwinLaunchBootstrap(configFile, gate)
 	}
@@ -159,8 +155,14 @@ func runDarwinLaunchBootstrap(configInput io.ReadCloser, gate io.ReadCloser) err
 }
 
 func prepareProcessTreeCommand(native *exec.Cmd, options processLaunchOptions) (*processTreeCommand, error) {
+	if options.Isolation != nil {
+		return nil, errors.New("process isolation is unsupported on darwin")
+	}
+
 	if !options.DarwinBestEffort {
-		return nil, fmt.Errorf("%w: Darwin best-effort containment requires explicit opt-in", ErrProcessContainmentIncomplete)
+		configureCommand(native)
+
+		return &processTreeCommand{cmd: native}, nil
 	}
 
 	if options.Generation == nil {
@@ -239,16 +241,7 @@ func prepareProcessTreeCommand(native *exec.Cmd, options processLaunchOptions) (
 	helper := darwinLaunchCommand(executable) // #nosec G204 -- the current executable hosts the private launch bootstrap.
 	helper.Dir = native.Dir
 
-	helper.Env, err = supervisorEnvironment(native.Env, options.Isolation, darwinLaunchBootstrapMode)
-	if err != nil {
-		_ = configFile.Close()
-		_ = gateRead.Close()
-		_ = gateWrite.Close()
-		_ = statusRead.Close()
-		_ = statusWrite.Close()
-
-		return nil, fmt.Errorf("prepare Darwin native launch isolation: %w", err)
-	}
+	helper.Env = append(withoutPrivateAdapterEnv(native.Env), adapterSupervisorModeEnv+"="+darwinLaunchBootstrapMode)
 
 	helper.Stdin = native.Stdin
 	helper.Stdout = native.Stdout

@@ -467,7 +467,7 @@ func TestGeneratedNativeAncestorUnderASharedIdentityAcceptsOnlyRootAncestors(t *
 			want: "0777 is writable without sticky protection",
 		},
 		{
-			name: "root-owned ancestor the shared identity cannot traverse",
+			name: "root-owned ancestor the target identity cannot traverse",
 			stat: directory(0o700, 0, 0),
 			want: "not traversable by the target identity",
 		},
@@ -933,7 +933,7 @@ func TestDurableNativeAncestorUnderASharedIdentityAcceptsOnlyRootAncestors(t *te
 			stat: directory(0o777, 0, 0),
 			want: "native-owned path ancestor mode 0777 is writable",
 		},
-		"root-owned ancestor the shared identity cannot traverse": {
+		"root-owned ancestor the target identity cannot traverse": {
 			stat: directory(0o700, 0, 0),
 			want: "not traversable by the target identity",
 		},

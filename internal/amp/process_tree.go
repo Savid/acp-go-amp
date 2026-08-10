@@ -13,9 +13,9 @@ import (
 var ErrProcessContainmentIncomplete = errors.New("amp process containment incomplete")
 
 // processTreeCommand owns the platform launch wrapper and any parent-side
-// descriptors that establish its containment boundary. Linux uses an embedded
-// subreaper supervisor, opted-in Darwin uses its best-effort process group, and
-// unsupported platforms, including Windows, reject the launch.
+// descriptors that establish its selected process boundary. Ordinary launches
+// own the direct process; explicit Linux isolation uses an embedded subreaper,
+// and opted-in Darwin uses its best-effort process group.
 type processTreeCommand struct {
 	cmd           *exec.Cmd
 	onStartCancel func(func()) func() bool
