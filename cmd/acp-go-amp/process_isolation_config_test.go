@@ -62,7 +62,7 @@ func TestDecodeProcessIsolationConfigStrict(t *testing.T) {
 	}
 }
 
-func TestStandaloneCLIProcessIsolationConfigOptional(t *testing.T) {
+func TestRunWithoutProcessIsolationConfigUsesOrdinaryMode(t *testing.T) {
 	originalServe, originalLoader := serve, processIsolationConfigLoader
 	t.Cleanup(func() {
 		serve = originalServe
@@ -95,7 +95,7 @@ func TestStandaloneCLIProcessIsolationConfigOptional(t *testing.T) {
 	}
 }
 
-func TestExplicitProcessIsolationNeverFallsBack(t *testing.T) {
+func TestRunWithExplicitProcessIsolationConfigIsFailClosed(t *testing.T) {
 	originalServe, originalLoader := serve, processIsolationConfigLoader
 	t.Cleanup(func() {
 		serve = originalServe
