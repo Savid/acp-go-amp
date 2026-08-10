@@ -103,6 +103,23 @@ func (w *commandWait) await(ctx context.Context) (error, bool) {
 	}
 }
 
+// settled reports whether the one direct-child waiter has published its
+// memoized result. Process backends use this immediately before addressing a
+// child by a reusable OS identifier, so close and cancellation never begin a
+// new termination operation after settlement is observable.
+func (w *commandWait) settled() bool {
+	if w == nil {
+		return false
+	}
+
+	select {
+	case <-w.done:
+		return true
+	default:
+		return false
+	}
+}
+
 func (c *processTreeCommand) releaseInherited() {
 	for _, file := range c.inherited {
 		_ = file.Close()

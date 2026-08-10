@@ -3,11 +3,14 @@ package ampacp
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -311,17 +314,176 @@ func TestExplicitProcessIsolationAlwaysRequiresAuthority(t *testing.T) {
 	}
 }
 
+// ordinaryHarnessProbeThreadID is the deliberately missing thread id the native
+// startup probe uses for its method-present checks. Those probe launches are
+// startup, not the prompt's execute turn, so the canonical gate classifies them
+// separately.
+const ordinaryHarnessProbeThreadID = "T-00000000-0000-0000-0000-000000000000"
+
+// ordinaryHarnessLaunch is one recorded native invocation of the containment
+// fixture harness.
+type ordinaryHarnessLaunch struct {
+	Args    []string `json:"args"`
+	UID     int      `json:"uid"`
+	EUID    int      `json:"euid"`
+	Private []string `json:"private"`
+}
+
+// ordinaryAmpHarnessSource is a fake Amp the ordinary launch path can really
+// run. Every invocation appends the identity it ran as and the private adapter
+// environment it was handed, so the canonical containment tests can count
+// spawns and classify each one instead of inferring either from constructed
+// options. An ordinary launch carries no ACP_GO_AMP_INTERNAL_ key at all; the
+// hardened launcher consumes and scrubs its private handoff before native exec.
+const ordinaryAmpHarnessSource = `package main
+
+import (
+	"encoding/json"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+const privatePrefix = "ACP_" + "GO_AMP_INTERNAL_"
+
+func main() {
+	args := os.Args[1:]
+	state := os.Getenv("ORDINARY_HARNESS_STATE")
+
+	private := []string{}
+	for _, entry := range os.Environ() {
+		if strings.HasPrefix(entry, privatePrefix) {
+			private = append(private, strings.SplitN(entry, "=", 2)[0])
+		}
+	}
+	record(state, map[string]any{
+		"args": args, "uid": os.Getuid(), "euid": os.Geteuid(), "private": private,
+	})
+
+	for _, arg := range args {
+		if arg == "T-00000000-0000-0000-0000-000000000000" {
+			os.Stderr.WriteString("Thread not found\n")
+			os.Exit(1)
+		}
+	}
+
+	if len(args) > 0 && args[0] == "version" {
+		os.Stdout.WriteString("0.0.1784765892-gfake\n")
+		return
+	}
+
+	for i, arg := range args {
+		if arg == "threads" && i+1 < len(args) && args[i+1] == "list" {
+			os.Stdout.WriteString("[]\n")
+			return
+		}
+	}
+
+	_, _ = io.ReadAll(os.Stdin)
+	os.Stdout.WriteString("{\"type\":\"system\",\"subtype\":\"init\",\"cwd\":\"/tmp/project\",\"session_id\":\"T-ordinary-thread\"}\n")
+	os.Stdout.WriteString("{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"ordinary\"}]},\"session_id\":\"T-ordinary-thread\"}\n")
+	os.Stdout.WriteString("{\"type\":\"result\",\"subtype\":\"success\",\"duration_ms\":1,\"is_error\":false,\"num_turns\":1,\"result\":\"done\",\"session_id\":\"T-ordinary-thread\"}\n")
+}
+
+func record(state string, value any) {
+	if state == "" {
+		return
+	}
+	file, err := os.OpenFile(filepath.Join(state, "launch.jsonl"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+	if err != nil {
+		os.Exit(3)
+	}
+	defer file.Close()
+	if err := json.NewEncoder(file).Encode(value); err != nil {
+		os.Exit(3)
+	}
+}
+`
+
+// ordinaryAmpHarness builds the fixture harness and returns its path plus the
+// state directory it records launches into. The state directory is published to
+// the child through the ambient environment, so a launch that never reaches the
+// child is indistinguishable from no launch at all: an empty ledger.
+func ordinaryAmpHarness(t *testing.T) (string, string) {
+	t.Helper()
+
+	dir, err := filepath.Abs(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	state := filepath.Join(dir, "state")
+	if err := os.MkdirAll(state, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	source := filepath.Join(dir, "ordinary_amp.go")
+	if err := os.WriteFile(source, []byte(ordinaryAmpHarnessSource), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	path := filepath.Join(dir, "amp")
+	if out, buildErr := exec.Command("go", "build", "-o", path, source).CombinedOutput(); buildErr != nil {
+		t.Fatalf("build ordinary amp harness: %v\n%s", buildErr, out)
+	}
+
+	t.Setenv("ORDINARY_HARNESS_STATE", state)
+
+	return path, state
+}
+
+func ordinaryHarnessLaunches(t *testing.T, state string) []ordinaryHarnessLaunch {
+	t.Helper()
+
+	data, err := os.ReadFile(filepath.Join(state, "launch.jsonl"))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var launches []ordinaryHarnessLaunch
+
+	for line := range strings.SplitSeq(strings.TrimSpace(string(data)), "\n") {
+		var launch ordinaryHarnessLaunch
+		if unmarshalErr := json.Unmarshal([]byte(line), &launch); unmarshalErr != nil {
+			t.Fatalf("decode harness launch %q: %v", line, unmarshalErr)
+		}
+
+		launches = append(launches, launch)
+	}
+
+	return launches
+}
+
+// TestAgentSessionDefaultsToOrdinaryExecution is the canonical ordinary-default
+// gate. It establishes a real session and runs a real prompt against a native
+// harness, then proves the three properties the default owes: the child ran as
+// the identity that supervises it (root or not), it was handed no authority,
+// and no descendant inventory was published for it.
 func TestAgentSessionDefaultsToOrdinaryExecution(t *testing.T) {
 	t.Setenv("AMP_API_KEY", "ambient-key")
 	t.Setenv("ACP_GO_AMP_TEST_CANARY", "ambient-canary")
 
-	probes := 0
-	agent := NewAgent(WithScratchDir(testScratchDir(t)))
-	agent.options.runtime.startupProbe = func(context.Context, *nativeamp.Client) error {
-		probes++
+	harness, state := ordinaryAmpHarness(t)
 
-		return nil
-	}
+	var snapshots, containments int
+
+	var observedModes []RuntimeContainmentMode
+
+	agent := NewAgent(
+		WithExecutablePath(harness),
+		WithScratchDir(testScratchDir(t)),
+		WithRuntimeResourceHooks(RuntimeResourceHooks{
+			ObserveProcessSnapshot: func(context.Context, RuntimeProcessKind, int) { snapshots++ },
+			ObserveContainment: func(_ context.Context, mode RuntimeContainmentMode) {
+				containments++
+				observedModes = append(observedModes, mode)
+			},
+		}),
+	)
 	t.Cleanup(func() {
 		if err := agent.Close(); err != nil {
 			t.Errorf("Close: %v", err)
@@ -332,8 +494,68 @@ func TestAgentSessionDefaultsToOrdinaryExecution(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSession without isolation: %v", err)
 	}
-	if resp.SessionId == "" || probes != 1 {
-		t.Fatalf("session = %q, probes = %d", resp.SessionId, probes)
+	if resp.SessionId == "" {
+		t.Fatal("ordinary session established no id")
+	}
+
+	promptResp, err := agent.Prompt(t.Context(), TextPromptRequest(resp.SessionId, "ordinary-turn", "hello"))
+	if err != nil {
+		t.Fatalf("ordinary prompt: %v", err)
+	}
+	if promptResp.StopReason != acp.StopReasonEndTurn {
+		t.Fatalf("ordinary prompt stop reason = %q", promptResp.StopReason)
+	}
+
+	launches := ordinaryHarnessLaunches(t, state)
+	if len(launches) == 0 {
+		t.Fatal("ordinary session and prompt spawned no native process")
+	}
+
+	var probed, executed int
+
+	for _, launch := range launches {
+		// Identity: ordinary execution never changes who runs the child. On a
+		// root runner that means the child is root; on any other runner it is
+		// that same unprivileged identity. Both are the supervisor's identity,
+		// which is the whole claim.
+		if launch.UID != os.Getuid() || launch.EUID != os.Geteuid() {
+			t.Fatalf("ordinary child identity = %d/%d, want the supervisor's %d/%d", launch.UID, launch.EUID, os.Getuid(), os.Geteuid())
+		}
+		// Authority: the hardened launcher is the only thing that hands a child
+		// private adapter state, and it was never selected.
+		if len(launch.Private) != 0 {
+			t.Fatalf("ordinary child received private adapter environment %v", launch.Private)
+		}
+
+		switch {
+		case len(launch.Args) > 0 && launch.Args[0] == "version":
+			probed++
+		case slices.Contains(launch.Args, ordinaryHarnessProbeThreadID):
+		case slices.Contains(launch.Args, "-x"):
+			executed++
+		}
+	}
+
+	if probed == 0 {
+		t.Fatalf("ordinary startup ran no version probe: %#v", launches)
+	}
+	if executed != 1 {
+		t.Fatalf("ordinary prompt ran %d execute launches, want 1", executed)
+	}
+	if os.Geteuid() == 0 {
+		t.Log("ordinary default executed under a root supervisor: no de-privileging or adapter-private control state")
+	}
+
+	// No inventory: ordinary execution cannot see a whole process tree, so it
+	// publishes no descendant counts rather than an unproven number.
+	if snapshots != 0 {
+		t.Fatalf("ordinary execution published %d descendant snapshots", snapshots)
+	}
+	if containments != 1 || observedModes[0] != RuntimeContainmentSharedIdentity {
+		t.Fatalf("ordinary containment observations = %v", observedModes)
+	}
+	if agent.ContainmentMode().provesWholeTreeLifecycle() {
+		t.Fatal("ordinary execution claimed whole-tree lifecycle")
 	}
 
 	var options nativeamp.Options
@@ -347,8 +569,16 @@ func TestAgentSessionDefaultsToOrdinaryExecution(t *testing.T) {
 	}
 }
 
+// TestExplicitProcessIsolationPreservesPolicy is the canonical explicit-policy
+// gate. An explicit policy is carried verbatim, selects the authoritative
+// launcher, and is fail-closed everywhere it cannot be honoured: each refusal
+// establishes no session, spawns nothing, and never retries the launch through
+// the ordinary launcher.
 func TestExplicitProcessIsolationPreservesPolicy(t *testing.T) {
+	t.Setenv("AMP_API_KEY", "ambient-key")
 	t.Setenv("ACP_GO_AMP_TEST_CANARY", "ambient-canary")
+
+	harness, state := ordinaryAmpHarness(t)
 
 	uid, gid := testIsolationIdentity()
 	policy := ProcessIsolation{
@@ -357,10 +587,12 @@ func TestExplicitProcessIsolationPreservesPolicy(t *testing.T) {
 	}
 	if testIsolationClaimsStandaloneAuthority(uid) {
 		policy.StandaloneOwnerID = "acp-go-amp-tests"
-		policy.StandaloneStateRoot = testStandaloneStateRoot(uid, gid)
+		policy.StandaloneStateRoot = testStandaloneStateRoot(t, uid, gid)
 	}
 
 	agent := NewAgent(WithProcessIsolation(policy))
+	t.Cleanup(func() { _ = agent.Close() })
+
 	var nativeOptions nativeamp.Options
 	agent.configureNativeClient(&nativeOptions, RuntimeResourcePrompt)
 	isolation := nativeOptions.Isolation
@@ -376,12 +608,126 @@ func TestExplicitProcessIsolationPreservesPolicy(t *testing.T) {
 	if isolation.BaseEnvironment["AMP_API_KEY"] != "policy-key" {
 		t.Fatalf("explicit base environment = %#v", isolation.BaseEnvironment)
 	}
-	invalid := NewAgent(WithProcessIsolation(ProcessIsolation{UID: 0, GID: 0}))
-	if _, err := invalid.NewSession(t.Context(), NewSessionRequest(t.TempDir())); err == nil {
-		t.Fatal("invalid explicit policy did not fail session establishment")
+
+	originalGOOS := runtimeGOOS
+	t.Cleanup(func() { runtimeGOOS = originalGOOS })
+
+	// Selection: a valid strict policy is a distinct authoritative mode, not
+	// the ordinary default wearing a policy. The state root only has to be a
+	// clean absolute path for validation; the launcher is what binds it.
+	strictPolicy := ProcessIsolation{
+		UID: 65534, GID: 65534,
+		BaseEnvironment:     map[string]string{"PATH": filepath.Dir(harness)},
+		StandaloneOwnerID:   "acp-go-amp-tests",
+		StandaloneStateRoot: "/var/lib/acp-go-amp-tests",
 	}
-	t.Cleanup(func() {
-		_ = agent.Close()
-		_ = invalid.Close()
+
+	runtimeGOOS = platformLinux
+	if err := validateProcessIsolationOption(&strictPolicy); err != nil {
+		t.Fatalf("valid strict policy rejected: %v", err)
+	}
+
+	mode := containmentMode(Options{ProcessIsolation: &strictPolicy})
+	if mode != RuntimeContainmentAuthoritative || !mode.provesWholeTreeLifecycle() {
+		t.Fatalf("valid strict policy mode = %q", mode)
+	}
+
+	runtimeGOOS = originalGOOS
+
+	authorityFree := ProcessIsolation{UID: uid, GID: gid, BaseEnvironment: policy.BaseEnvironment}
+	for _, refusal := range []struct {
+		name   string
+		goos   string
+		policy ProcessIsolation
+		want   string
+	}{
+		{name: "zero identity", goos: platformLinux, policy: ProcessIsolation{UID: 0, GID: 0}, want: "must be nonzero"},
+		{name: "authority free identity", goos: platformLinux, policy: authorityFree, want: "standalone owner id must match"},
+		{name: "unsupported darwin", goos: platformDarwin, policy: policy, want: "supported only on linux"},
+		{name: "unsupported windows", goos: "windows", policy: policy, want: "supported only on linux"},
+	} {
+		t.Run(refusal.name, func(t *testing.T) {
+			runtimeGOOS = refusal.goos
+			t.Cleanup(func() { runtimeGOOS = originalGOOS })
+
+			refused := NewAgent(
+				WithExecutablePath(harness),
+				WithProcessIsolation(refusal.policy),
+				WithScratchDir(testScratchDir(t)),
+			)
+			t.Cleanup(func() { _ = refused.Close() })
+
+			_, err := refused.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
+			if err == nil || !strings.Contains(err.Error(), refusal.want) {
+				t.Fatalf("refusal = %v, want %q", err, refusal.want)
+			}
+			if launches := ordinaryHarnessLaunches(t, state); len(launches) != 0 {
+				t.Fatalf("refused explicit policy spawned %d native processes: %#v", len(launches), launches)
+			}
+		})
+	}
+
+	// The valid strict policy against the real host launcher. Driving the
+	// native client directly is what makes this a selection proof rather than
+	// another validation proof: the refusal text can only come from the
+	// platform's hardened launcher, which the ordinary path never reaches.
+	nativeClient := nativeamp.NewClient(nil, nativeamp.Options{
+		CLIPath: harness,
+		Cwd:     filepath.Dir(harness),
+		Isolation: &nativeamp.ProcessIsolation{
+			UID: strictPolicy.UID, GID: strictPolicy.GID,
+			BaseEnvironment:     map[string]string{"PATH": filepath.Dir(harness)},
+			StandaloneOwnerID:   strictPolicy.StandaloneOwnerID,
+			StandaloneStateRoot: strictPolicy.StandaloneStateRoot,
+		},
 	})
+
+	switch {
+	case runtime.GOOS != platformLinux:
+		if _, err := nativeClient.Version(t.Context()); err == nil || !strings.Contains(err.Error(), "process isolation is unsupported") {
+			t.Fatalf("off-platform strict selection = %v", err)
+		}
+		if launches := ordinaryHarnessLaunches(t, state); len(launches) != 0 {
+			t.Fatalf("off-platform strict refusal spawned %d native processes: %#v", len(launches), launches)
+		}
+	case os.Geteuid() != 0:
+		// The hardened Linux launcher was selected and refused a supervisor
+		// that does not hold trusted root. The ordinary launcher has no such
+		// check, so reaching this message is the selection evidence.
+		if _, err := nativeClient.Version(t.Context()); err == nil || !strings.Contains(err.Error(), "trusted root identity is required") {
+			t.Fatalf("non-root strict selection = %v", err)
+		}
+		if launches := ordinaryHarnessLaunches(t, state); len(launches) != 0 {
+			t.Fatalf("non-root strict refusal spawned %d native processes: %#v", len(launches), launches)
+		}
+	default:
+		// A root Linux runner can execute the valid selection directly. The
+		// test-only no-credential switch keeps the fixture process at the
+		// supervisor identity, but it does not bypass the authoritative
+		// launcher, its private handoff, or its identity authority.
+		strictPolicy.StandaloneStateRoot = testStandaloneStateRoot(t, strictPolicy.UID, strictPolicy.GID)
+		strictPolicy.BaseEnvironment["ORDINARY_HARNESS_STATE"] = state
+		strictAgentOptions := testContainmentOptions([]Option{
+			WithExecutablePath(harness),
+			WithProcessIsolation(strictPolicy),
+			WithScratchDir(testScratchDir(t)),
+		})
+		identityRoot := t.TempDir()
+		strictAgentOptions = append(strictAgentOptions, func(options *Options) {
+			options.testOnlyIdentityLockRoot = identityRoot
+		})
+		strictAgent := NewAgent(strictAgentOptions...)
+		t.Cleanup(func() { _ = strictAgent.Close() })
+
+		var strictOptions nativeamp.Options
+		strictAgent.configureNativeClient(&strictOptions, RuntimeResourcePrompt)
+		strictOptions.CLIPath = harness
+		strictOptions.Cwd = filepath.Dir(harness)
+		if _, err := nativeamp.NewClient(nil, strictOptions).Version(t.Context()); err != nil {
+			t.Fatalf("root hardened selection: %v", err)
+		}
+		if launches := ordinaryHarnessLaunches(t, state); len(launches) != 1 {
+			t.Fatalf("root hardened selection spawned %d native processes, want exactly 1: %#v", len(launches), launches)
+		}
+	}
 }

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -192,5 +193,37 @@ func TestOrdinaryClientRunsWithoutProcessIsolation(t *testing.T) {
 	defer launch.close()
 	if launch.nativeIsolation || launch.control != nil || len(launch.inherited) != 0 {
 		t.Fatalf("ordinary launch acquired isolation authority: %#v", launch)
+	}
+}
+
+// TestOrdinaryLookupErrorBranches pins ordinary executable resolution: an
+// empty name is refused, an unreadable working directory is reported, and an
+// empty PATH component resolves against the process working directory rather
+// than aborting the lookup.
+func TestOrdinaryLookupErrorBranches(t *testing.T) {
+	if _, err := lookPathInOrdinaryEnvironment("", nil, ""); err == nil {
+		t.Fatal("empty ordinary executable succeeded")
+	}
+
+	originalGetwd := ordinaryEnvironmentGetwd
+	ordinaryEnvironmentGetwd = func() (string, error) { return "", errors.New("getwd") }
+	t.Cleanup(func() { ordinaryEnvironmentGetwd = originalGetwd })
+	if _, err := lookPathInOrdinaryEnvironment("amp", nil, ""); err == nil || !strings.Contains(err.Error(), "get working directory") {
+		t.Fatalf("ordinary getwd error = %v", err)
+	}
+	ordinaryEnvironmentGetwd = originalGetwd
+
+	dir := t.TempDir()
+	executable := filepath.Join(dir, "amp")
+	if err := os.WriteFile(executable, []byte("#!/bin/sh\nexit 1\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	client := NewClient(nil, Options{CLIPath: executable, Cwd: dir, OrdinaryEnvironment: map[string]string{"PATH": string(os.PathListSeparator) + "/bin"}})
+	environment, err := client.buildEnvironment(nil, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lookPathInOrdinaryEnvironment("sh", environment, dir); err != nil {
+		t.Fatalf("ordinary empty PATH component: %v", err)
 	}
 }

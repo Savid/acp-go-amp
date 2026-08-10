@@ -59,6 +59,24 @@ jobs:
       - name: Trusted supervisor security suite
         run: .github/scripts/run-privileged-suite.sh test-trusted-supervisor
 
+  # The self-hosted fleet is Unix, so it can compile the !unix process backend
+  # but never selects it. Run that backend where it is actually chosen: a
+  # Windows host executes internal/amp/process_unsupported.go for real, which is
+  # the only evidence that ordinary launch, completion, cancel and close work
+  # rather than merely parse.
+  portable-runtime:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup Go
+        uses: ./.github/workflows/go-setup
+
+      - name: Portable ordinary lifecycle suite
+        shell: bash
+        run: .github/scripts/run-portable-runtime.sh
+
   native-browser:
     runs-on: [self-hosted]
     steps:

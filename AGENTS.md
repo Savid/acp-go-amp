@@ -28,6 +28,8 @@ stdio or embed the agent directly in Go.
 - `make audit`: local release gate.
 - `make test-integration-live`: live Amp prompt tests gated by
   `ACP_GO_AMP_RUN_INTEGRATION=1` and `ACP_GO_AMP_RUN_LIVE_TOKENS=1`.
+- `make test-portable-runtime`: portable ordinary-lifecycle suite, runnable only
+  on a `!unix` host that selects `internal/amp/process_unsupported.go`.
 
 ## Coding Rules
 

@@ -1,4 +1,4 @@
-//go:build linux || darwin || freebsd || openbsd
+//go:build unix
 
 package amp
 
@@ -11,11 +11,13 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 var (
-	syscallGetpgid       = syscall.Getpgid
-	syscallKill          = syscall.Kill
+	syscallGetpgid       = unix.Getpgid
+	syscallKill          = unix.Kill
 	processTreeReadyWait = awaitProcessTreeReady
 	startProcessTreeWait = startPausedCommandWait
 	// validateBestEffortLaunch is the Darwin generation check. Its Linux
@@ -168,12 +170,38 @@ func (t *processTree) finish(err error) error {
 	return errors.Join(err, t.finishErr)
 }
 
+// settled reports whether the memoized direct-child waiter has already
+// published its result.
+//
+// An ordinary tree addresses its child by the numeric process-group ID
+// captured at launch. Once the direct child is reaped the kernel is free to
+// hand that number to an unrelated group, so a signal sent afterwards is not a
+// no-op — it can reach a stranger. Every ordinary signal is gated on this
+// check, including the first interrupt Turn.Close issues.
+func (t *processTree) settled() bool {
+	if t == nil {
+		return false
+	}
+
+	return t.waiter.settled()
+}
+
+// signalOrdinary signals the ordinary process group only while the direct
+// child has not settled.
+func (t *processTree) signalOrdinary(signal syscall.Signal) error {
+	if t.settled() {
+		return nil
+	}
+
+	return signalProcessGroupID(t.pgid, signal)
+}
+
 func (t *processTree) interrupt() error {
 	if t.generation != nil {
 		return t.terminateAndWait(defaultCloseWait)
 	}
 
-	return signalProcessGroupID(t.pgid, syscall.SIGINT)
+	return t.signalOrdinary(syscall.SIGINT)
 }
 
 func (t *processTree) kill() error {
@@ -194,7 +222,7 @@ func (t *processTree) kill() error {
 		return t.terminateAndWait(defaultCloseWait)
 	}
 
-	return signalProcessGroupID(t.pgid, syscall.SIGKILL)
+	return t.signalOrdinary(syscall.SIGKILL)
 }
 
 func (t *processTree) terminateOrdinary(timeout time.Duration) error {
@@ -203,15 +231,13 @@ func (t *processTree) terminateOrdinary(timeout time.Duration) error {
 	}
 
 	t.cleanupOnce.Do(func() {
-		select {
-		case <-t.waiter.done:
+		if t.settled() {
 			t.cleanupErr = t.finish(nil)
 
 			return
-		default:
 		}
 
-		_ = signalProcessGroupID(t.pgid, syscall.SIGTERM)
+		_ = t.signalOrdinary(syscall.SIGTERM)
 		if t.releaseWaiter != nil {
 			t.releaseWaiter()
 		}
@@ -232,7 +258,7 @@ func (t *processTree) terminateOrdinary(timeout time.Duration) error {
 			return
 		}
 
-		_ = signalProcessGroupID(t.pgid, syscall.SIGKILL)
+		_ = t.signalOrdinary(syscall.SIGKILL)
 		waitCtx, cancel = context.WithTimeout(context.Background(), timeout-phase)
 		_, completed = t.waiter.await(waitCtx)
 

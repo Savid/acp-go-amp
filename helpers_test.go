@@ -60,21 +60,35 @@ func testContainmentOptions(options []Option) []Option {
 	return options
 }
 
-// testStandaloneStateRoot is the standalone state root every adapter-level
-// fixture claims. The authority binds it as the claimed identity's own storage,
-// so the leaf has to be a UID:GID-owned mode-0700 directory under a root-owned
-// ancestry. The ambient temp root is only the ancestry: it is root-owned and
-// world-readable, so naming it directly can never satisfy the claim.
-func testStandaloneStateRoot(uid, gid uint32) string {
-	root := filepath.Join(os.TempDir(), "acp-go-amp-standalone-state-"+strconv.Itoa(os.Getpid()))
-	if err := os.Mkdir(root, 0o700); err != nil && !os.IsExist(err) {
-		panic(err)
+// testStandaloneStateRoot creates the state root an adapter-level fixture
+// claims. A root Linux runner uses /var/lib so every ancestor is protected
+// root-owned storage; ordinary temporary directories are intentionally
+// world-writable and must be refused by the production authority walk.
+func testStandaloneStateRoot(t *testing.T, uid, gid uint32) string {
+	t.Helper()
+
+	parent := os.TempDir()
+	if runtime.GOOS == platformLinux && os.Geteuid() == 0 {
+		parent = "/var/lib"
+	}
+	base, err := os.MkdirTemp(parent, "acp-go-amp-standalone-state-")
+	if err != nil {
+		t.Fatalf("create standalone state parent: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(base) })
+	if err := os.Chmod(base, 0o700); err != nil {
+		t.Fatalf("protect standalone state parent: %v", err)
+	}
+
+	root := filepath.Join(base, "state")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatalf("create standalone state root: %v", err)
 	}
 	if err := os.Chown(root, int(uid), int(gid)); err != nil {
-		panic(err)
+		t.Fatalf("own standalone state root: %v", err)
 	}
 	if err := os.Chmod(root, 0o700); err != nil {
-		panic(err)
+		t.Fatalf("protect standalone state root: %v", err)
 	}
 
 	return root

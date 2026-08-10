@@ -1,4 +1,4 @@
-//go:build linux || darwin || freebsd || openbsd
+//go:build unix
 
 package amp
 
@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -265,5 +266,135 @@ func TestOrdinaryProcessTerminationBranches(t *testing.T) {
 	tree = &processTree{pgid: 12, waiter: &commandWait{done: make(chan struct{})}}
 	if err := tree.terminateOrdinary(0); !errors.Is(err, ErrProcessContainmentIncomplete) {
 		t.Fatalf("unsettled ordinary process = %v", err)
+	}
+}
+
+// TestOrdinarySignalsStopAfterDirectChildSettlement pins the settlement gate.
+// An ordinary tree only knows the numeric process-group ID captured at launch;
+// once the direct child is reaped the kernel may hand that number to a
+// stranger, so no ordinary entry point may signal it again.
+func TestOrdinarySignalsStopAfterDirectChildSettlement(t *testing.T) {
+	originalKill := syscallKill
+	t.Cleanup(func() { syscallKill = originalKill })
+
+	var signals atomic.Int64
+
+	syscallKill = func(int, syscall.Signal) error {
+		signals.Add(1)
+
+		return nil
+	}
+
+	reaped := make(chan struct{})
+	close(reaped)
+
+	settled := &processTree{pgid: 424242, waiter: &commandWait{done: reaped}}
+	if err := settled.interrupt(); err != nil || signals.Load() != 0 {
+		t.Fatalf("settled interrupt = %v, signals = %d", err, signals.Load())
+	}
+	if err := settled.kill(); err != nil || signals.Load() != 0 {
+		t.Fatalf("settled kill = %v, signals = %d", err, signals.Load())
+	}
+	if err := settled.terminateOrdinary(time.Second); err != nil || signals.Load() != 0 {
+		t.Fatalf("settled terminate = %v, signals = %d", err, signals.Load())
+	}
+
+	// A live child is still reachable: the gate suppresses stale signals, not
+	// cancellation itself.
+	live := &processTree{pgid: 424243, waiter: &commandWait{done: make(chan struct{})}}
+	if err := live.interrupt(); err != nil || signals.Load() != 1 {
+		t.Fatalf("live interrupt = %v, signals = %d", err, signals.Load())
+	}
+	if err := live.kill(); err != nil || signals.Load() != 2 {
+		t.Fatalf("live kill = %v, signals = %d", err, signals.Load())
+	}
+
+	// A tree whose waiter has not been published yet has certainly not been
+	// reaped, so it is never treated as settled.
+	var nilTree *processTree
+	if nilTree.settled() {
+		t.Fatal("nil ordinary tree reported settlement")
+	}
+	if (&processTree{}).settled() {
+		t.Fatal("waiterless ordinary tree reported settlement")
+	}
+}
+
+// startOrdinaryTestTree launches a real ordinary child through the platform
+// selector, which returns a direct command for a nil policy.
+func startOrdinaryTestTree(t *testing.T, body string) (*processTree, *exec.Cmd) {
+	t.Helper()
+
+	dir := t.TempDir()
+	script := filepath.Join(dir, "amp")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\n"+body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(script)
+	cmd.Dir = dir
+
+	launch, err := prepareProcessTreeCommand(cmd, processLaunchOptions{})
+	if err != nil {
+		t.Fatalf("prepare ordinary launch: %v", err)
+	}
+
+	tree, err := startProcessTree(launch)
+	if err != nil {
+		t.Fatalf("start ordinary tree: %v", err)
+	}
+
+	return tree, launch.cmd
+}
+
+// TestOrdinaryTurnCloseAfterSettlementIsSilent runs a real ordinary child to
+// completion and then closes the turn. Turn.Close interrupts unconditionally,
+// so this is the case that used to signal a reaped process group: the close
+// must be clean and send nothing at all.
+func TestOrdinaryTurnCloseAfterSettlementIsSilent(t *testing.T) {
+	tree, cmd := startOrdinaryTestTree(t, "exit 0\n")
+	if _, completed := tree.commandWait().await(t.Context()); !completed {
+		t.Fatal("ordinary child did not settle")
+	}
+
+	var signals atomic.Int64
+
+	originalKill := syscallKill
+	t.Cleanup(func() { syscallKill = originalKill })
+	syscallKill = func(pgid int, signal syscall.Signal) error {
+		signals.Add(1)
+
+		return originalKill(pgid, signal)
+	}
+
+	turn := &Turn{cmd: cmd, tree: tree}
+	if err := turn.Close(); err != nil {
+		t.Fatalf("close of an already-settled ordinary turn = %v", err)
+	}
+	if got := signals.Load(); got != 0 {
+		t.Fatalf("settled ordinary close sent %d signals, want 0", got)
+	}
+}
+
+// TestOrdinaryTurnCancelTerminatesLiveChild is the live half: cancellation
+// still reaches a running ordinary child, reaps it, and reports success.
+func TestOrdinaryTurnCancelTerminatesLiveChild(t *testing.T) {
+	tree, cmd := startOrdinaryTestTree(t, "sleep 60\n")
+	pid := cmd.Process.Pid
+
+	turn := &Turn{cmd: cmd, tree: tree}
+	if err := turn.Interrupt(t.Context(), defaultCloseKillAfter); err != nil {
+		t.Fatalf("cancel of a live ordinary turn = %v", err)
+	}
+	if _, completed := tree.commandWait().await(t.Context()); !completed {
+		t.Fatal("cancelled ordinary child was not reaped")
+	}
+	// Close reports the child's own termination status verbatim; what it must
+	// not do is fail the containment boundary or signal the reaped group again.
+	if err := turn.Close(); !expectedExit(err) {
+		t.Fatalf("close after ordinary cancel = %v", err)
+	}
+	if processPIDAlive(pid) {
+		t.Fatalf("cancelled ordinary child pid %d survived cancellation", pid)
 	}
 }

@@ -1,4 +1,4 @@
-//go:build openbsd
+//go:build unix && !linux && !darwin && !freebsd
 
 package amp
 
@@ -7,8 +7,8 @@ import (
 	"syscall"
 )
 
-// The remaining Unix platforms have no Pdeathsig equivalent; parent-death
-// cleanup is best-effort via process-group signalling.
+// The remaining Unix platforms have no portable Pdeathsig equivalent;
+// parent-death cleanup is best-effort via process-group signalling.
 func configureCommand(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 }
