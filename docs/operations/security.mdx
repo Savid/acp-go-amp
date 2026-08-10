@@ -9,8 +9,10 @@ session and about exactly what the session store may contain.
 
 ## Standalone command boundary
 
-The standalone command launches native work only on Linux and requires the
-root-owned mode-`0600` `-process-isolation-config` policy. Resolution walks
+The standalone command's hardened launch is Linux-only and requires the
+root-owned mode-`0600` `-process-isolation-config` policy; omitting the flag
+instead launches native work ordinarily as the identity the command already
+runs as. Resolution walks
 from an open `/` descriptor with `openat` and `O_NOFOLLOW`; every ancestor
 must be root-owned and not writable by group or other, and the final single-link
 policy inode is read through the descriptor that was validated. The configured

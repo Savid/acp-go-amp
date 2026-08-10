@@ -1,9 +1,13 @@
 package main
 
 import (
+	"context"
 	"errors"
+	"io"
 	"strings"
 	"testing"
+
+	ampacp "github.com/savid/acp-go-amp"
 )
 
 const testProcessIsolationConfigPath = "/test/process-isolation.json"
@@ -58,22 +62,54 @@ func TestDecodeProcessIsolationConfigStrict(t *testing.T) {
 	}
 }
 
-func TestRunRequiresProcessIsolationConfig(t *testing.T) {
+func TestStandaloneCLIProcessIsolationConfigOptional(t *testing.T) {
+	originalServe, originalLoader := serve, processIsolationConfigLoader
+	t.Cleanup(func() {
+		serve = originalServe
+		processIsolationConfigLoader = originalLoader
+	})
+
+	processIsolationConfigLoader = func(string) (processIsolationConfig, error) {
+		t.Fatal("omitted -process-isolation-config must not load a policy")
+
+		return processIsolationConfig{}, nil
+	}
+
+	var got ampacp.Options
+
+	serve = func(_ context.Context, _ io.Reader, _ io.Writer, opts ...ampacp.Option) error {
+		for _, opt := range opts {
+			opt(&got)
+		}
+
+		return nil
+	}
+
 	var stderr strings.Builder
-	if code := run(t.Context(), nil, strings.NewReader(""), &strings.Builder{}, &stderr); code != 2 {
+	if code := run(t.Context(), nil, strings.NewReader(""), &strings.Builder{}, &stderr); code != 0 {
 		t.Fatalf("run code = %d, stderr = %q", code, stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "-"+processIsolationConfigFlag+" is required") {
-		t.Fatalf("stderr = %q", stderr.String())
+
+	if got.ProcessIsolation != nil {
+		t.Fatalf("ProcessIsolation = %#v, want nil", got.ProcessIsolation)
 	}
 }
 
-func TestRunRejectsInvalidProcessIsolationConfig(t *testing.T) {
-	original := processIsolationConfigLoader
+func TestExplicitProcessIsolationNeverFallsBack(t *testing.T) {
+	originalServe, originalLoader := serve, processIsolationConfigLoader
+	t.Cleanup(func() {
+		serve = originalServe
+		processIsolationConfigLoader = originalLoader
+	})
+
 	processIsolationConfigLoader = func(string) (processIsolationConfig, error) {
 		return processIsolationConfig{}, errors.New("invalid policy")
 	}
-	t.Cleanup(func() { processIsolationConfigLoader = original })
+	serve = func(context.Context, io.Reader, io.Writer, ...ampacp.Option) error {
+		t.Fatal("a rejected explicit policy must never reach Serve")
+
+		return nil
+	}
 
 	var stderr strings.Builder
 	code := run(

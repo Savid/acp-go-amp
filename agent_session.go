@@ -887,11 +887,12 @@ func (a *Agent) deleteNativeThread(ctx context.Context, id acp.SessionId, native
 
 const missingAPIKeyMessage = "AMP_API_KEY is not set: amp sessions run in an " +
 	"isolated home where amp login credentials are unavailable; set AMP_API_KEY " +
-	"in ProcessIsolation.BaseEnvironment, WithEnv, or session env options"
+	"in the process environment, ProcessIsolation.BaseEnvironment, WithEnv, or " +
+	"session env options"
 
 func (a *Agent) ensureNewSessionStartup(ctx context.Context, cwd string, meta parsedSessionMeta) error {
 	env := mergeEnv(a.options.Env, meta.options.Env)
-	if amp.HasAPIKey(mergeEnv(processIsolationBase(a.options.ProcessIsolation), env)) {
+	if amp.HasAPIKey(mergeEnv(a.processIsolationBase(), env)) {
 		return a.ensureStartupWithProbe(ctx, cwd, env, a.options.runtime.startupProbe)
 	}
 
@@ -909,19 +910,27 @@ func (a *Agent) ensureNewSessionStartup(ctx context.Context, cwd string, meta pa
 
 func (a *Agent) ensureStartup(ctx context.Context, cwd string, meta parsedSessionMeta) error {
 	env := mergeEnv(a.options.Env, meta.options.Env)
-	if !amp.HasAPIKey(mergeEnv(processIsolationBase(a.options.ProcessIsolation), env)) {
+	if !amp.HasAPIKey(mergeEnv(a.processIsolationBase(), env)) {
 		return missingAPIKeyError()
 	}
 
 	return a.ensureStartupWithProbe(ctx, cwd, env, a.options.runtime.startupProbe)
 }
 
-func processIsolationBase(isolation *ProcessIsolation) map[string]string {
-	if isolation == nil {
-		return nil
+// processIsolationBase is the base environment credential checks consult: the
+// explicit policy's base when one is configured, otherwise the implicit
+// current-identity capture, so an ambient AMP_API_KEY keeps working when the
+// isolation option is omitted.
+func (a *Agent) processIsolationBase() map[string]string {
+	if a.options.ProcessIsolation != nil {
+		return a.options.ProcessIsolation.BaseEnvironment
 	}
 
-	return isolation.BaseEnvironment
+	if a.implicitIsolation != nil {
+		return a.implicitIsolation.BaseEnvironment
+	}
+
+	return nil
 }
 
 func missingAPIKeyError() error {

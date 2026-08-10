@@ -16,6 +16,21 @@ var (
 )
 
 func validateProcessIsolationPlatform(isolation *ProcessIsolation) error {
+	// An implicit policy has exactly one valid shape: the identity the process
+	// already runs as. Anything else means the capture and the process have
+	// diverged, and a launch built on that capture would misdescribe itself.
+	if isolation.Implicit {
+		uid, gid := processIsolationGeteuid(), processIsolationGetegid()
+		if int64(isolation.UID) != int64(uid) || int64(isolation.GID) != int64(gid) {
+			return fmt.Errorf(
+				"implicit current-identity policy names uid=%d gid=%d, process runs as uid=%d gid=%d",
+				isolation.UID, isolation.GID, uid, gid,
+			)
+		}
+
+		return nil
+	}
+
 	return validateStandaloneIdentityDispositionPlatform(isolation)
 }
 
@@ -29,6 +44,13 @@ func validateProcessIsolationPlatform(isolation *ProcessIsolation) error {
 func sharedProcessIdentity(isolation *ProcessIsolation) bool {
 	if isolation == nil || processIsolationGOOS != processIsolationLinux {
 		return false
+	}
+
+	// The implicit policy is the current identity by construction, root
+	// included: omission launches native work as whoever already runs the
+	// supervisor, so the shared shape is the only truthful description.
+	if isolation.Implicit {
+		return true
 	}
 
 	effectiveUID := processIsolationGeteuid()
@@ -46,6 +68,13 @@ func applyProcessIsolation(cmd *exec.Cmd, isolation *ProcessIsolation) error {
 	}
 
 	if isolation.TestOnlyNoCredential {
+		return nil
+	}
+
+	// The implicit policy already validated as the running identity, so there
+	// is no credential to apply and the ambient supplementary groups — which
+	// belong to that identity — stay untouched.
+	if isolation.Implicit {
 		return nil
 	}
 

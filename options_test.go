@@ -179,8 +179,11 @@ func TestContainmentModeAndValidationAcrossPlatforms(t *testing.T) {
 	t.Cleanup(func() { runtimeGOOS = originalGOOS })
 
 	runtimeGOOS = platformLinux
-	if got := containmentMode(Options{}); got != RuntimeContainmentAuthoritative {
+	if got := containmentMode(Options{}); got != RuntimeContainmentSharedIdentity {
 		t.Fatalf("Linux mode = %q", got)
+	}
+	if got := containmentMode(Options{ProcessIsolation: &ProcessIsolation{UID: 65534, GID: 65534}}); got != RuntimeContainmentAuthoritative {
+		t.Fatalf("Linux explicit mode = %q", got)
 	}
 	runtimeGOOS = platformWindows
 	if got := containmentMode(Options{}); got != RuntimeContainmentUnavailable {
@@ -210,11 +213,11 @@ func TestContainmentModeAndValidationAcrossPlatforms(t *testing.T) {
 }
 
 func TestProcessIsolationOptionClonesAndFailsClosed(t *testing.T) {
-	if processIsolationBase(nil) != nil {
-		t.Fatal("nil isolation exposed a base environment")
+	if (&Agent{}).processIsolationBase() != nil {
+		t.Fatal("agent without any isolation capture exposed a base environment")
 	}
-	if err := NewAgent().validateSessionStartOptions(AmpOptions{}); err == nil {
-		t.Fatal("session start accepted missing isolation")
+	if err := NewAgent().validateSessionStartOptions(AmpOptions{}); err != nil {
+		t.Fatalf("session start rejected omitted isolation: %v", err)
 	}
 	base := map[string]string{"PATH": "/policy/bin", "CANARY": "base"}
 	opts := applyOptions([]Option{WithProcessIsolation(ProcessIsolation{UID: 10, GID: 20, BaseEnvironment: base})})
@@ -230,7 +233,10 @@ func TestProcessIsolationOptionClonesAndFailsClosed(t *testing.T) {
 	if nativeProcessIsolation(nil, false) != nil {
 		t.Fatal("nil isolation mapped non-nil")
 	}
-	for _, isolation := range []*ProcessIsolation{nil, {UID: 0, GID: 1}, {UID: 1, GID: 0}} {
+	if err := validateProcessIsolationOption(nil); err != nil {
+		t.Fatalf("omitted isolation was rejected: %v", err)
+	}
+	for _, isolation := range []*ProcessIsolation{{UID: 0, GID: 1}, {UID: 1, GID: 0}} {
 		if validateProcessIsolationOption(isolation) == nil {
 			t.Fatalf("invalid isolation accepted: %#v", isolation)
 		}
@@ -240,5 +246,8 @@ func TestProcessIsolationOptionClonesAndFailsClosed(t *testing.T) {
 	t.Cleanup(func() { runtimeGOOS = original })
 	if validateProcessIsolationOption(&ProcessIsolation{UID: 1, GID: 1}) == nil {
 		t.Fatal("windows isolation accepted")
+	}
+	if err := validateProcessIsolationOption(nil); err != nil {
+		t.Fatalf("omitted isolation was rejected on windows: %v", err)
 	}
 }

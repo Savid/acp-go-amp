@@ -9,12 +9,13 @@ inside your own Go program.
 
 ## Standalone
 
-Standalone native mode is Linux-only. The root supervisor must receive
+By default the command needs no isolation policy: native work runs as the
+identity the command already holds, root or not. Hardened standalone native
+mode is Linux-only and is selected by giving the root supervisor
 `-process-isolation-config=/absolute/path/process-isolation.json`; the strict
 file schema, account/home checks, closed environment, and explicit
 `inheritEnvironment` behavior are documented in the
-[CLI reference](/docs/reference/cli). `-version` and Darwin containment
-diagnostics do not require the policy. There is no Darwin or Windows
+[CLI reference](/docs/reference/cli). There is no Darwin or Windows
 standalone-launch fallback.
 
 An ACP host launches the command and speaks JSON-RPC over its stdio:

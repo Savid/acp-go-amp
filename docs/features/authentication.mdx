@@ -11,8 +11,12 @@ environment, or broker one through the provider-auth methods.
 
 ## Standalone credential input
 
-The standalone root supervisor never forwards its ambient environment.
-To pass `AMP_API_KEY` and `AMP_URL`, name each variable explicitly in the
+Without a `-process-isolation-config` policy, the adapter forwards a
+deterministic sanitized capture of its own ambient environment, so an ambient
+`AMP_API_KEY` and `AMP_URL` work as-is.
+
+With a policy, the standalone root supervisor never forwards its ambient
+environment. To pass `AMP_API_KEY` and `AMP_URL`, name each variable explicitly in the
 `inheritEnvironment` array of the root-owned
 `-process-isolation-config` policy. The value must be set in the supervisor
 environment or startup fails; identity, path, loader, XDG/native-home, and

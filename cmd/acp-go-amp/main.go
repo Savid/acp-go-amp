@@ -52,7 +52,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 	flags.StringVar(&providerAuthDirectHome, "provider-auth-direct-home", "", "unsupported: Amp's disconnect releases only the ledger slot a connection owns, so no leg acts on a canonical native home; a non-empty value is rejected at session start")
 	flags.BoolVar(&debug, "debug", false, "enable debug logging")
 	flags.BoolVar(&showVersion, "version", false, "print adapter version and exit")
-	flags.StringVar(&isolationConfigPath, processIsolationConfigFlag, "", "absolute path to the required root-owned mode-0600 Linux child-isolation policy")
+	flags.StringVar(&isolationConfigPath, processIsolationConfigFlag, "", "absolute path to an optional root-owned mode-0600 Linux child-isolation policy; omitted runs native work as the current identity")
 	flags.Var(&seedFiles, "seed-file", "seed file as <relpath>=<hostpath>, written into each session's isolated native root; repeatable")
 
 	if err := flags.Parse(args); err != nil {
@@ -66,17 +66,26 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 		return 0
 	}
 
-	if isolationConfigPath == "" {
-		_, _ = fmt.Fprintf(stderr, "acp-go-amp: -%s is required for standalone native mode\n", processIsolationConfigFlag)
+	// An explicit policy path is strict hardening: it loads and validates
+	// before anything serves, and any failure refuses startup. Omission appends
+	// no isolation option at all, so native work runs as the current identity.
+	var isolationOptions []ampacp.Option
 
-		return 2
-	}
+	if isolationConfigPath != "" {
+		isolation, err := processIsolationConfigLoader(isolationConfigPath)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "acp-go-amp: process isolation: %v\n", err)
 
-	isolation, err := processIsolationConfigLoader(isolationConfigPath)
-	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "acp-go-amp: process isolation: %v\n", err)
+			return 1
+		}
 
-		return 1
+		isolationOptions = append(isolationOptions, ampacp.WithProcessIsolation(ampacp.ProcessIsolation{
+			UID:                 isolation.UID,
+			GID:                 isolation.GID,
+			BaseEnvironment:     isolation.BaseEnvironment,
+			StandaloneOwnerID:   isolation.StandaloneOwnerID,
+			StandaloneStateRoot: isolation.StandaloneStateRoot,
+		}))
 	}
 
 	seeds, err := seedFiles.contents()
@@ -124,14 +133,9 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 		ampacp.WithProviderAuthDirectHome(providerAuthDirectHome),
 		ampacp.WithLogger(logger),
 		ampacp.WithAgentVersion(agentVer),
-		ampacp.WithProcessIsolation(ampacp.ProcessIsolation{
-			UID:                 isolation.UID,
-			GID:                 isolation.GID,
-			BaseEnvironment:     isolation.BaseEnvironment,
-			StandaloneOwnerID:   isolation.StandaloneOwnerID,
-			StandaloneStateRoot: isolation.StandaloneStateRoot,
-		}),
 	)
+
+	serveOptions = append(serveOptions, isolationOptions...)
 
 	if len(seeds) > 0 {
 		serveOptions = append(serveOptions, ampacp.WithSeedFiles(seeds))

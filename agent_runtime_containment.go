@@ -39,7 +39,7 @@ func (mode RuntimeContainmentMode) provesWholeTreeLifecycle() bool {
 }
 
 func (a *Agent) configureNativeClient(options *nativeamp.Options, kind RuntimeResourceKind) {
-	options.Isolation = nativeProcessIsolation(a.options.ProcessIsolation, a.options.testOnlyNoCredential)
+	options.Isolation = a.nativeIsolation()
 
 	options.TestOnlyAuthLoginPlatform = a.options.testOnlyAuthLoginPlatform
 
@@ -110,4 +110,36 @@ func nativeProcessIsolation(isolation *ProcessIsolation, testOnlyNoCredential bo
 		TestOnlyNoCredential: testOnlyNoCredential, IdentityLock: isolation.IdentityLock, AuthorityDomain: isolation.AuthorityDomain,
 		StandaloneOwnerID: isolation.StandaloneOwnerID, StandaloneStateRoot: isolation.StandaloneStateRoot,
 	}
+}
+
+// captureImplicitIsolation snapshots the ordinary current-identity launch
+// policy exactly once, at agent construction, and only when no explicit policy
+// was configured. Every native client is then handed a clone of this one
+// capture, so the implicit base environment is deterministic for the agent's
+// whole lifetime.
+func captureImplicitIsolation(options Options) *nativeamp.ProcessIsolation {
+	if options.ProcessIsolation != nil {
+		return nil
+	}
+
+	return nativeamp.ImplicitProcessIsolation()
+}
+
+// nativeIsolation is the launch policy every native client runs under: the
+// explicit policy when one was configured, otherwise a clone of the implicit
+// current-identity capture.
+func (a *Agent) nativeIsolation() *nativeamp.ProcessIsolation {
+	if isolation := nativeProcessIsolation(a.options.ProcessIsolation, a.options.testOnlyNoCredential); isolation != nil {
+		return isolation
+	}
+
+	if a.implicitIsolation == nil {
+		return nil
+	}
+
+	clone := *a.implicitIsolation
+	clone.BaseEnvironment = cloneStringMap(a.implicitIsolation.BaseEnvironment)
+	clone.TestOnlyNoCredential = a.options.testOnlyNoCredential
+
+	return &clone
 }

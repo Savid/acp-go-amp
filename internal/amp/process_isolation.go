@@ -3,6 +3,7 @@ package amp
 import (
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -15,9 +16,14 @@ type ProcessIdentityLockCapability interface {
 }
 
 type ProcessIsolation struct {
-	UID                      uint32
-	GID                      uint32
-	BaseEnvironment          map[string]string
+	UID             uint32
+	GID             uint32
+	BaseEnvironment map[string]string
+	// Implicit marks the ordinary current-identity launch policy captured when
+	// no explicit isolation is configured: UID and GID name the identity the
+	// process already runs as, BaseEnvironment is the sanitized ambient capture,
+	// and no credential is ever applied. Explicit policies never set it.
+	Implicit                 bool
 	TestOnlyNoCredential     bool
 	TestOnlyIdentityLockRoot string
 	IdentityLock             ProcessIdentityLockCapability `json:"-"`
@@ -30,11 +36,55 @@ const (
 	envIsolationUID       = adapterPrivateEnvPrefix + "ISOLATION_UID"
 	envIsolationGID       = adapterPrivateEnvPrefix + "ISOLATION_GID"
 	envIsolationTest      = adapterPrivateEnvPrefix + "ISOLATION_TEST_ONLY"
+	envIsolationImplicit  = adapterPrivateEnvPrefix + "ISOLATION_IMPLICIT"
 	envValueTrue          = "true"
 	processIsolationLinux = "linux"
 )
 
-var processIsolationGOOS = runtime.GOOS
+var (
+	processIsolationGOOS = runtime.GOOS
+
+	implicitIsolationEnviron = os.Environ
+	implicitIsolationUID     = os.Geteuid
+	implicitIsolationGID     = os.Getegid
+)
+
+// ImplicitProcessIsolation captures the ordinary current-identity launch
+// policy used when the embedder configures no explicit isolation: the identity
+// this process already runs as — root or not — and a sanitized snapshot of the
+// ambient environment. The capture happens once per call, so every launch built
+// from one result sees the same base environment regardless of later ambient
+// mutation.
+func ImplicitProcessIsolation() *ProcessIsolation {
+	base := map[string]string{}
+
+	for _, entry := range implicitIsolationEnviron() {
+		key, value, ok := strings.Cut(entry, "=")
+		if !ok || key == "" || isPrivateAdapterEnv(key) || isScrubbedEnv(key) {
+			continue
+		}
+
+		base[key] = value
+	}
+
+	return &ProcessIsolation{
+		UID:             implicitIdentityValue(implicitIsolationUID()),
+		GID:             implicitIdentityValue(implicitIsolationGID()),
+		BaseEnvironment: base,
+		Implicit:        true,
+	}
+}
+
+// implicitIdentityValue maps an effective id onto the 32 bits an isolation
+// policy stores. A platform that reports no id (-1) fails closed onto an id no
+// launch validation can match.
+func implicitIdentityValue(id int) uint32 {
+	if id < 0 || id > math.MaxUint32 {
+		return math.MaxUint32
+	}
+
+	return uint32(id)
+}
 
 // sharedIdentitySupervisorRemedy states what an operator can change when the
 // supervisor was asked to launch the native process under the very identity it
@@ -49,7 +99,12 @@ func validateProcessIsolation(isolation *ProcessIsolation) error {
 		return errors.New("process isolation policy is required")
 	}
 
-	if isolation.UID == 0 || isolation.GID == 0 {
+	if isolation.Implicit {
+		if isolation.IdentityLock != nil || isolation.AuthorityDomain != nil ||
+			isolation.StandaloneOwnerID != "" || isolation.StandaloneStateRoot != "" {
+			return errors.New("implicit current-identity launch forbids identity capabilities and standalone owner fields")
+		}
+	} else if isolation.UID == 0 || isolation.GID == 0 {
 		return errors.New("process isolation UID and GID must be nonzero")
 	}
 
@@ -130,10 +185,11 @@ func supervisorEnvironment(native []string, isolation *ProcessIsolation, mode st
 		return nil, err
 	}
 
-	env := make([]string, 0, len(native)+4)
+	env := make([]string, 0, len(native)+5)
 	for _, entry := range native {
 		name, _, ok := strings.Cut(entry, "=")
-		if ok && name != adapterSupervisorModeEnv && name != envIsolationUID && name != envIsolationGID && name != envIsolationTest {
+		if ok && name != adapterSupervisorModeEnv && name != envIsolationUID && name != envIsolationGID &&
+			name != envIsolationTest && name != envIsolationImplicit {
 			env = append(env, entry)
 		}
 	}
@@ -143,6 +199,7 @@ func supervisorEnvironment(native []string, isolation *ProcessIsolation, mode st
 		envIsolationUID+"="+strconv.FormatUint(uint64(isolation.UID), 10),
 		envIsolationGID+"="+strconv.FormatUint(uint64(isolation.GID), 10),
 		envIsolationTest+"="+strconv.FormatBool(isolation.TestOnlyNoCredential),
+		envIsolationImplicit+"="+strconv.FormatBool(isolation.Implicit),
 	), nil
 }
 
@@ -156,6 +213,15 @@ func verifyInheritedProcessIsolation() error {
 
 	if os.Getenv(envIsolationTest) == envValueTrue {
 		return nil
+	}
+
+	// An implicit launch never changed credentials, so the proof is that the
+	// bootstrap still runs as the captured identity; the ambient supplementary
+	// groups belong to that identity and are not a failure.
+	if os.Getenv(envIsolationImplicit) == envValueTrue {
+		return validateProcessIsolation(&ProcessIsolation{
+			UID: uint32(uid), GID: uint32(gid), BaseEnvironment: map[string]string{}, Implicit: true,
+		})
 	}
 
 	return verifyProcessIsolation(&ProcessIsolation{UID: uint32(uid), GID: uint32(gid), BaseEnvironment: map[string]string{}})

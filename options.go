@@ -103,8 +103,10 @@ type ProcessIdentityLockCapability interface {
 	Duplicate() (*os.File, error)
 }
 
-// ProcessIsolation is the mandatory operating-system identity and complete
-// base environment for every native Amp process.
+// ProcessIsolation is an explicit operating-system identity and complete base
+// environment for every native Amp process. Omitting it launches native work
+// as the current identity with a deterministic capture of the ambient
+// environment as the base.
 type ProcessIsolation struct {
 	UID             uint32
 	GID             uint32
@@ -302,10 +304,13 @@ func WithExecutablePath(path string) Option {
 	}
 }
 
-// WithProcessIsolation requires every Amp command, probe, and authentication
-// leg to run as the supplied non-root identity with no
-// supplementary groups. BaseEnvironment replaces the adapter environment;
-// WithEnv and per-session values overlay it.
+// WithProcessIsolation is explicit hardening: it requires every Amp command,
+// probe, and authentication leg to run as the supplied non-root identity with
+// no supplementary groups. BaseEnvironment replaces the adapter environment;
+// WithEnv and per-session values overlay it. Omitting the option is the
+// ordinary default — native work runs as the current identity, root or not,
+// over a deterministically captured clone of the ambient environment. An
+// invalid explicit policy fails closed before any native spawn.
 func WithProcessIsolation(isolation ProcessIsolation) Option {
 	return func(options *Options) {
 		cloned := isolation
@@ -596,7 +601,10 @@ func containmentMode(options Options) RuntimeContainmentMode {
 
 	switch runtimeGOOS {
 	case platformLinux:
-		if sharedProcessIdentity(options.ProcessIsolation) {
+		// Omission launches the native tree as the identity this process
+		// already runs as, so shared identity is the only truthful report; an
+		// authoritative claim belongs solely to an explicit distinct identity.
+		if options.ProcessIsolation == nil || sharedProcessIdentity(options.ProcessIsolation) {
 			return RuntimeContainmentSharedIdentity
 		}
 

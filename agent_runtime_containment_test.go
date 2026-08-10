@@ -28,7 +28,9 @@ func TestAgentContainmentModeAndObservation(t *testing.T) {
 	var want RuntimeContainmentMode
 	switch runtime.GOOS {
 	case "linux":
-		want = RuntimeContainmentAuthoritative
+		// No explicit policy means the native tree runs as this process's own
+		// identity, and the report says so.
+		want = RuntimeContainmentSharedIdentity
 	default:
 		want = RuntimeContainmentUnavailable
 	}
@@ -264,8 +266,9 @@ func TestSimulatedDarwinContainmentConfiguration(t *testing.T) {
 // TestContainmentModeReportsASharedAgentIdentity proves the Linux boundary
 // names the identity it actually established: the authoritative report is kept
 // for a launch that crosses a credential boundary, and a launch that runs the
-// agent under the supervisor's own identity says so instead. Root never
-// reaches the shared report, and no other platform changes.
+// agent under the supervisor's own identity says so instead. An omitted policy
+// is such a launch by construction — root or not — and no other platform
+// changes.
 func TestContainmentModeReportsASharedAgentIdentity(t *testing.T) {
 	originalGOOS, originalUID := runtimeGOOS, containmentEffectiveUID
 	t.Cleanup(func() { runtimeGOOS, containmentEffectiveUID = originalGOOS, originalUID })
@@ -281,13 +284,16 @@ func TestContainmentModeReportsASharedAgentIdentity(t *testing.T) {
 	if got := containmentMode(Options{ProcessIsolation: distinct}); got != RuntimeContainmentAuthoritative {
 		t.Fatalf("distinct identity mode = %q", got)
 	}
-	if got := containmentMode(Options{}); got != RuntimeContainmentAuthoritative {
+	if got := containmentMode(Options{}); got != RuntimeContainmentSharedIdentity {
 		t.Fatalf("absent policy mode = %q", got)
 	}
 
 	containmentEffectiveUID = func() int { return 0 }
 	if got := containmentMode(Options{ProcessIsolation: shared}); got != RuntimeContainmentAuthoritative {
 		t.Fatalf("trusted root mode = %q", got)
+	}
+	if got := containmentMode(Options{}); got != RuntimeContainmentSharedIdentity {
+		t.Fatalf("absent policy root mode = %q", got)
 	}
 
 	containmentEffectiveUID = func() int { return 1000 }
@@ -377,4 +383,108 @@ func TestSharedIdentityProcessIsolationOptionCarriesNoStandaloneOwnerFields(t *t
 	if err == nil || !strings.Contains(err.Error(), "standalone owner id must match") {
 		t.Fatalf("isolated policy error = %v", err)
 	}
+}
+
+// TestAgentSessionDefaultsToOrdinaryExecution proves omitting
+// WithProcessIsolation is the ordinary default: session establishment
+// succeeds, the ambient credential is honored through the implicit base
+// environment, and every native client is handed a clone of the one
+// current-identity capture rather than an isolation policy.
+func TestAgentSessionDefaultsToOrdinaryExecution(t *testing.T) {
+	t.Setenv("AMP_API_KEY", "ambient-key")
+	t.Setenv("ACP_GO_AMP_TEST_CANARY", "ambient-canary")
+
+	probes := 0
+	agent := NewAgent(WithScratchDir(testScratchDir(t)))
+	agent.options.runtime.startupProbe = func(context.Context, *nativeamp.Client) error {
+		probes++
+
+		return nil
+	}
+	t.Cleanup(func() {
+		if err := agent.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	})
+
+	resp, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
+	if err != nil {
+		t.Fatalf("NewSession without isolation: %v", err)
+	}
+	if resp.SessionId == "" || probes != 1 {
+		t.Fatalf("session = %q, probes = %d", resp.SessionId, probes)
+	}
+
+	isolation := agent.nativeIsolation()
+	if isolation == nil || !isolation.Implicit {
+		t.Fatalf("native isolation = %#v, want implicit capture", isolation)
+	}
+	if int64(isolation.UID) != int64(os.Geteuid()) || int64(isolation.GID) != int64(os.Getegid()) {
+		t.Fatalf("implicit identity = %d:%d, process runs as %d:%d", isolation.UID, isolation.GID, os.Geteuid(), os.Getegid())
+	}
+	if isolation.BaseEnvironment["ACP_GO_AMP_TEST_CANARY"] != "ambient-canary" ||
+		isolation.BaseEnvironment["AMP_API_KEY"] != "ambient-key" {
+		t.Fatalf("implicit base environment missed ambient values: %#v", isolation.BaseEnvironment)
+	}
+	if isolation.IdentityLock != nil || isolation.AuthorityDomain != nil ||
+		isolation.StandaloneOwnerID != "" || isolation.StandaloneStateRoot != "" {
+		t.Fatalf("implicit capture carries isolation authority: %#v", isolation)
+	}
+
+	isolation.BaseEnvironment["ACP_GO_AMP_TEST_CANARY"] = "mutated"
+	if agent.nativeIsolation().BaseEnvironment["ACP_GO_AMP_TEST_CANARY"] != "ambient-canary" {
+		t.Fatal("implicit capture is shared rather than cloned")
+	}
+
+	if sharedProcessIdentity(nil) {
+		t.Fatal("a nil policy reported an explicit shared identity")
+	}
+	if (&Agent{}).nativeIsolation() != nil {
+		t.Fatal("an agent without any capture produced a launch policy")
+	}
+}
+
+// TestExplicitProcessIsolationPreservesPolicy proves supplying
+// WithProcessIsolation stays explicit hardening: the policy reaches native
+// clients verbatim with no ambient environment mixed in, and an invalid
+// policy fails session establishment closed with no ordinary-mode fallback.
+func TestExplicitProcessIsolationPreservesPolicy(t *testing.T) {
+	t.Setenv("ACP_GO_AMP_TEST_CANARY", "ambient-canary")
+
+	uid, gid := testIsolationIdentity()
+	policy := ProcessIsolation{
+		UID: uid, GID: gid,
+		BaseEnvironment: map[string]string{"PATH": "/policy/bin", "AMP_API_KEY": "policy-key"},
+	}
+	if testIsolationClaimsStandaloneAuthority(uid) {
+		policy.StandaloneOwnerID = "acp-go-amp-tests"
+		policy.StandaloneStateRoot = testStandaloneStateRoot(uid, gid)
+	}
+
+	agent := NewAgent(WithProcessIsolation(policy))
+	isolation := agent.nativeIsolation()
+	if isolation == nil || isolation.Implicit {
+		t.Fatalf("native isolation = %#v, want the explicit policy", isolation)
+	}
+	if isolation.UID != policy.UID || isolation.GID != policy.GID {
+		t.Fatalf("explicit identity = %d:%d, want %d:%d", isolation.UID, isolation.GID, policy.UID, policy.GID)
+	}
+	if _, ambient := isolation.BaseEnvironment["ACP_GO_AMP_TEST_CANARY"]; ambient {
+		t.Fatal("explicit policy absorbed ambient environment")
+	}
+	if isolation.BaseEnvironment["AMP_API_KEY"] != "policy-key" {
+		t.Fatalf("explicit base environment = %#v", isolation.BaseEnvironment)
+	}
+	if agent.implicitIsolation != nil {
+		t.Fatal("explicit policy still captured an implicit fallback")
+	}
+
+	invalid := NewAgent(WithProcessIsolation(ProcessIsolation{UID: 0, GID: 0}))
+	if _, err := invalid.NewSession(t.Context(), NewSessionRequest(t.TempDir())); err == nil {
+		t.Fatal("invalid explicit policy did not fail session establishment")
+	}
+	t.Cleanup(func() {
+		_ = agent.Close()
+		_ = invalid.Close()
+	})
 }

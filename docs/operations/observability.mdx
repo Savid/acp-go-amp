@@ -27,8 +27,9 @@ default — see [Raw events](/docs/features/raw-events).
 
 The `acp_go_amp.runtime.containment` gauge records one point with
 `containment=authoritative|shared_identity|best_effort|unavailable`: Linux
-reports `authoritative`, or `shared_identity` when the configured native
-identity is the identity the adapter already runs as, Windows reports
+reports `authoritative`, or `shared_identity` when the native identity is the
+identity the adapter already runs as — because the configured identity matches
+it, or because no isolation policy was configured at all — Windows reports
 `unavailable`, and Darwin reports `unavailable` unless its explicit
 best-effort mode is selected. Darwin best-effort also emits an unconditional
 structured warning. `ObserveContainment` exposes the same mode to embedding

@@ -63,8 +63,10 @@ func (a *Agent) validateSessionStartOptions(options AmpOptions) error {
 }
 
 func validateProcessIsolationOption(isolation *ProcessIsolation) error {
+	// Omission is the ordinary default: native work runs as the current
+	// identity, so there is nothing to validate and nothing to refuse.
 	if isolation == nil {
-		return errors.New("process isolation policy is required")
+		return nil
 	}
 
 	if isolation.UID == 0 || isolation.GID == 0 {

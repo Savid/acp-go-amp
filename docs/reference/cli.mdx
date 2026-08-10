@@ -6,11 +6,14 @@ description: Every flag the acp-go-amp stdio command accepts, and how stdout is 
 `acp-go-amp` runs an ACP JSON-RPC server on stdio. An ACP host launches it as a
 subprocess; stdout is reserved for JSON-RPC and diagnostics go to stderr.
 
-## Required standalone isolation policy
+## Optional standalone isolation policy
 
-Normal serve mode is Linux-only and requires
-`-process-isolation-config=/absolute/path/process-isolation.json`.
-`-version` and the Darwin containment diagnostic subcommands are exempt.
+Serve mode needs no isolation policy: omitting
+`-process-isolation-config` launches native work as the identity the command
+already runs as, over a deterministic capture of the ambient environment.
+Supplying `-process-isolation-config=/absolute/path/process-isolation.json`
+selects the Linux-only hardened standalone mode; a policy that fails to load
+or validate refuses startup before serving, with no ordinary-mode fallback.
 The policy must be a root-owned, single-link regular file with mode `0600`.
 Every component is opened from `/` without following symlinks, and every
 ancestor must be root-owned and not writable by group or other. Unknown JSON
@@ -67,7 +70,7 @@ home for native tools.
 | Flag | Meaning |
 |---|---|
 | `-path` | Amp executable path. Defaults to `amp` on `PATH`. |
-| `-process-isolation-config` | Required absolute path to the standalone Linux isolation policy described above. |
+| `-process-isolation-config` | Optional absolute path to the standalone Linux isolation policy described above. Omitted launches native work as the current identity. |
 | `-scratch-dir` | Parent directory for ephemeral scratch: isolated per-session native HOME/XDG state, the startup/discovery probes' isolated HOME/XDG/settings/MCP residence, and any temp. Empty means the system temp directory. |
 | `-home` | Native config/auth root. Accepted on the adapter surface; non-empty values fail session start because Amp has no such root — its per-session isolated HOME/XDG state lives under `-scratch-dir` instead. |
 | `-provider-auth-root` | Absolute durable directory holding the values-free provider-auth ledger. Empty leaves every `_amp/auth/*` method unadvertised. Darwin and Windows authorization fails before native login. See [Authentication](/docs/features/authentication#broker-a-login). |

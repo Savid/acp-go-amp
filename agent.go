@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/coder/acp-go-sdk"
+	nativeamp "github.com/savid/acp-go-amp/internal/amp"
 	"github.com/savid/acp-go-amp/internal/observer"
 )
 
@@ -18,6 +19,9 @@ type Agent struct {
 	log     *slog.Logger
 	store   SessionStore
 	observe *observer.Observer
+	// implicitIsolation is the one-time current-identity capture native
+	// launches clone when no explicit ProcessIsolation was configured.
+	implicitIsolation *nativeamp.ProcessIsolation
 
 	lifecycleDone chan struct{}
 	lifecycleWG   sync.WaitGroup
@@ -89,6 +93,7 @@ func NewAgent(opts ...Option) *Agent {
 		log:                  log,
 		store:                store,
 		observe:              observe,
+		implicitIsolation:    captureImplicitIsolation(options),
 		sessions:             make(map[acp.SessionId]*agentSession),
 		deleted:              make(map[acp.SessionId]struct{}),
 		pendingNativeDeletes: make(map[acp.SessionId]string),
