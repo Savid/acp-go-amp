@@ -1020,6 +1020,16 @@ func TestClientProcessSeamsReaderAndInterruptEdges(t *testing.T) {
 	}
 }
 
+func TestCommandCwdUsesProcessWorkingDirectory(t *testing.T) {
+	original := getwd
+	t.Cleanup(func() { getwd = original })
+
+	getwd = func() (string, error) { return "/working", nil }
+	if got := (&Client{}).commandCwd(); got != "/working" {
+		t.Fatalf("command cwd = %q, want /working", got)
+	}
+}
+
 type failingWriteCloser struct{}
 
 func (failingWriteCloser) Write([]byte) (int, error) { return 0, errors.New("write failed") }
