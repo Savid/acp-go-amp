@@ -105,6 +105,10 @@ func (f *authFixture) generation() string {
 }
 
 func (f *authFixture) authorize(connectionID string, requestID string) (authAuthorizeResult, error) {
+	return f.authorizeMethod(connectionID, requestID, authMethodLogin)
+}
+
+func (f *authFixture) authorizeMethod(connectionID string, requestID string, method string) (authAuthorizeResult, error) {
 	f.t.Helper()
 
 	var result authAuthorizeResult
@@ -113,7 +117,7 @@ func (f *authFixture) authorize(connectionID string, requestID string) (authAuth
 		authFieldProviderID:         authProviderID,
 		authFieldConnectionID:       connectionID,
 		authFieldMethodsGeneration:  f.generation(),
-		authFieldMethod:             authMethodID,
+		authFieldMethod:             method,
 		authFieldAuthorizeRequestID: requestID,
 	}, &result)
 
@@ -121,9 +125,13 @@ func (f *authFixture) authorize(connectionID string, requestID string) (authAuth
 }
 
 func (f *authFixture) mustAuthorize(connectionID string) authAuthorizeResult {
+	return f.mustAuthorizeMethod(connectionID, authMethodLogin)
+}
+
+func (f *authFixture) mustAuthorizeMethod(connectionID string, method string) authAuthorizeResult {
 	f.t.Helper()
 
-	result, err := f.authorize(connectionID, "request-"+connectionID)
+	result, err := f.authorizeMethod(connectionID, "request-"+connectionID, method)
 	if err != nil {
 		f.t.Fatalf("authorize: %v", err)
 	}
@@ -132,12 +140,16 @@ func (f *authFixture) mustAuthorize(connectionID string) authAuthorizeResult {
 }
 
 func (f *authFixture) callback(flowID string, input string) error {
+	return f.callbackMethod(flowID, authMethodLogin, input)
+}
+
+func (f *authFixture) callbackMethod(flowID string, method string, input string) error {
 	f.t.Helper()
 
 	return f.call(AuthCallbackMethod, map[string]any{
 		authFieldSessionID:  string(f.session.id),
 		authFieldProviderID: authProviderID,
-		authFieldMethod:     authMethodID,
+		authFieldMethod:     method,
 		authFieldFlowID:     flowID,
 		authFieldInput:      input,
 	}, nil)

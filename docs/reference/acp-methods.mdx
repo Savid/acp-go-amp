@@ -32,6 +32,11 @@ object is closed — an unknown, duplicate, or misplaced field is rejected with
 invalid params naming the field path — and every time value is Unix epoch
 milliseconds.
 
+`_amp/auth/methods` publishes one provider, `amp`, with `login` (`oauth`) and
+`api-key` (`api`) methods. The catalog carries only method ID, type, and label.
+The API key itself is accepted only by `_amp/auth/callback` after `authorize`
+has returned an `interaction: "secret"` flow.
+
 | Method | Params | Result |
 |---|---|---|
 | `_amp/auth/methods` | `{sessionId}` | `{providers, generation}` |
@@ -53,7 +58,7 @@ outside that shape is invalid params naming `connectionId`. Every other failure
 is JSON-RPC `-32000`
 carrying `{"error": "amp_auth_failed", "cause": ..., "retryable": ...}` with a
 closed `cause` enum and no native message text. See
-[Authentication](/docs/features/authentication#broker-a-login).
+[Authentication](/docs/features/authentication#broker-an-account).
 
 ## Unsupported and rejected
 

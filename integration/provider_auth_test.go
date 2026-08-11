@@ -143,8 +143,18 @@ func TestAttendedProviderAuthLoginCompletes(t *testing.T) {
 	}
 
 	entries := methods.Providers["amp"]
-	if len(methods.Providers) != 1 || len(entries) != 1 {
-		t.Fatalf("catalog = %#v, want exactly one account entry", methods.Providers)
+	if len(methods.Providers) != 1 || len(entries) != 2 {
+		t.Fatalf("catalog = %#v, want hosted and manual account methods", methods.Providers)
+	}
+
+	hostedMethod := ""
+	for _, entry := range entries {
+		if entry.ID == "login" && entry.Type == "oauth" {
+			hostedMethod = entry.ID
+		}
+	}
+	if hostedMethod == "" {
+		t.Fatalf("catalog has no hosted login: %#v", entries)
 	}
 
 	var authorization authAuthorizeWire
@@ -154,7 +164,7 @@ func TestAttendedProviderAuthLoginCompletes(t *testing.T) {
 		"providerId":         "amp",
 		"connectionId":       "attended-connection",
 		"methodsGeneration":  methods.Generation,
-		"method":             entries[0].ID,
+		"method":             hostedMethod,
 		"authorizeRequestId": "attended-request",
 	}, &authorization)
 	if err != nil {
@@ -171,7 +181,7 @@ func TestAttendedProviderAuthLoginCompletes(t *testing.T) {
 
 	if err := callAuthLeg(t, ctx, conn, "_amp/auth/callback", map[string]any{
 		"sessionId": sessionID, "providerId": "amp",
-		"method": entries[0].ID, "flowId": authorization.FlowID, "input": pasted,
+		"method": hostedMethod, "flowId": authorization.FlowID, "input": pasted,
 	}, nil); err != nil {
 		t.Fatalf("_amp/auth/callback: %v", err)
 	}

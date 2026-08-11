@@ -10,28 +10,36 @@ import (
 	"golang.org/x/text/unicode/norm"
 )
 
-// authMethodTypeOAuth is the entry type on the wire. Amp's one login is a
-// hosted OAuth paste-back, so it is the only type this catalog publishes.
-const authMethodTypeOAuth = "oauth"
-
-// The whole catalog. Amp has exactly one login and it authenticates the Amp
-// account itself rather than a model provider, so the entry is the account and
-// the id is the native subcommand that drives it. Amp's per-provider model
-// credentials are loopback-only, entitlement-gated, and stored server-side, so
-// none of them is brokerable and none is offered.
+// Method entry types.
 const (
-	authProviderID   = "amp"
-	authMethodID     = "login"
-	authProviderName = "Amp account"
+	authMethodTypeOAuth = "oauth"
+	authMethodTypeAPI   = "api"
+)
+
+// The whole catalog. Both methods produce the same opaque Amp account key. The
+// hosted method obtains it through `amp login`; the API method accepts material
+// only after authorize has minted a secret interaction. Amp's per-provider
+// model credentials remain loopback-only, entitlement-gated, and server-side,
+// so none of those is brokerable or offered here.
+const (
+	authProviderID = "amp"
+
+	authMethodLogin  = "login"
+	authMethodAPIKey = "api-key"
+
+	authMethodLoginLabel    = "Sign in to Amp"
+	authMethodAPIKeyLabel   = "Amp API key"           //nolint:gosec // UI label, not credential material.
+	authMethodAPIKeyMessage = "Paste an Amp API key." //nolint:gosec // UI guidance, not credential material.
+	authMethodAPIKeyInput   = "API key"
 )
 
 // Display-field bounds. A value violating its bound is dropped, never
-// truncated. The only presentation strings that cross this surface are the
-// relayed url and the message, and the message is the catalog label, so the
-// label bound is what the message is measured against.
+// truncated. Labels and authorize guidance have independent bounds because the
+// catalog never carries the latter.
 const (
-	authMaxURLBytes   = 2048
-	authMaxLabelBytes = 256
+	authMaxURLBytes     = 2048
+	authMaxMessageBytes = 2048
+	authMaxLabelBytes   = 256
 )
 
 // authMaxCallbackBytes bounds the value a callback submits. Amp's paste-back
@@ -39,16 +47,36 @@ const (
 // envelope's, not a code's.
 const authMaxCallbackBytes = 8192
 
-// authCatalogName is the display name of the one entry this surface publishes.
-// A name that cannot pass the label bound leaves no catalog to publish, which
-// is the one way the methods leg fails closed.
-var authCatalogName = authProviderName
+// authMaxSecretBytes bounds one manually supplied Amp key. The exact bytes are
+// otherwise opaque: the adapter neither trims nor normalizes credential
+// material.
+const authMaxSecretBytes = 1024
+
+// pinnedAuthCatalog is the adapter's complete account-method catalog. It is a
+// function so tests can replace the whole fact without mutating a returned
+// slice shared with a live generation.
+var pinnedAuthCatalog = func() []authCatalogMethod {
+	return []authCatalogMethod{
+		{ID: authMethodLogin, Type: authMethodTypeOAuth, Label: authMethodLoginLabel},
+		{
+			ID:            authMethodAPIKey,
+			Type:          authMethodTypeAPI,
+			Label:         authMethodAPIKeyLabel,
+			Message:       authMethodAPIKeyMessage,
+			Interaction:   authInteractionSecret,
+			CallbackInput: authMethodAPIKeyInput,
+		},
+	}
+}
 
 // authCatalogMethod is one entry of the current catalog.
 type authCatalogMethod struct {
-	ID    string
-	Type  string
-	Label string
+	ID            string
+	Type          string
+	Label         string
+	Message       string
+	Interaction   string
+	CallbackInput string
 }
 
 type authMethodEntry struct {
@@ -64,7 +92,7 @@ type authMethodsResult struct {
 
 // methods enumerates the catalog and mints the generation that names this exact
 // result. The catalog is pinned rather than native: amp exposes no enumeration
-// route, and the one login it does expose is fixed by the CLI's own surface.
+// route, so the account methods are adapter facts.
 func (p *providerAuth) methods(_ context.Context, params json.RawMessage) (any, error) {
 	fields, err := authParamFields(params, authFieldSessionID)
 	if err != nil {
@@ -80,7 +108,7 @@ func (p *providerAuth) methods(_ context.Context, params json.RawMessage) (any, 
 		return nil, sessionErr
 	}
 
-	methods, entries := buildAuthCatalog(authCatalogName)
+	methods, entries := buildAuthCatalog()
 	if len(methods) == 0 {
 		return nil, authFailed(authCauseNativeVeto, "", "", "")
 	}
@@ -92,37 +120,49 @@ func (p *providerAuth) methods(_ context.Context, params json.RawMessage) (any, 
 
 	p.mu.Lock()
 	p.generation = generation
+	p.catalog = methods
 	p.mu.Unlock()
 
 	return authMethodsResult{Providers: entries, Generation: generation}, nil
 }
 
-// buildAuthCatalog publishes the single account entry. A label that violates
-// its display bound omits the entry rather than truncating it, which for a
-// one-entry catalog means no catalog can be produced at all.
-func buildAuthCatalog(name string) (map[string][]authCatalogMethod, map[string][]authMethodEntry) {
-	label, ok := authDisplayText(name, authMaxLabelBytes)
-	if !ok {
+// buildAuthCatalog applies the label bound entry by entry. An invalid entry is
+// omitted rather than truncated. The methods leg fails closed only when none
+// survive.
+func buildAuthCatalog() (map[string][]authCatalogMethod, map[string][]authMethodEntry) {
+	pinned := pinnedAuthCatalog()
+	methods := make([]authCatalogMethod, 0, len(pinned))
+	entries := make([]authMethodEntry, 0, len(pinned))
+
+	for _, method := range pinned {
+		label, ok := authDisplayText(method.Label, authMaxLabelBytes)
+		if !ok {
+			continue
+		}
+
+		method.Label = label
+		methods = append(methods, method)
+		entries = append(entries, authMethodEntry{ID: method.ID, Type: method.Type, Label: label})
+	}
+
+	if len(methods) == 0 {
 		return nil, nil
 	}
 
-	method := authCatalogMethod{ID: authMethodID, Type: authMethodTypeOAuth, Label: label}
-
-	return map[string][]authCatalogMethod{authProviderID: {method}},
-		map[string][]authMethodEntry{authProviderID: {{ID: method.ID, Type: method.Type, Label: method.Label}}}
+	return map[string][]authCatalogMethod{authProviderID: methods},
+		map[string][]authMethodEntry{authProviderID: entries}
 }
 
 // authResolveMethod fences a method id against the generation that produced it.
 func (p *providerAuth) authResolveMethod(providerID string, generation string, methodID string) (authCatalogMethod, error) {
 	p.mu.Lock()
 	current := p.generation
+	methods := p.catalog
 	p.mu.Unlock()
 
 	if current == "" || current != generation {
 		return authCatalogMethod{}, invalidAuthField(authFieldMethodsGeneration)
 	}
-
-	methods, _ := buildAuthCatalog(authCatalogName)
 
 	for _, method := range methods[providerID] {
 		if method.ID == methodID {
@@ -193,6 +233,23 @@ func authDisplayURL(value string) (string, bool) {
 func validateAuthInputs(inputs map[string]string) error {
 	if len(inputs) > 0 {
 		return invalidAuthField(authFieldInputs)
+	}
+
+	return nil
+}
+
+// validateAuthSecret bounds manually supplied credential material without
+// transforming it. Control characters, including line breaks, are rejected so
+// a key can never become multiple environment or diagnostic lines.
+func validateAuthSecret(value string) error {
+	if value == "" || len(value) > authMaxSecretBytes || !utf8.ValidString(value) {
+		return invalidAuthField(authFieldInput)
+	}
+
+	for _, char := range value {
+		if char == '\n' || char == '\r' || unicode.IsControl(char) {
+			return invalidAuthField(authFieldInput)
+		}
 	}
 
 	return nil

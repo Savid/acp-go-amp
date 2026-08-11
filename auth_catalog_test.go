@@ -3,11 +3,12 @@ package ampacp
 import (
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 )
 
-func TestMethodsPublishesTheSingleAccountEntry(t *testing.T) {
+func TestMethodsPublishesHostedAndManualAccountMethods(t *testing.T) {
 	fixture := newAuthFixture(t, "login")
 
 	var result authMethodsResult
@@ -20,13 +21,16 @@ func TestMethodsPublishesTheSingleAccountEntry(t *testing.T) {
 	}
 
 	entries := result.Providers[authProviderID]
-	if len(entries) != 1 {
+	if len(entries) != 2 {
 		t.Fatalf("provider entries = %#v", entries)
 	}
 
-	entry := entries[0]
-	if entry.ID != authMethodID || entry.Type != authMethodTypeOAuth || entry.Label != authProviderName {
-		t.Fatalf("entry = %#v", entry)
+	want := []authMethodEntry{
+		{ID: authMethodLogin, Type: authMethodTypeOAuth, Label: authMethodLoginLabel},
+		{ID: authMethodAPIKey, Type: authMethodTypeAPI, Label: authMethodAPIKeyLabel},
+	}
+	if !reflect.DeepEqual(entries, want) {
+		t.Fatalf("entries = %#v, want %#v", entries, want)
 	}
 
 	if result.Generation == "" {
@@ -68,16 +72,27 @@ func TestMethodsFailsClosedWithNoEntropy(t *testing.T) {
 }
 
 func TestBuildAuthCatalogOmitsAnEntryThatViolatesItsLabelBound(t *testing.T) {
-	methods, entries := buildAuthCatalog(authProviderName)
-	if len(methods) != 1 || len(entries) != 1 {
+	methods, entries := buildAuthCatalog()
+	if len(methods) != 1 || len(methods[authProviderID]) != 2 || len(entries) != 1 || len(entries[authProviderID]) != 2 {
 		t.Fatalf("catalog = %#v/%#v", methods, entries)
 	}
 
-	// A label that cannot be displayed omits its entry rather than being
-	// truncated, which for a one-entry catalog leaves no catalog at all.
+	original := pinnedAuthCatalog
+	t.Cleanup(func() { pinnedAuthCatalog = original })
+
+	// A label that cannot be displayed omits only that method rather than being
+	// truncated.
 	for _, bad := range []string{"", "Amp\u202eaccount", strings.Repeat("x", authMaxLabelBytes+1)} {
-		if methods, entries := buildAuthCatalog(bad); methods != nil || entries != nil {
-			t.Fatalf("label %q produced a catalog", bad)
+		pinnedAuthCatalog = func() []authCatalogMethod {
+			return []authCatalogMethod{
+				{ID: authMethodLogin, Type: authMethodTypeOAuth, Label: bad},
+				{ID: authMethodAPIKey, Type: authMethodTypeAPI, Label: authMethodAPIKeyLabel},
+			}
+		}
+
+		methods, entries := buildAuthCatalog()
+		if len(methods[authProviderID]) != 1 || len(entries[authProviderID]) != 1 || entries[authProviderID][0].ID != authMethodAPIKey {
+			t.Fatalf("label %q produced %#v/%#v", bad, methods, entries)
 		}
 	}
 }
@@ -85,11 +100,13 @@ func TestBuildAuthCatalogOmitsAnEntryThatViolatesItsLabelBound(t *testing.T) {
 func TestMethodsFailsClosedWithNoPublishableCatalog(t *testing.T) {
 	fixture := newAuthFixture(t, "login")
 
-	original := authCatalogName
-	authCatalogName = strings.Repeat("x", authMaxLabelBytes+1)
+	original := pinnedAuthCatalog
+	pinnedAuthCatalog = func() []authCatalogMethod {
+		return []authCatalogMethod{{ID: authMethodLogin, Type: authMethodTypeOAuth, Label: strings.Repeat("x", authMaxLabelBytes+1)}}
+	}
 
 	err := fixture.call(AuthMethodsMethod, map[string]any{authFieldSessionID: string(fixture.session.id)}, nil)
-	authCatalogName = original
+	pinnedAuthCatalog = original
 
 	if err == nil {
 		t.Fatal("methods published a catalog it could not build")
@@ -102,16 +119,18 @@ func TestMethodsFailsClosedWhenNoCatalogCanBeProduced(t *testing.T) {
 	fixture := newAuthFixture(t, "login")
 	broker := fixture.broker
 
-	// A generation naming an empty catalog resolves no method.
+	// Seed the resolved catalog, then exercise the generation and addressing
+	// fences independently.
+	fixture.generation()
 	broker.mu.Lock()
 	broker.generation = "spent"
 	broker.mu.Unlock()
 
-	if _, err := broker.authResolveMethod(authProviderID, "other", authMethodID); err == nil {
+	if _, err := broker.authResolveMethod(authProviderID, "other", authMethodLogin); err == nil {
 		t.Fatal("a stale generation resolved a method")
 	}
 
-	if _, err := broker.authResolveMethod("openai", "spent", authMethodID); err == nil {
+	if _, err := broker.authResolveMethod("openai", "spent", authMethodLogin); err == nil {
 		t.Fatal("an unknown provider resolved a method")
 	}
 
@@ -119,7 +138,7 @@ func TestMethodsFailsClosedWhenNoCatalogCanBeProduced(t *testing.T) {
 		t.Fatal("an unknown method id resolved")
 	}
 
-	if _, err := broker.authResolveMethod(authProviderID, "spent", authMethodID); err != nil {
+	if _, err := broker.authResolveMethod(authProviderID, "spent", authMethodLogin); err != nil {
 		t.Fatalf("the pinned method did not resolve: %v", err)
 	}
 
@@ -127,8 +146,24 @@ func TestMethodsFailsClosedWhenNoCatalogCanBeProduced(t *testing.T) {
 	broker.generation = ""
 	broker.mu.Unlock()
 
-	if _, err := broker.authResolveMethod(authProviderID, "", authMethodID); err == nil {
+	if _, err := broker.authResolveMethod(authProviderID, "", authMethodLogin); err == nil {
 		t.Fatal("a method resolved before any generation was minted")
+	}
+}
+
+func TestMethodGenerationResolvesTheExactPublishedCatalog(t *testing.T) {
+	fixture := newAuthFixture(t, "login-hang")
+	generation := fixture.generation()
+
+	original := pinnedAuthCatalog
+	pinnedAuthCatalog = func() []authCatalogMethod {
+		return []authCatalogMethod{{ID: authMethodLogin, Type: authMethodTypeOAuth, Label: authMethodLoginLabel}}
+	}
+	t.Cleanup(func() { pinnedAuthCatalog = original })
+
+	method, err := fixture.broker.authResolveMethod(authProviderID, generation, authMethodAPIKey)
+	if err != nil || method.ID != authMethodAPIKey || method.Type != authMethodTypeAPI {
+		t.Fatalf("published generation resolved %#v/%v", method, err)
 	}
 }
 

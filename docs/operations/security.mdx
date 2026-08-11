@@ -70,9 +70,10 @@ Auth material is live process state only:
 |---|---|---|
 | `AMP_API_KEY` | Sanitized ordinary environment, `ProcessIsolation.BaseEnvironment`, or `WithEnv` | Never |
 | `AMP_URL` | Sanitized ordinary environment, `ProcessIsolation.BaseEnvironment`, or `WithEnv` | Never |
-| The value pasted into `_amp/auth/callback` | The owner, through the host | Never |
+| Hosted paste-back or manual API key submitted to `_amp/auth/callback` | The owner, through the host | Never |
 | The relayed `_amp/auth/authorize` URL | The native login process | Never |
-| The key returned by `_amp/auth/credential` | The isolated `secrets.json` | Never |
+| A hosted key returned by `_amp/auth/credential` | The isolated `secrets.json` | Never |
+| A manual key returned by `_amp/auth/credential` | The wipeable in-memory provider-auth flow | Never |
 
 No value is written to the settings file or the `SessionStore`. The store
 contains the manifest, transcript frames, and canonical image tool-result
@@ -87,8 +88,8 @@ isolated native home. Never seed secrets through them; put credentials in
 </Warning>
 
 The provider-auth ledger under `WithProviderAuthRoot` is bookkeeping only:
-provider slot identity, connection ID, revision, binding generation, flow ID,
-authorize request ID, state, and timestamps. It never holds credential
+provider slot identity, method ID, connection ID, revision, binding generation,
+flow ID, authorize request ID, state, and timestamps. It never holds credential
 material, authorization URLs, or pasted values, and it is never keyed by,
 swept with, or restored alongside a session. A provider-auth leg failure
 carries a closed `cause` enum and never native message text: a native login

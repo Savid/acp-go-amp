@@ -169,25 +169,25 @@ type authCredentialResult struct {
 	Credential        ProviderCredential `json:"credential"`
 }
 
-// credential harvests exactly one slot: the one this connection's own ledger
-// entry names, in the session's own isolated data home. It runs once per flow —
-// the key is long-lived and non-rotating, so there is no harvest cycle, and the
-// claim that enforces it is taken before any read rather than after them all —
-// and a slot that answers nothing fails the leg closed rather than reporting
-// absence, because a flipped native-secrets flag deletes the file after
-// migrating it.
-func (p *providerAuth) credential(_ context.Context, params json.RawMessage) (any, error) {
+// credential harvests exactly one slot: either hosted material from the native
+// residence or manual material retained by this flow. It runs once per flow —
+// the key is long-lived and non-rotating, so there is no harvest cycle — and a
+// slot that answers nothing fails closed rather than reporting absence.
+func (p *providerAuth) credential(ctx context.Context, params json.RawMessage) (any, error) {
 	session, flow, err := p.addressedFlowLeg(params)
 	if err != nil {
 		return nil, err
 	}
 
-	if claimErr := p.claimHarvest(flow); claimErr != nil {
-		return nil, claimErr
+	release, admitted := p.admitSlot(ctx, flow.providerID)
+	if !admitted {
+		return nil, authFailed(authCauseTimeout, flow.providerID, flow.method.ID, flow.id)
 	}
 
-	if storeErr := session.authFileStore(); storeErr != nil {
-		return nil, p.failHarvest(flow, authCauseNativeVeto)
+	defer release()
+
+	if claimErr := p.claimHarvest(flow); claimErr != nil {
+		return nil, claimErr
 	}
 
 	record, ok, err := p.ledger.read(flow.providerID, flow.connectionID)
@@ -195,8 +195,23 @@ func (p *providerAuth) credential(_ context.Context, params json.RawMessage) (an
 		return nil, p.failHarvest(flow, authCauseHarvestFailed)
 	}
 
-	if record.ConnectionID != flow.connectionID || record.Revision != flow.revision || record.BindingGeneration != flow.bindingGeneration {
+	if record.Method != flow.method.ID || record.ConnectionID != flow.connectionID ||
+		record.Revision != flow.revision || record.BindingGeneration != flow.bindingGeneration ||
+		record.State != authLedgerConfirmed {
 		return nil, p.failHarvest(flow, authCauseHarvestFailed)
+	}
+
+	if flow.method.Type == authMethodTypeAPI {
+		secret, present := p.takeFlowCredential(flow)
+		if !present {
+			return nil, p.failHarvest(flow, authCauseHarvestFailed)
+		}
+
+		return providerCredentialResult(flow, secret), nil
+	}
+
+	if storeErr := session.authFileStore(); storeErr != nil {
+		return nil, p.failHarvest(flow, authCauseNativeVeto)
 	}
 
 	p.mu.Lock()
@@ -213,12 +228,33 @@ func (p *providerAuth) credential(_ context.Context, params json.RawMessage) (an
 	// that has already happened.
 	p.closeLogin(flow)
 
+	return providerCredentialResult(flow, secret), nil
+}
+
+// takeFlowCredential consumes manual material after the harvest claim has
+// already made this the only credential leg that can reach it. The bytes are
+// wiped before the string leaves the broker.
+func (p *providerAuth) takeFlowCredential(flow *authFlow) (string, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if flow.state != authStateSaved || len(flow.credential) == 0 {
+		return "", false
+	}
+
+	secret := string(flow.credential)
+	flow.dropCredential()
+
+	return secret, true
+}
+
+func providerCredentialResult(flow *authFlow, secret string) authCredentialResult {
 	return authCredentialResult{
 		ConnectionID:      flow.connectionID,
 		Revision:          flow.revision,
 		BindingGeneration: flow.bindingGeneration,
 		Credential:        ProviderCredential{Type: ProviderCredentialAPI, API: &ProviderAPICredential{Key: secret}},
-	}, nil
+	}
 }
 
 // claimHarvest admits the one harvest a completed flow allows and holds the
@@ -245,23 +281,28 @@ func (p *providerAuth) claimHarvest(flow *authFlow) error {
 	return nil
 }
 
-// failHarvest fails the leg and records the demotion the harvest owns. This is
-// the one transition a flow already terminal may still take: the leg is
-// admitted only from authenticated or saved, so what it demotes is a completion
-// nobody is racing, and a slot that answered nothing leaves the flow no longer
-// standing for a credential this connection can produce. A cause that owns no
-// transition demotes nothing and leaves the record where its owner left it,
-// because writing an empty state would put a value outside the wire enum into
-// every later status answer. The claim is released either way: at-most-once
-// governs the credential a harvest hands back, and an attempt that handed back
-// nothing has nothing to be once about.
+// failHarvest fails the leg and records a demotion only while the completion
+// state its harvest claimed still owns the flow. Owner cancellation can win
+// while durable I/O is in flight; that terminal state remains authoritative.
+// A cause that owns no transition also leaves the record where its owner left
+// it, because writing an empty state would put a value outside the wire enum
+// into every later status answer. The claim is released either way:
+// at-most-once governs the credential a harvest hands back, and an attempt that
+// handed back nothing has nothing to be once about.
 func (p *providerAuth) failHarvest(flow *authFlow, cause string) error {
 	p.mu.Lock()
 	flow.harvested = false
 
-	if state, reason := authFlowTransition(cause, false); state != "" {
-		flow.state = state
-		flow.reason = reason
+	// Harvest may demote only the completed state its claim admitted. An owner
+	// can cancel a saved flow while this leg is blocked on durable I/O; that
+	// terminal transition already wiped the material and wins, so the losing
+	// harvest must not overwrite it with its own failure.
+	if flow.state == authStateAuthenticated || flow.state == authStateSaved {
+		if state, reason := authFlowTransition(cause, false); state != "" {
+			flow.state = state
+			flow.reason = reason
+			flow.dropCredential()
+		}
 	}
 	p.mu.Unlock()
 
@@ -323,6 +364,7 @@ func (p *providerAuth) disconnect(ctx context.Context, params json.RawMessage) (
 		return nil, authFailed(authCauseBindingConflict, providerID, "", "")
 	}
 
+	disconnected := record
 	record.BindingGeneration++
 	record.State = authLedgerRemoved
 	record.UpdatedAt = authNow().UnixMilli()
@@ -331,5 +373,37 @@ func (p *providerAuth) disconnect(ctx context.Context, params json.RawMessage) (
 		return nil, authFailed(authCauseProcess, providerID, "", "")
 	}
 
+	p.fenceDisconnectedManualFlow(disconnected)
+
 	return struct{}{}, nil
+}
+
+// fenceDisconnectedManualFlow consumes the in-memory half of a manual binding
+// after its durable lineage has been removed. The caller still holds the
+// provider slot, so a credential leg either harvested before the disconnect or
+// observes this cancellation after it; it can never return material after the
+// disconnect returned. Hosted bindings have no in-memory material to revoke
+// and remain outside this adapter-owned cleanup.
+func (p *providerAuth) fenceDisconnectedManualFlow(removed authLedgerRecord) {
+	if removed.Method != authMethodAPIKey {
+		return
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	for _, flow := range p.byID {
+		if flow.method.ID != removed.Method || flow.method.Type != authMethodTypeAPI ||
+			flow.providerID != removed.ProviderID || flow.connectionID != removed.ConnectionID ||
+			flow.revision != removed.Revision || flow.bindingGeneration != removed.BindingGeneration ||
+			flow.state != authStateSaved || flow.harvested {
+			continue
+		}
+
+		flow.dropCredential()
+		flow.state = authStateCancelled
+		flow.reason = authReasonOwnerCancel
+		flow.stopCompleter()
+		delete(p.flows, authFlowKey{sessionID: flow.sessionID, providerID: flow.providerID})
+	}
 }

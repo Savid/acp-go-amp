@@ -113,6 +113,7 @@ type providerAuth struct {
 
 	mu         sync.Mutex
 	generation string
+	catalog    map[string][]authCatalogMethod
 	flows      map[authFlowKey]*authFlow
 	byID       map[string]*authFlow
 	// retained holds the most recent flow per key whatever its state, because

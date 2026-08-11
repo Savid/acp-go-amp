@@ -37,10 +37,12 @@ const (
 	authReasonDeadline          = "deadline"
 )
 
-// Closed interaction discriminator. Amp's single method pastes a value back, so
-// it is the only interaction this surface ever returns.
+// Closed interaction discriminators. Hosted login pastes a value back into its
+// native child; manual account material is collected through a secret
+// interaction after authorize has minted the flow.
 const (
 	authInteractionCallback = "callback"
+	authInteractionSecret   = "secret"
 	authCallbackInputCode   = "code"
 )
 
@@ -84,6 +86,9 @@ type authFlow struct {
 	reason    string
 	expiresAt time.Time
 	harvested bool
+	// credential holds manual account material only from the successful secret
+	// callback until its one credential harvest. Every cleanup path wipes it.
+	credential []byte
 	// claimed is held by the one leg driving this flow's login child, so a
 	// second callback or a status poll cannot write to a stdin another leg is
 	// already writing to and closing.
@@ -202,8 +207,14 @@ func (p *providerAuth) authorize(ctx context.Context, params json.RawMessage) (a
 		return nil, inputErr
 	}
 
-	if storeErr := session.authFileStore(); storeErr != nil {
-		return nil, authFailed(authCauseNativeVeto, request.providerID, request.method, "")
+	// Manual material never enters Amp's native store. Hosted login does, so
+	// assert that store before minting an id or superseding any retained flow:
+	// a local-policy refusal must leave the owner's existing flow and durable
+	// lineage untouched.
+	if method.Type != authMethodTypeAPI {
+		if storeErr := session.authFileStore(); storeErr != nil {
+			return nil, authFailed(authCauseNativeVeto, request.providerID, request.method, "")
+		}
 	}
 
 	flowID, err := newAuthToken()
@@ -269,6 +280,7 @@ func (p *providerAuth) recordIntent(ctx context.Context, request authorizeReques
 
 	record := authLedgerRecord{
 		ProviderID:         request.providerID,
+		Method:             request.method,
 		ConnectionID:       request.connectionID,
 		Revision:           1,
 		BindingGeneration:  1,
@@ -388,6 +400,21 @@ func (p *providerAuth) replayAuthorize(ctx context.Context, key authFlowKey, req
 // alone: the flow is already registered, so the caller terminalizes it through
 // the transition that cause pairs with.
 func (p *providerAuth) mintPresentation(ctx context.Context, session *agentSession, flow *authFlow) (authAuthorizeResult, string) {
+	if flow.method.Type == authMethodTypeAPI {
+		message, ok := authDisplayText(flow.method.Message, authMaxMessageBytes)
+		if !ok {
+			return authAuthorizeResult{}, authCauseNativeVeto
+		}
+
+		return authAuthorizeResult{
+			Interaction:   flow.method.Interaction,
+			Message:       message,
+			CallbackInput: flow.method.CallbackInput,
+			FlowID:        flow.id,
+			FlowExpiresAt: flow.expiresAt.UnixMilli(),
+		}, ""
+	}
+
 	client := session.client()
 	if !client.AuthDeploymentSupported() {
 		return authAuthorizeResult{}, authCauseUnsupportedVariant
@@ -456,6 +483,7 @@ func (p *providerAuth) expire(flow *authFlow) {
 
 	flow.state = authStateExpired
 	flow.reason = authReasonDeadline
+	flow.dropCredential()
 
 	delete(p.flows, authFlowKey{sessionID: flow.sessionID, providerID: flow.providerID})
 	p.mu.Unlock()
@@ -485,6 +513,7 @@ func (p *providerAuth) supersede(key authFlowKey, reason string) {
 	delete(p.flows, key)
 	delete(p.byID, flow.id)
 	p.retire(key, flow.authorizeRequestID)
+	flow.dropCredential()
 
 	if !authTerminal(flow.state) {
 		flow.state = authStateCancelled
@@ -521,6 +550,14 @@ func (f *authFlow) stopCompleter() {
 	default:
 		close(f.disarm)
 	}
+}
+
+func (f *authFlow) dropCredential() {
+	for index := range f.credential {
+		f.credential[index] = 0
+	}
+
+	f.credential = nil
 }
 
 // callback submits the value the owner pasted back. That value is not an
@@ -570,6 +607,14 @@ func (p *providerAuth) callback(ctx context.Context, params json.RawMessage) (an
 
 	if flow.method.ID != method {
 		return nil, invalidAuthField(authFieldMethod)
+	}
+
+	if flow.method.Type == authMethodTypeAPI {
+		if secretErr := validateAuthSecret(input); secretErr != nil {
+			return nil, secretErr
+		}
+
+		return p.saveCredential(ctx, flow, input)
 	}
 
 	if claimErr := p.claimFlow(flow); claimErr != nil {
@@ -639,12 +684,63 @@ func (p *providerAuth) callback(ctx context.Context, params json.RawMessage) (an
 	return authFlowIDResult{FlowID: flow.id}, nil
 }
 
+// saveCredential binds manually supplied material to this flow without writing
+// it to Amp's native store, the ledger, session state, or configuration. The
+// host receives the exact opaque key from the credential leg and redelivers it
+// as AMP_API_KEY through the existing environment boundary.
+func (p *providerAuth) saveCredential(ctx context.Context, flow *authFlow, input string) (any, error) {
+	if claimErr := p.claimFlow(flow); claimErr != nil {
+		return nil, claimErr
+	}
+
+	defer p.releaseFlow(flow)
+
+	releaseSlot, admitted := p.admitSlot(ctx, flow.providerID)
+	if !admitted {
+		return nil, authFailed(authCauseTimeout, flow.providerID, flow.method.ID, flow.id)
+	}
+
+	defer releaseSlot()
+
+	if err := p.confirmFlow(flow, false); err != nil {
+		return nil, err
+	}
+
+	p.mu.Lock()
+	if authTerminal(flow.state) {
+		p.mu.Unlock()
+
+		return nil, authFailed(authCauseFlowState, flow.providerID, flow.method.ID, flow.id)
+	}
+
+	flow.credential = []byte(input)
+	flow.state = authStateSaved
+	flow.reason = ""
+	flow.stopCompleter()
+	delete(p.flows, authFlowKey{sessionID: flow.sessionID, providerID: flow.providerID})
+	p.mu.Unlock()
+
+	return authFlowIDResult{FlowID: flow.id}, nil
+}
+
 // completeFlow records the post-mutation confirmation and terminalizes the flow
 // as authenticated. The credential the login just wrote is not read here: the
 // harvest leg is the only reader, and it runs at most once. Its caller holds the
 // slot gate, so the binding it checks here cannot move before the write below
 // lands.
 func (p *providerAuth) completeFlow(flow *authFlow) error {
+	if err := p.confirmFlow(flow, true); err != nil {
+		return err
+	}
+
+	p.terminalize(flow, authStateAuthenticated, "")
+
+	return nil
+}
+
+// confirmFlow persists the post-material confirmation under the caller's slot
+// gate. It records lineage only; secret material never enters the ledger.
+func (p *providerAuth) confirmFlow(flow *authFlow, materialInFlight bool) error {
 	if cause, abandoned := p.abandonedCause(flow); abandoned {
 		return authFailed(cause, flow.providerID, flow.method.ID, flow.id)
 	}
@@ -655,6 +751,7 @@ func (p *providerAuth) completeFlow(flow *authFlow) error {
 
 	record := authLedgerRecord{
 		ProviderID:         flow.providerID,
+		Method:             flow.method.ID,
 		ConnectionID:       flow.connectionID,
 		Revision:           flow.revision,
 		BindingGeneration:  flow.bindingGeneration,
@@ -666,10 +763,8 @@ func (p *providerAuth) completeFlow(flow *authFlow) error {
 	}
 
 	if err := p.ledger.write(record); err != nil {
-		return p.fail(flow, authCauseProcess, true)
+		return p.fail(flow, authCauseProcess, materialInFlight)
 	}
-
-	p.terminalize(flow, authStateAuthenticated, "")
 
 	return nil
 }
@@ -732,6 +827,10 @@ func (p *providerAuth) terminalize(flow *authFlow, state string, reason string) 
 
 	flow.state = state
 	flow.reason = reason
+
+	if state != authStateSaved {
+		flow.dropCredential()
+	}
 
 	flow.stopCompleter()
 	delete(p.flows, authFlowKey{sessionID: flow.sessionID, providerID: flow.providerID})
@@ -829,6 +928,11 @@ func (p *providerAuth) cancel(_ context.Context, params json.RawMessage) (any, e
 	p.mu.Lock()
 
 	if authTerminal(flow.state) {
+		if flow.state == authStateSaved {
+			flow.dropCredential()
+			flow.state = authStateCancelled
+			flow.reason = authReasonOwnerCancel
+		}
 		p.mu.Unlock()
 
 		return authFlowIDResult{FlowID: flow.id}, nil
@@ -902,6 +1006,7 @@ func (p *providerAuth) closeSession(sessionID acp.SessionId) {
 
 		delete(p.byID, id)
 		delete(p.flows, authFlowKey{sessionID: flow.sessionID, providerID: flow.providerID})
+		flow.dropCredential()
 
 		if !authTerminal(flow.state) {
 			flow.state = authStateCancelled

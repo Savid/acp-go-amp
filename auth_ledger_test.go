@@ -178,7 +178,7 @@ func TestAuthLedgerWritesAtomicallyAndDurably(t *testing.T) {
 	ledger := newTestLedger(t)
 
 	record := authLedgerRecord{
-		ProviderID: authProviderID, ConnectionID: "connection-1",
+		ProviderID: authProviderID, Method: authMethodLogin, ConnectionID: "connection-1",
 		Revision: 1, BindingGeneration: 1, FlowID: "F1",
 		AuthorizeRequestID: "R1", State: authLedgerIntent, CreatedAt: 1, UpdatedAt: 1,
 	}
@@ -208,7 +208,7 @@ func TestAuthLedgerWritesAtomicallyAndDurably(t *testing.T) {
 	}
 
 	want := []string{
-		"providerId", "connectionId", "revision", "bindingGeneration",
+		"providerId", "method", "connectionId", "revision", "bindingGeneration",
 		"flowId", "authorizeRequestId", "state", "createdAt", "updatedAt",
 	}
 	if len(fields) != len(want) {

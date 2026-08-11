@@ -3,8 +3,8 @@ title: Authentication
 description: Supply an Amp key through the environment, or broker one with the eight session-scoped provider-auth methods.
 ---
 
-Amp has exactly one login, and it authenticates the Amp account itself rather
-than a model provider. The adapter advertises no ACP auth methods in
+Amp authenticates one account of its own rather than a model provider. The
+adapter advertises no ACP auth methods in
 `initialize`, and `Authenticate` rejects any caller-provided method ID. There
 are two supported ways to get a key into a session: supply one through the
 environment, or broker one through the provider-auth methods.
@@ -50,7 +50,7 @@ the harvested key is redelivered. `session/load` and `session/resume` always
 require the key.
 </Warning>
 
-## Broker a login
+## Broker an account
 
 Set `WithProviderAuthRoot` (or `-provider-auth-root`) to an absolute, durable,
 host-owned directory and the adapter advertises eight session-scoped extension
@@ -68,53 +68,70 @@ ID, revision, binding generation, flow ID, state, and timestamps — and never
 credential material, URLs, or pasted values. It is created `0700` and entries
 are written `0600`.
 
-The catalog has exactly one entry, `amp`, with one method. Amp's per-provider
-model-credential commands are not brokered: they are loopback-only,
-entitlement-gated, and stored on Amp's side.
+The catalog has exactly one provider, `amp`, with two methods:
+
+| Method | Type | Interaction |
+|---|---|---|
+| `login` | `oauth` | Hosted Amp account sign-in; `authorize` starts `amp login` and returns `callback`. |
+| `api-key` | `api` | Manual Amp account key; `authorize` returns `secret` without starting a native child. |
+
+The catalog publishes only each method's ID, type, and display label. Secret
+material is never placed in `methods`, `authorize` params, adapter config, or a
+session manifest. Amp's per-provider model-credential commands are not
+brokered: they are loopback-only, entitlement-gated, and stored on Amp's side.
 
 ### The flow
 
-1. `methods` returns the single entry and an opaque `generation` token naming
-   that exact result.
-2. `authorize` runs `amp login` inside the session's isolated home and relays
-   the hosted paste-back URL. `interaction` is `callback` and `callbackInput`
-   is `code`. A repeat of the newest `authorizeRequestId` replays that
+1. `methods` returns the two account methods and an opaque `generation` token
+   naming that exact result.
+2. `authorize` validates the selected method against that generation and mints
+   a flow. For `login`, it runs `amp login` inside the session's isolated home
+   and relays the hosted paste-back URL with `interaction: "callback"`. For
+   `api-key`, it returns `interaction: "secret"`, no URL, and asks for the Amp
+   API key. A repeat of the newest `authorizeRequestId` replays that
    presentation and flow ID verbatim for as long as the session lives — no
-   second login, whatever state the flow has since reached. A request id a
+   second native login or material request, whatever state the flow has since
+   reached. A request id a
    later `authorize` replaced is refused with invalid params naming
    `authorizeRequestId`: only the newest record is answerable, and minting in
    an older one's place would destroy the flow whose URL the owner is looking
    at. That replacement also retires the previous flow entirely — its `flowId`
    stops addressing anything and its unharvested credential residence is
    released.
-3. The owner opens the URL, approves at Amp, and pastes the value back through
-   `callback`.
-4. `status` reports the flow. Amp races a hook that can complete the login
-   without any paste, so `status` also discovers a login that finished on its
-   own, behind a five-second floor on its own native reads.
+3. The owner either opens the hosted URL and pastes Amp's value back, or enters
+   the manual account key. In both cases the credential-class value crosses
+   only through `callback`; it is bounded, never logged or echoed, and never
+   written to the values-free ledger.
+4. `status` reports hosted completion as `authenticated` and accepted manual
+   material as `saved`. Amp races a hook that can complete hosted login without
+   any paste, so `status` also discovers a hosted login that finished on its
+   own, behind a five-second floor on native reads.
 5. `credential` harvests once, returning `{"type": "api", "key": "..."}`. The
+   same credential union and account-key semantics apply to both methods. The
    Amp key is opaque, long-lived, and non-rotating, so it carries no expiry, no
    refresh half, and no metadata, and a second harvest on the same flow is
-   refused.
+   refused. Manual bytes are wiped from the flow during harvest or cleanup.
 6. `disconnect` bumps the binding generation and releases the ledger slot.
 
 ### Deployment
 
-The brokering legs run against the default Amp deployment on a supported login
-platform only. The single host a relayed URL may name and the single store key a
-harvest reads are both measured facts about that deployment, so a session whose
-`AMP_URL` names another one is refused at `authorize` with
-`unsupported_variant` before a login child exists. Darwin and Windows return the
-same cause before native minting: Darwin Amp account login has no audited
+Hosted brokering runs against the default Amp deployment on a supported login
+platform only. The single host a relayed URL may name and the single store key
+a hosted harvest reads are measured facts about that deployment, so a hosted
+flow whose `AMP_URL` names another one is refused at `authorize` with
+`unsupported_variant` before a login child exists. Darwin and Windows return
+the same cause before native minting: Darwin Amp account login has no audited
 browserless contract, while Windows cannot provide the mandatory Unix identity
-boundary. Every other Amp command still honours `AMP_URL` normally where the
-runtime containment policy permits it.
+boundary. The manual `api-key` method starts no native login and does not depend
+on those hosted-login facts; ordinary Amp commands still honor `AMP_URL` where
+the runtime containment policy permits it.
 
 <Warning>
-The value the owner pastes back is not an authorization code to be exchanged —
-it carries the account credential in the clear and stays valid indefinitely. It
-is written straight to the native login process and is never logged, echoed,
-persisted, or retained after delivery.
+The value a hosted owner pastes back is not an authorization code to be
+exchanged — it carries the account credential in the clear and stays valid
+indefinitely. Hosted material is written straight to the native login process;
+manual material is retained in memory only until its one harvest. Neither is
+logged, echoed, or persisted.
 </Warning>
 
 ### Redelivery
@@ -130,29 +147,37 @@ field.
 names. It performs **no native removal** and promises **no Amp-side
 revocation**: Amp's own `logout` refuses while an environment key is set, and
 the account key stays valid at Amp until the owner revokes it there. Present
-that plainly to an owner rather than as a revocation.
+that plainly to an owner rather than as a revocation. For a manual `api-key`
+binding, a successful disconnect also wipes and marks `cancelled/owner_cancel`
+the exact matching unharvested in-memory flow; that is adapter-owned cleanup,
+not revocation of the Amp account key.
 
 A `disconnect` that returns success is final against the login it raced. Every
-rewrite of one provider's recorded binding is serialised, so a `callback`
-already in flight either lands first — and is then released by the
-`disconnect` — or finds the generation moved and is refused with
-`binding_conflict` without pasting anything. The generation never moves
-backwards, so the value a successful `disconnect` established is the one the
-next `disconnect` fences against.
+rewrite and credential harvest of one provider's recorded binding is
+serialised on the same provider slot. A `callback` already in flight either
+lands first — and is then released by the `disconnect` — or finds the
+generation moved and is refused with `binding_conflict` without pasting
+anything. A manual credential harvest either returns before disconnect can
+complete, or a disconnect that wins first wipes the unharvested bytes and the
+later harvest returns no key. The generation never moves backwards, so the
+value a successful `disconnect` established is the one the next `disconnect`
+fences against.
 
 ### Storage
 
-Amp keeps the account key in a flat single-key `secrets.json` under the
-session's isolated `XDG_DATA_HOME`, mode `0600`. A hidden settings key can move
-it into the operating system keystore instead, where the item is keyed by
-hostname alone — not by the isolated home — so every Amp process on the machine
-would then share one credential. The adapter writes that key `false` into the
-settings file it owns and fails every provider-auth leg closed if it ever reads
-back `true`.
+For hosted sign-in, Amp keeps the account key in a flat single-key
+`secrets.json` under the session's isolated `XDG_DATA_HOME`, mode `0600`. A
+hidden settings key can move it into the operating system keystore instead,
+where the item is keyed by hostname alone — not by the isolated home — so every
+Amp process on the machine would then share one credential. The adapter writes
+that key `false` into the settings file it owns and fails hosted native-store
+operations closed if it ever reads back `true`. Manual material never enters
+either native store; the host harvests it once and owns redelivery.
 
 ## What is never stored
 
-Auth material is live process state only. `AMP_API_KEY`, `AMP_URL`, the pasted
-callback value, the relayed URL, and the harvested key are never written to the
-session manifest, the transcript, the settings file, or a raw event. See
+Auth material is live process state only. `AMP_API_KEY`, `AMP_URL`, hosted
+paste-back material, a manually entered API key, the relayed URL, and the
+harvested key are never written to the provider-auth ledger, session manifest,
+transcript, settings file, log, or raw event. See
 [Security](/docs/operations/security).

@@ -134,16 +134,18 @@ rejects at session start.
   permission, so the adapter never sends `session/request_permission`.
 - No fork surface; `_amp/session/fork` is unsupported and `session/fork`
   returns method-not-found.
-- An owner-driven Amp login behind eight session-scoped `_amp/auth/*` methods,
+- Owner-driven Amp account connection behind eight session-scoped `_amp/auth/*` methods,
   advertised only while `WithProviderAuthRoot`/`-provider-auth-root` names a
-  usable durable directory. The catalog is the one Amp account entry, the
-  hosted paste-back URL is relayed for the owner to approve, and the resulting
-  opaque key is harvested once and redelivered as `AMP_API_KEY`. The broker
+  usable durable directory. The one `amp` provider offers hosted account
+  sign-in and manual Amp API-key material. Hosted sign-in relays Amp's
+  paste-back URL; manual material is requested only after `authorize` mints a
+  secret interaction. Both return the same opaque account-key credential,
+  harvested once and redelivered as `AMP_API_KEY`. The broker
   admits a keyless `session/new` for this flow, while the first prompt and all
   load/resume paths remain credential-gated. `disconnect` releases the ledger
-  slot and promises no Amp-side revocation. Darwin and Windows authorization
-  fail with `unsupported_variant` before `amp login` starts; Darwin's account
-  login has no audited browserless contract.
+  slot and promises no Amp-side revocation. Hosted authorization on Darwin and
+  Windows fails with `unsupported_variant` before `amp login` starts; the
+  manual method starts no native login child.
 - Durable mirroring through a host-provided `SessionStore`; ordinary frames are
   retained under `transcript`, while image-bearing tool frames use canonical
   artifact references backed by `_artifacts/images/` records.

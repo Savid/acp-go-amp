@@ -41,6 +41,7 @@ const (
 // native text.
 type authLedgerRecord struct {
 	ProviderID         string `json:"providerId"`
+	Method             string `json:"method"`
 	ConnectionID       string `json:"connectionId"`
 	Revision           int64  `json:"revision"`
 	BindingGeneration  int64  `json:"bindingGeneration"`
@@ -289,13 +290,13 @@ type authInventoryResult struct {
 	Entries []authInventoryEntry `json:"entries"`
 }
 
-// inventory reports residence from the ledger and a probe of the one slot each
-// record names. The ledger alone is never sufficient — an adapter's record of
-// its own intent cannot prove residence — and a probe alone proves only that
-// something is resident, not that it is the thing this connection installed.
-// The probe reads exactly the named secrets file: `amp login` launches a
-// browser that writes its own profile into the same isolated home, so the root
-// holds more than this adapter put there.
+// inventory reports residence from the ledger and, for hosted login, a probe of
+// the native slot the record names. The ledger alone is never sufficient — an
+// adapter's record of its own intent cannot prove residence — and a probe alone
+// proves only that something is resident, not that it is the thing this
+// connection installed. Manual material is handed to the host and never
+// installed into native state, so its honest proof remains not_confirmed across
+// both the current process and a restart.
 func (p *providerAuth) inventory(_ context.Context, params json.RawMessage) (any, error) {
 	fields, err := authParamFields(params, authFieldSessionID)
 	if err != nil {
@@ -312,10 +313,6 @@ func (p *providerAuth) inventory(_ context.Context, params json.RawMessage) (any
 		return nil, err
 	}
 
-	if storeErr := session.authFileStore(); storeErr != nil {
-		return nil, authFailed(authCauseNativeVeto, "", "", "")
-	}
-
 	records, err := p.ledger.list()
 	if err != nil {
 		return nil, authFailed(authCauseHarvestFailed, "", "", "")
@@ -323,14 +320,26 @@ func (p *providerAuth) inventory(_ context.Context, params json.RawMessage) (any
 
 	entries := make([]authInventoryEntry, 0, len(records))
 
-	for _, record := range records {
+	for index := range records {
+		record := &records[index]
+
 		if record.State == authLedgerRemoved {
 			continue
 		}
 
-		present, err := authSecretPresent(p.authResidence(session, record.ProviderID, record.ConnectionID))
-		if err != nil {
-			return nil, authFailed(authCauseHarvestFailed, record.ProviderID, "", "")
+		proof := authProofNotConfirmed
+
+		if record.Method == authMethodLogin {
+			if storeErr := session.authFileStore(); storeErr != nil {
+				return nil, authFailed(authCauseNativeVeto, record.ProviderID, record.Method, "")
+			}
+
+			present, presentErr := authSecretPresent(p.authResidence(session, record.ProviderID, record.ConnectionID))
+			if presentErr != nil {
+				return nil, authFailed(authCauseHarvestFailed, record.ProviderID, record.Method, "")
+			}
+
+			proof = authProofSource(record.State, present)
 		}
 
 		entries = append(entries, authInventoryEntry{
@@ -338,7 +347,7 @@ func (p *providerAuth) inventory(_ context.Context, params json.RawMessage) (any
 			ConnectionID:      record.ConnectionID,
 			Revision:          record.Revision,
 			BindingGeneration: record.BindingGeneration,
-			ProofSource:       authProofSource(record.State, present),
+			ProofSource:       proof,
 		})
 	}
 

@@ -53,7 +53,7 @@ func TestAuthorizeRelaysTheHostedPasteBackURL(t *testing.T) {
 		t.Fatalf("authorize URL = %q", result.URL)
 	}
 
-	if result.Message != authProviderName || result.FlowID == "" || result.FlowExpiresAt == 0 {
+	if result.Message != authMethodLoginLabel || result.FlowID == "" || result.FlowExpiresAt == 0 {
 		t.Fatalf("authorize presentation = %#v", result)
 	}
 
@@ -71,6 +71,40 @@ func TestAuthorizeRelaysTheHostedPasteBackURL(t *testing.T) {
 	record, ok, err := fixture.broker.ledger.read(authProviderID, "connection-1")
 	if err != nil || !ok || record.FlowID != result.FlowID || record.State != authLedgerIntent {
 		t.Fatalf("ledger after authorize = %#v/%v/%v", record, ok, err)
+	}
+}
+
+func TestHostedStoreVetoPrecedesSupersessionAndLedgerMutation(t *testing.T) {
+	fixture := newAuthFixture(t, "login-hang")
+	existing := fixture.mustAuthorize("connection-existing")
+
+	before, ok, err := fixture.broker.ledger.read(authProviderID, "connection-existing")
+	if err != nil || !ok {
+		t.Fatalf("read existing intent: %#v/%v/%v", before, ok, err)
+	}
+
+	if writeErr := os.WriteFile(fixture.session.settingsFile,
+		[]byte(`{"amp.experimental.cli.nativeSecretsStorage.enabled":true}`), 0o600); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+
+	_, err = fixture.authorize("connection-replacement", "request-replacement")
+	if err == nil {
+		t.Fatal("hosted authorize crossed an unasserted native store")
+	}
+	requireAuthCause(t, err, authCauseNativeVeto)
+
+	if status := fixture.status(existing.FlowID); status.State != authStatePending || status.Reason != "" {
+		t.Fatalf("store veto superseded the existing flow: %#v", status)
+	}
+
+	after, ok, err := fixture.broker.ledger.read(authProviderID, "connection-existing")
+	if err != nil || !ok || after != before {
+		t.Fatalf("store veto changed the existing ledger intent: %#v/%v/%v, before %#v", after, ok, err, before)
+	}
+
+	if _, ok, err := fixture.broker.ledger.read(authProviderID, "connection-replacement"); err != nil || ok {
+		t.Fatalf("store veto recorded replacement intent: ok=%v err=%v", ok, err)
 	}
 }
 
@@ -274,7 +308,7 @@ func TestAuthorizeReplayWaitsForAnInFlightMint(t *testing.T) {
 		authFieldProviderID:         authProviderID,
 		authFieldConnectionID:       "connection-1",
 		authFieldMethodsGeneration:  fixture.generation(),
-		authFieldMethod:             authMethodID,
+		authFieldMethod:             authMethodLogin,
 		authFieldAuthorizeRequestID: "request-a",
 	})
 	if err != nil {
@@ -362,7 +396,7 @@ func TestAuthorizeReleasesALoginChildTheSessionCloseRacedPastIt(t *testing.T) {
 		authFieldProviderID:         authProviderID,
 		authFieldConnectionID:       "connection-1",
 		authFieldMethodsGeneration:  fixture.generation(),
-		authFieldMethod:             authMethodID,
+		authFieldMethod:             authMethodLogin,
 		authFieldAuthorizeRequestID: "request-a",
 	})
 	if err != nil {
@@ -404,7 +438,7 @@ func TestAuthorizeRejectsAddressingFailures(t *testing.T) {
 			authFieldProviderID:         authProviderID,
 			authFieldConnectionID:       "connection-1",
 			authFieldMethodsGeneration:  generation,
-			authFieldMethod:             authMethodID,
+			authFieldMethod:             authMethodLogin,
 			authFieldAuthorizeRequestID: "request-a",
 		}
 	}
@@ -504,7 +538,7 @@ func TestAuthorizeFailsClosedOnALedgerOrTokenFailure(t *testing.T) {
 		authFieldProviderID:         authProviderID,
 		authFieldConnectionID:       "connection-1",
 		authFieldMethodsGeneration:  generation,
-		authFieldMethod:             authMethodID,
+		authFieldMethod:             authMethodLogin,
 		authFieldAuthorizeRequestID: "request-a",
 	}
 
@@ -594,7 +628,7 @@ func TestCallbackRejectsAddressingFailures(t *testing.T) {
 		return map[string]any{
 			authFieldSessionID:  string(fixture.session.id),
 			authFieldProviderID: authProviderID,
-			authFieldMethod:     authMethodID,
+			authFieldMethod:     authMethodLogin,
 			authFieldFlowID:     authorized.FlowID,
 			authFieldInput:      "pasted",
 		}
@@ -646,7 +680,7 @@ func TestCallbackRejectsAddressingFailures(t *testing.T) {
 	other := fixture.newSession("T-other")
 	err := fixture.call(AuthCallbackMethod, map[string]any{
 		authFieldSessionID: string(other.id), authFieldProviderID: authProviderID,
-		authFieldMethod: authMethodID, authFieldFlowID: authorized.FlowID, authFieldInput: "pasted",
+		authFieldMethod: authMethodLogin, authFieldFlowID: authorized.FlowID, authFieldInput: "pasted",
 	}, nil)
 
 	if err == nil {
@@ -1232,7 +1266,7 @@ func TestConnectionIDIsRefusedAtEverySurfaceEntry(t *testing.T) {
 	fixture := newAuthFixture(t, "login")
 
 	seeded := authLedgerRecord{
-		ProviderID: authProviderID, ConnectionID: "connection-1",
+		ProviderID: authProviderID, Method: authMethodLogin, ConnectionID: "connection-1",
 		Revision: 1, BindingGeneration: 1, State: authLedgerConfirmed,
 	}
 	if err := fixture.broker.ledger.write(seeded); err != nil {

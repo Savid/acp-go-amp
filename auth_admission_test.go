@@ -104,7 +104,7 @@ func TestDisconnectIsNotUndoneByAnAdmittedCompletion(t *testing.T) {
 	params := fixture.rawParams(map[string]any{
 		authFieldSessionID:  string(fixture.session.id),
 		authFieldProviderID: authProviderID,
-		authFieldMethod:     authMethodID,
+		authFieldMethod:     authMethodLogin,
 		authFieldFlowID:     authorized.FlowID,
 		authFieldInput:      "pasted",
 	})
@@ -157,7 +157,7 @@ func TestOneCallbackIsAdmittedForOneLoginChild(t *testing.T) {
 	params := fixture.rawParams(map[string]any{
 		authFieldSessionID:  string(fixture.session.id),
 		authFieldProviderID: authProviderID,
-		authFieldMethod:     authMethodID,
+		authFieldMethod:     authMethodLogin,
 		authFieldFlowID:     authorized.FlowID,
 		authFieldInput:      "pasted",
 	})
@@ -214,7 +214,7 @@ func TestConcurrentIdenticalAuthorizesMintOneFlow(t *testing.T) {
 		authFieldProviderID:         authProviderID,
 		authFieldConnectionID:       "connection-1",
 		authFieldMethodsGeneration:  fixture.generation(),
-		authFieldMethod:             authMethodID,
+		authFieldMethod:             authMethodLogin,
 		authFieldAuthorizeRequestID: "request-a",
 	})
 
@@ -286,7 +286,7 @@ func TestSessionCloseRefusesAnAuthorizeThatHasNotPublished(t *testing.T) {
 		authFieldProviderID:         authProviderID,
 		authFieldConnectionID:       "connection-1",
 		authFieldMethodsGeneration:  fixture.generation(),
-		authFieldMethod:             authMethodID,
+		authFieldMethod:             authMethodLogin,
 		authFieldAuthorizeRequestID: "request-a",
 	})
 
@@ -583,7 +583,7 @@ func TestReopeningAnIdDoesNotAdmitTheLifetimeItReplaced(t *testing.T) {
 		authFieldProviderID:         authProviderID,
 		authFieldConnectionID:       "connection-1",
 		authFieldMethodsGeneration:  fixture.generation(),
-		authFieldMethod:             authMethodID,
+		authFieldMethod:             authMethodLogin,
 		authFieldAuthorizeRequestID: "request-a",
 	})
 
@@ -669,7 +669,7 @@ func TestAdmissionRefusesALegTheCallerAbandoned(t *testing.T) {
 		authFieldProviderID:         authProviderID,
 		authFieldConnectionID:       "connection-1",
 		authFieldMethodsGeneration:  fixture.generation(),
-		authFieldMethod:             authMethodID,
+		authFieldMethod:             authMethodLogin,
 		authFieldAuthorizeRequestID: "request-b",
 	}))
 	requireAuthCause(t, err, authCauseTimeout)
@@ -683,13 +683,13 @@ func TestAdmissionRefusesALegTheCallerAbandoned(t *testing.T) {
 	defer releaseSlot()
 
 	_, err = fixture.broker.recordIntent(abandoned,
-		authorizeRequest{providerID: authProviderID, connectionID: "connection-1", method: authMethodID}, "flow", authNow())
+		authorizeRequest{providerID: authProviderID, connectionID: "connection-1", method: authMethodLogin}, "flow", authNow())
 	requireAuthCause(t, err, authCauseTimeout)
 
 	_, err = fixture.broker.callback(abandoned, fixture.rawParams(map[string]any{
 		authFieldSessionID:  string(fixture.session.id),
 		authFieldProviderID: authProviderID,
-		authFieldMethod:     authMethodID,
+		authFieldMethod:     authMethodLogin,
 		authFieldFlowID:     authorized.FlowID,
 		authFieldInput:      "pasted",
 	}))
