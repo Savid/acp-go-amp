@@ -1342,6 +1342,15 @@ func agentStandaloneAuthorityEntries(directory *os.File) ([]os.DirEntry, error) 
 		return nil, errors.Join(readErr, closeErr)
 	}
 
+	// File.ReadDir hands back directory order, which the filesystem chooses.
+	// Every caller refuses on the first entry it cannot account for, so an
+	// unsorted walk makes the refusal reason for one authority root depend on
+	// whether that root lives on tmpfs or on disk. Sort so the reason is a
+	// property of the root.
+	slices.SortFunc(entries, func(a, b os.DirEntry) int {
+		return strings.Compare(a.Name(), b.Name())
+	})
+
 	return entries, nil
 }
 
@@ -2553,19 +2562,9 @@ func validateAgentStandaloneOwnerUniqueness(
 	canceled <-chan struct{},
 	signals <-chan os.Signal,
 ) error {
-	duplicate, err := agentStandaloneOpenat(
-		int(directory.Fd()), ".", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0,
-	)
+	entries, err := agentStandaloneAuthorityEntries(directory)
 	if err != nil {
 		return err
-	}
-
-	reader := os.NewFile(uintptr(duplicate), "standalone-owner-uniqueness")
-	entries, readErr := reader.ReadDir(-1)
-
-	closeErr := reader.Close()
-	if readErr != nil || closeErr != nil {
-		return errors.Join(readErr, closeErr)
 	}
 
 	for _, entry := range entries {
