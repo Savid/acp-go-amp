@@ -18,6 +18,11 @@ import (
 // only URL this surface may relay.
 const fakeLoginURL = "https://ampcode.com/auth/cli-login?authToken=deadbeef"
 
+// manualAmpKeyCanary is the manual account material every secret-interaction
+// test submits. It is a distinctive literal so a leak into a ledger, settings
+// file, or log line is detectable by substring alone.
+const manualAmpKeyCanary = "sgamp_manual_opaque_canary"
+
 // authFixture is one agent with a usable durable ledger root, one live session,
 // and the fake amp binary behind it.
 type authFixture struct {
@@ -199,6 +204,19 @@ func requireAuthCause(t *testing.T, err error, cause string) {
 	if data[jsonFieldError] != authFailedErrorTag || data[jsonFieldCause] != cause {
 		t.Fatalf("failure = %#v, want cause %q", data, cause)
 	}
+}
+
+func harvestAuthCredential(t *testing.T, fixture *authFixture, flowID string) authCredentialResult {
+	t.Helper()
+
+	var result authCredentialResult
+	if err := fixture.call(AuthCredentialMethod, map[string]any{
+		authFieldSessionID: string(fixture.session.id), authFieldProviderID: authProviderID, authFieldFlowID: flowID,
+	}, &result); err != nil {
+		t.Fatalf("credential: %v", err)
+	}
+
+	return result
 }
 
 func requireInvalidAuthField(t *testing.T, err error, field string) {

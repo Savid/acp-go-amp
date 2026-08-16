@@ -97,20 +97,13 @@ func TestLoadResumeManifestAndConfigBranches(t *testing.T) {
 		t.Fatalf("resume did not emit exactly one identity-only checkpoint: before=%d updates=%#v", before, updates)
 	}
 
-	// Every refusal on the config surface names the offending member in the
-	// uniform two-key shape: the value-id variant is the only accepted payload,
-	// so a boolean payload and an absent value id both name `value`.
-	_, err := agent.SetSessionConfigOption(ctx, acp.SetSessionConfigOptionRequest{Boolean: &acp.SetSessionConfigOptionBoolean{SessionId: "T-load", ConfigId: "mode", Value: true}})
-	requireUnsupportedField(t, err, fieldValue)
-
-	_, err = agent.SetSessionConfigOption(ctx, acp.SetSessionConfigOptionRequest{})
-	requireUnsupportedField(t, err, fieldValue)
-
 	if _, setErr := agent.SetSessionConfigOption(ctx, SetConfigOptionRequest("T-load", "mode", "low")); setErr != nil {
 		t.Fatalf("set mode: %v", setErr)
 	}
 
-	_, err = agent.SetSessionConfigOption(ctx, SetConfigOptionRequest("T-load", "mode", "bad"))
+	// Every refusal on the config surface names the offending member in the
+	// uniform two-key shape.
+	_, err := agent.SetSessionConfigOption(ctx, SetConfigOptionRequest("T-load", "mode", "bad"))
 	requireUnsupportedField(t, err, fieldValue)
 
 	_, err = agent.SetSessionConfigOption(ctx, SetConfigOptionRequest("T-load", "unknown", "x"))

@@ -222,3 +222,11 @@ func TestValidateAuthInputsRejectsEveryAnswer(t *testing.T) {
 		t.Fatal("an answer to a prompt amp never published was accepted")
 	}
 }
+
+// Invalid UTF-8 cannot survive JSON decoding, so the bound is asserted here
+// rather than through the callback leg that is its only production caller.
+func TestValidateAuthSecretRejectsInvalidUTF8(t *testing.T) {
+	if err := validateAuthSecret(string([]byte{0xff, 0xfe})); err == nil {
+		t.Fatal("invalid UTF-8 credential material was accepted")
+	}
+}

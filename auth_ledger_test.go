@@ -608,3 +608,57 @@ func TestAuthProofSourceIsATotalFunction(t *testing.T) {
 		}
 	}
 }
+
+func TestManualAPIKeyRestartProofAndDisconnectFence(t *testing.T) {
+	first := newAuthFixture(t, "login")
+	manual := first.mustAuthorizeMethod("connection-restart", authMethodAPIKey)
+	if err := first.callbackMethod(manual.FlowID, authMethodAPIKey, manualAmpKeyCanary); err != nil {
+		t.Fatalf("manual material: %v", err)
+	}
+	harvest := harvestAuthCredential(t, first, manual.FlowID)
+
+	if err := first.agent.Close(); err != nil {
+		t.Fatalf("close first agent: %v", err)
+	}
+
+	restartedAgent := newTestAgent(
+		WithExecutablePath(first.agent.options.ExecutablePath),
+		WithScratchDir(testScratchDir(t)),
+		WithProviderAuthRoot(first.root),
+	)
+	t.Cleanup(func() { _ = restartedAgent.Close() })
+	restartedSession, err := newAgentSession(t.Context(), restartedAgent, "T-restarted", t.TempDir(), parsedSessionMeta{}, "", nil)
+	if err != nil {
+		t.Fatalf("restart session: %v", err)
+	}
+	restartedAgent.mu.Lock()
+	restartedAgent.sessions[restartedSession.id] = restartedSession
+	restartedAgent.mu.Unlock()
+	restarted := &authFixture{t: t, agent: restartedAgent, broker: restartedAgent.providerAuth, session: restartedSession, root: first.root}
+
+	var inventory authInventoryResult
+	if err := restarted.call(AuthInventoryMethod, map[string]any{authFieldSessionID: string(restartedSession.id)}, &inventory); err != nil {
+		t.Fatalf("restart inventory: %v", err)
+	}
+	if len(inventory.Entries) != 1 || inventory.Entries[0].ProviderID != authProviderID ||
+		inventory.Entries[0].ConnectionID != "connection-restart" ||
+		inventory.Entries[0].BindingGeneration != harvest.BindingGeneration ||
+		inventory.Entries[0].ProofSource != authProofNotConfirmed {
+		t.Fatalf("restart inventory = %#v", inventory.Entries)
+	}
+
+	if err := restarted.call(AuthDisconnectMethod, map[string]any{
+		authFieldSessionID: string(restartedSession.id), authFieldProviderID: authProviderID,
+		authFieldConnectionID: "connection-restart", authFieldBindingGeneration: harvest.BindingGeneration,
+	}, nil); err != nil {
+		t.Fatalf("restart disconnect: %v", err)
+	}
+
+	var after authInventoryResult
+	if err := restarted.call(AuthInventoryMethod, map[string]any{authFieldSessionID: string(restartedSession.id)}, &after); err != nil {
+		t.Fatalf("inventory after disconnect: %v", err)
+	}
+	if len(after.Entries) != 0 {
+		t.Fatalf("disconnected restart inventory = %#v", after.Entries)
+	}
+}

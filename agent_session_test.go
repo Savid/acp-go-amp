@@ -32,6 +32,28 @@ func TestConfigOptions(t *testing.T) {
 	}
 }
 
+// The two members that can make a set-config request unsupported are distinct
+// caller mistakes and are named as such: a boolean payload chose the wrong
+// request discriminator, while a request carrying neither variant supplied no
+// value at all. Both variants are marshalled inline, so the discriminator the
+// caller got wrong is reachable on the wire only as `type`.
+func TestSetSessionConfigOptionNamesTheMemberThatFailed(t *testing.T) {
+	agent := newTestAgent()
+	t.Cleanup(func() {
+		if err := agent.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	})
+
+	_, err := agent.SetSessionConfigOption(t.Context(), acp.SetSessionConfigOptionRequest{
+		Boolean: &acp.SetSessionConfigOptionBoolean{SessionId: "T-config", ConfigId: "mode", Value: true},
+	})
+	requireUnsupportedField(t, err, fieldType)
+
+	_, err = agent.SetSessionConfigOption(t.Context(), acp.SetSessionConfigOptionRequest{})
+	requireUnsupportedField(t, err, fieldValue)
+}
+
 func TestActiveLoadResumeSemantics(t *testing.T) {
 	ctx := context.Background()
 	path, _ := fakeAgentAmpPath(t, "")

@@ -1,9 +1,11 @@
 package ampacp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"os"
 	"strings"
 	"sync/atomic"
@@ -484,5 +486,277 @@ func TestFailHarvestKeepsARecordACauseCannotTransition(t *testing.T) {
 		if status.State != authStateAuthenticated || status.Reason != "" {
 			t.Fatalf("failHarvest(%q) moved the record to %#v", cause, status)
 		}
+	}
+}
+
+func TestManualAPIKeyMaterialProducesTheSameOpaqueCredentialShape(t *testing.T) {
+	var logs bytes.Buffer
+	fixture := newAuthFixture(t, "login", WithLogger(slog.New(slog.NewJSONHandler(&logs, nil))))
+
+	manual := fixture.mustAuthorizeMethod("connection-manual", authMethodAPIKey)
+	if err := fixture.callbackMethod(manual.FlowID, authMethodAPIKey, manualAmpKeyCanary); err != nil {
+		t.Fatalf("manual material: %v", err)
+	}
+
+	if status := fixture.status(manual.FlowID); status.State != authStateSaved || status.Reason != "" || status.ExpiresAt != 0 {
+		t.Fatalf("manual status = %#v", status)
+	}
+
+	manualCredential := harvestAuthCredential(t, fixture, manual.FlowID)
+	if manualCredential.Credential.Type != ProviderCredentialAPI || manualCredential.Credential.API == nil ||
+		manualCredential.Credential.API.Key != manualAmpKeyCanary || manualCredential.Credential.API.Metadata != nil {
+		t.Fatalf("manual credential = %#v", manualCredential)
+	}
+
+	// The flow handed out one copy and retained none.
+	if err := fixture.call(AuthCredentialMethod, map[string]any{
+		authFieldSessionID: string(fixture.session.id), authFieldProviderID: authProviderID, authFieldFlowID: manual.FlowID,
+	}, nil); err == nil {
+		t.Fatal("manual credential was harvested twice")
+	} else {
+		requireAuthCause(t, err, authCauseFlowState)
+	}
+
+	hosted := fixture.mustAuthorize("connection-hosted")
+	if err := fixture.callback(hosted.FlowID, "hosted-paste"); err != nil {
+		t.Fatalf("hosted callback: %v", err)
+	}
+
+	hostedCredential := harvestAuthCredential(t, fixture, hosted.FlowID)
+	if hostedCredential.Credential.Type != manualCredential.Credential.Type ||
+		hostedCredential.Credential.API == nil || hostedCredential.Credential.API.Metadata != nil {
+		t.Fatalf("hosted/manual credential shapes diverged: %#v/%#v", hostedCredential, manualCredential)
+	}
+
+	ledgerBytes, err := os.ReadFile(fixture.broker.ledger.path(authProviderID, "connection-manual"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	settingsBytes, err := os.ReadFile(fixture.session.settingsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for name, contents := range map[string][]byte{
+		"ledger":   ledgerBytes,
+		"settings": settingsBytes,
+		"logs":     logs.Bytes(),
+	} {
+		if bytes.Contains(contents, []byte(manualAmpKeyCanary)) {
+			t.Fatalf("manual key leaked into %s", name)
+		}
+	}
+}
+
+func TestManualAPIKeyHarvestFailurePathsRemainFenced(t *testing.T) {
+	t.Run("missing retained material", func(t *testing.T) {
+		fixture := newAuthFixture(t, "login-hang")
+		flowResult := fixture.mustAuthorizeMethod("connection-empty", authMethodAPIKey)
+		if err := fixture.callbackMethod(flowResult.FlowID, authMethodAPIKey, manualAmpKeyCanary); err != nil {
+			t.Fatal(err)
+		}
+
+		flow, err := fixture.broker.addressFlow(fixture.session.id, authProviderID, flowResult.FlowID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fixture.broker.mu.Lock()
+		flow.dropCredential()
+		fixture.broker.mu.Unlock()
+
+		err = fixture.call(AuthCredentialMethod, map[string]any{
+			authFieldSessionID: string(fixture.session.id), authFieldProviderID: authProviderID, authFieldFlowID: flowResult.FlowID,
+		}, nil)
+		requireAuthCause(t, err, authCauseHarvestFailed)
+	})
+
+	t.Run("credential slot timeout", func(t *testing.T) {
+		fixture := newAuthFixture(t, "login-hang")
+		flowResult := fixture.mustAuthorizeMethod("connection-credential-timeout", authMethodAPIKey)
+		if err := fixture.callbackMethod(flowResult.FlowID, authMethodAPIKey, manualAmpKeyCanary); err != nil {
+			t.Fatalf("manual material: %v", err)
+		}
+
+		release, admitted := fixture.broker.admitSlot(context.Background(), authProviderID)
+		if !admitted {
+			t.Fatal("could not hold the slot gate")
+		}
+
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		_, err := fixture.broker.credential(ctx, fixture.rawParams(map[string]any{
+			authFieldSessionID: string(fixture.session.id), authFieldProviderID: authProviderID, authFieldFlowID: flowResult.FlowID,
+		}))
+		release()
+		requireAuthCause(t, err, authCauseTimeout)
+
+		credential := harvestAuthCredential(t, fixture, flowResult.FlowID)
+		if credential.Credential.API == nil || credential.Credential.API.Key != manualAmpKeyCanary {
+			t.Fatalf("timed-out credential leg consumed material: %#v", credential)
+		}
+	})
+}
+
+func TestManualAPIKeyDisconnectWipesUnharvestedMaterial(t *testing.T) {
+	fixture := newAuthFixture(t, "login-hang")
+	result := fixture.mustAuthorizeMethod("connection-disconnect", authMethodAPIKey)
+	if err := fixture.callbackMethod(result.FlowID, authMethodAPIKey, manualAmpKeyCanary); err != nil {
+		t.Fatalf("manual material: %v", err)
+	}
+
+	flow, err := fixture.broker.addressFlow(fixture.session.id, authProviderID, result.FlowID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if disconnectErr := fixture.disconnect("connection-disconnect", 1); disconnectErr != nil {
+		t.Fatalf("disconnect: %v", disconnectErr)
+	}
+
+	fixture.broker.mu.Lock()
+	retained := len(flow.credential)
+	fixture.broker.mu.Unlock()
+	if retained != 0 {
+		t.Fatalf("disconnected flow retained %d credential bytes", retained)
+	}
+
+	if status := fixture.status(result.FlowID); status.State != authStateCancelled || status.Reason != authReasonOwnerCancel {
+		t.Fatalf("disconnected flow status = %#v", status)
+	}
+
+	err = fixture.call(AuthCredentialMethod, map[string]any{
+		authFieldSessionID: string(fixture.session.id), authFieldProviderID: authProviderID, authFieldFlowID: result.FlowID,
+	}, nil)
+	if err == nil {
+		t.Fatal("disconnected manual material remained harvestable")
+	}
+	requireAuthCause(t, err, authCauseFlowState)
+}
+
+func TestManualAPIKeyCredentialAndDisconnectShareSlotFence(t *testing.T) {
+	fixture := newAuthFixture(t, "login-hang")
+	result := fixture.mustAuthorizeMethod("connection-raced-disconnect", authMethodAPIKey)
+	if err := fixture.callbackMethod(result.FlowID, authMethodAPIKey, manualAmpKeyCanary); err != nil {
+		t.Fatalf("manual material: %v", err)
+	}
+
+	originalRead := ledgerReadFile
+	readConfirmed := make(chan struct{})
+	releaseRead := make(chan struct{})
+	var reads atomic.Int64
+	ledgerReadFile = func(path string) ([]byte, error) {
+		contents, err := originalRead(path)
+		if reads.Add(1) == 1 {
+			close(readConfirmed)
+			<-releaseRead
+		}
+
+		return contents, err
+	}
+	t.Cleanup(func() { ledgerReadFile = originalRead })
+
+	type credentialAnswer struct {
+		result any
+		err    error
+	}
+	credentialAnswered := make(chan credentialAnswer, 1)
+	go func() {
+		answer, err := fixture.broker.credential(context.Background(), fixture.rawParams(map[string]any{
+			authFieldSessionID: string(fixture.session.id), authFieldProviderID: authProviderID, authFieldFlowID: result.FlowID,
+		}))
+		credentialAnswered <- credentialAnswer{result: answer, err: err}
+	}()
+
+	<-readConfirmed
+
+	disconnectAnswered := make(chan error, 1)
+	go func() { disconnectAnswered <- fixture.disconnect("connection-raced-disconnect", 1) }()
+
+	select {
+	case err := <-disconnectAnswered:
+		t.Fatalf("disconnect crossed a credential leg holding a confirmed ledger read: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(releaseRead)
+
+	credential := <-credentialAnswered
+	if credential.err != nil {
+		t.Fatalf("credential: %v", credential.err)
+	}
+	resultValue, ok := credential.result.(authCredentialResult)
+	if !ok || resultValue.Credential.API == nil || resultValue.Credential.API.Key != manualAmpKeyCanary {
+		t.Fatalf("credential result = %#v", credential.result)
+	}
+
+	if err := <-disconnectAnswered; err != nil {
+		t.Fatalf("disconnect: %v", err)
+	}
+
+	record, ok, err := fixture.broker.ledger.read(authProviderID, "connection-raced-disconnect")
+	if err != nil || !ok || record.State != authLedgerRemoved || record.BindingGeneration != 2 {
+		t.Fatalf("ledger after serialized harvest/disconnect = %#v/%v/%v", record, ok, err)
+	}
+}
+
+func TestManualAPIKeyCancelWinsAgainstClaimedHarvestFailure(t *testing.T) {
+	fixture := newAuthFixture(t, "login-hang")
+	result := fixture.mustAuthorizeMethod("connection-raced-cancel", authMethodAPIKey)
+	if err := fixture.callbackMethod(result.FlowID, authMethodAPIKey, manualAmpKeyCanary); err != nil {
+		t.Fatalf("manual material: %v", err)
+	}
+
+	flow, err := fixture.broker.addressFlow(fixture.session.id, authProviderID, result.FlowID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	originalRead := ledgerReadFile
+	readConfirmed := make(chan struct{})
+	releaseRead := make(chan struct{})
+	ledgerReadFile = func(path string) ([]byte, error) {
+		contents, readErr := originalRead(path)
+		close(readConfirmed)
+		<-releaseRead
+
+		return contents, readErr
+	}
+	t.Cleanup(func() { ledgerReadFile = originalRead })
+
+	credentialAnswered := make(chan error, 1)
+	go func() {
+		_, credentialErr := fixture.broker.credential(context.Background(), fixture.rawParams(map[string]any{
+			authFieldSessionID: string(fixture.session.id), authFieldProviderID: authProviderID, authFieldFlowID: result.FlowID,
+		}))
+		credentialAnswered <- credentialErr
+	}()
+
+	<-readConfirmed
+	cancelErr := fixture.call(AuthCancelMethod, map[string]any{
+		authFieldSessionID: string(fixture.session.id), authFieldProviderID: authProviderID, authFieldFlowID: result.FlowID,
+	}, nil)
+	statusAfterCancel := fixture.status(result.FlowID)
+	close(releaseRead)
+
+	if cancelErr != nil {
+		t.Fatalf("cancel: %v", cancelErr)
+	}
+	if statusAfterCancel.State != authStateCancelled || statusAfterCancel.Reason != authReasonOwnerCancel {
+		t.Fatalf("status after cancel = %#v", statusAfterCancel)
+	}
+
+	harvestErr := <-credentialAnswered
+	requireAuthCause(t, harvestErr, authCauseHarvestFailed)
+
+	if status := fixture.status(result.FlowID); status.State != authStateCancelled || status.Reason != authReasonOwnerCancel {
+		t.Fatalf("losing harvest overwrote owner cancellation: %#v", status)
+	}
+
+	fixture.broker.mu.Lock()
+	retained, claimed := len(flow.credential), flow.harvested
+	fixture.broker.mu.Unlock()
+	if retained != 0 || claimed {
+		t.Fatalf("cancelled flow retained bytes/claim: %d/%v", retained, claimed)
 	}
 }

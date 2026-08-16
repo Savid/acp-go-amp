@@ -121,10 +121,12 @@ a hosted harvest reads are measured facts about that deployment, so a hosted
 flow whose `AMP_URL` names another one is refused at `authorize` with
 `unsupported_variant` before a login child exists. Darwin and Windows return
 the same cause before native minting: Darwin Amp account login has no audited
-browserless contract, while Windows cannot provide the mandatory Unix identity
-boundary. The manual `api-key` method starts no native login and does not depend
-on those hosted-login facts; ordinary Amp commands still honor `AMP_URL` where
-the runtime containment policy permits it.
+browserless contract, while on Windows the adapter's launcher shim cannot
+contain a browser the system loader opens out of the system directory. Neither
+refusal stops ordinary native Amp commands on those platforms. The manual
+`api-key` method starts no native login and does not depend on those
+hosted-login facts; ordinary Amp commands still honor `AMP_URL` where the
+runtime containment policy permits it.
 
 <Warning>
 The value a hosted owner pastes back is not an authorization code to be

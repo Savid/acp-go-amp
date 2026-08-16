@@ -1313,3 +1313,246 @@ func TestConnectionIDAcceptsTheOpaqueTokenAConsumerMints(t *testing.T) {
 		}
 	}
 }
+
+func TestManualAPIKeyAuthorizeMintsOnlyASecretInteraction(t *testing.T) {
+	fixture := newAuthFixture(t, "login", WithEnv(map[string]string{
+		"AMP_URL": "https://private.amp.example",
+	}))
+
+	if err := os.WriteFile(fixture.session.settingsFile,
+		[]byte(`{"amp.experimental.cli.nativeSecretsStorage.enabled":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	original := authStartLogin
+	loginCalls := 0
+	authStartLogin = func(*nativeamp.Client, context.Context) (*nativeamp.AuthLogin, error) {
+		loginCalls++
+
+		return nil, errors.New("manual authorization must not start amp login")
+	}
+	t.Cleanup(func() { authStartLogin = original })
+
+	result := fixture.mustAuthorizeMethod("connection-manual", authMethodAPIKey)
+	if result.Interaction != authInteractionSecret || result.URL != "" ||
+		result.Message != authMethodAPIKeyMessage || result.CallbackInput != authMethodAPIKeyInput ||
+		result.FlowID == "" || result.FlowExpiresAt == 0 {
+		t.Fatalf("manual authorize = %#v", result)
+	}
+
+	if loginCalls != 0 {
+		t.Fatalf("manual authorize started %d native logins", loginCalls)
+	}
+
+	record, ok, err := fixture.broker.ledger.read(authProviderID, "connection-manual")
+	if err != nil || !ok || record.Method != authMethodAPIKey || record.State != authLedgerIntent || record.FlowID != result.FlowID {
+		t.Fatalf("manual intent = %#v/%v/%v", record, ok, err)
+	}
+}
+
+func TestManualAPIKeyPresentationFailsClosedOnUnsafeGuidance(t *testing.T) {
+	fixture := newAuthFixture(t, "login-hang")
+	original := pinnedAuthCatalog
+	pinnedAuthCatalog = func() []authCatalogMethod {
+		return []authCatalogMethod{{
+			ID: authMethodAPIKey, Type: authMethodTypeAPI, Label: authMethodAPIKeyLabel,
+			Message: "unsafe\nmessage", Interaction: authInteractionSecret, CallbackInput: authMethodAPIKeyInput,
+		}}
+	}
+	t.Cleanup(func() { pinnedAuthCatalog = original })
+
+	_, err := fixture.authorizeMethod("connection-unsafe", "request-unsafe", authMethodAPIKey)
+	if err == nil {
+		t.Fatal("manual authorize relayed unsafe guidance")
+	}
+	requireAuthCause(t, err, authCauseNativeVeto)
+}
+
+func TestManualAPIKeyMaterialValidationAndMethodFence(t *testing.T) {
+	invalid := []string{
+		"",
+		"line\nbreak",
+		"carriage\rreturn",
+		"control\x00byte",
+		strings.Repeat("x", authMaxSecretBytes+1),
+	}
+
+	for index, value := range invalid {
+		fixture := newAuthFixture(t, "login-hang")
+		flow := fixture.mustAuthorizeMethod("connection-invalid", authMethodAPIKey)
+		err := fixture.callbackMethod(flow.FlowID, authMethodAPIKey, value)
+		if err == nil {
+			t.Fatalf("invalid material %d was accepted", index)
+		}
+		requireInvalidAuthField(t, err, authFieldInput)
+
+		if status := fixture.status(flow.FlowID); status.State != authStatePending {
+			t.Fatalf("invalid material %d moved the flow: %#v", index, status)
+		}
+	}
+
+	fixture := newAuthFixture(t, "login-hang")
+	flow := fixture.mustAuthorizeMethod("connection-fenced", authMethodAPIKey)
+	if err := fixture.callbackMethod(flow.FlowID, authMethodLogin, manualAmpKeyCanary); err == nil {
+		t.Fatal("manual material crossed the method fence")
+	} else {
+		requireInvalidAuthField(t, err, authFieldMethod)
+	}
+}
+
+func TestManualAPIKeyMaterialFailurePathsRemainFenced(t *testing.T) {
+	t.Run("already saved", func(t *testing.T) {
+		fixture := newAuthFixture(t, "login-hang")
+		flow := fixture.mustAuthorizeMethod("connection-saved", authMethodAPIKey)
+		if err := fixture.callbackMethod(flow.FlowID, authMethodAPIKey, manualAmpKeyCanary); err != nil {
+			t.Fatal(err)
+		}
+
+		err := fixture.callbackMethod(flow.FlowID, authMethodAPIKey, "second-copy")
+		requireAuthCause(t, err, authCauseFlowState)
+	})
+
+	t.Run("lineage moved", func(t *testing.T) {
+		fixture := newAuthFixture(t, "login-hang")
+		flow := fixture.mustAuthorizeMethod("connection-moved", authMethodAPIKey)
+		record, _, err := fixture.broker.ledger.read(authProviderID, "connection-moved")
+		if err != nil {
+			t.Fatal(err)
+		}
+		record.BindingGeneration++
+		if writeErr := fixture.broker.ledger.write(record); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+
+		err = fixture.callbackMethod(flow.FlowID, authMethodAPIKey, manualAmpKeyCanary)
+		requireAuthCause(t, err, authCauseBindingConflict)
+		if status := fixture.status(flow.FlowID); status.State != authStatePending {
+			t.Fatalf("lineage refusal moved the flow: %#v", status)
+		}
+	})
+
+	t.Run("slot timeout", func(t *testing.T) {
+		fixture := newAuthFixture(t, "login-hang")
+		flowResult := fixture.mustAuthorizeMethod("connection-timeout", authMethodAPIKey)
+		flow, err := fixture.broker.addressFlow(fixture.session.id, authProviderID, flowResult.FlowID)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		release, admitted := fixture.broker.admitSlot(context.Background(), authProviderID)
+		if !admitted {
+			t.Fatal("could not hold the slot gate")
+		}
+		defer release()
+
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		_, err = fixture.broker.saveCredential(ctx, flow, manualAmpKeyCanary)
+		requireAuthCause(t, err, authCauseTimeout)
+	})
+
+	t.Run("cancel after durable confirmation", func(t *testing.T) {
+		fixture := newAuthFixture(t, "login-hang")
+		flowResult := fixture.mustAuthorizeMethod("connection-race", authMethodAPIKey)
+
+		originalRename := ledgerRename
+		started := make(chan struct{})
+		release := make(chan struct{})
+		ledgerRename = func(oldPath string, newPath string) error {
+			close(started)
+			<-release
+
+			return originalRename(oldPath, newPath)
+		}
+		t.Cleanup(func() { ledgerRename = originalRename })
+
+		answered := make(chan error, 1)
+		go func() {
+			answered <- fixture.callbackMethod(flowResult.FlowID, authMethodAPIKey, manualAmpKeyCanary)
+		}()
+		<-started
+
+		if err := fixture.call(AuthCancelMethod, map[string]any{
+			authFieldSessionID: string(fixture.session.id), authFieldProviderID: authProviderID, authFieldFlowID: flowResult.FlowID,
+		}, nil); err != nil {
+			t.Fatalf("cancel: %v", err)
+		}
+		close(release)
+
+		requireAuthCause(t, <-answered, authCauseFlowState)
+		if status := fixture.status(flowResult.FlowID); status.State != authStateCancelled {
+			t.Fatalf("raced cancel status = %#v", status)
+		}
+	})
+}
+
+func TestManualAPIKeyCancelWipesUnharvestedMaterial(t *testing.T) {
+	fixture := newAuthFixture(t, "login-hang")
+
+	pending := fixture.mustAuthorizeMethod("connection-pending", authMethodAPIKey)
+	if err := fixture.call(AuthCancelMethod, map[string]any{
+		authFieldSessionID: string(fixture.session.id), authFieldProviderID: authProviderID, authFieldFlowID: pending.FlowID,
+	}, nil); err != nil {
+		t.Fatalf("cancel pending manual flow: %v", err)
+	}
+	if status := fixture.status(pending.FlowID); status.State != authStateCancelled || status.Reason != authReasonOwnerCancel {
+		t.Fatalf("pending cancel status = %#v", status)
+	}
+
+	saved := fixture.mustAuthorizeMethod("connection-saved", authMethodAPIKey)
+	if err := fixture.callbackMethod(saved.FlowID, authMethodAPIKey, manualAmpKeyCanary); err != nil {
+		t.Fatalf("manual material: %v", err)
+	}
+	if err := fixture.call(AuthCancelMethod, map[string]any{
+		authFieldSessionID: string(fixture.session.id), authFieldProviderID: authProviderID, authFieldFlowID: saved.FlowID,
+	}, nil); err != nil {
+		t.Fatalf("cancel saved manual flow: %v", err)
+	}
+
+	flow, err := fixture.broker.addressFlow(fixture.session.id, authProviderID, saved.FlowID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.broker.mu.Lock()
+	retained := len(flow.credential)
+	fixture.broker.mu.Unlock()
+	if retained != 0 {
+		t.Fatalf("cancelled flow retained %d credential bytes", retained)
+	}
+	if status := fixture.status(saved.FlowID); status.State != authStateCancelled || status.Reason != authReasonOwnerCancel {
+		t.Fatalf("saved cancel status = %#v", status)
+	}
+	if err := fixture.call(AuthCredentialMethod, map[string]any{
+		authFieldSessionID: string(fixture.session.id), authFieldProviderID: authProviderID, authFieldFlowID: saved.FlowID,
+	}, nil); err == nil {
+		t.Fatal("cancelled manual material remained harvestable")
+	}
+}
+
+func TestManualAPIKeyLateExpiryCannotWipeSavedMaterial(t *testing.T) {
+	fixture := newAuthFixture(t, "login-hang")
+	result := fixture.mustAuthorizeMethod("connection-late-expiry", authMethodAPIKey)
+	if err := fixture.callbackMethod(result.FlowID, authMethodAPIKey, manualAmpKeyCanary); err != nil {
+		t.Fatalf("manual material: %v", err)
+	}
+
+	flow, err := fixture.broker.addressFlow(fixture.session.id, authProviderID, result.FlowID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Model the deadline goroutine winning its timer-vs-disarm select just
+	// before callback saved the material, then reaching expire after callback
+	// returned. A terminal flow already has its owner; the losing expiry is a
+	// true no-op and must not perform terminal cleanup on that owner's state.
+	fixture.broker.expire(flow)
+
+	if status := fixture.status(result.FlowID); status.State != authStateSaved || status.Reason != "" {
+		t.Fatalf("late expiry moved the saved flow: %#v", status)
+	}
+
+	credential := harvestAuthCredential(t, fixture, result.FlowID)
+	if credential.Credential.API == nil || credential.Credential.API.Key != manualAmpKeyCanary {
+		t.Fatalf("late expiry wiped the saved material: %#v", credential)
+	}
+}

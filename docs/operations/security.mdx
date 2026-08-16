@@ -121,9 +121,14 @@ invokes the system browser directly, and `AMP_HEADLESS_OAUTH` controls only
 MCP-server OAuth rather than account authentication. The adapter fingerprints
 the resolved executable and refuses it before constructing `amp login`; an
 unknown build is refused until its account-login behavior has an audited
-headless contract. Windows also refuses the login before native minting and
-rejects every native Amp command at the mandatory Unix UID/GID identity
-boundary. Both platforms report `unsupported_variant` from `authorize`.
+headless contract. Windows also refuses the login before native minting,
+because the launcher shim above neutralises nothing there: `CreateProcess`
+resolves `cmd.exe`, `explorer.exe`, and `rundll32.exe` out of the system
+directory ahead of every `PATH` entry, and the `start` that opens a URL is a
+`cmd.exe` builtin with no image to shadow. Both platforms report
+`unsupported_variant` from `authorize`. Neither refusal reaches ordinary native
+Amp commands, which open no browser, nor the manual `api-key` method, which
+starts no login child.
 
 ## Stream isolation
 

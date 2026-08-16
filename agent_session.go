@@ -457,9 +457,13 @@ func (a *Agent) SetSessionConfigOption(ctx context.Context, params acp.SetSessio
 	ctx, finish := a.observe.StartACPRequest(ctx, acp.AgentMethodSessionSetConfigOption)
 	defer func() { finish(err) }()
 
-	// Amp advertises select options only, so both the boolean variant and a
-	// request carrying no value id at all name the same unsupported member.
-	if params.Boolean != nil || params.ValueId == nil {
+	// Amp advertises select options only, so the boolean variant is refused on
+	// the discriminator that chose it rather than on the value it carried.
+	if params.Boolean != nil {
+		return acp.SetSessionConfigOptionResponse{}, unsupportedField(fieldType)
+	}
+
+	if params.ValueId == nil {
 		return acp.SetSessionConfigOptionResponse{}, unsupportedField(fieldValue)
 	}
 

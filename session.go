@@ -50,6 +50,10 @@ const (
 	fieldPrompt   = "prompt"
 	fieldCursor   = "cursor"
 	fieldConfigID = "configId"
+	// fieldType names the request discriminator. Neither
+	// SetSessionConfigOptionRequest variant is itself a wire field, so `type` is
+	// the only JSON path a wrong-variant rejection can name.
+	fieldType = "type"
 
 	keyType      = "type"
 	keyDetail    = "detail"
