@@ -34,17 +34,17 @@ func declaresRasterMediaType(declared string) bool {
 //
 // Its verdicts report the resource channel: the byte bounds are borrowed from
 // the image contract, but the block a host would have to fix is a resource
-// block. A blob that is not valid base64 is refused ahead of every gate and so
-// consumes no position in the gated-media sequence.
+// block. Amp gates these blobs, so one enters the gated-media sequence and
+// claims its position before any verdict runs.
 func (b *imagePromptBudget) admitBlob(blob string) error {
+	index := b.claimIndex()
+
 	// Nothing downstream reads these bytes, so none are retained: the decode
 	// exists to prove the payload is base64 and to measure what it decodes to.
 	_, sizeBytes, err := decodePromptImage(blob, 0)
 	if err != nil {
-		return promptMediaError(resourceField, b.nextIndex, imageErrorInvalidBase64)
+		return promptMediaError(resourceField, index, imageErrorInvalidBase64)
 	}
-
-	index := b.nextImageIndex()
 
 	if maxBytes := effectiveInputBytesPerImage(b.limits); sizeBytes > maxBytes {
 		return promptMediaSizeError(resourceField, index, imageErrorTooLarge, sizeBytes, maxBytes)

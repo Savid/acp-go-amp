@@ -50,12 +50,12 @@ func (a *Agent) validateSessionStartOptions(options AmpOptions) error {
 	}
 
 	if options.Mode != "" && !slices.Contains(validModes(), options.Mode) {
-		return acp.NewInvalidParams(map[string]any{jsonFieldField: "_meta.amp.options.mode"})
+		return unsupportedField("_meta.amp.options.mode")
 	}
 
 	for key := range options.Env {
 		if invalidEnvName(key) || strings.HasPrefix(strings.ToUpper(key), privateEnvPrefix) {
-			return acp.NewInvalidParams(map[string]any{jsonFieldField: "_meta.amp.options.env." + key})
+			return unsupportedField("_meta.amp.options.env." + key)
 		}
 	}
 
@@ -171,7 +171,7 @@ func validateOptionalAbsolutePath(field string, path *string) error {
 	}
 
 	if !filepath.IsAbs(*path) {
-		return acp.NewInvalidParams(map[string]any{jsonFieldField: field})
+		return unsupportedField(field)
 	}
 
 	return nil
@@ -179,12 +179,12 @@ func validateOptionalAbsolutePath(field string, path *string) error {
 
 func validateSessionPaths(cwd string, additionalDirs []string) error {
 	if cwd == "" || !filepath.IsAbs(cwd) {
-		return acp.NewInvalidParams(map[string]any{jsonFieldField: "cwd"})
+		return unsupportedField("cwd")
 	}
 
 	for i, dir := range additionalDirs {
 		if dir == "" || !filepath.IsAbs(dir) {
-			return acp.NewInvalidParams(map[string]any{jsonFieldField: fmt.Sprintf("additionalDirectories[%d]", i)})
+			return unsupportedField(fmt.Sprintf("additionalDirectories[%d]", i))
 		}
 	}
 

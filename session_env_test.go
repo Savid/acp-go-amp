@@ -324,7 +324,10 @@ func TestInvalidEnvironmentNamesAreRefused(t *testing.T) {
 		_, err = sessionAgent.NewSession(context.Background(), NewSessionRequest(t.TempDir(), WithSessionAmpOptions(
 			NewAmpOptions(WithAmpEnv(map[string]string{key: "x"})),
 		)))
-		requireInvalidParamsData(t, err, map[string]any{jsonFieldField: "_meta.amp.options.env." + key})
+		requireInvalidParamsData(t, err, map[string]any{
+			jsonFieldError: valUnsupported,
+			jsonFieldField: "_meta.amp.options.env." + key,
+		})
 	}
 }
 

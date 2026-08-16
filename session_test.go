@@ -97,21 +97,24 @@ func TestLoadResumeManifestAndConfigBranches(t *testing.T) {
 		t.Fatalf("resume did not emit exactly one identity-only checkpoint: before=%d updates=%#v", before, updates)
 	}
 
-	if _, err := agent.SetSessionConfigOption(ctx, acp.SetSessionConfigOptionRequest{Boolean: &acp.SetSessionConfigOptionBoolean{SessionId: "T-load", ConfigId: "mode", Value: true}}); err == nil {
-		t.Fatal("boolean config accepted")
+	// Every refusal on the config surface names the offending member in the
+	// uniform two-key shape: the value-id variant is the only accepted payload,
+	// so a boolean payload and an absent value id both name `value`.
+	_, err := agent.SetSessionConfigOption(ctx, acp.SetSessionConfigOptionRequest{Boolean: &acp.SetSessionConfigOptionBoolean{SessionId: "T-load", ConfigId: "mode", Value: true}})
+	requireUnsupportedField(t, err, fieldValue)
+
+	_, err = agent.SetSessionConfigOption(ctx, acp.SetSessionConfigOptionRequest{})
+	requireUnsupportedField(t, err, fieldValue)
+
+	if _, setErr := agent.SetSessionConfigOption(ctx, SetConfigOptionRequest("T-load", "mode", "low")); setErr != nil {
+		t.Fatalf("set mode: %v", setErr)
 	}
-	if _, err := agent.SetSessionConfigOption(ctx, acp.SetSessionConfigOptionRequest{}); err == nil {
-		t.Fatal("missing value config accepted")
-	}
-	if _, err := agent.SetSessionConfigOption(ctx, SetConfigOptionRequest("T-load", "mode", "low")); err != nil {
-		t.Fatalf("set mode: %v", err)
-	}
-	if _, err := agent.SetSessionConfigOption(ctx, SetConfigOptionRequest("T-load", "mode", "bad")); err == nil {
-		t.Fatal("bad mode accepted")
-	}
-	if _, err := agent.SetSessionConfigOption(ctx, SetConfigOptionRequest("T-load", "unknown", "x")); err == nil {
-		t.Fatal("unknown config accepted")
-	}
+
+	_, err = agent.SetSessionConfigOption(ctx, SetConfigOptionRequest("T-load", "mode", "bad"))
+	requireUnsupportedField(t, err, fieldValue)
+
+	_, err = agent.SetSessionConfigOption(ctx, SetConfigOptionRequest("T-load", "unknown", "x"))
+	requireUnsupportedField(t, err, fieldConfigID)
 	if _, err := agent.SetSessionConfigOption(ctx, SetConfigOptionRequest("T-missing", "mode", "low")); err == nil {
 		t.Fatal("unknown config session accepted")
 	}
@@ -270,9 +273,13 @@ func TestPromptInputAndEmitBranches(t *testing.T) {
 		jsonFieldField: "prompt",
 	})
 
-	if _, err := promptInputWithPolicy(t.Context(), []acp.ContentBlock{acp.ResourceBlock(acp.EmbeddedResourceResource{})}, defaultPolicy()); err == nil {
-		t.Fatal("empty embedded resource accepted")
-	}
+	// An embedded resource carrying neither text nor blob is the same refusal:
+	// the block a host must fix is the prompt member it arrived on.
+	_, resourceErr := promptInputWithPolicy(t.Context(), []acp.ContentBlock{acp.ResourceBlock(acp.EmbeddedResourceResource{})}, defaultPolicy())
+	requireInvalidParamsData(t, resourceErr, map[string]any{
+		jsonFieldError: valUnsupported,
+		jsonFieldField: fieldPrompt,
+	})
 	session := &agentSession{agent: newTestAgent(), id: "T-emit", rawEvents: true}
 	if err := session.emitUsage(context.Background(), nil); err != nil {
 		t.Fatal(err)

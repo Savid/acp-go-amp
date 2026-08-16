@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/coder/acp-go-sdk"
 )
@@ -115,20 +117,100 @@ func TestLocalAgentConnectionNotifyExtensionValidatesMethod(t *testing.T) {
 }
 
 func TestRequestErrorConversions(t *testing.T) {
-	if requestError(nil) != nil {
+	live := t.Context()
+
+	if requestError(live, nil) != nil {
 		t.Fatal("nil error converted")
 	}
 
 	passthrough := acp.NewMethodNotFound("x")
-	if got := requestError(passthrough); got != passthrough {
+	if got := requestError(live, passthrough); got != passthrough {
 		t.Fatalf("request error not passed through: %#v", got)
 	}
 
-	if got := requestError(context.Canceled); got == nil || got.Code != -32800 {
-		t.Fatalf("cancelled conversion = %#v", got)
+	if got := requestError(live, errors.New("boom")); got == nil || got.Code != -32603 {
+		t.Fatalf("internal conversion = %#v", got)
 	}
 
-	if got := requestError(errors.New("boom")); got == nil || got.Code != -32603 {
-		t.Fatalf("internal conversion = %#v", got)
+	// A cancellation reached by unwrapping the error is not an honored cancel:
+	// the peer never withdrew this request, so it stays an internal failure.
+	if got := requestError(live, fmt.Errorf("read prompt: %w", context.Canceled)); got == nil || got.Code != -32603 {
+		t.Fatalf("wrapped cancellation conversion = %#v", got)
+	}
+}
+
+// TestRequestErrorReportsAnHonoredCancelAheadOfAnEmbeddedRequestError pins the
+// discriminator: only a request context whose cause is context.Canceled is an
+// honored $/cancel_request, and it outranks any typed error the aborted work
+// joined on its way out. Amp joins a backpressure -32600 with the teardown error
+// on the session-establishing paths, so an unguarded errors.As would answer a
+// withdrawn request with an error about its parameters.
+func TestRequestErrorReportsAnHonoredCancelAheadOfAnEmbeddedRequestError(t *testing.T) {
+	ctx, cancel := context.WithCancelCause(t.Context())
+	cancel(context.Canceled)
+
+	for name, err := range map[string]error{
+		"embedded request error": errors.Join(backpressureError("active_sessions"), context.Canceled),
+		"plain failure":          errors.New("boom"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := requestError(ctx, err); got == nil || got.Code != -32800 {
+				t.Fatalf("honored cancel conversion = %#v", got)
+			}
+		})
+	}
+}
+
+// TestRequestErrorReportsATornDownConnectionByItsOwnError pins that a connection
+// teardown is not a cancel. The SDK cancels the parent context with the
+// transport cause rather than context.Canceled, so a request aborted by it
+// reports what actually failed instead of -32800.
+func TestRequestErrorReportsATornDownConnectionByItsOwnError(t *testing.T) {
+	ctx, cancel := context.WithCancelCause(t.Context())
+	defer cancel(nil)
+
+	cancel(errors.New("peer connection closed"))
+
+	invalid := acp.NewInvalidParams(map[string]any{jsonFieldField: fieldPrompt})
+	if got := requestError(ctx, errors.Join(invalid, context.Canceled)); got != invalid {
+		t.Fatalf("torn-down conversion = %#v", got)
+	}
+
+	if got := requestError(ctx, errors.New("boom")); got == nil || got.Code != -32603 {
+		t.Fatalf("torn-down internal conversion = %#v", got)
+	}
+}
+
+// TestRequestErrorReportsAnExpiredDeadlineAsAnInternalFailure pins that an
+// adapter-internal deadline is a failure of the turn and never a cancel: its
+// cause is context.DeadlineExceeded, which the cancel discriminator excludes by
+// name rather than by accident of error matching.
+func TestRequestErrorReportsAnExpiredDeadlineAsAnInternalFailure(t *testing.T) {
+	ctx, cancel := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
+	defer cancel()
+
+	if got := requestError(ctx, context.DeadlineExceeded); got == nil || got.Code != -32603 {
+		t.Fatalf("deadline conversion = %#v", got)
+	}
+}
+
+// TestLocalAgentConnectionSerializesAnHonoredCancel proves the request context
+// reaches the error mapper through dispatch: the same call answers -32602 on a
+// live context and -32800 once the peer has withdrawn it.
+func TestLocalAgentConnectionSerializesAnHonoredCancel(t *testing.T) {
+	conn := &localAgentConnection{agent: newTestAgent()}
+	conn.initialized.Store(true)
+
+	params := json.RawMessage(`{"sessionId":"T-missing"}`)
+
+	if _, reqErr := conn.handle(t.Context(), acp.AgentMethodSessionClose, params); reqErr == nil || reqErr.Code != -32602 {
+		t.Fatalf("live unknown-session close = %#v", reqErr)
+	}
+
+	ctx, cancel := context.WithCancelCause(t.Context())
+	cancel(context.Canceled)
+
+	if _, reqErr := conn.handle(ctx, acp.AgentMethodSessionClose, params); reqErr == nil || reqErr.Code != -32800 {
+		t.Fatalf("cancelled unknown-session close = %#v", reqErr)
 	}
 }

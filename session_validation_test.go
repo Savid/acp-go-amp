@@ -219,7 +219,7 @@ func TestValidateOptionalAbsolutePath(t *testing.T) {
 	}
 	rel := "relative/path"
 	err := validateOptionalAbsolutePath("cwd", &rel)
-	requireInvalidParamsData(t, err, map[string]any{jsonFieldField: "cwd"})
+	requireInvalidParamsData(t, err, map[string]any{jsonFieldError: valUnsupported, jsonFieldField: "cwd"})
 }
 
 // TestProcessIsolationOptionIsRefusedOnWindows proves the option is rejected on

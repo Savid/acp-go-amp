@@ -153,6 +153,100 @@ func TestImagePromptAggregateLimitUsesCrossingImageIndex(t *testing.T) {
 	))
 }
 
+// TestPreGateRefusalsConsumeTheirGatedMediaIndex pins that entering the
+// gated-media chain is what consumes a position, not reaching any particular
+// gate: every block refused at the first gate still claims its index, so the
+// next media block in the same prompt reports a position no earlier block used.
+// Prompt mapping aborts on the first defect, so the sequence is driven against
+// the budget directly — that is the only place two verdicts from one prompt can
+// be observed.
+func TestPreGateRefusalsConsumeTheirGatedMediaIndex(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		refuse func(t *testing.T, budget *imagePromptBudget) error
+		want   map[string]any
+	}{
+		{
+			name: "image block carrying neither data nor handoff intent",
+			refuse: func(t *testing.T, budget *imagePromptBudget) error {
+				t.Helper()
+				_, err := budget.validateImageBlock(t.Context(), acp.ImageBlock("", imageMIMEPNG).Image)
+
+				return err
+			},
+			want: imageErrorData(0, imageErrorMissingData),
+		},
+		{
+			name: "image block declaring an unsupported media type",
+			refuse: func(t *testing.T, budget *imagePromptBudget) error {
+				t.Helper()
+				_, err := budget.validateImageBlock(t.Context(), acp.ImageBlock("%%%", "image/heic").Image)
+
+				return err
+			},
+			want: imageErrorData(0, imageErrorInvalidMediaType),
+		},
+		{
+			name: "image block carrying undecodable base64",
+			refuse: func(t *testing.T, budget *imagePromptBudget) error {
+				t.Helper()
+				_, err := budget.validateImageBlock(t.Context(), acp.ImageBlock("%%%", imageMIMEPNG).Image)
+
+				return err
+			},
+			want: imageErrorData(0, imageErrorInvalidBase64),
+		},
+		{
+			name: "raster blob carrying no data",
+			refuse: func(t *testing.T, budget *imagePromptBudget) error {
+				t.Helper()
+				_, err := budget.validate("", imageMIMEPNG)
+
+				return err
+			},
+			want: resourceErrorData(0, imageErrorMissingData),
+		},
+		{
+			name: "untyped blob carrying undecodable base64",
+			refuse: func(t *testing.T, budget *imagePromptBudget) error {
+				t.Helper()
+
+				return budget.admitBlob("%%%")
+			},
+			want: resourceErrorData(0, imageErrorInvalidBase64),
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			budget := imagePromptBudget{limits: applyOptions(nil).ImageLimits}
+
+			requireInvalidParamsData(t, test.refuse(t, &budget), test.want)
+
+			_, err := budget.validateImageBlock(t.Context(), acp.ImageBlock("", imageMIMEPNG).Image)
+			requireInvalidParamsData(t, err, imageErrorData(1, imageErrorMissingData))
+		})
+	}
+}
+
+// TestTextResourcesNeverConsumeAGatedMediaIndex is the other half of the counter
+// rule: a text resource carries no media the index identifies, so it reports the
+// position the next media block will take without claiming it.
+func TestTextResourcesNeverConsumeAGatedMediaIndex(t *testing.T) {
+	limits := applyOptions(nil).ImageLimits
+	limits.MaxInputBytesPerPrompt = 8
+
+	budget := imagePromptBudget{limits: limits}
+
+	requireInvalidParamsData(t, budget.chargeText(9), resourceSizeErrorData(
+		0,
+		imageErrorTooLarge,
+		9,
+		limits.MaxInputBytesPerPrompt,
+	))
+
+	_, err := budget.validateImageBlock(t.Context(), acp.ImageBlock("", imageMIMEPNG).Image)
+	requireInvalidParamsData(t, err, imageErrorData(0, imageErrorMissingData))
+}
+
 func TestImagePromptNativeEnvelopes(t *testing.T) {
 	validPNG := imageFixture(t, "valid.png")
 	oversize := make([]byte, ampNativeMaxImageBytes+1)

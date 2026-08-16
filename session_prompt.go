@@ -835,7 +835,7 @@ func embeddedResourceContent(resource acp.EmbeddedResourceResource, imageBudget 
 		return map[string]any{keyType: valText, valText: strings.Join(parts, "\n")}, nil
 	}
 
-	return nil, acp.NewInvalidParams(map[string]any{jsonFieldField: fieldPrompt, jsonFieldError: "unsupported embedded resource"})
+	return nil, unsupportedField(fieldPrompt)
 }
 
 func usageFromAmp(usage *amp.Usage) *acp.Usage {

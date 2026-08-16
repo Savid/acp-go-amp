@@ -46,9 +46,11 @@ const (
 	// gate.
 	optionFieldProviderAuthDirectHome = "providerAuthDirectHome"
 
-	fieldValue   = "value"
-	fieldPrompt  = "prompt"
-	fieldCursor  = "cursor"
+	fieldValue    = "value"
+	fieldPrompt   = "prompt"
+	fieldCursor   = "cursor"
+	fieldConfigID = "configId"
+
 	keyType      = "type"
 	keyDetail    = "detail"
 	keyMessage   = "message"

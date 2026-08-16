@@ -87,12 +87,14 @@ type imagePromptBudget struct {
 	root *os.Root
 }
 
-// nextImageIndex allocates the position this media block reports in the prompt's
-// gated-media sequence. It is claimed only once a block reaches the shared gate
-// chain — image content blocks and embedded resource blobs alike — so a block
-// refused ahead of every gate stays invisible to the counter, and no two gated
-// blocks in one prompt can report the same index.
-func (b *imagePromptBudget) nextImageIndex() int {
+// claimIndex allocates the position this media block reports in the prompt's
+// gated-media sequence. Entering the chain is what consumes a position, so every
+// entry point claims one before it validates anything — image content blocks and
+// embedded resource blobs alike — and a block refused at the first gate consumes
+// its position exactly as one that reaches the byte gate does. Were the counter
+// keyed on reaching a later gate, two blocks in one prompt could report the same
+// index.
+func (b *imagePromptBudget) claimIndex() int {
 	index := b.nextIndex
 	b.nextIndex++
 
@@ -102,41 +104,46 @@ func (b *imagePromptBudget) nextImageIndex() int {
 // validateImageBlock selects the block's input form and validates it. Non-empty
 // data is the embedded form even when a handoff envelope is also present; empty
 // data with handoff intent is the handoff form; empty data with neither is
-// missing_data.
+// missing_data. Form selection decides which gates run, never whether the block
+// entered: an image block always enters, so its position is claimed first.
 func (b *imagePromptBudget) validateImageBlock(ctx context.Context, block *acp.ContentBlockImage) (validatedPromptImage, error) {
+	index := b.claimIndex()
+
 	if block.Data != "" {
-		return b.validateEmbedded(imageField, block.Data, block.MimeType)
+		return b.validateEmbedded(imageField, index, block.Data, block.MimeType)
 	}
 
 	if !promptHandoffIntent(block) {
-		return validatedPromptImage{}, imagePromptError(b.nextIndex, imageErrorMissingData)
+		return validatedPromptImage{}, imagePromptError(index, imageErrorMissingData)
 	}
 
 	decoded, failure := b.handoffBytes(ctx, block)
 	if failure != nil {
-		return validatedPromptImage{}, imagePromptHandoffError(b.nextIndex, failure)
+		return validatedPromptImage{}, imagePromptHandoffError(index, failure)
 	}
 
 	// Both forms deliver every byte they account for: a handoff read past the
 	// declared size is rejected where it is read, so the byte the gates count is
 	// the byte that arrived.
-	return b.gate(imageField, b.nextImageIndex(), block.MimeType, decoded, int64(len(decoded)))
+	return b.gate(imageField, index, block.MimeType, decoded, int64(len(decoded)))
 }
 
 // validate validates an embedded base64 image carried by a resource block. The
 // bytes arrived on a resource, so every verdict names that member even though a
 // raster declaration is what routed them into the image chain.
 func (b *imagePromptBudget) validate(data, mimeType string) (validatedPromptImage, error) {
+	index := b.claimIndex()
+
 	if data == "" {
-		return validatedPromptImage{}, promptMediaError(resourceField, b.nextIndex, imageErrorMissingData)
+		return validatedPromptImage{}, promptMediaError(resourceField, index, imageErrorMissingData)
 	}
 
-	return b.validateEmbedded(resourceField, data, mimeType)
+	return b.validateEmbedded(resourceField, index, data, mimeType)
 }
 
-func (b *imagePromptBudget) validateEmbedded(field, data, mimeType string) (validatedPromptImage, error) {
+func (b *imagePromptBudget) validateEmbedded(field string, index int, data, mimeType string) (validatedPromptImage, error) {
 	if !isPromptImageMIME(mimeType) {
-		return validatedPromptImage{}, promptMediaError(field, b.nextIndex, imageErrorInvalidMediaType)
+		return validatedPromptImage{}, promptMediaError(field, index, imageErrorInvalidMediaType)
 	}
 
 	// Retain up to the ACP transport frame cap so structural inspection sees the
@@ -146,10 +153,10 @@ func (b *imagePromptBudget) validateEmbedded(field, data, mimeType string) (vali
 	// is rejected rather than truncated and forwarded.
 	decoded, sizeBytes, err := decodePromptImage(data, maxACPImageDecodedBytes)
 	if err != nil {
-		return validatedPromptImage{}, promptMediaError(field, b.nextIndex, imageErrorInvalidBase64)
+		return validatedPromptImage{}, promptMediaError(field, index, imageErrorInvalidBase64)
 	}
 
-	return b.gate(field, b.nextImageIndex(), mimeType, decoded, sizeBytes)
+	return b.gate(field, index, mimeType, decoded, sizeBytes)
 }
 
 // gate runs the structural and size verdicts every accepted image passes,

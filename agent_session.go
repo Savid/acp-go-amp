@@ -457,12 +457,10 @@ func (a *Agent) SetSessionConfigOption(ctx context.Context, params acp.SetSessio
 	ctx, finish := a.observe.StartACPRequest(ctx, acp.AgentMethodSessionSetConfigOption)
 	defer func() { finish(err) }()
 
-	if params.Boolean != nil {
-		return acp.SetSessionConfigOptionResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldField: fieldValue, jsonFieldError: "boolean config options are unsupported"})
-	}
-
-	if params.ValueId == nil {
-		return acp.SetSessionConfigOptionResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldField: fieldValue})
+	// Amp advertises select options only, so both the boolean variant and a
+	// request carrying no value id at all name the same unsupported member.
+	if params.Boolean != nil || params.ValueId == nil {
+		return acp.SetSessionConfigOptionResponse{}, unsupportedField(fieldValue)
 	}
 
 	session, err := a.session(params.ValueId.SessionId)
@@ -1015,14 +1013,14 @@ func (s *agentSession) setConfig(ctx context.Context, id acp.SessionConfigId, va
 		if !slices.Contains(validModes(), string(value)) {
 			s.mu.Unlock()
 
-			return acp.NewInvalidParams(map[string]any{jsonFieldField: fieldValue})
+			return unsupportedField(fieldValue)
 		}
 
 		s.mode = string(value)
 	default:
 		s.mu.Unlock()
 
-		return acp.NewInvalidParams(map[string]any{jsonFieldField: "configId"})
+		return unsupportedField(fieldConfigID)
 	}
 
 	s.updatedUnix = time.Now().UnixMilli()
