@@ -217,16 +217,19 @@ func (a *Agent) Close() error {
 }
 
 // optionsError reports every construction-time option failure as one uniform
-// invalid-params error, or nil when all of them validated. Both the handshake
-// and session establishment report it, because an embedded host can open a
-// session and prompt without ever calling initialize.
+// internal error, or nil when all of them validated. The code is -32603 because
+// the caller's params are fine — the embedding host built an agent that cannot
+// serve anything — and the data carries only the joined prose because no wire
+// field is at fault to name. Both the handshake and session establishment
+// report it, because an embedded host can open a session and prompt without
+// ever calling initialize.
 func (a *Agent) optionsError() error {
 	configurationErr := errors.Join(a.activeLimitErr, a.configurationErr)
 	if configurationErr == nil {
 		return nil
 	}
 
-	return acp.NewInvalidParams(map[string]any{jsonFieldError: configurationErr.Error()})
+	return acp.NewInternalError(map[string]any{jsonFieldError: configurationErr.Error()})
 }
 
 func (a *Agent) Initialize(ctx context.Context, params acp.InitializeRequest) (resp acp.InitializeResponse, err error) {

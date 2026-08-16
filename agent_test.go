@@ -348,12 +348,14 @@ func TestAgentErrorAndConformanceBranches(t *testing.T) {
 		WithAgentVersion("v1.2.3"),
 		WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: -1}),
 	)
+	// A construction-time option failure is the agent's own misconfiguration, not
+	// a caller-params fault, so every entry point answers -32603.
 	_, err := agent.Initialize(ctx, acp.InitializeRequest{})
-	requireRequestErrorCode(t, err, -32602)
+	requireRequestErrorCode(t, err, -32603)
 
 	agent = newTestAgent(WithImageLimits(ImageLimits{MaxInputBytesPerImage: -1}))
 	_, err = agent.Initialize(ctx, acp.InitializeRequest{})
-	requireRequestErrorCode(t, err, -32602)
+	requireRequestErrorCode(t, err, -32603)
 
 	agent = newTestAgent()
 	if _, err := agent.Authenticate(ctx, acp.AuthenticateRequest{MethodId: "none"}); err == nil {
@@ -430,10 +432,11 @@ func TestAgentErrorAndConformanceBranches(t *testing.T) {
 		WithScratchDir(testScratchDir(t)),
 		WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: -1}),
 	)
-	if _, err := limitAgent.NewSession(context.Background(), NewSessionRequest(t.TempDir())); err == nil ||
-		!strings.Contains(err.Error(), "max active sessions must be non-negative") {
-		t.Fatalf("concurrency limit error at session start = %v", err)
+	_, limitErr := limitAgent.NewSession(context.Background(), NewSessionRequest(t.TempDir()))
+	if limitErr == nil || !strings.Contains(limitErr.Error(), "max active sessions must be non-negative") {
+		t.Fatalf("concurrency limit error at session start = %v", limitErr)
 	}
+	requireRequestErrorCode(t, limitErr, -32603)
 	if err := newTestAgent().validateSessionStartOptions(AmpOptions{Env: map[string]string{"acp_go_amp_internal_bad": "value"}}); err == nil {
 		t.Fatal("reserved session environment was accepted")
 	}

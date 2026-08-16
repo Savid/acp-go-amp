@@ -156,6 +156,22 @@ func requireInvalidParamsData(t *testing.T, err error, want map[string]any) {
 	}
 }
 
+// requireInternalErrorData asserts err is a -32603 RequestError whose data map
+// exactly equals want. It stays separate from requireInvalidParamsData so a
+// server-fault shape can never be pinned by a caller-fault assertion.
+func requireInternalErrorData(t *testing.T, err error, want map[string]any) {
+	t.Helper()
+	var reqErr *acp.RequestError
+	require.ErrorAs(t, err, &reqErr)
+	require.Equal(t, -32603, reqErr.Code, "want -32603")
+	data, ok := reqErr.Data.(map[string]any)
+	require.True(t, ok, "data must be a map")
+	require.Len(t, data, len(want))
+	for k, v := range want {
+		require.Equal(t, v, data[k])
+	}
+}
+
 func TestMCPNameContract(t *testing.T) {
 	// Empty stdio name at index 0.
 	_, err := mcpConfigJSON([]acp.McpServer{{Stdio: &acp.McpServerStdio{Command: "c"}}})

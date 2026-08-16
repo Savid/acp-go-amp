@@ -172,8 +172,9 @@ func TestAdvertisedImageFormatsAreTheAllowlistTheGateEnforces(t *testing.T) {
 func TestRelativeInputHandoffRootIsAConfigurationError(t *testing.T) {
 	agent := newTestAgent(WithInputHandoffRoot("relative/handoff"))
 
+	// The host built the agent, not the caller, so the refusal is a server fault.
 	_, err := agent.Initialize(t.Context(), acp.InitializeRequest{})
-	requireInvalidParamsData(t, err, map[string]any{
+	requireInternalErrorData(t, err, map[string]any{
 		jsonFieldError: "input handoff root must be an absolute path",
 	})
 
