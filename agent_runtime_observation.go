@@ -278,18 +278,6 @@ func instrumentRuntimeResourceHooks(hooks RuntimeResourceHooks, observe *observe
 	return hooks
 }
 
-func observeRuntimeProcess(ctx context.Context, hooks RuntimeResourceHooks, kind RuntimeProcessKind, delta int64) {
-	if hooks.ObserveProcess != nil && delta != 0 {
-		hooks.ObserveProcess(ctx, kind, delta)
-	}
-}
-
-func observeRuntimeProcessSnapshot(ctx context.Context, hooks RuntimeResourceHooks, kind RuntimeProcessKind, count int) {
-	if hooks.ObserveProcessSnapshot != nil && count >= 0 {
-		hooks.ObserveProcessSnapshot(ctx, kind, count)
-	}
-}
-
 func observeRuntimeStartupStage(
 	ctx context.Context,
 	hooks RuntimeResourceHooks,

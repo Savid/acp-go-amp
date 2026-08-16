@@ -17,7 +17,7 @@ import (
 const validPNGBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
 
 func TestPromptInputResourceBlocks(t *testing.T) {
-	payload, err := promptInput(t.Context(), []acp.ContentBlock{
+	payload, err := promptInputWithPolicy(t.Context(), []acp.ContentBlock{
 		acp.ResourceLinkBlock("notes.md", "file:///tmp/notes.md"),
 		acp.ResourceBlock(acp.EmbeddedResourceResource{
 			TextResourceContents: &acp.TextResourceContents{
@@ -25,7 +25,7 @@ func TestPromptInputResourceBlocks(t *testing.T) {
 				Uri:  "file:///tmp/embedded.md",
 			},
 		}),
-	})
+	}, defaultPolicy())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -643,10 +643,10 @@ func TestUsageUpdateSizeIsContextWindowNotUsed(t *testing.T) {
 // an empty prompt and a data-less image block are rejected -32602 with the
 // uniform data shapes.
 func TestPromptInputFailClosedShapes(t *testing.T) {
-	_, err := promptInput(t.Context(), nil)
+	_, err := promptInputWithPolicy(t.Context(), nil, defaultPolicy())
 	requireInvalidParamsData(t, err, map[string]any{jsonFieldError: valUnsupported, jsonFieldField: fieldPrompt})
 
-	_, err = promptInput(t.Context(), []acp.ContentBlock{acp.ImageBlock("", "image/png")})
+	_, err = promptInputWithPolicy(t.Context(), []acp.ContentBlock{acp.ImageBlock("", "image/png")}, defaultPolicy())
 	requireInvalidParamsData(t, err, map[string]any{
 		jsonFieldField: "prompt.image",
 		jsonFieldError: imageErrorMissingData,
@@ -654,7 +654,7 @@ func TestPromptInputFailClosedShapes(t *testing.T) {
 	})
 
 	// An image with data still forwards as base64 source content.
-	input, err := promptInput(t.Context(), []acp.ContentBlock{acp.ImageBlock(validPNGBase64, "image/png")})
+	input, err := promptInputWithPolicy(t.Context(), []acp.ContentBlock{acp.ImageBlock(validPNGBase64, "image/png")}, defaultPolicy())
 	if err != nil {
 		t.Fatalf("image prompt input: %v", err)
 	}

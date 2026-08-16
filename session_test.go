@@ -240,14 +240,14 @@ func TestRemainingAgentBranches(t *testing.T) {
 
 func TestPromptInputAndEmitBranches(t *testing.T) {
 	title, mime, desc := "Title", "text/plain", "desc"
-	payload, err := promptInput(t.Context(), []acp.ContentBlock{
+	payload, err := promptInputWithPolicy(t.Context(), []acp.ContentBlock{
 		acp.TextBlock("text"),
 		acp.ImageBlock(validPNGBase64, "image/png"),
 		{ResourceLink: &acp.ContentBlockResourceLink{Name: "n", Uri: "file:///x", Title: &title, MimeType: &mime, Description: &desc}},
 		acp.ResourceBlock(acp.EmbeddedResourceResource{TextResourceContents: &acp.TextResourceContents{Uri: "file:///t", Text: "body", MimeType: &mime}}),
 		acp.ResourceBlock(acp.EmbeddedResourceResource{BlobResourceContents: &acp.BlobResourceContents{Uri: "file:///i", Blob: validPNGBase64, MimeType: acp.Ptr("image/png")}}),
 		acp.ResourceBlock(acp.EmbeddedResourceResource{BlobResourceContents: &acp.BlobResourceContents{Uri: "file:///b", Blob: "YmxvYg==", MimeType: &mime}}),
-	})
+	}, defaultPolicy())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -264,13 +264,13 @@ func TestPromptInputAndEmitBranches(t *testing.T) {
 	}
 	// An unsupported content block (e.g. audio) is rejected fail-closed with the
 	// uniform -32602 shape {error:"unsupported", field:"prompt"}.
-	_, audioErr := promptInput(t.Context(), []acp.ContentBlock{acp.AudioBlock("audio", "audio/wav")})
+	_, audioErr := promptInputWithPolicy(t.Context(), []acp.ContentBlock{acp.AudioBlock("audio", "audio/wav")}, defaultPolicy())
 	requireInvalidParamsData(t, audioErr, map[string]any{
 		jsonFieldError: valUnsupported,
 		jsonFieldField: "prompt",
 	})
 
-	if _, err := promptInput(t.Context(), []acp.ContentBlock{acp.ResourceBlock(acp.EmbeddedResourceResource{})}); err == nil {
+	if _, err := promptInputWithPolicy(t.Context(), []acp.ContentBlock{acp.ResourceBlock(acp.EmbeddedResourceResource{})}, defaultPolicy()); err == nil {
 		t.Fatal("empty embedded resource accepted")
 	}
 	session := &agentSession{agent: newTestAgent(), id: "T-emit", rawEvents: true}

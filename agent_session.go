@@ -372,14 +372,7 @@ func (a *Agent) CloseSession(ctx context.Context, params acp.CloseSessionRequest
 		return acp.CloseSessionResponse{}, err
 	}
 
-	err = session.Close(ctx)
-
-	a.mu.Lock()
-	delete(a.sessions, params.SessionId)
-	a.mu.Unlock()
-	a.observe.AddActiveSession(ctx, -1)
-
-	return acp.CloseSessionResponse{}, err
+	return acp.CloseSessionResponse{}, a.removeSession(ctx, params.SessionId, session)
 }
 
 func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDeleteSessionRequest) (resp acp.UnstableDeleteSessionResponse, err error) {
@@ -431,14 +424,11 @@ func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDe
 	}
 
 	a.markDeleted(params.SessionId)
-	a.mu.Lock()
-	session := a.sessions[params.SessionId]
-	delete(a.sessions, params.SessionId)
-	a.mu.Unlock()
 
+	// The tombstone lands first, so whichever session occupies the slot is the
+	// one this delete owns: no expected pointer is passed.
+	session := a.takeSession(ctx, params.SessionId, nil)
 	if session != nil {
-		a.observe.AddActiveSession(ctx, -1)
-
 		nativeID = session.nativeSessionID()
 	}
 
@@ -612,22 +602,44 @@ func (a *Agent) loadOrResume(ctx context.Context, sessionID acp.SessionId, cwd s
 	return session, transcript, true, nil
 }
 
-func (a *Agent) removeSession(ctx context.Context, sessionID acp.SessionId, session *agentSession) error {
+// takeSession evicts sessionID from the active map and returns the session it
+// evicted, or nil when it evicted nothing. Looking up and deleting under one
+// lock hold keeps the returned pointer identical to the evicted one, so the
+// active-session gauge only ever counts a session this caller now owns.
+//
+// A non-nil expect makes the eviction identity-conditional: teardown runs
+// unlocked and a fresh session may be installed on the same id while it runs,
+// so a caller holding a pointer the map has already replaced must evict
+// nothing. Otherwise a stale or retried caller would drop the live owner from
+// the map — leaking its amp process, scratch dir and pipes past agent
+// shutdown, which snapshots only what the map still holds — and decrement the
+// gauge a second time.
+func (a *Agent) takeSession(ctx context.Context, sessionID acp.SessionId, expect *agentSession) *agentSession {
 	a.mu.Lock()
 
-	removed := a.sessions[sessionID] == session
-	if removed {
-		delete(a.sessions, sessionID)
+	session := a.sessions[sessionID]
+	if session == nil || (expect != nil && session != expect) {
+		a.mu.Unlock()
+
+		return nil
 	}
+
+	delete(a.sessions, sessionID)
 	a.mu.Unlock()
+	a.observe.AddActiveSession(ctx, -1)
 
-	if removed {
-		a.observe.AddActiveSession(ctx, -1)
+	return session
+}
 
-		return session.Close(context.Background())
+// removeSession tears down session only while it still owns sessionID, so
+// close and rollback paths cannot reap a session installed after they read
+// theirs.
+func (a *Agent) removeSession(ctx context.Context, sessionID acp.SessionId, session *agentSession) error {
+	if a.takeSession(ctx, sessionID, session) == nil {
+		return nil
 	}
 
-	return nil
+	return session.Close(ctx)
 }
 
 // sessionStoreLoadTimeout resolves the WithSessionStoreLoadTimeout bound for
@@ -957,19 +969,6 @@ func (s *agentSession) sessionInfo() acp.SessionInfo {
 		Title:     &title,
 		UpdatedAt: &updated,
 	}
-}
-
-func (s *agentSession) replayTranscript(ctx context.Context) error {
-	if s.agent.store == nil {
-		return nil
-	}
-
-	entries, err := s.loadTranscript(ctx)
-	if err != nil {
-		return err
-	}
-
-	return s.replayTranscriptEntries(ctx, entries)
 }
 
 func (s *agentSession) replayTranscriptEntries(ctx context.Context, entries []SessionStoreEntry) error {

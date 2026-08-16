@@ -57,12 +57,6 @@ func parseSessionMeta(meta map[string]any) (parsedSessionMeta, error) {
 	return result, nil
 }
 
-func parseAmpOptions(value any) (AmpOptions, error) {
-	options, _, err := parseAmpOptionsWithPresence(value)
-
-	return options, err
-}
-
 func parseAmpOptionsWithPresence(value any) (AmpOptions, ampOptionFields, error) {
 	raw, ok := value.(map[string]any)
 	if !ok {

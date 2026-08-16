@@ -397,7 +397,7 @@ func TestRemainingBranches(t *testing.T) {
 	if maxConcurrentClientCalls(ConcurrencyLimits{MaxConcurrentClientCalls: 3}) != 3 || maxConcurrentClientCalls(ConcurrencyLimits{}) != defaultMaxConcurrentCalls {
 		t.Fatal("client call limit normalization failed")
 	}
-	options, err := parseAmpOptions(map[string]any{"model": "m", "mode": "low"})
+	options, _, err := parseAmpOptionsWithPresence(map[string]any{"model": "m", "mode": "low"})
 	if err != nil || options.Model != "m" || options.Mode != "low" {
 		t.Fatalf("parse valid options = %#v, %v", options, err)
 	}
@@ -405,7 +405,7 @@ func TestRemainingBranches(t *testing.T) {
 		{"mode": 1},
 		{"effort": "low"},
 	} {
-		if _, err := parseAmpOptions(raw); err == nil {
+		if _, _, err := parseAmpOptionsWithPresence(raw); err == nil {
 			t.Fatalf("invalid options accepted: %#v", raw)
 		}
 	}

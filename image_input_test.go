@@ -25,7 +25,7 @@ func TestImagePromptValidationAcceptsPortableFormats(t *testing.T) {
 			block := acp.ImageBlock(base64.StdEncoding.EncodeToString(data), test.mimeType)
 			block.Image.Uri = acp.Ptr("https://invalid.example/ignored")
 
-			input, err := promptInput(t.Context(), []acp.ContentBlock{block})
+			input, err := promptInputWithPolicy(t.Context(), []acp.ContentBlock{block}, defaultPolicy())
 			if err != nil {
 				t.Fatalf("prompt input: %v", err)
 			}

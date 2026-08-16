@@ -17,6 +17,8 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-amp/internal/amp"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
 func TestConfigOptions(t *testing.T) {
@@ -391,6 +393,137 @@ func TestSessionSlotFilesystemServeAndCloseEdges(t *testing.T) {
 	}
 }
 
+// TestCloseSessionCannotEvictASessionInstalledDuringItsTeardown pins the
+// close-versus-load ownership boundary. Close gives up the id before the
+// unlocked native teardown runs, so a session/load landing on that id while the
+// teardown is still in flight becomes the sole owner: the closer must leave it
+// installed, must not decrement the active-session gauge on its behalf, and
+// must leave it reachable by agent shutdown rather than orphaning its amp
+// process, scratch dir and pipes.
+func TestCloseSessionCannotEvictASessionInstalledDuringItsTeardown(t *testing.T) {
+	ctx := context.Background()
+	path, _ := fakeAgentAmpPath(t, "")
+	cwd := t.TempDir()
+
+	store := NewInMemorySessionStore()
+	putStoredSession(t, store, "T-own", cwd, nil)
+
+	reader := sdkmetric.NewManualReader()
+	agent := newTestAgent(
+		WithExecutablePath(path),
+		WithScratchDir(testScratchDir(t)),
+		WithSessionStore(store),
+		WithMeterProvider(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))),
+	)
+
+	if _, err := agent.LoadSession(ctx, LoadSessionRequest("T-own", cwd)); err != nil {
+		t.Fatalf("first load: %v", err)
+	}
+
+	closing := agent.sessions["T-own"]
+	if closing == nil {
+		t.Fatal("first load installed no session")
+	}
+
+	// The scratch-root release runs at the tail of the native teardown, after
+	// the closer has given up the id, so it is the one point where a competing
+	// load can be linearized against a close that is still running.
+	gaveUpID := make(chan struct{})
+	finishTeardown := make(chan struct{})
+	releaseScratch := closing.scratchRootRelease
+	closing.scratchRootRelease = func() {
+		close(gaveUpID)
+		<-finishTeardown
+
+		if releaseScratch != nil {
+			releaseScratch()
+		}
+	}
+
+	closed := make(chan error, 1)
+
+	go func() {
+		_, closeErr := agent.CloseSession(ctx, acp.CloseSessionRequest{SessionId: "T-own"})
+		closed <- closeErr
+	}()
+
+	<-gaveUpID
+
+	if _, err := agent.LoadSession(ctx, LoadSessionRequest("T-own", cwd)); err != nil {
+		t.Fatalf("load during close teardown: %v", err)
+	}
+
+	reloaded := agent.sessions["T-own"]
+	if reloaded == nil || reloaded == closing {
+		t.Fatalf("load during close teardown reused the closing session: %v", reloaded == closing)
+	}
+
+	close(finishTeardown)
+
+	if err := <-closed; err != nil {
+		t.Fatalf("CloseSession: %v", err)
+	}
+
+	if agent.sessions["T-own"] != reloaded {
+		t.Fatal("the settled closer evicted the session loaded during its teardown")
+	}
+	if got := collectActiveSessions(t, reader); got != 1 {
+		t.Fatalf("active sessions = %d, want 1 (the reloaded owner)", got)
+	}
+
+	if err := agent.Close(); err != nil {
+		t.Fatalf("agent Close: %v", err)
+	}
+	if got := collectActiveSessions(t, reader); got != 0 {
+		t.Fatalf("active sessions after shutdown = %d, want 0", got)
+	}
+}
+
+// TestStaleCloserCannotEvictTheReinstalledOwner pins the identity guard a
+// retried or overtaken closer hits: it holds a pointer the map has already
+// replaced, so it evicts nothing, closes nothing, and leaves the gauge to the
+// caller that does own the slot.
+func TestStaleCloserCannotEvictTheReinstalledOwner(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	agent := newTestAgent(WithMeterProvider(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))))
+
+	stale := &agentSession{agent: agent, id: "T-stale", turn: make(chan struct{}, 1)}
+	owner := &agentSession{agent: agent, id: "T-stale", turn: make(chan struct{}, 1)}
+	agent.sessions["T-stale"] = owner
+	agent.observe.AddActiveSession(t.Context(), 1)
+
+	if err := agent.removeSession(t.Context(), "T-stale", stale); err != nil {
+		t.Fatalf("stale close = %v", err)
+	}
+
+	if agent.sessions["T-stale"] != owner {
+		t.Fatal("the stale closer evicted the installed owner")
+	}
+
+	owner.mu.Lock()
+	ownerClosed := owner.closed
+	owner.mu.Unlock()
+
+	if ownerClosed {
+		t.Fatal("the stale closer tore down the installed owner")
+	}
+	if got := collectActiveSessions(t, reader); got != 1 {
+		t.Fatalf("active sessions = %d, want 1 (no double decrement)", got)
+	}
+}
+
+// collectActiveSessions reads the current active-session gauge total.
+func collectActiveSessions(t *testing.T, reader sdkmetric.Reader) int64 {
+	t.Helper()
+
+	var metrics metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &metrics); err != nil {
+		t.Fatalf("collect metrics: %v", err)
+	}
+
+	return sumInt64Metric(metrics, "acp_go_amp.session.active")
+}
+
 func TestLoadReplayDeleteAndConfigEdges(t *testing.T) {
 	ctx := context.Background()
 	path, _ := fakeAgentAmpPath(t, "")
@@ -430,24 +563,13 @@ func TestLoadReplayDeleteAndConfigEdges(t *testing.T) {
 		t.Fatal("failed cold load retained its materialized session")
 	}
 
-	replayLoadErr := errors.New("transcript load failed")
-	replayAgent := newTestAgent(WithSessionStore(&errorStore{loadErr: replayLoadErr}))
-	if replayGotErr := (&agentSession{agent: replayAgent, id: "T-replay"}).replayTranscript(ctx); !errors.Is(replayGotErr, replayLoadErr) {
-		t.Fatalf("replay load error = %v", replayGotErr)
-	}
-	nilStoreAgent := newTestAgent()
-	nilStoreAgent.store = nil
-	if replayErr := (&agentSession{agent: nilStoreAgent, id: "T-replay"}).replayTranscript(ctx); replayErr != nil {
-		t.Fatalf("nil-store replay: %v", replayErr)
-	}
-
-	updateErrStore := NewInMemorySessionStore()
-	putStoredSession(t, updateErrStore, "T-update-error", cwd, []SessionStoreEntry{
-		json.RawMessage(`{"type":"assistant","message":{"content":[{"type":"text","text":"stored"}]},"session_id":"T-update-error"}`),
-	})
-	updateAgent := newTestAgent(WithSessionStore(updateErrStore))
+	updateAgent := newTestAgent()
 	updateAgent.setConnection(newClosedAgentConnection(t))
-	if replayErr := (&agentSession{agent: updateAgent, id: "T-update-error"}).replayTranscript(ctx); replayErr == nil {
+	updateSession := &agentSession{agent: updateAgent, id: "T-update-error"}
+	updateEntries := []SessionStoreEntry{
+		json.RawMessage(`{"type":"assistant","message":{"content":[{"type":"text","text":"stored"}]},"session_id":"T-update-error"}`),
+	}
+	if replayErr := updateSession.replayTranscriptEntries(ctx, updateEntries); replayErr == nil {
 		t.Fatal("replay update failure was ignored")
 	}
 
@@ -463,10 +585,10 @@ func TestLoadReplayDeleteAndConfigEdges(t *testing.T) {
 		t.Fatal("empty MCP transport accepted after manifest")
 	}
 
-	if _, err := parseAmpOptions(map[string]any{"model": 42}); err == nil {
+	if _, _, err := parseAmpOptionsWithPresence(map[string]any{"model": 42}); err == nil {
 		t.Fatal("non-string model accepted")
 	}
-	if _, err := parseAmpOptions(map[string]any{"outputSchema": map[string]any{}}); err == nil {
+	if _, _, err := parseAmpOptionsWithPresence(map[string]any{"outputSchema": map[string]any{}}); err == nil {
 		t.Fatal("empty output schema accepted")
 	}
 

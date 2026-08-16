@@ -690,10 +690,6 @@ func (a *Agent) promptImagePolicy() promptImagePolicy {
 	}
 }
 
-func promptInput(ctx context.Context, blocks []acp.ContentBlock) (map[string]any, error) {
-	return promptInputWithPolicy(ctx, blocks, promptImagePolicy{limits: applyOptions(nil).ImageLimits})
-}
-
 func promptInputWithPolicy(ctx context.Context, blocks []acp.ContentBlock, policy promptImagePolicy) (map[string]any, error) {
 	// An empty prompt is rejected fail-closed: there is nothing to send to the
 	// native harness, so accepting it would spend a turn on silence.
