@@ -1,0 +1,39 @@
+---
+title: Observability
+description: Wire logging and OpenTelemetry, and read the failure signals when a turn goes wrong.
+---
+
+The adapter emits structured logs and OpenTelemetry signals through the options
+surface, and it captures native output so operators can diagnose failures
+without corrupting the ACP stream.
+
+## Logging and telemetry
+
+Provide a logger with `WithLogger`. The command writes logs to stderr and keeps
+stdout reserved for ACP JSON-RPC; `-debug` raises the command's log level.
+
+OpenTelemetry providers are accepted through the shared options surface:
+
+| Option | Signal |
+|---|---|
+| `WithTracerProvider` | Traces. |
+| `WithMeterProvider` | Metrics. |
+| `WithTextMapPropagator` | Context propagation. |
+
+Native Amp stderr is captured in a bounded buffer. If a native process exits
+with an error, the tail is included in the adapter error detail when available.
+Raw events can be enabled per session for stream-JSON diagnostics but are off by
+default — see [Raw events](/docs/features/raw-events).
+
+The `acp_go_amp.runtime.containment` gauge records one point with
+`containment=authoritative|shared_identity|best_effort|unavailable`. Ordinary
+execution without a process-isolation policy reports `shared_identity` on
+every supported platform. Explicit Linux isolation reports `authoritative`;
+Darwin's optional process-group mode reports `best_effort`. Darwin best-effort
+also emits an unconditional structured warning. `ObserveContainment` exposes
+the same mode to embedding hosts. Provider-descendant snapshots are published
+only for authoritative isolation and are suppressed for ordinary and
+best-effort execution, including zero.
+
+To map a specific failure signal to its cause, see
+[Troubleshooting](/docs/operations/troubleshooting).

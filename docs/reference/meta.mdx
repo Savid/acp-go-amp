@@ -1,0 +1,160 @@
+---
+title: Meta
+description: The _meta.amp metadata the adapter accepts on requests, emits on updates, and advertises on initialize.
+---
+
+Lifecycle requests carry Amp-owned settings under the `_meta.amp` namespace.
+Unknown keys fail closed; foreign namespaces are ignored.
+
+## Request metadata
+
+```json
+{
+  "_meta": {
+    "amp": {
+      "options": {
+        "env": {},
+        "mode": "high"
+      },
+      "rawEvent": {
+        "enabled": false
+      }
+    }
+  }
+}
+```
+
+## Accepted fields
+
+| Field | Accepted values |
+|---|---|
+| `options.env` | Map of environment overrides, including the session's complete raw `PATH`. |
+| `options.mode` | `low`, `medium`, `high`. |
+| `options.model` | Present for symmetry; any value fails with the uniform unsupported error. |
+| `options.outputSchema` | Present for symmetry; any presence fails with the uniform unsupported error. |
+| `rawEvent.enabled` | `true` to stream `_amp/rawEvent` for the session. |
+
+Unknown keys under `_meta.amp`, `_meta.amp.rawEvent`, or `_meta.amp.options`
+fail closed. Foreign metadata namespaces are ignored.
+
+## Environment composition
+
+The prompt child's environment is composed in phases: the process environment or
+`ProcessIsolation.BaseEnvironment`, then `WithEnv`, then `options.env`, then the
+adapter-managed isolated `HOME` and `XDG_*` roots and the trace carrier. A later
+phase replaces an earlier value, so the managed residence cannot be redirected
+by any caller value and the session's `options.env` owns the whole raw `PATH`
+the prompt process runs with.
+
+The `amp` executable is resolved and version-probed before any session exists,
+against the static base alone — the process environment or
+`ProcessIsolation.BaseEnvironment` plus `WithEnv`. The exact absolute file that
+passed validation is the file every later child runs, so a directory named by a
+session `PATH` can never select the harness. Children that are not prompts — the
+startup probes, thread export, thread delete, and account login — run on that
+same static base plus the adapter-managed residence and the session's
+`AMP_API_KEY` and `AMP_URL`. Every other `options.env` value, the raw `PATH`
+among them, reaches the prompt child alone.
+
+Windows resolves variable names without regard to case, so on Windows every
+equal-fold spelling is one variable: `Path` supplied by `WithEnv` and `PATH`
+supplied by `options.env` compose into the single `PATH` the session named. A
+key that cannot be a variable name, and — on Windows — a single map that names
+one variable under two spellings, are refused with the uniform invalid-params
+error rather than resolved by chance.
+
+## Emitted metadata
+
+Every main-agent `agent_message_chunk` carries `_meta.amp.messageId`, and the
+terminal main-agent value is repeated on the successful `session/prompt`
+response. The same value is also placed in the ACP `messageId` field. Amp does
+not expose a native message or turn id, so the adapter derives a UUID from the
+frame's absolute position and exact bytes in the durable transcript mirror.
+The derivation makes replay stable while keeping byte-identical assistant
+frames in separate turns distinct. Delegated-agent frames never become the
+terminal checkpoint identity.
+
+`session/update` notifications derived from delegated-agent frames — subagents,
+the oracle, and the Task tool — carry `_meta.amp.parentToolUseId`, the id of the
+`tool_use` block that spawned the delegated agent. Main-agent updates omit the
+key. See [Updates](/docs/reference/updates) for the tagged update kinds.
+
+## Inbound content-block metadata
+
+One key is read from an inbound `_meta` outside the `amp` namespace, and only on
+an image content block: `acp-go.dev/handoff`, the local handoff input envelope.
+
+```json
+{
+  "version": 1,
+  "digest": "<64-character lowercase hex sha256>",
+  "sizeBytes": 123456
+}
+```
+
+It is strict — exactly these three fields, version `1` only — and it is read
+only when `WithInputHandoffRoot` is set. On a block with non-empty `data` it is
+ignored, because embedded data wins. See
+[Models and config](/docs/features/models-config#local-handoff-input).
+
+## Advertised capabilities
+
+`initialize` advertises standard `promptCapabilities.image: true` plus
+`_meta.amp.rawEvent` and `_meta.amp.sessionStore`. While a usable provider-auth
+root is configured it also carries `_meta.amp.providerAuth`, listing the eight
+enabled leg names:
+
+```json
+{
+  "providerAuth": {
+    "methods": [
+      "_amp/auth/methods", "_amp/auth/authorize", "_amp/auth/callback",
+      "_amp/auth/status", "_amp/auth/cancel", "_amp/auth/inventory",
+      "_amp/auth/credential", "_amp/auth/disconnect"
+    ]
+  }
+}
+```
+
+No `injectionKey` is advertised: a brokered Amp key is redelivered as
+`AMP_API_KEY`, so `_meta.amp.options.providerAuth` is rejected as an
+unsupported field. The block is absent entirely when no usable root is
+configured, which is how a host learns the surface never came up. It omits fork and
+elicitation capability metadata, because the adapter supports neither. Amp
+does not expose authoritative per-model input modalities, so the adapter
+publishes no model-specific image claims.
+
+`agentCapabilities._meta` also carries `acp-go.dev/mediaEnvelope`, the bounds
+this adapter actually enforces on inbound media:
+
+```json
+{
+  "acp-go.dev/mediaEnvelope": {
+    "maxBytes": 921600,
+    "maxPromptBytes": 6291456,
+    "maxDimension": 8000,
+    "imageFormats": ["image/png", "image/jpeg", "image/gif", "image/webp"],
+    "documentFormats": []
+  }
+}
+```
+
+- `maxBytes` is the effective per-image decoded bound: the tighter of
+  `ImageLimits.MaxInputBytesPerImage` and Amp's 921,600-byte native envelope, so
+  the default configuration advertises the native envelope.
+- `maxPromptBytes` is the per-prompt aggregate decoded bound
+  (`ImageLimits.MaxInputBytesPerPrompt`).
+- `maxDimension` is Amp's 8,000-pixel native bound.
+- `imageFormats` is the accepted media-type allowlist.
+- `documentFormats` is always the empty array: Amp maps no media type to a
+  native document representation.
+
+The block is always present, and it is independent of every other
+advertisement. `acp-go.dev/handoff` is added, as `{"versions": [1]}`, only when
+`WithInputHandoffRoot` is set; its absence is how a host learns that its option
+never reached this adapter.
+
+Amp does not advertise `_meta["acp-go.dev/route"]`, stamp it on callbacks, or
+validate a turn nonce — and that says nothing about the media envelope, which is
+advertised regardless. Its prompt-builder nonce parameter is intentionally
+ignored; cancellation remains structurally scoped by `sessionId`.

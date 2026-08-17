@@ -1,0 +1,66 @@
+# acp-go-amp
+
+## Purpose
+
+This module exposes the Amp CLI as a Go ACP agent. It wraps a local `amp`
+harness behind the Agent Client Protocol so hosts can drive Amp threads over
+stdio or embed the agent directly in Go.
+
+## Project Map
+
+- Root package `ampacp`: ACP agent methods, request builders, metadata parsing,
+  raw events, config options, and session-store API.
+- `internal/amp`: Amp process boundary, stream-json parsing, environment
+  construction, and interrupt handling.
+- `cmd/acp-go-amp`: stdio ACP command with `-path`, `-home`, `-model`,
+  `-scratch-dir`, `-debug`, `-version`, and repeatable `-seed-file` flags, plus
+  Darwin containment operations.
+- `examples`: embeddable host examples that must stay covered by tests.
+- `integration`: smoke and live tests for installed Amp binaries.
+- `docs`: public documentation mirrored by `docs.json` navigation.
+
+## Commands
+
+- `make test`: unit tests.
+- `make coverage-check`: 100.0% total statement coverage gate.
+- `make lint`: pinned golangci-lint.
+- `make docs-audit`: public-doc forbidden-term and Amp semantics audit.
+- `make audit`: local release gate.
+- `make test-integration-live`: live Amp prompt tests gated by
+  `ACP_GO_AMP_RUN_INTEGRATION=1` and `ACP_GO_AMP_RUN_LIVE_TOKENS=1`.
+- `make test-portable-runtime`: portable ordinary-lifecycle suite, runnable only
+  on a `!unix` host that selects `internal/amp/process_unsupported.go`.
+
+## Coding Rules
+
+- Keep the public package surface identical to the adapter contract with Amp
+  names substituted.
+- Do not add permission bridging, command catalogs, model config options, or
+  fork behavior without a director ruling.
+- Keep process handling simple: one short-lived amp process per prompt — a
+  thread-less `amp -x` execute on the first prompt (which creates the
+  server-side thread), `amp threads continue` afterwards — with an isolated
+  settings file and dedicated stdout/stderr pipes.
+- Preserve ordinary Amp stream JSON bytes in the `transcript` store subpath.
+  Image-bearing tool results use canonical artifact references so base64 and
+  signed URLs do not leak into transcript or diagnostic surfaces.
+- Do not persist auth, settings, API keys, or other secrets.
+
+## Testing Rules
+
+- New code must keep `make coverage-check` at 100.0%.
+- Fake Amp binaries and generated test files must live under `t.TempDir()` or
+  another ignored path outside the repository tree.
+- Conformance tests must pin strict `_meta.amp` handling, the mode-only config
+  surface, no fork capability, no elicitation metadata, command silence, MCP
+  accept/reject behavior, and backpressure errors.
+- Live tests may spend tokens only when explicitly env-gated.
+
+## Security And Boundaries
+
+- `AMP_API_KEY` and `AMP_URL` are injected from live process environment or
+  options; they are never written to `SessionStore`.
+- `session/load` replays local transcript frames for display; it does not create
+  a new server-side thread.
+- Native continuation requires the original server-side Amp thread to still
+  exist.

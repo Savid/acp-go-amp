@@ -1,0 +1,351 @@
+---
+title: Security
+description: How per-session isolation and strict secret handling keep credentials out of durable state.
+---
+
+The adapter isolates each session's native state and keeps credentials out of
+anything durable. Operators can reason about the blast radius of a single
+session and about exactly what the session store may contain.
+
+## Standalone command boundary
+
+The standalone command's hardened launch is Linux-only and requires the
+root-owned mode-`0600` `-process-isolation-config` policy; omitting the flag
+instead launches native work ordinarily as the identity the command already
+runs as. Resolution walks
+from an open `/` descriptor with `openat` and `O_NOFOLLOW`; every ancestor
+must be root-owned and not writable by group or other, and the final single-link
+policy inode is read through the descriptor that was validated. The configured
+account home is resolved the same way, must be a target-owned mode-`0700`
+directory beneath protected root-owned ancestry, and cannot be `/root` or
+`/nonexistent`.
+
+In hardened mode the adapter remains root, but its ambient environment is never
+copied wholesale to the child. Only the complete literal `baseEnvironment`
+plus names in `inheritEnvironment` reach native work. Non-Linux platforms
+refuse this explicit policy without disabling ordinary execution. Darwin
+best-effort containment remains an embedded-Go option only. `-version` and
+Darwin containment diagnostics launch no native worker and are exempt.
+
+## Per-session isolation
+
+The adapter creates an isolated native home for each ACP session. Native `HOME`,
+`XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, `XDG_DATA_HOME`, and `XDG_STATE_HOME` point
+inside that directory, and the Amp settings file starts as an empty JSON object
+inside the isolated config tree before being passed with `--settings-file`. The
+directory is removed on close/delete, so one session cannot read another's
+native state or the operator's real `~/.config/amp`.
+
+## Handoff read root
+
+`WithInputHandoffRoot` is the only directory an ACP client can point the adapter
+at for reads, and it is opt-in: unset, no inbound path is readable at all.
+
+- The block's own declaration is judged first: an unallowlisted media type, and
+  then a declared size above the effective per-image byte limit, are refused
+  before the root is opened at all. A refusal on the declaration therefore
+  reveals nothing about whether the file it named exists.
+- Containment is enforced by the kernel: the root is opened once per prompt and
+  every file is opened relative to that descriptor, so a name leading out of the
+  root — including through a symlink — is refused as part of the open itself.
+- The opened descriptor must be a regular file, because a root bounds where a
+  name may lead and not what kind of object it names, so a device node or FIFO
+  under the root is rejected rather than read.
+- Reads stop one byte past the size the block declared, and the bytes must match
+  that size and hash to the digest the client declared before anything else uses
+  them.
+- The root is never written to, and nothing under it is moved or removed. The
+  path is not recorded in the native request, the transcript, raw events, or
+  logs.
+
+Point it at a directory that holds nothing but handoff payloads. It grants read
+access to that whole tree, so a workspace parent or a directory shared between
+tenants is the wrong choice.
+
+## Secret handling
+
+Auth material is live process state only:
+
+| Value | Supplied via | Persisted? |
+|---|---|---|
+| `AMP_API_KEY` | Sanitized ordinary environment, `ProcessIsolation.BaseEnvironment`, or `WithEnv` | Never |
+| `AMP_URL` | Sanitized ordinary environment, `ProcessIsolation.BaseEnvironment`, or `WithEnv` | Never |
+| Hosted paste-back or manual API key submitted to `_amp/auth/callback` | The owner, through the host | Never |
+| The relayed `_amp/auth/authorize` URL | The native login process | Never |
+| A hosted key returned by `_amp/auth/credential` | The isolated `secrets.json` | Never |
+| A manual key returned by `_amp/auth/credential` | The wipeable in-memory provider-auth flow | Never |
+
+No value is written to the settings file or the `SessionStore`. The store
+contains the manifest, transcript frames, and canonical image tool-result
+records — no settings, auth files, or API keys. A remote image result is stored
+with its original HTTP(S) URI for replay; if that URI is signed, treat the
+store as confidential application data.
+
+<Warning>
+Seed files (`WithSeedFiles` / `-seed-file`) are written verbatim into the
+isolated native home. Never seed secrets through them; put credentials in
+`WithEnv` so they stay in live process state and out of durable files.
+</Warning>
+
+The provider-auth ledger under `WithProviderAuthRoot` is bookkeeping only:
+provider slot identity, method ID, connection ID, revision, binding generation,
+flow ID, authorize request ID, state, and timestamps. It never holds credential
+material, authorization URLs, or pasted values, and it is never keyed by,
+swept with, or restored alongside a session. A provider-auth leg failure
+carries a closed `cause` enum and never native message text: a native login
+failure line can quote the value the owner pasted.
+
+Two environment variables are removed from every native spawn, from the live
+environment and from an explicit override alike, because neither can be
+disarmed once the child is running:
+
+| Variable | Why |
+|---|---|
+| `GOTRACEBACK` | `crash` dumps every goroutine to stderr before any adapter code runs. |
+| `AMP_DISABLE_SECRET_REDACTION` | Turns off Amp's own redaction wholesale. |
+
+The native login additionally runs with `AMP_API_KEY` removed, so a brokered
+login never copies an ambient environment key back out as if it had been
+brokered.
+
+On Linux, its browser launch is neutralised by two mechanisms at once because a
+native launcher may use either. The login child runs with a scratch directory
+of no-op launchers — `open`, `xdg-open`, `x-www-browser`, `www-browser`, and
+`sensible-browser` — ahead of every other entry on its `PATH`, with `BROWSER`
+pointing into that same directory. The directory is mode `0700`, lives under
+the scratch parent (`WithScratchDir` / `-scratch-dir`), and is removed when the
+login handle closes.
+
+Brokered account login is unavailable on Darwin. Current Amp account login
+invokes the system browser directly, and `AMP_HEADLESS_OAUTH` controls only
+MCP-server OAuth rather than account authentication. The adapter fingerprints
+the resolved executable and refuses it before constructing `amp login`; an
+unknown build is refused until its account-login behavior has an audited
+headless contract. Windows also refuses the login before native minting,
+because the launcher shim above neutralises nothing there: `CreateProcess`
+resolves `cmd.exe`, `explorer.exe`, and `rundll32.exe` out of the system
+directory ahead of every `PATH` entry, and the `start` that opens a URL is a
+`cmd.exe` builtin with no image to shadow. Both platforms report
+`unsupported_variant` from `authorize`. Neither refusal reaches ordinary native
+Amp commands, which open no browser, nor the manual `api-key` method, which
+starts no login child.
+
+## Stream isolation
+
+Native Amp subprocesses never inherit ACP stdout. The adapter captures native
+stdout and stderr through dedicated pipes so JSON-RPC output stays clean and
+native diagnostics cannot leak into the protocol stream.
+
+Image-bearing tool results are canonicalized before transcript and raw-event
+emission. Embedded image bytes live only in the typed ACP content and canonical
+artifact record; `RawOutput`, raw events, logs, and transcript frames contain
+safe metadata and references. Remote result URIs are redacted from those
+diagnostic surfaces.
+
+## Native-process containment
+
+Before version discovery or readiness probing, the adapter creates one
+mode-`0700` residence below `WithScratchDir` / `-scratch-dir`, owned by the
+ordinary current identity or by the explicit Linux target identity.
+Every probe child receives isolated `HOME`, `XDG_CONFIG_HOME`,
+`XDG_CACHE_HOME`, `XDG_DATA_HOME`, and `XDG_STATE_HOME` paths there plus the
+residence's mode-`0600` settings and MCP files; values from the raw policy
+environment cannot reach the child. The adapter removes this residence and
+releases its scratch reservation only after the selected process boundary
+settles.
+If proof is incomplete, or removal fails, the residence remains quarantined
+and the reservation stays held. Darwin's best-effort boundary copies these
+inputs into the target-owned per-command generation below the same scratch
+parent before launch, then applies the same proof-gated lifetime rule.
+
+Ordinary mode starts every Amp command directly as the adapter's current
+identity, root or non-root. It acquires no UID authority, applies no credential
+change, publishes no provider-descendant inventory, and makes no whole-tree
+quiescence claim. The adapter still owns the direct child lifecycle, isolated
+per-session HOME/XDG paths, environment scrubbing, cancellation, and native-root
+admission release at that selected boundary. This is the portable default.
+
+Explicit Linux isolation starts every Amp command — version/readiness probes,
+thread lifecycle commands, and prompts — below an independent trusted-root
+guardian/liveness pair of subreapers.
+Both trusted processes exist before native launch and retain duplicates of the
+same authority leases. If either one dies, the survivor adopts, terminates, and
+reaps ordinary, new-process-group, and `setsid(2)` descendants until `wait4(2)`
+reports `ECHILD`. Non-Linux platforms reject explicit isolation, with no
+fallback from an explicit request to ordinary execution. Cancellation,
+timeout, and successful completion all cross the selected boundary. An incomplete
+boundary surfaces
+`ampacp.ErrProcessContainmentIncomplete`; reachable native-root and scratch
+resources are retained, and the parent-side wait remains bounded.
+
+An explicit Linux policy never becomes ordinary execution because its UID/GID
+matches the adapter. The trusted supervisor must run as root and the target
+must be a distinct non-root identity; a current-UID request is refused. There
+is no unprivileged guardian, shared-authority stamp, or no-credential fallback.
+
+Both explicit Linux supervisors stay root and run from `/` with closed private
+environments. Immutable launch configuration carries the target identity and
+native environment; only Amp receives the configured UID/GID with no
+supplementary groups. Before native start both supervisors validate and retain
+duplicates of the identical UID EX and domain SH open file descriptions. A
+primary guardian `SIGKILL` leaves liveness authoritative; a liveness `SIGKILL`
+leaves the guardian authoritative. The survivor holds both capabilities while
+it adopts, kills, and reaps daemonized and `setsid` descendants to kernel
+`ECHILD`; completion and the managed-root permit wait for that proof. Amp
+inherits none of the launch, control, proof, or lock descriptors, so it cannot
+signal its supervisor, forge completion, or overlap another native tree using
+the same host identity.
+A dedicated guardian peer-liveness descriptor is fenced immediately before
+native start. Guardian death before readiness refuses native launch and lets
+liveness publish completion or quarantine only after kernel `ECHILD`.
+The identity root must be a persistent local-lock volume shared by every
+service or container using the same numeric UID namespace. Otherwise those
+participants require disjoint UID pools. Lock inodes are permanent and are
+never unlinked, renamed, or replaced.
+The durable authority root is `/var/lib/acp-go/agent-identities`.
+Before any identity operation, the adapter joins permanent `domain.lock`
+through matching strict `domain.json`, binding the boot, PID/user namespaces,
+canonical UID/GID maps, and unrestricted root procfs view. It and both trusted
+supervisors retain a shared checked-CLOEXEC lease through containment; native
+inherits no domain descriptor. Before launch the supervisor re-reads matching
+strict `domain.json` under that lease. Borrowed adoption strictly parses
+`/proc/self/fdinfo/<fd>` and requires the supplied open file description's
+matching whole-file `FLOCK`: UID `WRITE` and domain `READ`. Missing, unreadable,
+malformed, ambiguous, wrong-inode, partial-range, or wrong-mode state refuses;
+the adapter never calls mode-converting `flock` on the supplied descriptor.
+Separate-open contention remains an independent proof. Contended pristine same-domain bootstrap uses a
+bounded shared-lock rejoin; a retained shared lease protecting a live mismatch
+refuses. Rebind requires an
+exclusive lease, a boot-aware whole-root audit, durable atomic record replacement,
+and a shared-lock re-read. A contender that sees a peer's matching record after
+obtaining EX performs a real EX-to-SH conversion and shared re-read; it never
+returns a mislabeled exclusive lifetime lease. The full local-durable-noncloned
+filesystem probe reruns immediately before every initial publish, rebind, or
+replacement. Failure preserves the old record and blocks downgrade and launch.
+Same-boot exact-owner `ACTIVE` may rebind only while this provider holds that
+UID lock exclusively and proves task vacancy; a live UID-lock holder blocks rebind,
+and every other owner or `ACTIVE` refuses. A changed boot carries every valid standalone
+owner+`ACTIVE` unchanged and excluded, and ownerless `CLEAN_READY`
+may be carried. A provider never recovers ownerless `ACTIVE`: it performs no
+kill, path deletion, disposition rewrite, or CLEAN publish and fails with
+`Wagie recovery required`. The host authority alone owns that destructive
+recovery grammar and authority. Only the exact standalone owner may roll retained `ACTIVE`
+after publication and two consecutive vacancy scans. Missing domain state plus
+any owner or disposition fails closed. Every authorized cleanup requires exact
+persisted root device/inode; device renumber and cleanup-root filesystem
+substitution fail closed.
+Canonical crash temps are metadata-checked and never parsed. Domain temps are
+unlinked and directory-synced only under domain EX; marker temps only under
+their UID EX lock. A live-writer conflict is untouched, and malformed temp
+names or metadata fail closed. A matching-domain participant still joins SH
+while a valid canonical marker temp is protected by a live UID lock; its cleanup
+needs UID EX, not domain EX. Domain-record temps remain domain-EX-only.
+A matching-domain provider audit validates but tolerates a canonical unrelated marker temp.
+After target UID EX, it cleans target marker temps and re-reads the final disposition.
+A domain-rebind audit under domain EX drains all canonical marker temps under
+their UID EX locks.
+Pre-join filesystem probes hold a checked-CLOEXEC inode EX lease through unlink
+and directory sync across both canonical
+`.authority-probe-<24-lowercase-hex>` and
+`.authority-probe-<24-lowercase-hex>.renamed` names. Audit validates the named inode and
+metadata, takes inode `LOCK_EX|LOCK_NB`, then unlinks and directory-syncs. That
+inode lease permits matching shared cleanup; domain EX alone is insufficient.
+A live conflict remains untouched, matching shared join proceeds, and bootstrap
+cleanup bounded-waits. An authority `/proc/self/fd/<fd>` path ending in the
+kernel ` (deleted)` suffix fails closed.
+Permanent coordination inodes are never reconstructed beside durable state.
+  `domain.lock` creation requires a truly empty authority root; `owners.lock`
+  creation requires an established domain with no owner, disposition, UID-lock,
+  or affinity-lock state. A missing UID lock refuses beside its owner,
+  disposition, or temp; a missing affinity lock refuses when a marker maps to
+  its shard. This prevents an old unlinked open file description from becoming
+  split-brain authority. An exact-owner restart still validates the named
+  owners-lock metadata even though it skips that flock.
+With both host capabilities nil, standalone acquisition requires the explicit
+owner ID and state-root fields and strictly validates `<uid>.owner` and
+`<uid>.quarantine`. A new claim takes domain SH, permanent checked-CLOEXEC
+`owners.lock` EX, then nonblocking UID EX, and retains them through owner plus `ACTIVE`
+publication. It audits every owner and disposition globally and refuses
+duplicate UID, GID, provider+owner ID, state-root path, or state-root
+device/inode. It requires both owner and disposition absent and never claims
+ownerless `CLEAN_READY`. No provider waits for UID while holding owners EX; a busy candidate releases
+owners and boundedly retries the complete global scan. An exact-owner restart
+skips owners and may wait for UID with cancellation. The permanent owner kind is
+`standalone-provider`
+and permanently binds UID:GID, fixed provider module
+`github.com/savid/acp-go-amp`, canonical owner ID, and the exact no-symlink state-root
+path/device/inode.
+
+Before any audit passes, the provider drains every canonical owner temp,
+including temps for unrelated UIDs, under owners EX plus that temp's
+nonblocking UID EX lock. A busy temp UID releases owners and retries the whole
+scan. An exact-owner fast path that encounters a temp releases its target UID
+and joins owners-before-UID cleanup; unknown temp names refuse.
+
+The state root is dedicated, never `/`, and outside and not beneath the
+authority root. This exact provider resolves it componentwise from `/` without
+symlinks or magic links, and every ancestor except the final directory is
+root-owned and not group- or world-writable; the final directory is owned by
+the configured UID:GID with mode `0700`. It revalidates the protected path,
+ownership, mode, device, and inode immediately before `ACTIVE` publication and native launch. Host authority and foreign providers
+validate the tuple but carry or refuse it without requiring the path in their
+mount namespace.
+
+Publication uses a synced `<uid>.owner.next-` temporary,
+`RENAME_NOREPLACE`, named revalidation, and directory sync. Two consecutive
+full scans of every task's four `Uid`, four `Gid`, and supplementary
+`Groups` values are required before owner and `ACTIVE` publication. Every
+status has exactly one `Uid`, one `Gid`, and one `Groups`; missing, duplicate,
+or malformed fields refuse, while an empty `Groups` value is valid.
+`ACTIVE` has a fresh lease, empty paths, and `standalone:` plus lowercase
+SHA-256 of the compact canonical owner JSON without the file newline. Only the
+exact owner may restart matching retained `ACTIVE`, or finish an
+absent-disposition owner-sync crash marker, after two new consecutive scans.
+`CLEAN_READY`, unreadable or hidden credentials, survivors, and every tuple
+or state-root mismatch fail closed. Standalone never becomes `CLEAN_READY`,
+including on clean exit. With host capabilities, the adapter rejects any owner
+and never rewrites the ownerless host record.
+Participants sharing a pool must also share identical user-namespace UID/GID
+mappings and authoritative PID visibility, or use disjoint pools. The authority
+root rejects network, FUSE, pseudo, read-only, overlay, tmpfs, and unknown
+filesystems. Only probed ext2/3/4-magic, XFS, btrfs, f2fs, ZFS, and bcachefs backing
+filesystems are accepted. It probes separate-open lock exclusion, file sync,
+same-directory atomic rename,
+and directory sync. Each newly created directory level is parent-synced before
+any lock becomes authoritative.
+
+Embedded Darwin hosts use ordinary current-identity execution by default. The
+optional `WithDarwinBestEffortContainment` mode creates a fresh real writable
+generation root for every native launch, starts the direct child as its own
+process-group leader, reaps that child exactly once, sends group `SIGTERM`,
+escalates to `SIGKILL` after 500 ms, and polls the original group for one fixed
+five-second total deadline. It records `containment=best_effort` and emits an
+unconditional warning.
+
+Darwin best-effort containment cannot be combined with
+`WithProcessIsolation`; explicit process isolation is Linux-only.
+
+This Darwin boundary does not contain descendants that call `setsid(2)` or
+otherwise escape the original group. Such processes can become zombies or
+continue running. Inherited runtime markers are correlation, not ownership;
+they can be scrubbed, and an empty scan is not evidence of absence. A negative
+PID signal also targets a numeric PGID rather than an identity-bound handle, so
+PGID reuse can cause collateral signalling. Native-root permits do not bound
+escaped provider work, and provider-descendant snapshot metrics are suppressed
+instead of publishing a misleading count or zero.
+
+Operators can inspect retained records without mutation and explicitly clean a
+selected runtime:
+
+```sh
+acp-go-amp containment diagnose -scratch-dir /path/to/scratch
+acp-go-amp containment cleanup -scratch-dir /path/to/scratch -runtime-id <id> -force
+```
+
+Cleanup signals only individually revalidated same-uid marker-correlated PIDs;
+it never treats a recorded PID or PGID as signal authority. Ambiguity retains
+the generation root and returns a non-zero status. Its fixed five-second budget
+starts before the first process enumeration. PID revalidation and signalling
+are separate operations: reuse in that gap can still signal unrelated same-uid
+work. These commands remain best-effort diagnostics, not a claim that
+marker-scrubbing escapees are absent.

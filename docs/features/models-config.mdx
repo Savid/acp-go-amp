@@ -1,0 +1,203 @@
+---
+title: Models And Config
+description: Configure Amp turns with its select-only mode option, image input, and seeded on-disk native state.
+---
+
+Amp exposes one ACP session config option: `mode`. It is select-only, so a host
+presents a fixed value list rather than free text. There is no ACP model option,
+because Amp is locked to its hosted backend.
+
+## Config options
+
+| Option | Accepted values | Sent to Amp as |
+|---|---|---|
+| `mode` | `low`, `medium`, `high` | `-m` |
+
+The adapter passes the selected value straight through. Set it per session
+through `_meta.amp.options` (`AmpOptions.Mode`) or update it with
+`session/set_config_option`.
+
+## No model option
+
+There is no ACP model config option for Amp. A non-empty `WithDefaultModel`,
+`AmpOptions.Model`, or `_meta.amp.options.model` fails session start with the
+uniform unsupported error naming field `model`.
+
+## Image input
+
+Send images as standard ACP image blocks carrying embedded base64 data:
+
+```json
+{
+  "type": "image",
+  "data": "iVBORw0KGgoAAA...",
+  "mimeType": "image/png"
+}
+```
+
+The adapter accepts exactly `image/png`, `image/jpeg`, `image/gif`, and
+`image/webp`, and only static images. Before starting Amp it decodes the base64
+once, checks the declared media type against the bytes, reads dimensions
+without rendering pixels, and rejects GIFs with multiple image descriptors,
+WebP files with the animation flag, and PNG files carrying an `acTL` chunk.
+
+When an image carries both `data` and `uri`, the embedded data determines the
+submitted pixels and the URI is not read. Embedded resources use the same
+validation and aggregate budget as image blocks: a blob whose declared media
+type names a raster format is validated as an image, and a blob that names any
+other type still has to be valid base64 and still spends the per-image and
+per-prompt budget on the bytes it decodes to, even though those bytes never
+reach the prompt: a blob Amp has no native representation for is reduced to its
+URI and declared media type. A blob that
+names no raster format reports its rejection as `field: "prompt.resource"`,
+since the block a host has to fix is a resource block; everything held to the
+image gates reports `field: "prompt.image"`. A declared
+media type is matched case-insensitively and without parameters, so
+`IMAGE/PNG` and `image/png; charset=binary` are held to the image gates rather
+than treated as an untyped resource.
+
+### Local handoff input
+
+A co-located host can hand bytes over on disk instead of inside the prompt
+frame. Set `WithInputHandoffRoot` to an absolute directory and send an image
+block with empty `data`, a `file://` URI naming a path under that root, and an
+`acp-go.dev/handoff` envelope:
+
+```json
+{
+  "type": "image",
+  "mimeType": "image/png",
+  "data": "",
+  "uri": "file:///srv/handoff/session/turn/9f86d0...png",
+  "_meta": {
+    "acp-go.dev/handoff": {
+      "version": 1,
+      "digest": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+      "sizeBytes": 123456
+    }
+  }
+}
+```
+
+The declared media type and the declared size are judged first, from the block
+alone, so a block that fails either is refused before the read root is opened at
+all and its refusal says nothing about whether the named file exists. The adapter
+then opens the path relative to the read root, so containment is enforced by the
+kernel as part of the open, requires the opened descriptor to be a regular file,
+reads at most one byte past the declared size, and verifies that the bytes match
+that size and hash to the declared digest before anything else looks at them.
+Verified bytes then pass the same gate chain an embedded image passes, count
+toward the same per-prompt aggregate, and reach Amp as the same base64 source —
+a handoff turn and an embedded turn over the same bytes build byte-identical
+native requests, and the handoff path never appears in the native request.
+
+The root is read-only: the adapter never writes, moves, or removes anything
+under it, and the file's lifetime belongs to the host. The envelope is strict —
+exactly those three fields, version `1` only, a 64-character lowercase hex
+sha256, and a non-negative integer size.
+
+Form selection happens per block, before any other check:
+
+| Block | Form |
+|---|---|
+| non-empty `data` | embedded, even when a handoff envelope is also present |
+| empty `data` with an `acp-go.dev/handoff` envelope or a `file://` URI | handoff |
+| empty `data` with neither | `missing_data` |
+
+Leaving `WithInputHandoffRoot` unset rejects every handoff-form block with
+`invalid_handoff` and withholds the capability advertisement, so a host can tell
+from `initialize` whether its option reached the adapter. See
+[Meta](/docs/reference/meta#advertised-capabilities).
+
+Amp routes models on its hosted backend and exposes no authoritative per-model
+input modalities, so a structurally valid image is always forwarded and the
+native service stays authoritative. The standard `promptCapabilities.image`
+capability advertises that this transport exists.
+
+### Limits and input errors
+
+Decoded image bytes are bounded by the configured `ImageLimits`, 6 MiB per
+image and 6 MiB across one prompt by default (see
+[Go API](/docs/reference/go-api#image-limits)). Two smaller Amp native
+envelopes always apply, regardless of configuration:
+
+- at most 921,600 decoded bytes per image
+- at most 8,000 pixels in either dimension
+
+The byte envelope tracks how Amp stores a thread rather than any published
+per-image maximum: messages land in a backing store that caps one commit at
+1,310,720 bytes of dirty data and an image is stored as inline base64, so
+921,600 decoded bytes is 300 of the 320 available four-kilobyte pages. Because
+the cap is per commit, a long thread has less headroom than a fresh one — treat
+921,600 as the bound that holds for a fresh thread. See
+[Troubleshooting](/docs/operations/troubleshooting#image-failures).
+
+Crossing a configured byte limit returns `too_large`; crossing a native
+envelope returns `native_envelope_exceeded`. Both are `-32602 Invalid params`
+errors raised before any native turn starts:
+
+```json
+{
+  "field": "prompt.image",
+  "error": "too_large",
+  "index": 1,
+  "sizeBytes": 7000000,
+  "maxBytes": 6291456
+}
+```
+
+The full set of input `error` values is `missing_data`, `invalid_base64`,
+`invalid_media_type`, `media_type_mismatch`, `animated_not_supported`,
+`invalid_dimensions`, `too_large`, `native_envelope_exceeded`,
+`invalid_handoff`, `path_not_allowed`, `missing_file`, and
+`handoff_digest_mismatch`. `index` counts gated media prompt blocks in request
+order, validation stops at the first failing block, and an aggregate error names
+the image that crosses the total.
+
+The four handoff values are raised before any embedded-form gate and each
+carries a `message` naming the real cause:
+
+| `error` | Meaning |
+|---|---|
+| `invalid_handoff` | the block is malformed as a block: no read root configured, a missing, non-object, unknown-field, wrong-version, bad-digest or bad-size envelope, or a URI that is absent, unparsable, not `file://`, remote-hosted, or not absolute |
+| `path_not_allowed` | the path lies outside the read root, is reached through a symlink the root refuses (any absolute symlink, or one leading out of the root), or does not name a regular file |
+| `missing_file` | the path is inside the root but absent, unopenable, or unreadable — the expected outcome when a host cleans up early |
+| `handoff_digest_mismatch` | the file's byte count or sha256 disagrees with the envelope; the adapter fails closed and never falls back to another transport |
+
+`path_not_allowed` and `missing_file` also exist as image *output* `reason`
+values on the `-32603` `amp_turn_failed` envelope. The JSON-RPC error code tells
+the two apart: as a `-32602` `error` value the token describes a host-supplied
+inbound handoff path, and as a `reason` it describes an Amp-returned outbound
+artifact path.
+
+### Advertised media envelope
+
+`initialize` publishes the bounds above so a host can check an attachment before
+spending a turn on it. See
+[Meta](/docs/reference/meta#advertised-capabilities) for the exact block.
+
+## Seed Files
+
+`WithSeedFiles(map[string]string)` maps relative paths to file contents that the
+adapter writes into a session's resolved native root before the short-lived
+`amp threads` process launches, so the native CLI can read them as its own
+on-disk state.
+
+- **Anchor** — the per-session isolated `HOME` that `amp` runs with. The adapter
+  always creates a fresh isolated `HOME`/XDG root per session under the
+  `-scratch-dir`/`WithScratchDir` parent (the system temp directory when that is
+  unset), so seeds never land in the operator's real `HOME` or `~/.config/amp`.
+- **Placement** — seeds are written under `$HOME/<relpath>`. The adapter's
+  managed `settings.json` lives under `XDG_CONFIG_HOME` (alongside `HOME`), so
+  seeds are written verbatim and can never overwrite the adapter's required
+  settings.
+- **Confinement** — absolute paths, `..` escapes, and empty keys fail closed at
+  session start with the uniform unsupported error naming field `seedFiles[...]`.
+  Parent directories are created `0o700` and files `0o600`.
+
+<Warning>
+Amp does not support bring-your-own-model or custom LLM endpoints — it is locked
+to its hosted backend. Seed files cannot point Amp at a LiteLLM gateway or any
+alternate provider and have no effect on model routing. `WithSeedFiles` is
+accepted, but secrets still belong in `WithEnv`, never in a seeded file.
+</Warning>

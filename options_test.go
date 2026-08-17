@@ -1,0 +1,263 @@
+package ampacp
+
+import (
+	"log/slog"
+	"testing"
+	"time"
+
+	"github.com/coder/acp-go-sdk"
+	"go.opentelemetry.io/otel/metric/noop"
+	"go.opentelemetry.io/otel/propagation"
+	tracenoop "go.opentelemetry.io/otel/trace/noop"
+)
+
+func TestOptionsAndAmpOptions(t *testing.T) {
+	store := NewInMemorySessionStore()
+	logger := slog.New(slog.DiscardHandler)
+	imageLimits := ImageLimits{
+		MaxInputBytesPerImage:     1,
+		MaxInputBytesPerPrompt:    2,
+		MaxOutputBytesPerImage:    3,
+		MaxOutputBytesPerToolCall: 4,
+	}
+	options := applyOptions([]Option{
+		WithLogger(logger),
+		WithAgentName("name"),
+		WithAgentName(""),
+		WithAgentTitle("title"),
+		WithAgentTitle(""),
+		WithAgentVersion("version"),
+		WithAgentVersion(""),
+		WithExecutablePath("/bin/amp"),
+		WithHome("/tmp/home"),
+		WithDefaultModel("model"),
+		WithScratchDir("/tmp/scratch"),
+		WithEnv(map[string]string{"A": "B"}),
+		WithTracerProvider(tracenoop.NewTracerProvider()),
+		WithMeterProvider(noop.NewMeterProvider()),
+		WithTextMapPropagator(propagation.TraceContext{}),
+		WithSessionStore(store),
+		WithSessionStoreLoadTimeout(time.Second),
+		WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 2, MaxConcurrentClientCalls: 4}),
+		WithImageLimits(imageLimits),
+		WithTurnTimeout(90 * time.Second),
+		nil,
+	})
+	if options.AgentName != "name" || options.AgentTitle != "title" || options.AgentVersion != "version" {
+		t.Fatalf("identity options = %#v", options)
+	}
+	if options.Env["A"] != "B" || options.SessionStore != store || options.SessionStoreLoadTimeout != time.Second {
+		t.Fatalf("common options = %#v", options)
+	}
+	if options.ExecutablePath != "/bin/amp" || options.Home != "/tmp/home" || options.DefaultModel != "model" || options.ScratchDir != "/tmp/scratch" {
+		t.Fatalf("path/home/model/scratch options = %#v", options)
+	}
+	if options.TurnTimeout != 90*time.Second {
+		t.Fatalf("turn timeout = %s", options.TurnTimeout)
+	}
+	if options.ImageLimits != imageLimits {
+		t.Fatalf("image limits = %#v", options.ImageLimits)
+	}
+	env := map[string]string{"A": "B"}
+	ampOptions := NewAmpOptions(
+		WithAmpModel("model"),
+		WithAmpEnv(env),
+		WithAmpOutputSchema(map[string]any{"type": "object"}),
+		WithAmpMode("mode"),
+		nil,
+	)
+	env["A"] = "changed"
+	meta := ampOptions.Meta()
+	ampMeta, ok := meta[ampMetaKey].(map[string]any)
+	if !ok {
+		t.Fatalf("amp meta = %#v", meta[ampMetaKey])
+	}
+	payload, ok := ampMeta["options"].(map[string]any)
+	if !ok {
+		t.Fatalf("options meta = %#v", ampMeta["options"])
+	}
+	if payload["model"] != "model" || payload["mode"] != "mode" {
+		t.Fatalf("amp options meta = %#v", payload)
+	}
+	envPayload, ok := payload["env"].(map[string]string)
+	if !ok || envPayload["A"] != "B" {
+		t.Fatalf("env was not cloned: %#v", payload["env"])
+	}
+	if cloneStringMap(nil) != nil || cloneAnyMap(nil) != nil {
+		t.Fatal("nil clone changed")
+	}
+}
+
+func TestImageLimitDefaultsAndValidation(t *testing.T) {
+	want := ImageLimits{
+		MaxInputBytesPerImage:     defaultImageLimitBytes,
+		MaxInputBytesPerPrompt:    defaultImageLimitBytes,
+		MaxOutputBytesPerImage:    defaultImageLimitBytes,
+		MaxOutputBytesPerToolCall: defaultImageLimitBytes,
+	}
+	if got := applyOptions(nil).ImageLimits; got != want {
+		t.Fatalf("default image limits = %#v, want %#v", got, want)
+	}
+
+	for _, limits := range []ImageLimits{
+		{MaxInputBytesPerImage: -1},
+		{MaxInputBytesPerPrompt: -1},
+		{MaxOutputBytesPerImage: -1},
+		{MaxOutputBytesPerToolCall: -1},
+	} {
+		if err := validateImageLimits(limits); err == nil {
+			t.Fatalf("negative image limits accepted: %#v", limits)
+		}
+	}
+	if err := validateImageLimits(ImageLimits{}); err != nil {
+		t.Fatalf("zero image limits rejected: %v", err)
+	}
+}
+
+func TestCloneHelpersAndDeepClone(t *testing.T) {
+	if cloneMCPServers(nil) != nil {
+		t.Fatal("cloneMCPServers(nil) changed")
+	}
+	if cloneMCPServerStdio(nil) != nil {
+		t.Fatal("cloneMCPServerStdio(nil) changed")
+	}
+	if cloneHTTPHeaders(nil) != nil {
+		t.Fatal("cloneHTTPHeaders(nil) changed")
+	}
+	if cloneEnvVariables(nil) != nil {
+		t.Fatal("cloneEnvVariables(nil) changed")
+	}
+	if cloneAnySlice(nil) != nil {
+		t.Fatal("cloneAnySlice(nil) changed")
+	}
+	if got := cloneMCPServer(acp.McpServer{}); got.Http != nil || got.Sse != nil || got.Acp != nil || got.Stdio != nil {
+		t.Fatalf("cloneMCPServer(empty) = %#v", got)
+	}
+	if got := unstableMCPServerFromStable(acp.McpServer{}); got.Http != nil || got.Sse != nil || got.Acp != nil || got.Stdio != nil {
+		t.Fatalf("unstableMCPServerFromStable(empty) = %#v", got)
+	}
+
+	// A meta map with nested map and slice must be deep-cloned end to end.
+	nested := map[string]any{"list": []any{map[string]any{"deep": true}}}
+	cloned := cloneAnyMap(nested)
+	list, ok := cloned["list"].([]any)
+	if !ok || len(list) != 1 {
+		t.Fatalf("nested list not cloned: %#v", cloned["list"])
+	}
+
+	inner, ok := list[0].(map[string]any)
+	if !ok || inner["deep"] != true {
+		t.Fatalf("nested map not cloned: %#v", list[0])
+	}
+
+	origList, _ := nested["list"].([]any)
+	origInner, _ := origList[0].(map[string]any)
+	origInner["deep"] = false
+
+	clonedInner, _ := list[0].(map[string]any)
+	if clonedInner["deep"] != true {
+		t.Fatal("deep clone aliased nested map")
+	}
+
+	// Zero-arg WithSessionMCPServers yields a nil server slice, exercising the
+	// stableMCPServers nil path; the request still carries an empty slice.
+	req := NewSessionRequest("/tmp/cwd", WithSessionMCPServers())
+	if req.McpServers == nil || len(req.McpServers) != 0 {
+		t.Fatalf("empty mcp servers = %#v", req.McpServers)
+	}
+
+	// A fork with a bare (no-transport) server exercises the default branch of
+	// the unstable conversion.
+	forkReq := ForkSessionRequest("T-1", "/tmp/cwd", WithSessionMCPServers(acp.McpServer{}))
+	if len(forkReq.McpServers) != 1 {
+		t.Fatalf("fork servers = %#v", forkReq.McpServers)
+	}
+}
+
+func TestContainmentModeAndValidationAcrossPlatforms(t *testing.T) {
+	originalGOOS := runtimeGOOS
+	t.Cleanup(func() { runtimeGOOS = originalGOOS })
+
+	runtimeGOOS = platformLinux
+	if got := containmentMode(Options{}); got != RuntimeContainmentSharedIdentity {
+		t.Fatalf("Linux mode = %q", got)
+	}
+	if got := containmentMode(Options{ProcessIsolation: &ProcessIsolation{UID: 65534, GID: 65534}}); got != RuntimeContainmentAuthoritative {
+		t.Fatalf("Linux explicit mode = %q", got)
+	}
+	runtimeGOOS = platformWindows
+	if got := containmentMode(Options{}); got != RuntimeContainmentSharedIdentity {
+		t.Fatalf("Windows mode = %q", got)
+	}
+	runtimeGOOS = platformLinux
+	if got := containmentMode(Options{DarwinBestEffortContainment: true}); got != RuntimeContainmentUnavailable {
+		t.Fatalf("off-Darwin opt-in mode = %q", got)
+	}
+	if err := validateContainmentOptions(Options{DarwinBestEffortContainment: true}); err == nil {
+		t.Fatal("off-Darwin opt-in was accepted")
+	}
+
+	runtimeGOOS = platformDarwin
+	if got := containmentMode(Options{DarwinBestEffortContainment: true}); got != RuntimeContainmentBestEffort {
+		t.Fatalf("Darwin opt-in mode = %q", got)
+	}
+	if got := containmentMode(Options{}); got != RuntimeContainmentSharedIdentity {
+		t.Fatalf("Darwin default mode = %q", got)
+	}
+	if got := containmentMode(Options{DarwinBestEffortContainment: true, ProcessIsolation: &ProcessIsolation{UID: 1, GID: 1}}); got != RuntimeContainmentUnavailable {
+		t.Fatalf("Darwin combined mode = %q", got)
+	}
+	if err := validateContainmentOptions(Options{DarwinBestEffortContainment: true, ProcessIsolation: &ProcessIsolation{UID: 1, GID: 1}}); err == nil {
+		t.Fatal("Darwin containment and process isolation combination was accepted")
+	}
+	if err := validateContainmentOptions(Options{Env: map[string]string{"acp_go_amp_internal_bad": "value"}}); err == nil {
+		t.Fatal("reserved private environment was accepted")
+	}
+	if err := validateContainmentOptions(Options{}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestProcessIsolationOptionClonesAndFailsClosed(t *testing.T) {
+	if (&Agent{}).nativeEnvironmentBase() != nil {
+		t.Fatal("agent without any isolation capture exposed a base environment")
+	}
+	explicitBase := map[string]string{"PATH": "/policy/bin"}
+	if got := (&Agent{options: Options{ProcessIsolation: &ProcessIsolation{BaseEnvironment: explicitBase}}}).nativeEnvironmentBase(); got["PATH"] != "/policy/bin" {
+		t.Fatalf("explicit native environment base = %#v", got)
+	}
+	if err := NewAgent().validateSessionStartOptions(AmpOptions{}); err != nil {
+		t.Fatalf("session start rejected omitted isolation: %v", err)
+	}
+	base := map[string]string{"PATH": "/policy/bin", "CANARY": "base"}
+	opts := applyOptions([]Option{WithProcessIsolation(ProcessIsolation{UID: 10, GID: 20, BaseEnvironment: base})})
+	base["CANARY"] = "mutated"
+	if got := opts.ProcessIsolation.BaseEnvironment["CANARY"]; got != "base" {
+		t.Fatalf("cloned base = %q", got)
+	}
+	internal := nativeProcessIsolation(opts.ProcessIsolation, false)
+	opts.ProcessIsolation.BaseEnvironment["CANARY"] = "later"
+	if got := internal.BaseEnvironment["CANARY"]; got != "base" {
+		t.Fatalf("internal cloned base = %q", got)
+	}
+	if nativeProcessIsolation(nil, false) != nil {
+		t.Fatal("nil isolation mapped non-nil")
+	}
+	if err := validateProcessIsolationOption(nil); err != nil {
+		t.Fatalf("omitted isolation was rejected: %v", err)
+	}
+	for _, isolation := range []*ProcessIsolation{{UID: 0, GID: 1}, {UID: 1, GID: 0}} {
+		if validateProcessIsolationOption(isolation) == nil {
+			t.Fatalf("invalid isolation accepted: %#v", isolation)
+		}
+	}
+	original := runtimeGOOS
+	runtimeGOOS = platformWindows
+	t.Cleanup(func() { runtimeGOOS = original })
+	if validateProcessIsolationOption(&ProcessIsolation{UID: 1, GID: 1}) == nil {
+		t.Fatal("windows isolation accepted")
+	}
+	if err := validateProcessIsolationOption(nil); err != nil {
+		t.Fatalf("omitted isolation was rejected on windows: %v", err)
+	}
+}

@@ -1,0 +1,46 @@
+---
+title: MCP
+description: Forward stdio and streamable HTTP MCP servers to Amp, and know which transports are rejected.
+---
+
+An ACP session can carry MCP server definitions. The adapter renders the
+supported ones into Amp `--mcp-config` JSON and passes them to the prompt
+process; the rest are rejected at session start so a host learns immediately
+which servers Amp can use.
+
+## Supported and rejected transports
+
+| Transport | Result |
+|---|---|
+| stdio (name, command, args, env) | Accepted — forwarded via `--mcp-config`. |
+| HTTP (name, URL, headers) | Accepted — forwarded via `--mcp-config`. |
+| SSE | Rejected. |
+| ACP | Rejected. |
+| entry with no transport | Rejected. |
+| entry with an empty server name | Rejected. |
+
+A rejection is an invalid-params error naming the offending server index or
+field, raised during session start rather than mid-turn.
+
+## Wiring servers
+
+Attach the MCP servers to the session when you open it; the adapter only builds
+`--mcp-config` from the servers the ACP session provides, so a prompt process
+sees exactly the host-supplied set and nothing more. Build the accepted shapes
+with the `StdioMCPServer` and `HTTPMCPServer` request builders and pass them on
+the session request with `WithSessionMCPServers`:
+
+```go
+req := ampacp.NewSessionRequest(cwd,
+	ampacp.WithSessionMCPServers(
+		ampacp.StdioMCPServer("tools", "node", []string{"server.js"}, nil),
+		ampacp.HTTPMCPServer("remote", "https://example.test/mcp", nil),
+	),
+)
+```
+
+The adapter renders those two servers into a mode-`0600` file inside the
+adapter-owned session settings directory and passes only its path through
+`--mcp-config`. Header values therefore do not appear in process arguments. The
+file is removed after the prompt process exits. See the
+[Go API](/docs/reference/go-api) for the builder signatures.

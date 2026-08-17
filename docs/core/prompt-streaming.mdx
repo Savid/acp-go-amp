@@ -1,0 +1,112 @@
+---
+title: Prompt Streaming
+description: How one short-lived Amp process per prompt turns stream-JSON frames into ACP updates and results.
+---
+
+Each ACP prompt starts exactly one short-lived native process and streams its
+output back as ACP `session/update` notifications, ending with a single
+terminal result.
+
+## The prompt process
+
+```text
+amp threads continue <thread> --stream-json --stream-json-input -x
+```
+
+The adapter always adds `--no-ide`, `--no-color`, `--no-notifications`, and an
+isolated `--settings-file`. MCP configuration is supplied with `--mcp-config`
+when the ACP session includes stdio or HTTP MCP servers.
+
+## Frame mapping
+
+Amp stream-JSON frames map to ACP updates:
+
+- user text frames become user message chunks
+- assistant text frames become agent message chunks
+- tool-use frames become tool-call updates
+- structured tool-result text and images become complete ordered
+  `tool_call_update.content` snapshots
+- usage data becomes ACP `usage_update`
+- final result usage is copied to the prompt response
+
+Main-agent message chunks carry a wrapper-derived UUID in `messageId` and
+`_meta.amp.messageId`; the successful prompt response repeats the terminal
+main-agent value. Amp exposes no native message/turn id, so the adapter anchors
+the UUID to the exact raw frame and its durable transcript position. This keeps
+load replay stable without modifying native mirror bytes.
+
+The `usage_update` `size` field carries Amp's native `usage.max_tokens`
+verbatim (a model-scale value Amp reports), or `0` when absent.
+
+No slash commands are advertised. Text like `/review` remains ordinary prompt
+text and is sent to Amp unchanged.
+
+ACP prompt image blocks are validated before the native process starts and are
+sent as Amp stream-JSON base64 image sources in their original content order,
+whether their bytes arrived as embedded base64 or through the local handoff form.
+See [Models and config](/docs/features/models-config#image-input) for formats
+and native envelopes, [Updates](/docs/reference/updates#image-tool-content) for
+typed tool output, and [Session store](/docs/features/session-store) for replay
+behavior.
+
+## Cancel and stop reasons
+
+`session/cancel` sends an interrupt to the active prompt boundary. Ordinary
+execution owns and reaps the direct native child without claiming escaped
+descendant absence. With explicit Linux process isolation, every native
+command, including each turn, runs below its own child subreaper.
+It adopts and terminates the whole descendant tree even when a native tool
+escapes the original process group with `setsid(2)`, and reaps until `ECHILD`.
+Non-Linux platforms refuse explicit isolation but support ordinary execution.
+Explicit Linux isolation is the authoritative boundary.
+
+Prompt settlement is fenced by the selected containment result. If it is
+incomplete, the adapter returns an error matching
+`ampacp.ErrProcessContainmentIncomplete` and retains resources the native
+process may still reach. The wait is bounded.
+
+Darwin uses ordinary execution by default. With the explicit best-effort
+opt-in, the adapter reaps the direct child and runs the fixed TERM/KILL ladder
+against its original process group. It does not wait for or claim absence of a
+`setsid(2)` escapee, so escaped processes or zombies may survive a settled
+prompt. The best-effort opt-in is mutually exclusive with process isolation.
+
+A successful prompt returns exactly one terminal result, and this adapter
+emits only two of the ACP stop reasons: `end_turn` for a completed turn and
+`cancelled` for a cancelled one. The other reasons in the ACP enum
+(`max_tokens`, `max_turn_requests`, `refusal`) exist but this adapter never
+produces them, so a host must not wait for them.
+
+## Turn failures and timeouts
+
+A native turn failure is never reported as a stop reason. It terminates
+`session/prompt` with a JSON-RPC error (`-32603`) carrying:
+
+```json
+{
+  "error": "amp_turn_failed",
+  "cause": "process_exit" | "transport" | "provider" | "timeout",
+  "message": "<real native cause>"
+}
+```
+
+`message` always carries the real native cause (exit status and stderr tail for
+a process exit, the decode/read error for a transport fault, or `result.error`
+falling back to `result.result` for a provider error) — never a fixed
+placeholder. The session stays addressable and retriable after such a failure; a
+follow-up `session/prompt` re-drives the turn.
+
+An image the adapter will not ship is refused in place: fixed guidance takes
+the image's position in that tool call's own content and the turn keeps
+running with its context. Only the adapter's own artifact store breaking uses
+the `-32603` envelope with `cause: "transport"`, plus `stage: "image_output"`
+and `reason: "storage_failed"`; there the adapter emits failed status for the
+originating tool call and interrupts the turn. Neither path turns the failure
+into an empty image or silently successful text.
+
+<Note>
+`WithTurnTimeout(d)` sets an optional per-turn deadline (default `0`, no
+deadline). On expiry the adapter aborts the native turn and returns the failure
+error with `cause: "timeout"` — a timeout is a failure, not a cancellation, so
+it never produces a `cancelled` stop reason.
+</Note>

@@ -1,0 +1,74 @@
+---
+title: ACP Methods
+description: The exact ACP method surface the adapter supports, and what unsupported calls return.
+---
+
+The adapter implements a fixed ACP method surface. Methods outside it return
+method-not-found rather than partial behavior.
+
+## Supported methods
+
+| Method | Notes |
+|---|---|
+| `initialize` | Advertises standard image prompt support plus `_meta.amp.rawEvent` and `_meta.amp.sessionStore`. |
+| `authenticate` | Rejects caller method IDs; Amp owns auth. |
+| `logout` | Present. |
+| `session/new` | Mints the session id and persists the manifest; the Amp thread is created by the first prompt. |
+| `session/load` | Replays stored transcript frames. |
+| `session/resume` | Restores state without replay. |
+| `session/list` | Lists active and mirrored sessions, paginated by an opaque `cursor` with pages of 50 and `nextCursor`. |
+| `session/prompt` | Validates ordered text/image content, then continues the thread with one streamed turn. |
+| `session/cancel` | Interrupts the active prompt process. |
+| `session/close` | Closes the local session. |
+| `session/delete` | Tombstones locally, then deletes the Amp thread when one was created. |
+| `session/set_config_option` | Updates `mode`. |
+
+## Provider auth methods
+
+These eight session-scoped extension methods are advertised only while
+`-provider-auth-root` (or `WithProviderAuthRoot`) names a usable durable
+directory; without it each returns method-not-found. Every request and result
+object is closed — an unknown, duplicate, or misplaced field is rejected with
+invalid params naming the field path — and every time value is Unix epoch
+milliseconds.
+
+`_amp/auth/methods` publishes one provider, `amp`, with `login` (`oauth`) and
+`api-key` (`api`) methods. The catalog carries only method ID, type, and label.
+The API key itself is accepted only by `_amp/auth/callback` after `authorize`
+has returned an `interaction: "secret"` flow.
+
+| Method | Params | Result |
+|---|---|---|
+| `_amp/auth/methods` | `{sessionId}` | `{providers, generation}` |
+| `_amp/auth/authorize` | `{sessionId, providerId, connectionId, methodsGeneration, method, authorizeRequestId, inputs?}` | `{interaction, url, message, callbackInput, flowId, flowExpiresAt}` |
+| `_amp/auth/callback` | `{sessionId, providerId, method, flowId, input}` | `{flowId}` |
+| `_amp/auth/status` | `{sessionId, providerId, flowId}` | `{flowId, state, reason?}` |
+| `_amp/auth/cancel` | `{sessionId, providerId, flowId}` | `{flowId}` |
+| `_amp/auth/inventory` | `{sessionId}` | `{entries}` |
+| `_amp/auth/credential` | `{sessionId, providerId, flowId}` | `{connectionId, revision, bindingGeneration, credential}` |
+| `_amp/auth/disconnect` | `{sessionId, providerId, connectionId, bindingGeneration}` | `{}` |
+
+A caller addressing failure — an unknown, superseded, or cross-session
+`flowId`, a stale `methodsGeneration`, a `method` that is not the flow's, an
+`authorizeRequestId` a later `authorize` replaced — is invalid params with the
+field path. `connectionId` is caller-minted and bounded
+to at most 128 bytes of `A-Z`, `a-z`, `0-9`, `-`, and `_`; every leg that
+carries one checks it before the value is compared or recorded, and anything
+outside that shape is invalid params naming `connectionId`. Every other failure
+is JSON-RPC `-32000`
+carrying `{"error": "amp_auth_failed", "cause": ..., "retryable": ...}` with a
+closed `cause` enum and no native message text. See
+[Authentication](/docs/features/authentication#broker-an-account).
+
+## Unsupported and rejected
+
+- `session/set_mode` returns method-not-found and is not advertised.
+- `_amp/session/fork` returns the package unsupported error — Amp has no
+  documented native fork surface. Stable `session/fork` returns
+  method-not-found.
+- MCP accepts stdio and HTTP server definitions during session start; SSE and
+  ACP definitions are rejected with invalid params naming the server. See
+  [MCP](/docs/features/mcp).
+
+No slash commands are advertised. Slash-prefixed text remains normal prompt
+content.
