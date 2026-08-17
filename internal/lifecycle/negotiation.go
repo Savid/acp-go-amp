@@ -1,0 +1,221 @@
+package lifecycle
+
+import (
+	"math"
+	"slices"
+)
+
+// MetaPath is the request path a rejection names. Negotiation and correlation
+// values are rejected as invalid params rather than as stream violations,
+// because they are read before any stream exists.
+const MetaPath = `_meta["` + MetaKey + `"]`
+
+// ParamError refuses a negotiation or correlation value. It names the exact
+// member path so a host can tell which value it got wrong, and it is the one
+// family literal this adapter validates on `initialize` itself.
+type ParamError struct {
+	// Field is the full request path, from MetaPath down to the offending
+	// member.
+	Field string
+}
+
+// Error implements error.
+func (e *ParamError) Error() string { return "unsupported " + e.Field }
+
+func paramError(members ...string) *ParamError {
+	field := MetaPath
+	for _, member := range members {
+		field += "." + member
+	}
+
+	return &ParamError{Field: field}
+}
+
+// Offer is the host's `initialize` offer. It carries exactly one member, so a
+// later version adds its own members inside its own version's shape rather than
+// breaking a version-1 sibling.
+type Offer struct {
+	Versions []int
+}
+
+// DecodeOffer reads the offer from `InitializeRequest._meta`. A connection whose
+// offer is absent reports ErrNoEnvelope: the host asked for nothing, and the
+// answer, every envelope, and every correlation read are then omitted for the
+// whole connection.
+func DecodeOffer(meta map[string]any) (Offer, error) {
+	raw, present := meta[MetaKey]
+	if !present {
+		return Offer{}, ErrNoEnvelope
+	}
+
+	fields, ok := raw.(map[string]any)
+	if !ok {
+		return Offer{}, paramError()
+	}
+
+	for key := range fields {
+		if key != fieldVersions {
+			return Offer{}, paramError(key)
+		}
+	}
+
+	versions, err := decodeVersions(fields[fieldVersions])
+	if err != nil {
+		return Offer{}, err
+	}
+
+	return Offer{Versions: versions}, nil
+}
+
+// Answer resolves the offer against the versions this adapter implements and the
+// facts the active configuration proved. An empty intersection returns no answer
+// at all: the key is omitted rather than answered with an empty array.
+func (o Offer) Answer(proven Negotiated) (Negotiated, bool) {
+	common := make([]int, 0, len(o.Versions))
+
+	for _, version := range o.Versions {
+		if version == Version && !slices.Contains(common, version) {
+			common = append(common, version)
+		}
+	}
+
+	if len(common) == 0 {
+		return Negotiated{}, false
+	}
+
+	proven.Versions = common
+
+	return proven, true
+}
+
+// decodeVersions reads the ascending non-empty integer array every negotiation
+// object carries. It is validated on every offer whatever the version.
+func decodeVersions(raw any) ([]int, error) {
+	listed, ok := raw.([]any)
+	if !ok || len(listed) == 0 {
+		return nil, paramError(fieldVersions)
+	}
+
+	versions := make([]int, 0, len(listed))
+
+	for _, entry := range listed {
+		number, ok := entry.(float64)
+		if !ok || number != math.Trunc(number) {
+			return nil, paramError(fieldVersions)
+		}
+
+		versions = append(versions, int(number))
+	}
+
+	if !slices.IsSorted(versions) {
+		return nil, paramError(fieldVersions)
+	}
+
+	return versions, nil
+}
+
+// Submission names one accepted client prompt. The client nonce is the host's own
+// input identity: it is distinct from every JSON-RPC message id, and neither is
+// ever substituted for the other.
+type Submission struct {
+	SubmissionID string
+	ClientNonce  string
+	RunID        string
+}
+
+// DecodePromptCorrelation reads the value a `session/prompt` carries while
+// version 1 is negotiated. The key is required when negotiated and forbidden when
+// not, and either way the verdict is reached before the prompt is dispatched, so
+// no frame is written to the harness.
+func DecodePromptCorrelation(meta map[string]any, negotiated Negotiated) (Submission, error) {
+	raw, present := meta[MetaKey]
+
+	switch {
+	case !negotiated.Present() && present:
+		return Submission{}, paramError()
+	case !negotiated.Present():
+		return Submission{}, nil
+	case !present:
+		return Submission{}, paramError()
+	}
+
+	fields, ok := raw.(map[string]any)
+	if !ok {
+		return Submission{}, paramError()
+	}
+
+	for key := range fields {
+		if key != fieldVersion && key != fieldSubmission {
+			return Submission{}, paramError(key)
+		}
+	}
+
+	if err := checkCorrelationVersion(fields, negotiated); err != nil {
+		return Submission{}, err
+	}
+
+	return decodeSubmission(fields[fieldSubmission])
+}
+
+func checkCorrelationVersion(fields map[string]any, negotiated Negotiated) error {
+	version, ok := fields[fieldVersion].(float64)
+	if !ok || version != math.Trunc(version) || !negotiated.SupportsVersion(int(version)) {
+		return paramError(fieldVersion)
+	}
+
+	return nil
+}
+
+func decodeSubmission(raw any) (Submission, error) {
+	fields, ok := raw.(map[string]any)
+	if !ok {
+		return Submission{}, paramError(fieldSubmission)
+	}
+
+	for key := range fields {
+		if key != fieldSubmissionID && key != fieldClientNonce && key != fieldRunID {
+			return Submission{}, paramError(fieldSubmission, key)
+		}
+	}
+
+	submission := Submission{}
+
+	for _, member := range []struct {
+		key      string
+		target   *string
+		required bool
+	}{
+		{fieldSubmissionID, &submission.SubmissionID, true},
+		{fieldClientNonce, &submission.ClientNonce, true},
+		{fieldRunID, &submission.RunID, false},
+	} {
+		value, err := correlationIdentifier(fields, member.key, member.required)
+		if err != nil {
+			return Submission{}, err
+		}
+
+		*member.target = value
+	}
+
+	return submission, nil
+}
+
+// correlationIdentifier reads one opaque handle. A required one is never empty,
+// and every one is bounded: an identifier is a correlation handle, not a payload.
+func correlationIdentifier(fields map[string]any, key string, required bool) (string, error) {
+	raw, present := fields[key]
+	if !present {
+		if required {
+			return "", paramError(fieldSubmission, key)
+		}
+
+		return "", nil
+	}
+
+	value, ok := raw.(string)
+	if !ok || len(value) > IdentifierBound || (value == "" && required) {
+		return "", paramError(fieldSubmission, key)
+	}
+
+	return value, nil
+}
