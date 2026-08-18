@@ -139,3 +139,110 @@ func TestAcceptanceOmitsAnAbsentRunID(t *testing.T) {
 	require.True(t, ok)
 	require.NotContains(t, event, fieldRunID)
 }
+
+// emitted frames one rendered envelope as the notification a consumer decodes,
+// which is the only measure of whether the emitter stated what it emitted.
+func emitted(t *testing.T, envelope map[string]any) json.RawMessage {
+	t.Helper()
+
+	params, err := json.Marshal(map[string]any{
+		"sessionId": "sess-1",
+		"update":    map[string]any{sessionUpdateField: string(CarrierSessionInfo)},
+		metaField:   map[string]any{MetaKey: envelope},
+	})
+	require.NoError(t, err)
+
+	return params
+}
+
+// TestRichSnapshotIsEncodedWhole pins that a snapshot's nonterminal sets survive
+// encoding. A set rendered empty over entities the reducer accepted would assert
+// a vacancy the emitter never claimed, and a consumer would read the incarnation
+// as holding nothing live.
+func TestRichSnapshotIsEncodedWhole(t *testing.T) {
+	t.Parallel()
+
+	blocking := true
+	snapshot := Event{Type: EventSnapshot, Snapshot: &Snapshot{
+		Foreground: Foreground{
+			State:   ForegroundRequiresAction,
+			CycleID: "cyc-1",
+			TurnID:  "turn-1",
+			Origin:  CauseSubmission,
+		},
+		Activities: []ActivityUpdate{{
+			ActivityID:   "act-1",
+			Kind:         ActivitySubagent,
+			State:        ActivityRunning,
+			ToolCallID:   "tool-1",
+			Cause:        CauseSubmission,
+			OriginTurnID: "turn-1",
+			RunID:        "run-1",
+			Progress:     json.RawMessage(`{"done":1}`),
+		}},
+		Actions: []ActionUpdate{{
+			ActionID:         "acn-1",
+			Kind:             ActionPermission,
+			State:            ActionPending,
+			Owner:            Owner{Type: OwnerTurn, ID: "turn-1"},
+			RunID:            "run-1",
+			BlocksForeground: &blocking,
+		}},
+	}}
+
+	envelope, err := NewStream("strm-1", richConfiguration()).Emit(snapshot)
+	require.NoError(t, err)
+
+	delivery, err := DecodeSessionUpdate(emitted(t, envelope), richConfiguration())
+	require.NoError(t, err)
+	require.Equal(t, snapshot, delivery.Event, "the decoded assertion is the one that was emitted")
+}
+
+// TestActivityAndActionUpdatesAreEncoded pins that every event the reducer admits
+// is one the encoder can state. An event committed to the projection and lost on
+// the wire would leave the emitter's own state ahead of every consumer's.
+func TestActivityAndActionUpdatesAreEncoded(t *testing.T) {
+	t.Parallel()
+
+	blocking := false
+	stream := NewStream("strm-1", richConfiguration())
+
+	_, err := stream.Emit(SnapshotEvent("cyc-0", QuiescenceFact{}))
+	require.NoError(t, err)
+
+	_, err = stream.Emit(AcceptedEvent(Submission{SubmissionID: "sub-1", ClientNonce: "non-1"}, "turn-1"))
+	require.NoError(t, err)
+
+	_, err = stream.Emit(RunningEvent("cyc-1", "turn-1"))
+	require.NoError(t, err)
+
+	activity := Event{Type: EventActivityUpdate, Activity: &ActivityUpdate{
+		ActivityID:   "act-1",
+		Kind:         ActivityTask,
+		State:        ActivityRunning,
+		Cause:        CauseSubmission,
+		OriginTurnID: "turn-1",
+	}}
+
+	envelope, err := stream.Emit(activity)
+	require.NoError(t, err)
+
+	delivery, err := DecodeSessionUpdate(emitted(t, envelope), richConfiguration())
+	require.NoError(t, err)
+	require.Equal(t, activity, delivery.Event)
+
+	action := Event{Type: EventActionUpdate, Action: &ActionUpdate{
+		ActionID:         "acn-1",
+		Kind:             ActionElicitation,
+		State:            ActionPending,
+		Owner:            Owner{Type: OwnerActivity, ID: "act-1"},
+		BlocksForeground: &blocking,
+	}}
+
+	envelope, err = stream.Emit(action)
+	require.NoError(t, err)
+
+	delivery, err = DecodeSessionUpdate(emitted(t, envelope), richConfiguration())
+	require.NoError(t, err)
+	require.Equal(t, action, delivery.Event)
+}

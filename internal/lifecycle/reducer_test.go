@@ -803,3 +803,51 @@ func TestActionRestatementKeepsItPending(t *testing.T) {
 	require.Equal(t, ActionPending, action.State)
 	require.False(t, reducer.State().Quiescence.Certified)
 }
+
+// supersedingSnapshot is one incarnation's opening assertion on the named stream.
+func supersedingSnapshot(streamID string, sequence uint64, event Event) Delivery {
+	return Delivery{StreamID: streamID, Sequence: sequence, Carrier: CarrierSessionInfo, Event: event}
+}
+
+// TestRefusedReplacementLeavesTheProjectionStanding pins that supersession is
+// atomic. A replacement snapshot the reducer refuses opens nothing, so the
+// incarnation it would have replaced is exactly what a caller reads after the
+// refusal — not the empty projection a half-applied replacement would leave.
+func TestRefusedReplacementLeavesTheProjectionStanding(t *testing.T) {
+	t.Parallel()
+
+	reducer := NewReducer(Options{Negotiated: richConfiguration()})
+	require.NoError(t, reducer.Reduce(deliver(1, openSnapshot())))
+	require.NoError(t, reducer.Reduce(deliver(2, Event{Type: EventPromptAccepted, PromptAccepted: &PromptAccepted{
+		SubmissionID: "sub-1", ClientNonce: "non-1", TurnID: "turn-1",
+	}})))
+	require.NoError(t, reducer.Reduce(deliver(3, RunningEvent("cyc-1", "turn-1"))))
+
+	standing := reducer.State()
+
+	// The replacement's own foreground is incomplete, so the whole assertion is
+	// refused before any of it is projected.
+	err := reducer.Reduce(supersedingSnapshot("strm-2", 1, Event{Type: EventSnapshot, Snapshot: &Snapshot{}}))
+	require.Error(t, err)
+	require.Equal(t, ViolationMalformedEnvelope, reducer.Failed().Kind)
+	require.Equal(t, standing, reducer.State())
+}
+
+// TestSupersededStreamNeverOpensAgain pins that an incarnation this reducer
+// replaced is over: a later snapshot naming it is the resurrection of a
+// superseded identity, which is stale rather than the next incarnation.
+func TestSupersededStreamNeverOpensAgain(t *testing.T) {
+	t.Parallel()
+
+	reducer := NewReducer(Options{Negotiated: richConfiguration()})
+	require.NoError(t, reducer.Reduce(supersedingSnapshot("strm-a", 1, openSnapshot())))
+	require.NoError(t, reducer.Reduce(supersedingSnapshot("strm-b", 1, openSnapshot())))
+
+	replaced := reducer.State()
+	require.Equal(t, "strm-b", replaced.StreamID)
+
+	err := reducer.Reduce(supersedingSnapshot("strm-a", 1, openSnapshot()))
+	require.Error(t, err)
+	require.Equal(t, ViolationStaleStream, reducer.Failed().Kind)
+	require.Equal(t, replaced, reducer.State())
+}

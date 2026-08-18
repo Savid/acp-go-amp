@@ -54,11 +54,33 @@ type Reducer struct {
 	// a blocker blocks the cycle current at its first sight, and that cycle may
 	// not move again until the blocker terminalizes.
 	actionCycle map[string]string
+	// retired names every incarnation this reducer superseded. A superseded
+	// identity is over for the life of the session: a snapshot naming one again is
+	// not the next incarnation but the resurrection of a stream whose projection
+	// was already replaced.
+	retired map[string]bool
+}
+
+// incarnation is one stream's whole reduction: the projection and the
+// bookkeeping that backs it. A replacement snapshot is judged against a fresh
+// one, so the reducer holds the incarnation it would supersede aside until that
+// snapshot proves it reduces.
+type incarnation struct {
+	state          State
+	base           uint64
+	started        bool
+	frames         map[uint64]any
+	lastTransition uint64
+	fence          uint64
+	turnSeen       map[string]uint64
+	activitySeen   map[string]uint64
+	blockedCycle   string
+	actionCycle    map[string]string
 }
 
 // NewReducer builds a reducer for one session.
 func NewReducer(opts Options) *Reducer {
-	reducer := &Reducer{negotiated: opts.Negotiated}
+	reducer := &Reducer{negotiated: opts.Negotiated, retired: map[string]bool{}}
 	reducer.reset("")
 
 	return reducer
@@ -151,14 +173,67 @@ func (r *Reducer) Reduce(delivery Delivery) error {
 // on a stream identity this reducer has not seen; a projection is per incarnation
 // and adopts nothing from the one it supersedes. A closed session admits no
 // incarnation at all, which is why the fence is judged before this.
+//
+// Supersession is one-way and it is atomic. An identity this reducer already
+// superseded never opens again, and the incarnation in hand stands until the
+// replacement's snapshot reduces whole, so a refused replacement leaves the
+// projection exactly as it stood at the moment of refusal rather than latching
+// over an empty one.
 func (r *Reducer) reduceForeign(delivery Delivery) error {
 	if delivery.Event.Type != EventSnapshot {
 		return r.fail(delivery, ViolationStaleStream, "stream is "+r.state.StreamID)
 	}
 
+	if r.retired[delivery.StreamID] {
+		return r.fail(delivery, ViolationStaleStream, "stream "+delivery.StreamID+" was already superseded")
+	}
+
+	superseded, retiring := r.incarnation(), r.state.StreamID
+
 	r.reset(delivery.StreamID)
 
-	return r.reduceFirst(delivery)
+	if err := r.reduceFirst(delivery); err != nil {
+		r.restore(superseded)
+
+		return err
+	}
+
+	r.retired[retiring] = true
+
+	return nil
+}
+
+// incarnation holds the reduction in hand aside. reset installs fresh collections
+// rather than clearing these, so what is held here is never mutated behind it.
+func (r *Reducer) incarnation() incarnation {
+	return incarnation{
+		state:          r.state,
+		base:           r.base,
+		started:        r.started,
+		frames:         r.frames,
+		lastTransition: r.lastTransition,
+		fence:          r.fence,
+		turnSeen:       r.turnSeen,
+		activitySeen:   r.activitySeen,
+		blockedCycle:   r.blockedCycle,
+		actionCycle:    r.actionCycle,
+	}
+}
+
+// restore reinstates a held incarnation. The latched refusal is not part of it:
+// the stream failed closed and stays closed; what returns is the projection the
+// caller reads after that refusal.
+func (r *Reducer) restore(held incarnation) {
+	r.state = held.state
+	r.base = held.base
+	r.started = held.started
+	r.frames = held.frames
+	r.lastTransition = held.lastTransition
+	r.fence = held.fence
+	r.turnSeen = held.turnSeen
+	r.activitySeen = held.activitySeen
+	r.blockedCycle = held.blockedCycle
+	r.actionCycle = held.actionCycle
 }
 
 func (r *Reducer) reset(streamID string) {

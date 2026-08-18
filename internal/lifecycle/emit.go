@@ -104,23 +104,15 @@ func QuiescenceEvent(fact QuiescenceFact) Event {
 	return Event{Type: EventQuiescenceUpdate, Quiescence: &fact}
 }
 
-// encodeEvent renders the events this adapter emits. A prompt-contained
+// encodeEvent renders an event the reducer just admitted. A prompt-contained
 // configuration proves no activity kind and holds no action awaiting an answer,
-// so those two event types have no emitter here; the reducer still reduces all
-// six, because it is also the validator for streams this adapter reads.
+// so this adapter has no emitter that builds those two forms; the encoder still
+// renders all six, because an event the reducer accepted and the encoder could
+// not state would be committed to the projection and lost on the wire.
 func encodeEvent(event Event) map[string]any {
 	switch event.Type {
 	case EventSnapshot:
-		return map[string]any{
-			fieldType: string(EventSnapshot),
-			fieldForeground: map[string]any{
-				fieldState:   string(event.Snapshot.Foreground.State),
-				fieldCycleID: event.Snapshot.Foreground.CycleID,
-			},
-			fieldActivities: []any{},
-			fieldActions:    []any{},
-			fieldQuiescence: encodeQuiescence(event.Snapshot.Quiescence),
-		}
+		return encodeSnapshot(*event.Snapshot)
 	case EventPromptAccepted:
 		return withOptional(map[string]any{
 			fieldType:         string(EventPromptAccepted),
@@ -128,6 +120,16 @@ func encodeEvent(event Event) map[string]any {
 			fieldClientNonce:  event.PromptAccepted.ClientNonce,
 			fieldTurnID:       event.PromptAccepted.TurnID,
 		}, fieldRunID, event.PromptAccepted.RunID)
+	case EventActivityUpdate:
+		return map[string]any{
+			fieldType:     string(EventActivityUpdate),
+			fieldActivity: encodeActivity(*event.Activity),
+		}
+	case EventActionUpdate:
+		return map[string]any{
+			fieldType:   string(EventActionUpdate),
+			fieldAction: encodeAction(*event.Action),
+		}
 	case EventQuiescenceUpdate:
 		fact := encodeQuiescence(*event.Quiescence)
 		fact[fieldType] = string(EventQuiescenceUpdate)
@@ -136,6 +138,84 @@ func encodeEvent(event Event) map[string]any {
 	default:
 		return encodeTransition(*event.State)
 	}
+}
+
+// encodeSnapshot renders the whole-state assertion. The nonterminal sets are
+// always present and carry exactly what the snapshot asserts: a set rendered
+// empty over entities the reducer accepted would assert a vacancy the emitter
+// never claimed.
+func encodeSnapshot(snapshot Snapshot) map[string]any {
+	activities := make([]any, 0, len(snapshot.Activities))
+	for index := range snapshot.Activities {
+		activities = append(activities, encodeActivity(snapshot.Activities[index]))
+	}
+
+	actions := make([]any, 0, len(snapshot.Actions))
+	for _, action := range snapshot.Actions {
+		actions = append(actions, encodeAction(action))
+	}
+
+	foreground := map[string]any{
+		fieldState:   string(snapshot.Foreground.State),
+		fieldCycleID: snapshot.Foreground.CycleID,
+	}
+	withOptional(foreground, fieldTurnID, snapshot.Foreground.TurnID)
+	withOptional(foreground, fieldOrigin, string(snapshot.Foreground.Origin))
+
+	return map[string]any{
+		fieldType:       string(EventSnapshot),
+		fieldForeground: foreground,
+		fieldActivities: activities,
+		fieldActions:    actions,
+		fieldQuiescence: encodeQuiescence(snapshot.Quiescence),
+	}
+}
+
+// encodeActivity renders one activity. Every member a later patch may omit is
+// omitted when it has no value, so a first sight and a patch render as the
+// different assertions they are.
+func encodeActivity(activity ActivityUpdate) map[string]any {
+	encoded := map[string]any{
+		fieldActivityID: activity.ActivityID,
+		fieldState:      string(activity.State),
+	}
+	withOptional(encoded, fieldKind, string(activity.Kind))
+	withOptional(encoded, fieldParentID, activity.ParentID)
+	withOptional(encoded, fieldToolCallID, activity.ToolCallID)
+	withOptional(encoded, fieldCause, string(activity.Cause))
+	withOptional(encoded, fieldOriginTurnID, activity.OriginTurnID)
+	withOptional(encoded, fieldRunID, activity.RunID)
+
+	if len(activity.Progress) > 0 {
+		encoded[fieldProgress] = activity.Progress
+	}
+
+	return encoded
+}
+
+// encodeAction renders one action. blocksForeground is stated only when the
+// update states it: rendering an absent claim as false would demote a blocking
+// request to a background one.
+func encodeAction(action ActionUpdate) map[string]any {
+	encoded := map[string]any{
+		fieldActionID: action.ActionID,
+		fieldState:    string(action.State),
+	}
+	withOptional(encoded, fieldKind, string(action.Kind))
+	withOptional(encoded, fieldRunID, action.RunID)
+
+	if action.Owner.ID != "" {
+		encoded[fieldOwner] = map[string]any{
+			fieldType: string(action.Owner.Type),
+			fieldID:   action.Owner.ID,
+		}
+	}
+
+	if action.BlocksForeground != nil {
+		encoded[fieldBlocksForeground] = *action.BlocksForeground
+	}
+
+	return encoded
 }
 
 func encodeTransition(transition StateTransition) map[string]any {
