@@ -68,9 +68,11 @@ func DecodeOffer(meta map[string]any) (Offer, bool, *ParamError) {
 	return Offer{Versions: versions}, true, nil
 }
 
-// Answer resolves the offer against the versions this adapter implements and the
-// facts the active configuration proved. An empty intersection returns no answer
-// at all: the key is omitted rather than answered with an empty array.
+// Answer intersects the offer with the versions this adapter implements and
+// carries the facts the active configuration proved. The intersection is
+// ascending by construction, because this adapter implements one version. An
+// empty intersection returns no answer at all: the key is omitted rather than
+// answered with an empty array.
 func (o Offer) Answer(proven Negotiated) (Negotiated, bool) {
 	common := make([]int, 0, len(o.Versions))
 
@@ -89,8 +91,10 @@ func (o Offer) Answer(proven Negotiated) (Negotiated, bool) {
 	return proven, true
 }
 
-// decodeVersions reads the ascending non-empty integer array every negotiation
-// object carries. It is validated on every offer whatever the version.
+// decodeVersions reads the non-empty integer array every negotiation object
+// carries. It is validated on every offer whatever the version. Only the answer
+// is ordered: a host is free to offer its versions in any order, and refusing an
+// unordered offer would break the forward compatibility the array exists for.
 func decodeVersions(raw any) ([]int, *ParamError) {
 	listed, ok := raw.([]any)
 	if !ok || len(listed) == 0 {
@@ -106,10 +110,6 @@ func decodeVersions(raw any) ([]int, *ParamError) {
 		}
 
 		versions = append(versions, version)
-	}
-
-	if !slices.IsSorted(versions) {
-		return nil, paramError(fieldVersions)
 	}
 
 	return versions, nil

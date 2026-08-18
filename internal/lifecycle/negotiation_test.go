@@ -42,7 +42,6 @@ func TestDecodeOfferStrictness(t *testing.T) {
 		{"non-array versions", offerMeta(1.0), MetaPath + ".versions"},
 		{"fractional version", offerMeta([]any{1.5}), MetaPath + ".versions"},
 		{"string version", offerMeta([]any{"1"}), MetaPath + ".versions"},
-		{"descending versions", offerMeta([]any{2.0, 1.0}), MetaPath + ".versions"},
 		{"unparsable number", offerMeta([]any{json.Number("one")}), MetaPath + ".versions"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -57,8 +56,8 @@ func TestDecodeOfferStrictness(t *testing.T) {
 	}
 }
 
-// TestOfferAnswerIntersects pins that the answer is the common set and that an
-// empty intersection answers nothing at all.
+// TestOfferAnswerIntersects pins that the answer is the common set, that only the
+// answer is ordered, and that an empty intersection answers nothing at all.
 func TestOfferAnswerIntersects(t *testing.T) {
 	t.Parallel()
 
@@ -67,6 +66,10 @@ func TestOfferAnswerIntersects(t *testing.T) {
 	answer, common := Offer{Versions: []int{1, 1, 2}}.Answer(proven)
 	require.True(t, common)
 	require.Equal(t, []int{1}, answer.Versions, "the intersection is duplicate-free")
+
+	answer, common = Offer{Versions: []int{2, 1}}.Answer(proven)
+	require.True(t, common)
+	require.Equal(t, []int{1}, answer.Versions, "an unordered offer is intersected, not refused")
 
 	_, common = Offer{Versions: []int{2, 3}}.Answer(proven)
 	require.False(t, common)

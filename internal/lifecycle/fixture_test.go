@@ -28,11 +28,16 @@ type manifest struct {
 }
 
 type fixture struct {
-	Name       string          `json:"name"`
-	Purpose    string          `json:"purpose"`
-	Negotiated Negotiated      `json:"negotiated"`
-	Input      []fixtureInput  `json:"input"`
-	Expect     fixtureExpected `json:"expect"`
+	Name       string         `json:"name"`
+	Purpose    string         `json:"purpose"`
+	Negotiated Negotiated     `json:"negotiated"`
+	Input      []fixtureInput `json:"input"`
+	// PostRefusal is delivered after the refusal. Fail closed latches, so every
+	// one of these must report the same token at the same identity: a consumer
+	// that stopped reducing and one that kept going past its own verdict are
+	// otherwise indistinguishable.
+	PostRefusal []fixtureInput  `json:"postRefusal"`
+	Expect      fixtureExpected `json:"expect"`
 }
 
 // fixtureInput is either a delivered notification or an out-of-band control event
@@ -120,6 +125,7 @@ func TestReducerFixtures(t *testing.T) {
 				require.Equal(t, ViolationKind(vector.Expect.Violation), refusal.Kind)
 				require.NotNil(t, vector.Expect.AtInput)
 				require.Equal(t, *vector.Expect.AtInput, refusedAt)
+				requireLatched(t, reducer, vector, refusal)
 			default:
 				t.Fatalf("unknown verdict %q", vector.Expect.Verdict)
 			}
@@ -157,6 +163,27 @@ func driveFixture(t *testing.T, reducer *Reducer, vector fixture) (*ViolationErr
 	}
 
 	return nil, -1
+}
+
+// requireLatched feeds every post-refusal input and proves the latch holds: each
+// one reports the same token at the same identity the refusal named, and the
+// projection is the one that stood when the stream failed closed. A consumer that
+// stopped reducing and one that kept going past its own verdict are otherwise
+// indistinguishable.
+func requireLatched(t *testing.T, reducer *Reducer, vector fixture, refusal *ViolationError) {
+	t.Helper()
+
+	for index, input := range vector.PostRefusal {
+		require.Equal(t, "session/update", input.Method, "post-refusal input %d", index)
+
+		var latched *ViolationError
+
+		err := reducer.ReduceSessionUpdate(input.Params)
+		require.True(t, errors.As(err, &latched), "post-refusal input %d: %v", index, err)
+		require.Equal(t, refusal, latched, "post-refusal input %d", index)
+	}
+
+	requireStateEquals(t, vector.Expect.State, reducer.State())
 }
 
 func loadManifest(t *testing.T) manifest {

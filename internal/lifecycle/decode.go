@@ -230,6 +230,10 @@ func (d *decoder) snapshot(fields map[string]json.RawMessage) Event {
 	return Event{Type: EventSnapshot, Snapshot: snapshot}
 }
 
+// foreground reads the snapshot's foreground object. Presence is a rule rather
+// than a preference: a turn is named exactly while one is open, and its origin
+// is named exactly with it, so a resumed turn always carries recorded
+// provenance.
 func (d *decoder) foreground(raw json.RawMessage) Foreground {
 	fields, ok := jsonObject(raw)
 	if !ok {
@@ -238,15 +242,24 @@ func (d *decoder) foreground(raw json.RawMessage) Foreground {
 		return Foreground{}
 	}
 
-	d.known(fields, fieldForeground, fieldState, fieldCycleID, fieldTurnID)
+	d.known(fields, fieldForeground, fieldState, fieldCycleID, fieldTurnID, fieldOrigin)
 
 	foreground := Foreground{
 		State:   ForegroundState(d.identifier(fields, fieldState, true)),
 		CycleID: d.identifier(fields, fieldCycleID, true),
 		TurnID:  d.identifier(fields, fieldTurnID, false),
+		Origin:  Cause(d.identifier(fields, fieldOrigin, false)),
 	}
-	if !foreground.State.Valid() {
+
+	switch {
+	case !foreground.State.Valid():
 		d.fail(ViolationMalformedEnvelope, "foreground state "+string(foreground.State))
+	case foreground.State == ForegroundIdle && foreground.TurnID != "":
+		d.fail(ViolationMalformedEnvelope, "an idle foreground reports no turn")
+	case (foreground.TurnID == "") != (foreground.Origin == ""):
+		d.fail(ViolationMalformedEnvelope, "foreground origin is present exactly while a turn is")
+	case foreground.Origin != "" && foreground.Origin != CauseSubmission && foreground.Origin != CauseActivity:
+		d.fail(ViolationMalformedEnvelope, "foreground origin "+string(foreground.Origin))
 	}
 
 	return foreground
@@ -289,9 +302,30 @@ func (d *decoder) stateUpdate(fields map[string]json.RawMessage) Event {
 		d.fail(ViolationMalformedEnvelope, "stop reason "+transition.StopReason)
 	case transition.Outcome != "" && !transition.Outcome.Valid():
 		d.fail(ViolationMalformedEnvelope, "outcome "+string(transition.Outcome))
+	default:
+		d.ending(*transition)
 	}
 
 	return Event{Type: EventStateUpdate, State: transition}
+}
+
+// ending validates the pair an idle transition that settles a turn records. An
+// idle naming a turn ends it, so the outcome is always required; the stop reason
+// is required with it except on a failure, where no ACP v1 stop reason names one
+// and the v1 error carries it instead.
+func (d *decoder) ending(transition StateTransition) {
+	if transition.State != ForegroundIdle || transition.TurnID == "" {
+		return
+	}
+
+	switch {
+	case transition.Outcome == "":
+		d.fail(ViolationMalformedEnvelope, "an idle transition that ends a turn records its outcome")
+	case transition.Outcome == OutcomeFailed && transition.StopReason != "":
+		d.fail(ViolationMalformedEnvelope, "a failed outcome states no stop reason")
+	case transition.Outcome != OutcomeFailed && transition.StopReason == "":
+		d.fail(ViolationMalformedEnvelope, "an idle transition that ends a turn records its stop reason")
+	}
 }
 
 func (d *decoder) activityUpdate(fields map[string]json.RawMessage) Event {
@@ -498,7 +532,9 @@ func (d *decoder) watermark(fields map[string]json.RawMessage) uint64 {
 }
 
 // identifier reads one opaque string member. An identifier is a correlation
-// handle, so it is bounded, and a required one is never empty.
+// handle, so it is bounded, and it is never empty: an optional one is omitted
+// rather than emptied, so a member present carrying the empty string is
+// malformed rather than absent.
 func (d *decoder) identifier(fields map[string]json.RawMessage, key string, required bool) string {
 	raw, present := fields[key]
 	if !present {
@@ -514,7 +550,7 @@ func (d *decoder) identifier(fields map[string]json.RawMessage, key string, requ
 	switch {
 	case !ok:
 		d.fail(ViolationMalformedEnvelope, key+" is not a string")
-	case value == "" && required:
+	case value == "":
 		d.fail(ViolationMalformedEnvelope, key+" is empty")
 	case len(value) > IdentifierBound:
 		d.fail(ViolationMalformedEnvelope, key+" exceeds its bound")
@@ -523,18 +559,24 @@ func (d *decoder) identifier(fields map[string]json.RawMessage, key string, requ
 	return value
 }
 
-func (d *decoder) boolean(fields map[string]json.RawMessage, key string) bool {
+// boolean reads one optional boolean member. It reports absence rather than
+// false: a member read as false by default makes an omitted one and a stated one
+// indistinguishable, which is exactly what an action's first sight may not do
+// with blocksForeground.
+func (d *decoder) boolean(fields map[string]json.RawMessage, key string) *bool {
 	raw, present := fields[key]
 	if !present {
-		return false
+		return nil
 	}
 
 	var value bool
 	if err := json.Unmarshal(raw, &value); err != nil {
 		d.fail(ViolationMalformedEnvelope, key+" is not a boolean")
+
+		return nil
 	}
 
-	return value
+	return &value
 }
 
 func (d *decoder) array(fields map[string]json.RawMessage, key string) []json.RawMessage {

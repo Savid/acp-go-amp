@@ -63,6 +63,10 @@ func actionEvent(update ActionUpdate) Event {
 	return Event{Type: EventActionUpdate, Action: &update}
 }
 
+// stated marks a blocking claim an action's first sight actually made, which is
+// the difference an omitted member may not be read as.
+func stated(blocks bool) *bool { return &blocks }
+
 // TestReducerRefusesAnEventWithNoPayload pins that a discriminant without its
 // payload is malformed rather than reduced as an empty event. Only an emitter can
 // produce one: the decoder never yields a discriminant it could not read.
@@ -103,14 +107,15 @@ func TestSnapshotIntroducesEveryIdentityItNames(t *testing.T) {
 	t.Parallel()
 
 	reducer, refusal := reduceAll(t, richConfiguration(), Event{Type: EventSnapshot, Snapshot: &Snapshot{
-		Foreground: Foreground{State: ForegroundRunning, CycleID: "cyc-1", TurnID: "turn-1"},
+		Foreground: Foreground{State: ForegroundRunning, CycleID: "cyc-1", TurnID: "turn-1", Origin: CauseSubmission},
 		Activities: []ActivityUpdate{
 			{ActivityID: "act-1", Kind: ActivityTask, State: ActivityRunning, Cause: CauseSubmission, OriginTurnID: "turn-1"},
 			{ActivityID: "act-2", Kind: ActivitySubagent, State: ActivityRunning, Cause: CauseActivity, OriginTurnID: "turn-1", ParentID: "act-1"},
 		},
-		Actions: []ActionUpdate{
-			{ActionID: "req-1", Kind: ActionPermission, State: ActionPending, Owner: Owner{Type: OwnerTurn, ID: "turn-1"}},
-		},
+		Actions: []ActionUpdate{{
+			ActionID: "req-1", Kind: ActionPermission, State: ActionPending,
+			Owner: Owner{Type: OwnerTurn, ID: "turn-1"}, BlocksForeground: stated(false),
+		}},
 		Quiescence: QuiescenceFact{},
 	}})
 	require.Nil(t, refusal)
@@ -127,13 +132,16 @@ func TestSnapshotIntroducesEveryIdentityItNames(t *testing.T) {
 	require.True(t, found)
 	require.Equal(t, Owner{Type: OwnerTurn, ID: "turn-1"}, action.Owner)
 
-	_, found = state.Turn("turn-1")
-	require.False(t, found, "a snapshot's foreground turn is introduced without a turn record")
+	turn, found := state.Turn("turn-1")
+	require.True(t, found, "a snapshot resuming mid-turn projects that turn as open")
+	require.Equal(t, CauseSubmission, turn.Origin)
 	require.False(t, state.Vacant(), "live work is not vacancy")
 }
 
 // TestSnapshotRefusesAnIncompleteEntity pins that the sets a snapshot carries are
-// held to the same identity rules a later first sight is.
+// held to the same first-sight rules a later one is, and to the asymmetry
+// between them: an activity missing an immutable identity field reports that,
+// while an action missing a member of its first sight is malformed.
 func TestSnapshotRefusesAnIncompleteEntity(t *testing.T) {
 	t.Parallel()
 
@@ -143,19 +151,10 @@ func TestSnapshotRefusesAnIncompleteEntity(t *testing.T) {
 			Activities: []ActivityUpdate{{ActivityID: "act-1", State: ActivityRunning}},
 		}})
 
-	requireReduceRefusal(t, richConfiguration(), ViolationImmutableIdentityChange,
+	requireReduceRefusal(t, richConfiguration(), ViolationMalformedEnvelope,
 		Event{Type: EventSnapshot, Snapshot: &Snapshot{
 			Foreground: Foreground{State: ForegroundIdle, CycleID: "cyc-0"},
 			Actions:    []ActionUpdate{{ActionID: "req-1", State: ActionPending}},
-		}})
-
-	requireReduceRefusal(t, richConfiguration(), ViolationChildAfterParentTerminal,
-		Event{Type: EventSnapshot, Snapshot: &Snapshot{
-			Foreground: Foreground{State: ForegroundIdle, CycleID: "cyc-0"},
-			Activities: []ActivityUpdate{
-				{ActivityID: "act-1", Kind: ActivityTask, State: ActivityCompleted, Cause: CauseSession, OriginTurnID: "turn-1"},
-				{ActivityID: "act-2", Kind: ActivityTask, State: ActivityRunning, Cause: CauseSession, OriginTurnID: "turn-1", ParentID: "act-1"},
-			},
 		}})
 }
 
@@ -242,7 +241,7 @@ func TestBlockingActionOwesItsForegroundTransition(t *testing.T) {
 	}}
 	blocking := actionEvent(ActionUpdate{
 		ActionID: "req-1", Kind: ActionPermission, State: ActionPending,
-		Owner: Owner{Type: OwnerTurn, ID: "turn-1"}, BlocksForeground: true,
+		Owner: Owner{Type: OwnerTurn, ID: "turn-1"}, BlocksForeground: stated(true),
 	})
 
 	requireReduceRefusal(t, richConfiguration(), ViolationInconsistentForeground,
@@ -312,7 +311,7 @@ func TestParentTerminalizesAfterEveryOwnedAction(t *testing.T) {
 		}},
 		Actions: []ActionUpdate{{
 			ActionID: "req-1", Kind: ActionElicitation, State: ActionPending,
-			Owner: Owner{Type: OwnerActivity, ID: "act-1"},
+			Owner: Owner{Type: OwnerActivity, ID: "act-1"}, BlocksForeground: stated(false),
 		}},
 	}}
 
@@ -331,22 +330,23 @@ func TestActionRules(t *testing.T) {
 	opening := []Event{openSnapshot(), accepted, RunningEvent("cyc-1", "turn-1")}
 	pending := actionEvent(ActionUpdate{
 		ActionID: "req-1", Kind: ActionPermission, State: ActionPending,
-		Owner: Owner{Type: OwnerTurn, ID: "turn-1"}, RunID: "run-1",
+		Owner: Owner{Type: OwnerTurn, ID: "turn-1"}, RunID: "run-1", BlocksForeground: stated(false),
 	})
 
-	requireReduceRefusal(t, richConfiguration(), ViolationImmutableIdentityChange,
+	requireReduceRefusal(t, richConfiguration(), ViolationMalformedEnvelope,
 		append(append([]Event{}, opening...), actionEvent(ActionUpdate{ActionID: "req-1", State: ActionPending}))...)
 
 	requireReduceRefusal(t, richConfiguration(), ViolationUnknownEntity,
 		append(append([]Event{}, opening...), actionEvent(ActionUpdate{
 			ActionID: "req-1", Kind: ActionPermission, State: ActionPending,
-			Owner: Owner{Type: OwnerActivity, ID: "act-ghost"},
+			Owner: Owner{Type: OwnerActivity, ID: "act-ghost"}, BlocksForeground: stated(false),
 		}))...)
 
 	for _, patch := range []ActionUpdate{
 		{ActionID: "req-1", State: ActionAccepted, Kind: ActionElicitation},
 		{ActionID: "req-1", State: ActionAccepted, Owner: Owner{Type: OwnerTurn, ID: "turn-9"}},
 		{ActionID: "req-1", State: ActionAccepted, RunID: "run-9"},
+		{ActionID: "req-1", State: ActionAccepted, BlocksForeground: stated(true)},
 	} {
 		requireReduceRefusal(t, richConfiguration(), ViolationImmutableIdentityChange,
 			append(append([]Event{}, opening...), pending, actionEvent(patch))...)
@@ -359,18 +359,22 @@ func TestActionRules(t *testing.T) {
 }
 
 // TestTerminalActionOnFirstSightNeverBlocks pins that an action already resolved
-// when the stream first sees it holds nothing.
+// when a delta first sees it holds nothing: it is recorded, and the cycle it
+// would otherwise have blocked owes no transition.
 func TestTerminalActionOnFirstSightNeverBlocks(t *testing.T) {
 	t.Parallel()
 
+	accepted := Event{Type: EventPromptAccepted, PromptAccepted: &PromptAccepted{
+		SubmissionID: "sub-1", ClientNonce: "non-1", TurnID: "turn-1",
+	}}
+	resolved := actionEvent(ActionUpdate{
+		ActionID: "req-1", Kind: ActionPermission, State: ActionCancelled,
+		Owner: Owner{Type: OwnerTurn, ID: "turn-1"}, BlocksForeground: stated(true),
+	})
+
 	reducer, refusal := reduceAll(t, richConfiguration(),
-		Event{Type: EventSnapshot, Snapshot: &Snapshot{
-			Foreground: Foreground{State: ForegroundIdle, CycleID: "cyc-0", TurnID: "turn-1"},
-			Actions: []ActionUpdate{{
-				ActionID: "req-1", Kind: ActionPermission, State: ActionCancelled,
-				Owner: Owner{Type: OwnerTurn, ID: "turn-1"}, BlocksForeground: true,
-			}},
-		}})
+		openSnapshot(), accepted, RunningEvent("cyc-1", "turn-1"), resolved,
+		IdleEvent("cyc-1", "turn-1", StopReasonEndTurn, OutcomeSuccess))
 	require.Nil(t, refusal)
 	require.True(t, reducer.State().Vacant())
 }
@@ -469,29 +473,30 @@ func TestReducerRefusesAnUnopenedStreamsSnapshot(t *testing.T) {
 	require.Equal(t, ViolationMalformedEnvelope, reducer.Failed().Kind)
 }
 
-// TestRetransmissionWindowBoundsWhatStaysRecognizable pins that a duplicate
-// identity older than the window cannot be proven identical, so it fails closed
-// like any other conflicting duplicate.
-func TestRetransmissionWindowBoundsWhatStaysRecognizable(t *testing.T) {
+// TestWholesaleIdempotenceHasNoWindow pins that an exact retransmission is
+// suppressed however far back its identity was reduced. A bounded window would
+// turn the oldest identity in a long stream into a conflicting duplicate, which
+// is the one thing wholesale idempotence promises never happens.
+func TestWholesaleIdempotenceHasNoWindow(t *testing.T) {
 	t.Parallel()
 
-	reducer := NewReducer(Options{Negotiated: richConfiguration(), RetransmissionWindow: 1})
+	reducer := NewReducer(Options{Negotiated: richConfiguration()})
 
 	opening := deliver(1, openSnapshot())
 	opening.Frame = map[string]any{"seq": 1}
 	require.NoError(t, reducer.Reduce(opening))
 
-	second := deliver(2, Event{Type: EventStateUpdate, State: &StateTransition{
-		State: ForegroundIdle, CycleID: "cyc-0", Cause: CauseSession,
-	}})
-	second.Frame = map[string]any{"seq": 2}
-	require.NoError(t, reducer.Reduce(second))
+	for sequence := uint64(2); sequence <= 4096; sequence++ {
+		filler := deliver(sequence, Event{Type: EventStateUpdate, State: &StateTransition{
+			State: ForegroundIdle, CycleID: "cyc-0", Cause: CauseSession,
+		}})
+		filler.Frame = map[string]any{"seq": sequence}
+		require.NoError(t, reducer.Reduce(filler))
+	}
 
-	require.NoError(t, reducer.Reduce(second))
+	require.NoError(t, reducer.Reduce(opening))
 	require.Equal(t, 1, reducer.State().SuppressedRetransmissions)
-
-	require.Error(t, reducer.Reduce(opening))
-	require.Equal(t, ViolationConflictingDuplicate, reducer.Failed().Kind)
+	require.Nil(t, reducer.Failed())
 }
 
 // TestStateLookupsMissEntitiesTheStreamNeverHeld pins the projection's own
@@ -513,26 +518,65 @@ func TestStateLookupsMissEntitiesTheStreamNeverHeld(t *testing.T) {
 	require.True(t, state.Vacant(), "a stream with nothing in it holds nothing live")
 }
 
-// TestVacancyIsNotForegroundState pins that a live foreground cycle is not a
-// vacant one, and that a nonterminal action holds the session open.
+// TestVacancyIsNotForegroundState pins that vacancy is not foreground state: a
+// live cycle, an unfinished activity, and an unanswered request each hold the
+// session open on their own.
 func TestVacancyIsNotForegroundState(t *testing.T) {
 	t.Parallel()
 
 	running, refusal := reduceAll(t, richConfiguration(), Event{Type: EventSnapshot, Snapshot: &Snapshot{
-		Foreground: Foreground{State: ForegroundRunning, CycleID: "cyc-1", TurnID: "turn-1"},
+		Foreground: Foreground{State: ForegroundRunning, CycleID: "cyc-1", TurnID: "turn-1", Origin: CauseSubmission},
 	}})
 	require.Nil(t, refusal)
 	require.False(t, running.State().Vacant())
 
-	held, refusal := reduceAll(t, richConfiguration(), Event{Type: EventSnapshot, Snapshot: &Snapshot{
-		Foreground: Foreground{State: ForegroundIdle, CycleID: "cyc-0", TurnID: "turn-1"},
-		Actions: []ActionUpdate{{
-			ActionID: "req-1", Kind: ActionPermission, State: ActionPending,
-			Owner: Owner{Type: OwnerTurn, ID: "turn-1"},
-		}},
-	}})
+	accepted := Event{Type: EventPromptAccepted, PromptAccepted: &PromptAccepted{
+		SubmissionID: "sub-1", ClientNonce: "non-1", TurnID: "turn-1",
+	}}
+	live := activityEvent(ActivityUpdate{
+		ActivityID: "act-1", Kind: ActivityTask, State: ActivityRunning,
+		Cause: CauseSubmission, OriginTurnID: "turn-1",
+	})
+	working, refusal := reduceAll(t, richConfiguration(), openSnapshot(), accepted,
+		RunningEvent("cyc-1", "turn-1"), live,
+		IdleEvent("cyc-1", "turn-1", StopReasonEndTurn, OutcomeSuccess))
 	require.Nil(t, refusal)
-	require.False(t, held.State().Vacant())
+	require.False(t, working.State().Vacant(), "an unfinished activity holds the session open")
+
+	background := actionEvent(ActionUpdate{
+		ActionID: "req-1", Kind: ActionPermission, State: ActionPending,
+		Owner: Owner{Type: OwnerTurn, ID: "turn-1"}, BlocksForeground: stated(false),
+	})
+	held, refusal := reduceAll(t, richConfiguration(), openSnapshot(), accepted,
+		RunningEvent("cyc-1", "turn-1"), background,
+		IdleEvent("cyc-1", "turn-1", StopReasonEndTurn, OutcomeSuccess))
+	require.Nil(t, refusal)
+	require.False(t, held.State().Vacant(), "an unanswered request holds the session open")
+}
+
+// TestSnapshotRefusesAnUnresolvableSet pins the two ways a snapshot's own action
+// set fails: an entry already terminal asserts a state that is over, and an owner
+// the snapshot does not introduce could never be attributed.
+func TestSnapshotRefusesAnUnresolvableSet(t *testing.T) {
+	t.Parallel()
+
+	requireReduceRefusal(t, richConfiguration(), ViolationMalformedEnvelope,
+		Event{Type: EventSnapshot, Snapshot: &Snapshot{
+			Foreground: Foreground{State: ForegroundRunning, CycleID: "cyc-1", TurnID: "turn-1", Origin: CauseSubmission},
+			Actions: []ActionUpdate{{
+				ActionID: "req-1", Kind: ActionPermission, State: ActionAccepted,
+				Owner: Owner{Type: OwnerTurn, ID: "turn-1"}, BlocksForeground: stated(false),
+			}},
+		}})
+
+	requireReduceRefusal(t, richConfiguration(), ViolationUnknownEntity,
+		Event{Type: EventSnapshot, Snapshot: &Snapshot{
+			Foreground: Foreground{State: ForegroundRunning, CycleID: "cyc-1", TurnID: "turn-1", Origin: CauseSubmission},
+			Actions: []ActionUpdate{{
+				ActionID: "req-1", Kind: ActionPermission, State: ActionPending,
+				Owner: Owner{Type: OwnerActivity, ID: "act-ghost"}, BlocksForeground: stated(false),
+			}},
+		}})
 }
 
 // TestViolationErrorNamesTheFrameItRefused pins the refusal's own reporting and
@@ -649,7 +693,7 @@ func fencedStream(t *testing.T) *Reducer {
 		IdleEvent("cyc-1", "turn-1", StopReasonEndTurn, OutcomeSuccess),
 		QuiescenceEvent(QuiescenceFact{Quiescent: true, Source: ProofClassProcessContainment, Watermark: 6}),
 		Event{Type: EventStateUpdate, State: &StateTransition{
-			State: ForegroundRunning, CycleID: "cyc-2", TurnID: "turn-2", Cause: CauseSession,
+			State: ForegroundRunning, CycleID: "cyc-2", TurnID: "turn-2", Cause: CauseActivity,
 		}},
 	)
 	require.Nil(t, refusal)
@@ -683,7 +727,7 @@ func TestUnrelatedWorkMayBeginAfterASettledBoundary(t *testing.T) {
 	reducer := fencedStream(t)
 	require.NoError(t, reducer.Reduce(deliver(9, activityEvent(ActivityUpdate{
 		ActivityID: "act-3", Kind: ActivityTask, State: ActivityRunning,
-		Cause: CauseSession, OriginTurnID: "turn-2",
+		Cause: CauseActivity, OriginTurnID: "turn-2",
 	}))))
 
 	state := reducer.State()
@@ -691,23 +735,22 @@ func TestUnrelatedWorkMayBeginAfterASettledBoundary(t *testing.T) {
 	require.False(t, state.Vacant())
 }
 
-// TestQuiescenceCertifiesNothingWhileWorkIsLive pins that a fact this stream
-// contradicts proves no boundary: it neither certifies nor fails closed.
-func TestQuiescenceCertifiesNothingWhileWorkIsLive(t *testing.T) {
+// TestQuiescenceIsDisprovedByLiveWork pins that a positive fact the stream
+// contradicts fails closed rather than quietly certifying nothing: a swallowed
+// lie is indistinguishable from a loss.
+func TestQuiescenceIsDisprovedByLiveWork(t *testing.T) {
 	t.Parallel()
 
-	reducer, refusal := reduceAll(t, richConfiguration(),
-		Event{Type: EventSnapshot, Snapshot: &Snapshot{
-			Foreground: Foreground{State: ForegroundIdle, CycleID: "cyc-0"},
-			Activities: []ActivityUpdate{{
-				ActivityID: "act-1", Kind: ActivityTask, State: ActivityRunning,
-				Cause: CauseSession, OriginTurnID: "turn-1",
-			}},
+	opening := Event{Type: EventSnapshot, Snapshot: &Snapshot{
+		Foreground: Foreground{State: ForegroundRunning, CycleID: "cyc-1", TurnID: "turn-1", Origin: CauseSubmission},
+		Activities: []ActivityUpdate{{
+			ActivityID: "act-1", Kind: ActivityTask, State: ActivityRunning,
+			Cause: CauseSubmission, OriginTurnID: "turn-1",
 		}},
-		QuiescenceEvent(QuiescenceFact{Quiescent: true, Source: ProofClassProcessContainment, Watermark: 1}),
-	)
-	require.Nil(t, refusal)
-	require.False(t, reducer.State().Quiescence.Certified)
+	}}
+
+	requireReduceRefusal(t, richConfiguration(), ViolationFalseQuiescence, opening,
+		QuiescenceEvent(QuiescenceFact{Quiescent: true, Source: ProofClassProcessContainment, Watermark: 1}))
 }
 
 // TestActionRestatementKeepsItPending pins that a patch restating a pending
@@ -717,13 +760,13 @@ func TestActionRestatementKeepsItPending(t *testing.T) {
 
 	pending := actionEvent(ActionUpdate{
 		ActionID: "req-1", Kind: ActionElicitation, State: ActionPending,
-		Owner: Owner{Type: OwnerTurn, ID: "turn-1"},
+		Owner: Owner{Type: OwnerTurn, ID: "turn-1"}, BlocksForeground: stated(false),
 	})
 
 	reducer, refusal := reduceAll(t, richConfiguration(),
 		Event{Type: EventSnapshot, Snapshot: &Snapshot{
-			Foreground: Foreground{State: ForegroundIdle, CycleID: "cyc-0", TurnID: "turn-1"},
-			Quiescence: QuiescenceFact{Quiescent: true, Source: ProofClassProcessContainment},
+			Foreground: Foreground{State: ForegroundRunning, CycleID: "cyc-1", TurnID: "turn-1", Origin: CauseSubmission},
+			Quiescence: QuiescenceFact{},
 		}},
 		pending,
 		actionEvent(ActionUpdate{ActionID: "req-1", State: ActionPending}),

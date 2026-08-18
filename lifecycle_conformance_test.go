@@ -348,7 +348,6 @@ func TestLifecycleOfferStrictness(t *testing.T) {
 		{"empty versions", lifecycleOffer(), `_meta["acp-go.dev/lifecycle"].versions`},
 		{"non-integer version", lifecycleOffer(1.5), `_meta["acp-go.dev/lifecycle"].versions`},
 		{"non-numeric version", lifecycleOffer("1"), `_meta["acp-go.dev/lifecycle"].versions`},
-		{"descending versions", lifecycleOffer(2.0, 1.0), `_meta["acp-go.dev/lifecycle"].versions`},
 		{"non-array versions", map[string]any{lifecycle.MetaKey: map[string]any{"versions": 1.0}}, `_meta["acp-go.dev/lifecycle"].versions`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

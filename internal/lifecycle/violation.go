@@ -3,7 +3,7 @@ package lifecycle
 import "strconv"
 
 // ViolationKind names one fail-closed verdict. The vocabulary is closed at the
-// nineteen tokens below: every rule this package enforces reports one of them,
+// twenty tokens below: every rule this package enforces reports one of them,
 // and a condition none of them names is not refusable.
 type ViolationKind string
 
@@ -63,6 +63,11 @@ const (
 	// ViolationLateCausalWork refuses a first-sight activity whose origin turn or
 	// parent activity was first seen at or before a certified watermark.
 	ViolationLateCausalWork ViolationKind = "late_causal_work"
+	// ViolationFalseQuiescence refuses a positive quiescence fact the stream
+	// carrying it disproves. A proof the stream disproves is a lie about the
+	// boundary rather than a weaker claim, so it fails closed instead of quietly
+	// certifying nothing: a swallowed lie is indistinguishable from a loss.
+	ViolationFalseQuiescence ViolationKind = "false_quiescence"
 	// ViolationUnknownEntity refuses an event naming an entity the stream never
 	// introduced. Unknown references would make parentage, ownership, and
 	// terminal-ordering rules unenforceable.
@@ -91,6 +96,7 @@ var violationVocabulary = []ViolationKind{
 	ViolationParentTerminalBeforeChild,
 	ViolationChildAfterParentTerminal,
 	ViolationLateCausalWork,
+	ViolationFalseQuiescence,
 	ViolationUnknownEntity,
 }
 

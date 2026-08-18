@@ -6,18 +6,11 @@ import (
 	"reflect"
 )
 
-// DefaultRetransmissionWindow bounds how far back an exact retransmission stays
-// recognizable. A duplicate identity older than the window cannot be proven
-// identical, so it fails closed like any other conflicting duplicate.
-const DefaultRetransmissionWindow = 1024
-
 // Options configures a reducer.
 type Options struct {
 	// Negotiated are the lifecycle facts the source's configuration proved. The
 	// reducer refuses anything the configuration did not advertise.
 	Negotiated Negotiated
-	// RetransmissionWindow overrides DefaultRetransmissionWindow.
-	RetransmissionWindow int
 }
 
 // Reducer reduces one session's lifecycle stream. It validates ordering identity
@@ -36,15 +29,14 @@ type Options struct {
 // reduction.
 type Reducer struct {
 	negotiated Negotiated
-	window     int
 	state      State
 	base       uint64
 	started    bool
 	failed     *ViolationError
-	frames     map[uint64]any
-	// retained is the order frames were recorded in, so the oldest leaves the
-	// window first.
-	retained []uint64
+	// frames holds every decoded notification this incarnation reduced. Wholesale
+	// idempotence has no window: an exact retransmission is suppressed however far
+	// back its identity was reduced, and the retention ends with the incarnation.
+	frames map[uint64]any
 	// lastTransition is the highest sequence carrying a transition a quiescence
 	// proof must cover before it can certify a boundary.
 	lastTransition uint64
@@ -58,16 +50,15 @@ type Reducer struct {
 	// blockedCycle is the cycle owing the accompanying foreground transition a
 	// blocking action requires.
 	blockedCycle string
+	// actionCycle records, per blocking action, the foreground cycle it stopped:
+	// a blocker blocks the cycle current at its first sight, and that cycle may
+	// not move again until the blocker terminalizes.
+	actionCycle map[string]string
 }
 
 // NewReducer builds a reducer for one session.
 func NewReducer(opts Options) *Reducer {
-	window := opts.RetransmissionWindow
-	if window <= 0 {
-		window = DefaultRetransmissionWindow
-	}
-
-	reducer := &Reducer{negotiated: opts.Negotiated, window: window}
+	reducer := &Reducer{negotiated: opts.Negotiated}
 	reducer.reset("")
 
 	return reducer
@@ -100,6 +91,7 @@ func (r *Reducer) ReduceSessionUpdate(params json.RawMessage) error {
 		var refusal *ViolationError
 		if errors.As(err, &refusal) {
 			r.failed = refusal
+			r.nameStream(refusal.StreamID)
 		}
 
 		return err
@@ -108,27 +100,40 @@ func (r *Reducer) ReduceSessionUpdate(params json.RawMessage) error {
 	return r.Reduce(delivery)
 }
 
-// Reduce validates and reduces one delivery. An exact retransmission of an
-// already-reduced identity is suppressed wholesale and returns nil without
-// changing the projection.
+// nameStream adopts the identity a refused frame named. A stream is identified by
+// the envelope naming it, whether or not that envelope reduces, so a refusal
+// before the stream ever opened still reports which stream failed closed. An
+// already-open stream keeps its own identity: nothing a foreign frame claims
+// renames it.
+func (r *Reducer) nameStream(streamID string) {
+	if !r.started {
+		r.state.StreamID = streamID
+	}
+}
+
+// Reduce validates and reduces one delivery. Carrier legality is structural, so
+// it is judged before ordering: an envelope on a carrier a conformant client may
+// coalesce is no evidence the sequence it claims was ever delivered. An exact
+// retransmission of an already-reduced identity is suppressed wholesale and
+// returns nil without changing the projection.
 func (r *Reducer) Reduce(delivery Delivery) error {
 	switch {
 	case r.failed != nil:
 		return r.failed
+	case delivery.Carrier != CarrierSessionInfo:
+		return r.fail(delivery, ViolationIllegalCarrier, "carrier "+string(delivery.Carrier))
+	case r.state.Closed:
+		return r.fail(delivery, ViolationStaleStream, "the session's close containment completed")
 	case !r.started:
 		return r.reduceFirst(delivery)
 	case delivery.StreamID != r.state.StreamID:
 		return r.reduceForeign(delivery)
-	case r.state.Closed:
-		return r.fail(delivery, ViolationStaleStream, "the stream is fenced")
 	case delivery.Sequence < r.base:
 		return r.fail(delivery, ViolationSequenceRegression, "below the stream's snapshot boundary")
 	case delivery.Sequence <= r.state.ReducedThrough:
 		return r.reduceDuplicate(delivery)
 	case delivery.Sequence > r.state.ReducedThrough+1:
 		return r.fail(delivery, ViolationSequenceGap, "expected the next contiguous sequence")
-	case delivery.Carrier != CarrierSessionInfo:
-		return r.fail(delivery, ViolationIllegalCarrier, "carrier "+string(delivery.Carrier))
 	case delivery.Event.Type == EventSnapshot:
 		return r.fail(delivery, ViolationStreamCycle, "a snapshot opens a stream and never appears inside one")
 	}
@@ -144,7 +149,8 @@ func (r *Reducer) Reduce(delivery Delivery) error {
 
 // reduceForeign admits the next incarnation. Only its opening snapshot may arrive
 // on a stream identity this reducer has not seen; a projection is per incarnation
-// and adopts nothing from the one it supersedes.
+// and adopts nothing from the one it supersedes. A closed session admits no
+// incarnation at all, which is why the fence is judged before this.
 func (r *Reducer) reduceForeign(delivery Delivery) error {
 	if delivery.Event.Type != EventSnapshot {
 		return r.fail(delivery, ViolationStaleStream, "stream is "+r.state.StreamID)
@@ -160,19 +166,16 @@ func (r *Reducer) reset(streamID string) {
 	r.base = 0
 	r.started = false
 	r.frames = make(map[uint64]any)
-	r.retained = nil
 	r.lastTransition = 0
 	r.fence = 0
 	r.turnSeen = make(map[string]uint64)
 	r.activitySeen = make(map[string]uint64)
 	r.blockedCycle = ""
+	r.actionCycle = make(map[string]string)
 }
 
 func (r *Reducer) reduceFirst(delivery Delivery) error {
 	r.state.StreamID = delivery.StreamID
-	if delivery.Carrier != CarrierSessionInfo {
-		return r.fail(delivery, ViolationIllegalCarrier, "carrier "+string(delivery.Carrier))
-	}
 
 	if delivery.Event.Type != EventSnapshot {
 		return r.fail(delivery, ViolationDeltaBeforeSnapshot, "first event was "+string(delivery.Event.Type))
@@ -205,12 +208,6 @@ func (r *Reducer) reduceDuplicate(delivery Delivery) error {
 func (r *Reducer) commit(delivery Delivery) {
 	r.state.ReducedThrough = delivery.Sequence
 	r.frames[delivery.Sequence] = delivery.Frame
-	r.retained = append(r.retained, delivery.Sequence)
-
-	if len(r.retained) > r.window {
-		delete(r.frames, r.retained[0])
-		r.retained = r.retained[1:]
-	}
 }
 
 func (r *Reducer) fail(delivery Delivery, kind ViolationKind, detail string) error {

@@ -1,82 +1,187 @@
 package lifecycle
 
-// applySnapshot opens the stream from a whole-state assertion. A snapshot
-// introduces every identity it names — its foreground turn, its nonterminal
-// activities and actions, and the turns those name as origin or owner — because
-// the state it describes predates the stream: a terminal origin turn or a
-// terminal parent is legitimately absent from the sets it carries.
+// applySnapshot opens the stream from a whole-state assertion. A snapshot is
+// taken whole or not at all: the entire assertion is judged before any of it is
+// projected, so a refused snapshot opens nothing and leaves no half-built
+// projection behind.
 func (r *Reducer) applySnapshot(delivery Delivery) error {
 	snapshot := delivery.Event.Snapshot
 	if snapshot == nil {
 		return r.fail(delivery, ViolationMalformedEnvelope, "the snapshot payload is missing")
 	}
 
+	if err := r.checkSnapshot(delivery, *snapshot); err != nil {
+		return err
+	}
+
+	r.projectSnapshot(delivery, *snapshot)
+
+	return nil
+}
+
+// checkSnapshot judges the assertion. A snapshot introduces exactly what it
+// names — the turn its foreground reports, the turns its activities name as
+// origin, and its own activities — and every reference it makes resolves inside
+// that set: an action owner is a reference rather than an introduction.
+func (r *Reducer) checkSnapshot(delivery Delivery, snapshot Snapshot) error {
 	if !snapshot.Foreground.State.Valid() || snapshot.Foreground.CycleID == "" {
 		return r.fail(delivery, ViolationMalformedEnvelope, "the snapshot's foreground is incomplete")
 	}
 
-	foreground := snapshot.Foreground
-	r.state.Foreground = &foreground
+	introduced := snapshot.introduces()
 
-	if foreground.TurnID != "" {
-		r.seeTurn(foreground.TurnID, delivery.Sequence)
-	}
-
-	if err := r.adoptSnapshotActivities(delivery, snapshot.Activities); err != nil {
+	if err := r.checkSnapshotActivities(delivery, snapshot, introduced); err != nil {
 		return err
 	}
 
-	for _, action := range snapshot.Actions {
-		if err := r.checkActionIdentity(delivery, action); err != nil {
-			return err
-		}
-
-		r.recordAction(delivery, action)
-
-		if action.Owner.Type == OwnerTurn {
-			r.seeTurn(action.Owner.ID, delivery.Sequence)
-		}
+	if err := r.checkSnapshotActions(delivery, snapshot, introduced); err != nil {
+		return err
 	}
 
-	return r.certifyQuiescence(delivery, snapshot.Quiescence)
+	if snapshot.Foreground.State == ForegroundRequiresAction && !snapshot.carriesBlocker() {
+		return r.fail(delivery, ViolationInconsistentForeground,
+			"cycle "+snapshot.Foreground.CycleID+" lists no blocking action")
+	}
+
+	return r.checkQuiescence(delivery, snapshot.Quiescence, snapshot.vacant())
 }
 
-// adoptSnapshotActivities records the asserted set before checking parentage, so
-// a parent stated later in the same set is already introduced when its child is
-// resolved against it.
-func (r *Reducer) adoptSnapshotActivities(delivery Delivery, activities []ActivityUpdate) error {
-	first := len(r.state.Activities)
-
-	for index := range activities {
-		if err := r.checkActivityIdentity(delivery, activities[index]); err != nil {
+// checkSnapshotActivities validates the asserted activity set. The set is the
+// complete nonterminal one, so an entry that is already terminal asserts as
+// current a state that is over.
+func (r *Reducer) checkSnapshotActivities(delivery Delivery, snapshot Snapshot, introduced introductions) error {
+	for _, activity := range snapshot.Activities {
+		if err := r.checkActivityIdentity(delivery, activity); err != nil {
 			return err
 		}
 
-		r.recordActivity(delivery, activities[index])
-		r.seeTurn(activities[index].OriginTurnID, delivery.Sequence)
-	}
+		if activity.State.Terminal() {
+			return r.fail(delivery, ViolationMalformedEnvelope, "activity "+activity.ActivityID+" is terminal")
+		}
 
-	for offset := range activities {
-		recorded := r.state.Activities[first+offset]
-		if err := r.checkActivityParent(delivery, recorded.ActivityID, recorded.ParentID); err != nil {
-			return err
+		if activity.ParentID != "" && !introduced.activities[activity.ParentID] {
+			return r.fail(delivery, ViolationUnknownEntity, "parent activity "+activity.ParentID+" is not introduced")
 		}
 	}
 
 	return nil
 }
 
-// applyPromptAccepted opens a prompt-origin turn. Acceptance is the dispatch
-// linearization point, so it also invalidates whatever boundary was certified
-// before the frame the native dispatcher just took ownership of.
+func (r *Reducer) checkSnapshotActions(delivery Delivery, snapshot Snapshot, introduced introductions) error {
+	for _, action := range snapshot.Actions {
+		if err := r.checkActionIdentity(delivery, action); err != nil {
+			return err
+		}
+
+		if action.State.Terminal() {
+			return r.fail(delivery, ViolationMalformedEnvelope, "action "+action.ActionID+" is terminal")
+		}
+
+		if !introduced.holds(action.Owner) {
+			return r.fail(delivery, ViolationUnknownEntity,
+				"owner "+string(action.Owner.Type)+" "+action.Owner.ID+" is not introduced")
+		}
+	}
+
+	return nil
+}
+
+// projectSnapshot installs the validated assertion. A snapshot resuming mid-turn
+// projects that turn as open with the origin it reported, because a resumed
+// stream whose foreground names a turn nothing later opened would leave every
+// reference to it unresolvable.
+func (r *Reducer) projectSnapshot(delivery Delivery, snapshot Snapshot) {
+	foreground := snapshot.Foreground
+	r.state.Foreground = &foreground
+
+	if foreground.TurnID != "" {
+		r.state.Turns = append(r.state.Turns, TurnRecord{
+			TurnID:  foreground.TurnID,
+			Origin:  foreground.Origin,
+			CycleID: foreground.CycleID,
+		})
+		r.seeTurn(foreground.TurnID, delivery.Sequence)
+	}
+
+	for _, activity := range snapshot.Activities {
+		r.seeTurn(activity.OriginTurnID, delivery.Sequence)
+		r.recordActivity(delivery, activity)
+	}
+
+	for _, action := range snapshot.Actions {
+		r.recordAction(delivery, action)
+	}
+
+	r.recordQuiescence(delivery, snapshot.Quiescence)
+}
+
+// introductions is the identity set a snapshot brings into existence.
+type introductions struct {
+	turns      map[string]bool
+	activities map[string]bool
+}
+
+func (s Snapshot) introduces() introductions {
+	introduced := introductions{turns: map[string]bool{}, activities: map[string]bool{}}
+	if s.Foreground.TurnID != "" {
+		introduced.turns[s.Foreground.TurnID] = true
+	}
+
+	for _, activity := range s.Activities {
+		introduced.turns[activity.OriginTurnID] = true
+		introduced.activities[activity.ActivityID] = true
+	}
+
+	return introduced
+}
+
+func (i introductions) holds(owner Owner) bool {
+	if owner.Type == OwnerActivity {
+		return i.activities[owner.ID]
+	}
+
+	return i.turns[owner.ID]
+}
+
+// carriesBlocker reports whether the snapshot's own action set explains a
+// requires_action foreground. The set is complete, so a blocker it does not list
+// does not exist.
+func (s Snapshot) carriesBlocker() bool {
+	for _, action := range s.Actions {
+		if blocksForeground(action) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// vacant reports whether the asserted state holds nothing live. The sets are the
+// complete nonterminal ones, so a non-empty set is live work by construction.
+func (s Snapshot) vacant() bool {
+	return s.Foreground.State == ForegroundIdle && len(s.Activities) == 0 && len(s.Actions) == 0
+}
+
+// applyPromptAccepted opens a prompt-origin turn. Acceptance introduces its turn,
+// so it happens once per turn: a second acceptance of a turn the stream already
+// introduced changes that turn's identity rather than reporting a new one.
+// Acceptance is also the dispatch linearization point, so it invalidates whatever
+// boundary was certified before the frame the native dispatcher just took
+// ownership of.
 func (r *Reducer) applyPromptAccepted(delivery Delivery) error {
 	accepted := delivery.Event.PromptAccepted
 	if accepted == nil {
 		return r.fail(delivery, ViolationMalformedEnvelope, "the acceptance payload is missing")
 	}
 
-	if index := r.turnIndex(accepted.TurnID); index >= 0 && r.state.Turns[index].Terminal {
+	index := r.turnIndex(accepted.TurnID)
+
+	switch {
+	case index >= 0 && r.state.Turns[index].Terminal:
 		return r.fail(delivery, ViolationPostTerminalMutation, "turn "+accepted.TurnID+" is terminal")
+	case r.turnKnown(accepted.TurnID):
+		return r.fail(delivery, ViolationImmutableIdentityChange,
+			"turn "+accepted.TurnID+" was already introduced")
 	}
 
 	r.state.Turns = append(r.state.Turns, TurnRecord{
@@ -117,13 +222,15 @@ func (r *Reducer) applyStateUpdate(delivery Delivery) error {
 	return nil
 }
 
-// checkBlockedCycle enforces the two halves of the blocking-action rule: a
+// checkBlockedCycle enforces both halves of the blocking-action rule: a
 // requires-action transition names a cycle something is actually blocking, and a
-// cycle a blocking action stopped reports that state before it reports anything
-// else.
+// cycle a blocking action stopped neither leaves that state nor ends while any
+// action blocking it is still nonterminal. The resolution is the reason the
+// foreground may move, so it is always ordered first, and a cycle returns to
+// running when the last blocker resolves rather than the first.
 func (r *Reducer) checkBlockedCycle(delivery Delivery, transition StateTransition) error {
 	if transition.State == ForegroundRequiresAction {
-		if !r.hasBlockingAction() {
+		if !r.blocked(transition.CycleID) {
 			return r.fail(delivery, ViolationInconsistentForeground,
 				"cycle "+transition.CycleID+" has no outstanding blocking action")
 		}
@@ -135,7 +242,7 @@ func (r *Reducer) checkBlockedCycle(delivery Delivery, transition StateTransitio
 		return nil
 	}
 
-	if r.blockedCycle == transition.CycleID {
+	if r.blocked(transition.CycleID) || r.blockedCycle == transition.CycleID {
 		return r.fail(delivery, ViolationInconsistentForeground,
 			"cycle "+transition.CycleID+" is blocked and reported "+string(transition.State))
 	}
@@ -143,9 +250,10 @@ func (r *Reducer) checkBlockedCycle(delivery Delivery, transition StateTransitio
 	return nil
 }
 
-func (r *Reducer) hasBlockingAction() bool {
+// blocked reports whether an action that stopped this cycle is still nonterminal.
+func (r *Reducer) blocked(cycleID string) bool {
 	for _, action := range r.state.Actions {
-		if action.BlocksForeground && !action.State.Terminal() {
+		if action.BlocksForeground && !action.State.Terminal() && r.actionCycle[action.ActionID] == cycleID {
 			return true
 		}
 	}
@@ -153,10 +261,12 @@ func (r *Reducer) hasBlockingAction() bool {
 	return false
 }
 
-// applyLive reduces a running or requires-action transition. A turn with no
-// accepted submission behind it is agent-origin, and the transition's cause names
-// what opened it; a submission-caused transition naming a turn the stream never
-// accepted references an entity that does not exist.
+// applyLive reduces a running or requires-action transition. Exactly two events
+// open a turn, and this is the second: an activity-caused running transition
+// bearing a turn the stream has not introduced opens an agent-origin turn. Every
+// other transition names a turn the stream already opened — a session-caused one
+// reports the foreground moving for a reason the host did not cause, which is
+// never a reason to invent an owner for it.
 func (r *Reducer) applyLive(delivery Delivery, transition StateTransition) error {
 	index := r.turnIndex(transition.TurnID)
 
@@ -164,11 +274,11 @@ func (r *Reducer) applyLive(delivery Delivery, transition StateTransition) error
 	case index >= 0 && r.state.Turns[index].Terminal:
 		return r.fail(delivery, ViolationPostTerminalMutation, "turn "+transition.TurnID+" is terminal")
 	case index < 0:
-		if transition.Cause == CauseSubmission && !r.turnKnown(transition.TurnID) {
-			return r.fail(delivery, ViolationUnknownEntity, "turn "+transition.TurnID+" was never accepted")
+		if transition.Cause != CauseActivity || transition.State != ForegroundRunning {
+			return r.fail(delivery, ViolationUnknownEntity, "turn "+transition.TurnID+" was never opened")
 		}
 
-		r.state.Turns = append(r.state.Turns, TurnRecord{TurnID: transition.TurnID, Origin: transition.Cause})
+		r.state.Turns = append(r.state.Turns, TurnRecord{TurnID: transition.TurnID, Origin: CauseActivity})
 		r.seeTurn(transition.TurnID, delivery.Sequence)
 
 		index = len(r.state.Turns) - 1
@@ -198,12 +308,7 @@ func (r *Reducer) applyIdle(delivery Delivery, transition StateTransition) error
 	case index >= 0 && r.state.Turns[index].Terminal:
 		return r.fail(delivery, ViolationPostTerminalMutation, "turn "+transition.TurnID+" is terminal")
 	case index < 0:
-		if !r.turnKnown(transition.TurnID) {
-			return r.fail(delivery, ViolationUnknownEntity, "turn "+transition.TurnID+" was never opened")
-		}
-
-		r.state.Turns = append(r.state.Turns, TurnRecord{TurnID: transition.TurnID, Origin: transition.Cause})
-		index = len(r.state.Turns) - 1
+		return r.fail(delivery, ViolationUnknownEntity, "turn "+transition.TurnID+" was never opened")
 	}
 
 	turn := &r.state.Turns[index]
@@ -418,13 +523,24 @@ func (r *Reducer) applyActionUpdate(delivery Delivery) error {
 	return nil
 }
 
+// checkActionIdentity validates an action's first sight, when every member that
+// fixes what the action is must be present. blocksForeground read as false by
+// default would silently demote a blocking request to a background one, which is
+// the difference between a foreground a host renders as waiting and one it
+// renders as working.
 func (r *Reducer) checkActionIdentity(delivery Delivery, update ActionUpdate) error {
-	if update.Kind == "" || update.Owner.ID == "" {
-		return r.fail(delivery, ViolationImmutableIdentityChange,
-			"action "+update.ActionID+" states an incomplete identity")
+	if update.Kind == "" || update.Owner.ID == "" || update.BlocksForeground == nil {
+		return r.fail(delivery, ViolationMalformedEnvelope,
+			"action "+update.ActionID+" states an incomplete first sight")
 	}
 
 	return nil
+}
+
+// blocksForeground reports a stated blocking claim. An omitted member states
+// nothing, which is why only a first sight is required to carry one.
+func blocksForeground(update ActionUpdate) bool {
+	return update.BlocksForeground != nil && *update.BlocksForeground
 }
 
 // checkActionOwner resolves the entity an action is owned by. An action hung off
@@ -444,7 +560,14 @@ func (r *Reducer) checkActionOwner(delivery Delivery, update ActionUpdate) error
 }
 
 func (r *Reducer) recordAction(delivery Delivery, update ActionUpdate) {
-	r.state.Actions = append(r.state.Actions, ActionRecord(update))
+	r.state.Actions = append(r.state.Actions, ActionRecord{
+		ActionID:         update.ActionID,
+		Kind:             update.Kind,
+		State:            update.State,
+		Owner:            update.Owner,
+		RunID:            update.RunID,
+		BlocksForeground: *update.BlocksForeground,
+	})
 
 	if update.State.Terminal() {
 		return
@@ -454,12 +577,15 @@ func (r *Reducer) recordAction(delivery Delivery, update ActionUpdate) {
 	r.invalidateQuiescence(delivery.Sequence)
 }
 
-// blockForeground records that a cycle owes the accompanying transition. A
-// blocking action never moves the foreground by itself.
+// blockForeground records the cycle a blocking action stopped and the transition
+// that cycle now owes. A blocker blocks the cycle current at its first sight, and
+// it never moves the foreground by itself.
 func (r *Reducer) blockForeground(update ActionUpdate) {
-	if !update.BlocksForeground || r.state.Foreground == nil {
+	if !blocksForeground(update) || r.state.Foreground == nil {
 		return
 	}
+
+	r.actionCycle[update.ActionID] = r.state.Foreground.CycleID
 
 	if r.state.Foreground.State != ForegroundRequiresAction {
 		r.blockedCycle = r.state.Foreground.CycleID
@@ -478,6 +604,8 @@ func (r *Reducer) patchAction(delivery Delivery, update ActionUpdate) error {
 		return r.fail(delivery, ViolationImmutableIdentityChange, "action "+update.ActionID+" changed owner")
 	case update.RunID != "" && update.RunID != existing.RunID:
 		return r.fail(delivery, ViolationImmutableIdentityChange, "action "+update.ActionID+" changed ownership root")
+	case update.BlocksForeground != nil && *update.BlocksForeground != existing.BlocksForeground:
+		return r.fail(delivery, ViolationImmutableIdentityChange, "action "+update.ActionID+" changed what it blocks")
 	case existing.State.Terminal() && update.State != existing.State:
 		return r.fail(delivery, ViolationPostTerminalMutation, "action "+update.ActionID+" is terminal")
 	}
@@ -491,33 +619,57 @@ func (r *Reducer) patchAction(delivery Delivery, update ActionUpdate) error {
 	return nil
 }
 
+// applyQuiescence reduces a standalone quiescence fact. The event asserts the
+// proof class whatever its polarity, so a configuration that proved no class
+// emits none at all: admitting even a negative one would let a host read
+// authoritative absence of background work from a source that cannot observe it.
 func (r *Reducer) applyQuiescence(delivery Delivery) error {
 	fact := delivery.Event.Quiescence
 	if fact == nil {
 		return r.fail(delivery, ViolationMalformedEnvelope, "the quiescence payload is missing")
 	}
 
-	return r.certifyQuiescence(delivery, *fact)
+	if !r.negotiated.AuthoritativeQuiescence {
+		return r.fail(delivery, ViolationUnnegotiatedFact, "the answer proved no quiescence class")
+	}
+
+	if err := r.checkQuiescence(delivery, *fact, r.state.Vacant()); err != nil {
+		return err
+	}
+
+	r.recordQuiescence(delivery, *fact)
+
+	return nil
 }
 
-// certifyQuiescence installs an authoritative quiescence fact. A configuration
-// that proved no class, or a fact naming a class it never advertised, asserts
-// something the answer did not claim. A fact this stream contradicts — work is
-// still live, or the watermark does not cover every transition reduced before
-// it — proves no boundary and certifies nothing.
-func (r *Reducer) certifyQuiescence(delivery Delivery, fact QuiescenceFact) error {
+// checkQuiescence judges a positive fact against the stream carrying it. A fact
+// naming a class the answer never claimed is refused before its content is
+// judged. One the stream disproves — work is still live, or the watermark stops
+// short of the last event that recorded any — is a lie about the boundary rather
+// than a weaker claim, so it fails closed instead of certifying nothing: a
+// swallowed lie is indistinguishable from a loss.
+func (r *Reducer) checkQuiescence(delivery Delivery, fact QuiescenceFact, vacant bool) error {
+	switch {
+	case !fact.Quiescent:
+		return nil
+	case fact.Source != r.negotiated.QuiescenceSource:
+		return r.fail(delivery, ViolationUnnegotiatedFact, "quiescence proof "+string(fact.Source))
+	case !vacant:
+		return r.fail(delivery, ViolationFalseQuiescence, "the stream still holds live work")
+	case fact.Watermark < r.lastTransition:
+		return r.fail(delivery, ViolationFalseQuiescence, "the watermark stops short of the last recorded work")
+	default:
+		return nil
+	}
+}
+
+// recordQuiescence installs a validated fact. A negative one revokes whatever
+// boundary stood; only a later positive fact certifies again.
+func (r *Reducer) recordQuiescence(delivery Delivery, fact QuiescenceFact) {
 	if !fact.Quiescent {
 		r.invalidateQuiescence(delivery.Sequence)
 
-		return nil
-	}
-
-	if !r.negotiated.AuthoritativeQuiescence || fact.Source != r.negotiated.QuiescenceSource {
-		return r.fail(delivery, ViolationUnnegotiatedFact, "quiescence proof "+string(fact.Source))
-	}
-
-	if !r.state.Vacant() || fact.Watermark < r.lastTransition {
-		return nil
+		return
 	}
 
 	r.state.Quiescence = QuiescenceState{
@@ -527,8 +679,6 @@ func (r *Reducer) certifyQuiescence(delivery Delivery, fact QuiescenceFact) erro
 		Barrier:   fact.Barrier,
 	}
 	r.fence = max(r.fence, fact.Watermark)
-
-	return nil
 }
 
 // seeTurn and seeActivity retain the sequence an identity was first seen at. Only

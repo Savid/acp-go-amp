@@ -203,6 +203,14 @@ func TestDecodeEventStructure(t *testing.T) {
 		{`{"type":"quiescence_update","quiescent":true,"source":"vibes","watermark":0}`, ViolationMalformedEnvelope},
 		{`{"type":"quiescence_update","quiescent":true,"source":"process-containment","watermark":"0"}`, ViolationMalformedEnvelope},
 		{`{"type":"quiescence_update","quiescent":true,"source":"process-containment","watermark":1}`, ViolationMalformedEnvelope},
+		{`{"type":"lifecycle_snapshot","foreground":{"state":"running","cycleId":"c","turnId":"t","origin":"session"},` +
+			`"activities":[],"actions":[],"quiescence":{"quiescent":false}}`, ViolationMalformedEnvelope},
+		{`{"type":"lifecycle_snapshot","foreground":{"state":"running","cycleId":"c","turnId":"t"},` +
+			`"activities":[],"actions":[],"quiescence":{"quiescent":false}}`, ViolationMalformedEnvelope},
+		{`{"type":"state_update","state":"idle","cycleId":"c","turnId":"t","cause":"submission","outcome":"success"}`,
+			ViolationMalformedEnvelope},
+		{`{"type":"state_update","state":"idle","cycleId":"c","turnId":"t","cause":"submission",` +
+			`"stopReason":"end_turn","outcome":"failed"}`, ViolationMalformedEnvelope},
 	} {
 		requireRefusal(t, enveloped(tc.event), richConfiguration(), tc.kind)
 	}
@@ -214,7 +222,7 @@ func TestDecodeAcceptsTheWholeEventSet(t *testing.T) {
 	t.Parallel()
 
 	for _, event := range []string{
-		`{"type":"lifecycle_snapshot","foreground":{"state":"running","cycleId":"c","turnId":"t"},"activities":[],"actions":[],"quiescence":{"quiescent":false}}`,
+		`{"type":"lifecycle_snapshot","foreground":{"state":"running","cycleId":"c","turnId":"t","origin":"submission"},"activities":[],"actions":[],"quiescence":{"quiescent":false}}`,
 		`{"type":"prompt_accepted","submissionId":"a","clientNonce":"b","turnId":"c","runId":"r"}`,
 		`{"type":"state_update","state":"idle","cycleId":"c","cause":"session"}`,
 		`{"type":"activity_update","activity":{"activityId":"a","kind":"task","state":"running","cause":"submission","originTurnId":"t","parentId":"p","toolCallId":"tool","runId":"r","progress":{"done":1}}}`,

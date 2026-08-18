@@ -22,6 +22,7 @@ const (
 	fieldCycleID = "cycleId"
 	fieldTurnID  = "turnId"
 	fieldCause   = "cause"
+	fieldOrigin  = "origin"
 
 	fieldSubmissionID = "submissionId"
 	fieldClientNonce  = "clientNonce"
@@ -79,11 +80,16 @@ type Snapshot struct {
 	Quiescence QuiescenceFact
 }
 
-// Foreground is one foreground cycle. TurnID is empty while no turn holds it.
+// Foreground is one foreground cycle. TurnID is empty while no turn holds it,
+// and Origin names that turn's provenance exactly while it does: a resumed turn
+// with no recorded origin would be a turn a consumer could not attribute. Origin
+// is the snapshot's own member and is not projected — the turn record it opens
+// carries it instead.
 type Foreground struct {
 	State   ForegroundState `json:"state"`
 	CycleID string          `json:"cycleId"`
 	TurnID  string          `json:"turnId,omitempty"`
+	Origin  Cause           `json:"-"`
 }
 
 // PromptAccepted records that the native dispatcher took durable ownership of a
@@ -125,13 +131,16 @@ type ActivityUpdate struct {
 
 // ActionUpdate reports one permission or elicitation. Only an action blocking the
 // current foreground cycle bears on requires_action.
+//
+// BlocksForeground is a pointer because absence and false are different facts: it
+// is required on a first sight, and a later patch that omits it restates nothing.
 type ActionUpdate struct {
 	ActionID         string
 	Kind             ActionKind
 	State            ActionState
 	Owner            Owner
 	RunID            string
-	BlocksForeground bool
+	BlocksForeground *bool
 }
 
 // QuiescenceFact is an authoritative quiescence claim with the proof that
