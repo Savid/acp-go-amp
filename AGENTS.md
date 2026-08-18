@@ -55,8 +55,12 @@ stdio or embed the agent directly in Go.
   durable commit, terminal idle, quiescence fact, response. One commit point
   covers every exit path. Settlement runs on a context detached from the
   request's, and the completion latch close and delete wait on is published only
-  once the whole order has run. A failed commit or an incomplete boundary fails
-  the prompt and emits no terminal idle.
+  once the whole order has run. The latch carries the boundary's own failure
+  only — an incomplete containment, a failed commit, or a failed terminal
+  lifecycle or quiescence delivery — never the native turn's outcome: a natively
+  failed prompt over a boundary that settled is a successful close and delete. A
+  failed commit or an incomplete boundary fails the prompt and emits no terminal
+  idle.
 - `session/delete` fences the session's writes and waits out the commit in
   flight before its tombstone lands: a late `Replace` never clears a tombstone
   it did not create.

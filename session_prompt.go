@@ -52,14 +52,17 @@ func turnFailure(cause, message string) error {
 }
 
 type promptTurnState struct {
-	mu           sync.Mutex
-	turn         *amp.Turn
-	cancelCtx    context.CancelFunc
-	closeErr     error
-	cancelled    chan struct{}
-	completed    chan struct{}
-	cancelOnce   sync.Once
-	completeOnce sync.Once
+	mu        sync.Mutex
+	turn      *amp.Turn
+	cancelCtx context.CancelFunc
+	// settlementErr is the settlement boundary's own outcome, which is what close
+	// and delete wait on. It is never the native turn's outcome: what the model
+	// did inside a boundary that completed is the prompt response's business.
+	settlementErr error
+	cancelled     chan struct{}
+	completed     chan struct{}
+	cancelOnce    sync.Once
+	completeOnce  sync.Once
 }
 
 func newPromptTurnState() *promptTurnState {
@@ -100,10 +103,10 @@ func (s *promptTurnState) cancel() {
 	}
 }
 
-func (s *promptTurnState) complete(closeErr error) {
+func (s *promptTurnState) complete(settlementErr error) {
 	s.completeOnce.Do(func() {
 		s.mu.Lock()
-		s.closeErr = closeErr
+		s.settlementErr = settlementErr
 		s.mu.Unlock()
 		close(s.completed)
 	})
@@ -115,7 +118,7 @@ func (s *promptTurnState) awaitCompletion(ctx context.Context) error {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 
-		return s.closeErr
+		return s.settlementErr
 	case <-ctx.Done():
 		return fmt.Errorf("%w: wait for active Amp turn cleanup: %v", amp.ErrProcessContainmentIncomplete, ctx.Err())
 	}
@@ -327,7 +330,7 @@ func (s *agentSession) settlePrompt(
 	state *promptTurnState,
 	incarnation *promptStream,
 	result promptResult,
-) (response acp.PromptResponse, err error) {
+) (acp.PromptResponse, error) {
 	settleCtx := context.WithoutCancel(ctx)
 
 	proof, closeErr := s.agent.options.runtime.settleTurn(turn)
@@ -337,23 +340,37 @@ func (s *agentSession) settlePrompt(
 	// so it proves nothing and the next incarnation opens without a claim.
 	s.recordVacancy(proof.Vacant() && amp.ProcessContainmentComplete(closeErr))
 
-	// The completion latch is what close and delete wait on, so it is published
-	// only once the prompt is wholly settled. Publishing it at the native
-	// terminal would let a close response fence a stream this prompt is still
-	// writing to, and let a close return before the frames it was shown are
-	// durable.
-	defer func() { state.complete(err) }()
+	// settlementErr is what the completion latch publishes: the boundary's own
+	// failure, and only that. A native turn that failed over a boundary which
+	// completed, committed, and delivered its terminal facts did settle, so a
+	// concurrent close or delete succeeds while the prompt still answers the host
+	// with the native failure. Conflating the two would both fail a close that
+	// nothing went wrong for and hide a real settlement failure behind the native
+	// error the prompt reports first.
+	var settlementErr error
+
+	// The latch is what close and delete wait on, so it is published only once
+	// the prompt is wholly settled. Publishing it at the native terminal would
+	// let a close response fence a stream this prompt is still writing to, and
+	// let a close return before the frames it was shown are durable.
+	defer func() { state.complete(settlementErr) }()
 
 	if !amp.ProcessContainmentComplete(closeErr) {
+		settlementErr = closeErr
+
 		return acp.PromptResponse{}, unsettled(errors.Join(result.err, closeErr))
 	}
 
-	if err := s.persistAfterTurn(settleCtx, result.transcript); err != nil {
-		return acp.PromptResponse{}, unsettled(firstError(result.err, err))
+	if commitErr := s.persistAfterTurn(settleCtx, result.transcript); commitErr != nil {
+		settlementErr = commitErr
+
+		return acp.PromptResponse{}, unsettled(firstError(result.err, commitErr))
 	}
 
-	if err := incarnation.settle(settleCtx, lifecycleOutcomeFor(result.response, result.err), proof); err != nil {
-		return acp.PromptResponse{}, unsettled(firstError(result.err, err))
+	if deliveryErr := incarnation.settle(settleCtx, lifecycleOutcomeFor(result.response, result.err), proof); deliveryErr != nil {
+		settlementErr = deliveryErr
+
+		return acp.PromptResponse{}, unsettled(firstError(result.err, deliveryErr))
 	}
 
 	if result.err != nil {

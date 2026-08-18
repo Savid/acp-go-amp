@@ -18,8 +18,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// invalidParamsCode is the JSON-RPC code every refused reserved value carries.
-const invalidParamsCode = -32602
+// invalidParamsCode is the JSON-RPC code every refused reserved value carries,
+// and methodNotFoundCode the one an unrouted method carries.
+const (
+	invalidParamsCode  = -32602
+	methodNotFoundCode = -32601
+)
 
 // lifecycleOffer is the object a host stamps on initialize. It carries exactly
 // one member, and the decoded wire form of a JSON number is a float64.
@@ -866,6 +870,64 @@ func TestLifecycleKeyRefusedBeforeExtensionDispatch(t *testing.T) {
 			require.Equal(t, baselineSessions, sessions)
 		})
 	}
+}
+
+// TestLifecycleKeyRefusedOnTheUnconfiguredAuthSurface pins the refusal on the
+// provider-auth surface nobody configured. Without a usable ledger root every
+// `_amp/auth/*` leg answers method-not-found, and "the method does not exist" is
+// not the answer a family literal is owed: the key is refused by name first, on
+// the same field path the configured surface refuses it on, and the refusal is
+// the whole effect.
+func TestLifecycleKeyRefusedOnTheUnconfiguredAuthSurface(t *testing.T) {
+	bare := newTestAgent()
+	require.Nil(t, bare.providerAuth, "this table is the surface nobody configured")
+
+	connection := &localAgentConnection{agent: bare}
+	connection.initialized.Store(true)
+
+	legs := authMethodNames()
+	require.Len(t, legs, 8, "every leg of the advertised surface is in this table")
+
+	stamped, err := json.Marshal(map[string]any{
+		"_meta": map[string]any{lifecycle.MetaKey: map[string]any{"version": 1.0}},
+	})
+	require.NoError(t, err)
+
+	for _, method := range legs {
+		t.Run(method, func(t *testing.T) {
+			// The leg's own answer, so the ordering below is a real precedence and
+			// not a method that happened to refuse everything.
+			result, absent := connection.handle(t.Context(), method, json.RawMessage(`{}`))
+			require.Nil(t, result)
+			require.NotNil(t, absent)
+			require.Equal(t, methodNotFoundCode, absent.Code)
+
+			result, refusal := connection.handle(t.Context(), method, stamped)
+			require.Nil(t, result)
+			require.NotNil(t, refusal)
+			require.Equal(t, invalidParamsCode, refusal.Code)
+
+			data, ok := refusal.Data.(map[string]any)
+			require.True(t, ok)
+			require.Equal(t, valUnsupported, data[jsonFieldError])
+			require.Equal(t, lifecycle.MetaPath, data[jsonFieldField])
+		})
+	}
+
+	// No leg ran, so nothing exists that did not exist before: no broker appeared,
+	// no session opened, and the surface is still unadvertised.
+	require.Nil(t, bare.providerAuth)
+
+	bare.mu.Lock()
+	sessions := len(bare.sessions)
+	bare.mu.Unlock()
+	require.Empty(t, sessions)
+
+	resp, err := bare.Initialize(t.Context(), acp.InitializeRequest{})
+	require.NoError(t, err)
+
+	ampMeta, _ := resp.AgentCapabilities.Meta[ampMetaKey].(map[string]any)
+	require.NotContains(t, ampMeta, providerAuthCapabilityKey)
 }
 
 // TestLifecycleKeyFailsACancelClosed pins the cancel rule: the key fails the
