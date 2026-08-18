@@ -177,7 +177,8 @@ The host offers on `InitializeRequest._meta`, carrying exactly one member:
 {"acp-go.dev/lifecycle": {"versions": [1]}}
 ```
 
-The adapter answers on the **response's own top-level `_meta`**, never inside
+The adapter places its negotiated `acp-go.dev/lifecycle` answer on
+`InitializeResponse._meta` — the response's own top-level `_meta`, never inside
 `agentCapabilities._meta`. The answer describes the active configuration and is
 resolved from the same code path that enforces containment:
 
@@ -281,7 +282,7 @@ fails closed before the native interrupt and the cancel is never applied; being
 a notification it carries no response frame, so that refusal is wire-silent.
 
 `session/set_mode` does not exist on this adapter and answers `-32601 method not
-found`. The refusal above is judged first: a family literal is never ignored
+found`. The refusal above is judged first: a reserved literal is never ignored
 because the request was going to be refused anyway, so a `session/set_mode`
 carrying the key answers `-32602` naming it, and so does the boolean
 `session/set_config_option` variant this adapter otherwise rejects on its
