@@ -401,6 +401,105 @@ func TestActionRules(t *testing.T) {
 			actionEvent(ActionUpdate{ActionID: "req-1", State: ActionDeclined}))...)
 }
 
+// TestTerminalActionAdmitsOnlyNoOpRestatement pins the patch basis on the action
+// half of the rule. A resolved action restated with the members it already holds
+// says nothing and is suppressed; one carrying any difference is refused, and a
+// carried immutable at other than its first-sight value is reported as the
+// terminal token rather than the identity one, because a token naming a terminal
+// entity always wins.
+func TestTerminalActionAdmitsOnlyNoOpRestatement(t *testing.T) {
+	t.Parallel()
+
+	accepted := Event{Type: EventPromptAccepted, PromptAccepted: &PromptAccepted{
+		SubmissionID: "sub-1", ClientNonce: "non-1", TurnID: "turn-1",
+	}}
+	opening := []Event{openSnapshot(), accepted, RunningEvent("cyc-1", "turn-1")}
+	pending := actionEvent(ActionUpdate{
+		ActionID: "req-1", Kind: ActionPermission, State: ActionPending,
+		Owner: Owner{Type: OwnerTurn, ID: "turn-1"}, RunID: "run-1", BlocksForeground: stated(false),
+	})
+	resolved := actionEvent(ActionUpdate{ActionID: "req-1", State: ActionAccepted})
+
+	reducer, refusal := reduceAll(t, richConfiguration(),
+		append(append([]Event{}, opening...), pending, resolved,
+			actionEvent(ActionUpdate{
+				ActionID: "req-1", Kind: ActionPermission, State: ActionAccepted,
+				Owner: Owner{Type: OwnerTurn, ID: "turn-1"}, RunID: "run-1", BlocksForeground: stated(false),
+			}))...)
+	require.Nil(t, refusal)
+
+	state := reducer.State()
+	require.EqualValues(t, 6, state.ReducedThrough)
+	require.Zero(t, state.SuppressedRetransmissions)
+
+	action, known := state.Action("req-1")
+	require.True(t, known)
+	require.Equal(t, ActionAccepted, action.State)
+
+	for _, restatement := range []ActionUpdate{
+		{ActionID: "req-1", State: ActionAccepted, Kind: ActionElicitation},
+		{ActionID: "req-1", State: ActionAccepted, Owner: Owner{Type: OwnerTurn, ID: "turn-9"}},
+		{ActionID: "req-1", State: ActionAccepted, RunID: "run-9"},
+		{ActionID: "req-1", State: ActionAccepted, BlocksForeground: stated(true)},
+	} {
+		requireReduceRefusal(t, richConfiguration(), ViolationPostTerminalMutation,
+			append(append([]Event{}, opening...), pending, resolved, actionEvent(restatement))...)
+	}
+}
+
+// TestSuppressedRestatementLeavesTheQuiescenceFloorWhereItStood pins that a
+// resolved action restated after its turn ended begins no work: the floor a
+// positive fact must clear stays at the terminal idle, so a proof whose watermark
+// stops below the restatement still certifies the boundary.
+func TestSuppressedRestatementLeavesTheQuiescenceFloorWhereItStood(t *testing.T) {
+	t.Parallel()
+
+	accepted := Event{Type: EventPromptAccepted, PromptAccepted: &PromptAccepted{
+		SubmissionID: "sub-1", ClientNonce: "non-1", TurnID: "turn-1",
+	}}
+
+	reducer, refusal := reduceAll(t, richConfiguration(),
+		openSnapshot(), accepted, RunningEvent("cyc-1", "turn-1"),
+		actionEvent(ActionUpdate{
+			ActionID: "req-1", Kind: ActionPermission, State: ActionPending,
+			Owner: Owner{Type: OwnerTurn, ID: "turn-1"}, BlocksForeground: stated(false),
+		}),
+		actionEvent(ActionUpdate{ActionID: "req-1", State: ActionAccepted}),
+		IdleEvent("cyc-1", "turn-1", StopReasonEndTurn, OutcomeSuccess),
+		actionEvent(ActionUpdate{ActionID: "req-1", State: ActionAccepted}),
+		Event{Type: EventQuiescenceUpdate, Quiescence: &QuiescenceFact{
+			Quiescent: true, Source: ProofClassProcessContainment, Watermark: 6, Barrier: "contained-exit-1",
+		}})
+	require.Nil(t, refusal)
+
+	state := reducer.State()
+	require.True(t, state.Quiescence.Certified)
+	require.EqualValues(t, 6, state.Quiescence.Watermark)
+	require.EqualValues(t, 8, state.ReducedThrough)
+}
+
+// TestTerminalActivityRestatementCountsAnUnrecordedProgress pins that progress is
+// a carried member like any other: a terminal activity whose record never held
+// one is not restated by an event that states one, however plausible the content.
+func TestTerminalActivityRestatementCountsAnUnrecordedProgress(t *testing.T) {
+	t.Parallel()
+
+	accepted := Event{Type: EventPromptAccepted, PromptAccepted: &PromptAccepted{
+		SubmissionID: "sub-1", ClientNonce: "non-1", TurnID: "turn-1",
+	}}
+
+	requireReduceRefusal(t, richConfiguration(), ViolationPostTerminalMutation,
+		openSnapshot(), accepted, RunningEvent("cyc-1", "turn-1"),
+		activityEvent(ActivityUpdate{
+			ActivityID: "act-1", Kind: ActivityTask, State: ActivityRunning,
+			Cause: CauseSubmission, OriginTurnID: "turn-1",
+		}),
+		activityEvent(ActivityUpdate{ActivityID: "act-1", State: ActivityCompleted}),
+		activityEvent(ActivityUpdate{
+			ActivityID: "act-1", State: ActivityCompleted, Progress: json.RawMessage(`{"stage":"final"}`),
+		}))
+}
+
 // TestTerminalActionOnFirstSightNeverBlocks pins that an action already resolved
 // when a delta first sees it holds nothing: it is recorded, and the cycle it
 // would otherwise have blocked owes no transition.

@@ -24,8 +24,8 @@ const sessionUpdateField = "sessionUpdate"
 // notification payload. It reports ErrNoEnvelope for a frame with no extension
 // value, and a *ViolationError naming the closed token for every frame it refuses.
 func DecodeSessionUpdate(params json.RawMessage, negotiated Negotiated) (Delivery, error) {
-	var frame any
-	if err := json.Unmarshal(params, &frame); err != nil {
+	frame, decodable := decodeValue(params)
+	if !decodable {
 		return Delivery{}, violation(ViolationMalformedEnvelope, "", 0, "the notification is not decodable JSON")
 	}
 
