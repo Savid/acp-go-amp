@@ -4,11 +4,15 @@ package amp
 
 // descendantCount enumerates the contained descendant set of a supervised
 // subreaper tree. That is the one configuration where every descendant is
-// reparented onto a root this adapter owns, so the set is exactly enumerable and
-// an empty answer is a vacancy proof rather than an assumption. Ordinary
-// same-identity execution owns no such root and reports no inventory.
+// reparented onto a root this adapter owns, so the set is exactly enumerable.
+//
+// The vacancy the count reports is the subreaper's own: that root exits only
+// once it has reaped every descendant it adopted, so an empty answer after the
+// boundary completed confirms the discipline the root already enforced rather
+// than substituting for it. Ordinary same-identity execution owns no such root
+// and reports no inventory at all.
 func (t *processTree) descendantCount() (int, bool) {
-	if t == nil || !t.supervised {
+	if !t.supervised {
 		return 0, false
 	}
 

@@ -63,12 +63,12 @@ func (s *agentSession) openPromptStream(ctx context.Context) (*promptStream, err
 		turnID:      id + lifecycleTurnSuffix,
 	}
 
-	// Nothing owned by this session is live: the previous prompt's process was
-	// contained and exited, and a session that was never prompted never started
-	// one. A configuration that proves whole-tree vacancy may state that as a
-	// certified boundary fencing no sequence; one that cannot states a negative
-	// fact rather than a guess.
-	if negotiated.AuthoritativeQuiescence {
+	// The stream opens on a certified boundary only where one was actually
+	// proven: the previous prompt's process was contained and its descendant set
+	// enumerated empty, or this session never started a process at all. A
+	// configuration that proves no class, and a session whose last boundary could
+	// not state vacancy, both open on a negative fact rather than a guess.
+	if negotiated.AuthoritativeQuiescence && s.vacancyProven() {
 		incarnation.proof = lifecycle.QuiescenceFact{
 			Quiescent: true,
 			Source:    negotiated.QuiescenceSource,

@@ -311,6 +311,7 @@ func (s *agentSession) settlePrompt(
 	proof, closeErr := s.agent.options.runtime.settleTurn(turn)
 	state.complete(closeErr)
 	s.recordScratchContainment(closeErr)
+	s.recordVacancy(proof.Vacant())
 
 	if !amp.ProcessContainmentComplete(closeErr) {
 		return acp.PromptResponse{}, errors.Join(result.err, closeErr)

@@ -204,3 +204,20 @@ func TestUnprovenVacancyStatesNoQuiescenceFact(t *testing.T) {
 		"lifecycle_snapshot", "prompt_accepted", "state_update", "state_update",
 	}, client.eventTypes(t))
 }
+
+// TestUnprovenVacancyOpensTheNextIncarnationNegative pins that the snapshot's
+// quiescence claim is backed by evidence rather than by the advertisement alone:
+// a session whose last boundary could not enumerate an empty descendant set
+// opens its next incarnation on a negative fact.
+func TestUnprovenVacancyOpensTheNextIncarnationNegative(t *testing.T) {
+	client := &lifecycleClient{}
+	session := lifecycleStreamSession(t, authoritativeAnswer(), client)
+	session.recordVacancy(false)
+
+	_, err := session.openPromptStream(t.Context())
+	require.NoError(t, err)
+
+	event, ok := client.envelopes(t)[0]["event"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, map[string]any{"quiescent": false}, event["quiescence"])
+}

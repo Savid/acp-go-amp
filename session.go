@@ -147,11 +147,15 @@ type agentSession struct {
 	scratchContainmentErr error
 	unsyncedFrames        []SessionStoreEntry
 	transcriptFrames      int
-	turn                  chan struct{}
-	cancelMu              sync.Mutex
-	activePrompt          *promptTurnState
-	persistMu             sync.Mutex
-	mu                    sync.Mutex
+	// vacancyUnproven records that a completed prompt boundary failed to
+	// enumerate an empty contained descendant set. A session that has never
+	// prompted started no process at all, so it opens with nothing outstanding.
+	vacancyUnproven bool
+	turn            chan struct{}
+	cancelMu        sync.Mutex
+	activePrompt    *promptTurnState
+	persistMu       sync.Mutex
+	mu              sync.Mutex
 }
 
 func newAgentSession(ctx context.Context, agent *Agent, id acp.SessionId, cwd string, meta parsedSessionMeta, mcpConfigJSON string, additionalDirs []string) (_ *agentSession, err error) {
@@ -686,6 +690,24 @@ func (s *agentSession) setTranscriptFrameCount(count int) {
 	defer s.mu.Unlock()
 
 	s.transcriptFrames = count
+}
+
+// recordVacancy retains what the prompt's containment boundary proved, so the
+// next incarnation's snapshot states a quiescence fact backed by evidence rather
+// than by the configuration's advertisement alone.
+func (s *agentSession) recordVacancy(vacant bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.vacancyUnproven = !vacant
+}
+
+// vacancyProven reports that nothing this session owns can still be live.
+func (s *agentSession) vacancyProven() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return !s.vacancyUnproven
 }
 
 // retainUnsynced marks the mirror as unsynced by keeping the exact frames that
