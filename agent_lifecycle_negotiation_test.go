@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -711,6 +712,24 @@ func TestLifecycleKeyRefusedOnEverySurfaceThatNeverCarriesIt(t *testing.T) {
 
 			return err
 		},
+		// The variant a request chose decides where its `_meta` lives. Amp takes
+		// no boolean option, but "this adapter has no such option" and "the key is
+		// not read here" are different answers, and the family literal is refused
+		// by name before the discriminator is judged.
+		"session/set_config_option boolean": func() error {
+			_, err := agent.SetSessionConfigOption(t.Context(), acp.SetSessionConfigOptionRequest{
+				Boolean: &acp.SetSessionConfigOptionBoolean{SessionId: sessionID, ConfigId: "mode", Type: "boolean", Value: true, Meta: key},
+			})
+
+			return err
+		},
+		// The method this adapter does not route is still an inbound surface: the
+		// key is rejected by name rather than swallowed with the method.
+		"session/set_mode": func() error {
+			_, err := agent.SetSessionMode(t.Context(), acp.SetSessionModeRequest{SessionId: sessionID, ModeId: "high", Meta: key})
+
+			return err
+		},
 		"logout": func() error {
 			_, err := agent.Logout(t.Context(), acp.LogoutRequest{Meta: key})
 
@@ -1187,4 +1206,254 @@ func TestPromptFailsWhenTheTurnCannotSettle(t *testing.T) {
 	stored, storeErr := agent.store.Load(t.Context(), SessionKey{SessionID: string(sessionID), Subpath: transcriptSubpath})
 	require.NoError(t, storeErr)
 	require.NotEmpty(t, stored, "the commit precedes the terminal idle")
+}
+
+// cancellingIdleClient cancels the request context from inside the terminal
+// idle's own delivery, which is the one deterministic point where a cancel and a
+// settled turn overlap: the boundary is proven, the commit is durable, the
+// lifecycle turn has just recorded how it ended, and the v1 response has not
+// been written yet.
+type cancellingIdleClient struct {
+	lifecycleClient
+	cancel func()
+}
+
+func (c *cancellingIdleClient) SessionUpdate(ctx context.Context, notification acp.SessionNotification) error {
+	if envelope, ok := notification.Meta[lifecycle.MetaKey].(map[string]any); ok {
+		if event, ok := envelope["event"].(map[string]any); ok && event["outcome"] == "failed" {
+			c.cancel()
+		}
+	}
+
+	return c.lifecycleClient.SessionUpdate(ctx, notification)
+}
+
+// TestSettledFailureIsNeverRewrittenAsCancelled pins that a turn's recorded
+// terminal identity is the one its v1 response states. A cancel landing while a
+// turn is already failing does not convert that failure into a clean cancel: the
+// lifecycle idle the host was just shown recorded `failed`, and no ACP v1 stop
+// reason names a failure.
+func TestSettledFailureIsNeverRewrittenAsCancelled(t *testing.T) {
+	promptCtx, cancelPrompt := context.WithCancel(t.Context())
+	defer cancelPrompt()
+
+	client := &cancellingIdleClient{cancel: cancelPrompt}
+	agent, sessionID := lifecycleAgentWithClient(t, lifecycleOffer(1.0), client)
+
+	resp, err := agent.Prompt(promptCtx, lifecyclePrompt(sessionID, "provider-failure", "sub-1", "nonce-1"))
+	require.Error(t, err, "a settled native failure answers with the failure it recorded")
+	require.NotEqual(t, acp.StopReasonCancelled, resp.StopReason)
+
+	var requestErr *acp.RequestError
+
+	require.ErrorAs(t, err, &requestErr)
+
+	data, ok := requestErr.Data.(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, turnFailedError, data[jsonFieldError])
+
+	idle, ok := client.envelopes(t)[3]["event"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "failed", idle["outcome"])
+	require.NotContains(t, idle, "stopReason")
+
+	state := reduceEmittedStream(t, &client.lifecycleClient, negotiatedAnswer()).State()
+	require.Equal(t, lifecycle.OutcomeFailed, state.Turns[0].Outcome)
+}
+
+// fencedDeleteStore fails the tombstone write, and runs a hook at the exact
+// moment the delete fence is up: the session has stopped writing, and the
+// tombstone that would have justified dropping what it holds never lands.
+type fencedDeleteStore struct {
+	SessionStore
+	fenced func()
+}
+
+func (s *fencedDeleteStore) Delete(_ context.Context, _ SessionKey) error {
+	if s.fenced != nil {
+		hook := s.fenced
+		s.fenced = nil
+		hook()
+	}
+
+	return errors.New("tombstone write refused")
+}
+
+// TestFailedDeleteRetainsTheSettlingTurnsFrames pins that a delete whose
+// tombstone never lands hands the host back a live session whose mirror still
+// says what it holds. The fence stops the commit; it does not authorize
+// forgetting the frames the client was already shown, because the row those
+// frames belong to is still there.
+func TestFailedDeleteRetainsTheSettlingTurnsFrames(t *testing.T) {
+	t.Setenv("AMP_API_KEY", "conformance-key")
+
+	store := &fencedDeleteStore{SessionStore: NewInMemorySessionStore()}
+	agent := NewAgent(testContainmentOptions([]Option{
+		WithExecutablePath(lifecycleHarness(t)),
+		WithScratchDir(testScratchDir(t)),
+		WithSessionStore(store),
+	})...)
+	t.Cleanup(func() { require.NoError(t, agent.Close()) })
+
+	client := &lifecycleClient{}
+	agent.setConnection(client)
+
+	_, err := agent.Initialize(t.Context(), acp.InitializeRequest{Meta: lifecycleOffer(1.0)})
+	require.NoError(t, err)
+
+	session, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
+	require.NoError(t, err)
+
+	streamed := make(chan struct{})
+	client.onAgentChunk = func() { close(streamed) }
+
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+
+		resp, promptErr := agent.Prompt(t.Context(), lifecyclePrompt(session.SessionId, "hang", "sub-1", "nonce-1"))
+		require.NoError(t, promptErr)
+		require.Equal(t, acp.StopReasonCancelled, resp.StopReason)
+	}()
+
+	<-streamed
+
+	// The turn settles inside the delete's fence, so its commit is the one the
+	// fence forbids.
+	store.fenced = func() {
+		require.NoError(t, agent.Cancel(t.Context(), acp.CancelNotification{SessionId: session.SessionId}))
+		<-done
+	}
+
+	_, err = agent.UnstableDeleteSession(t.Context(), acp.UnstableDeleteSessionRequest{SessionId: session.SessionId})
+	require.ErrorContains(t, err, "tombstone write refused")
+
+	stored, err := agent.store.Load(t.Context(), SessionKey{SessionID: string(session.SessionId), Subpath: transcriptSubpath})
+	require.NoError(t, err)
+	require.Empty(t, stored, "the fence forbids the write")
+
+	live, err := agent.session(session.SessionId)
+	require.NoError(t, err)
+
+	live.mu.Lock()
+	retained := len(live.unsyncedFrames)
+	live.mu.Unlock()
+	require.NotZero(t, retained, "the frames the client was shown are retained, not dropped")
+
+	// The mirror is unsynced, and the session the host still owns re-commits
+	// exactly those frames rather than reporting itself clean over a gap.
+	require.NoError(t, live.ensureMirrorSynced(t.Context()))
+
+	stored, err = agent.store.Load(t.Context(), SessionKey{SessionID: string(session.SessionId), Subpath: transcriptSubpath})
+	require.NoError(t, err)
+	require.Len(t, stored, retained)
+}
+
+// TestPromptAdmissionIsTheClosureLinearization pins the window a prompt and a
+// teardown race in. A prompt that already passed its own readiness gate is
+// admitted under the same lock a close or delete fences one with, so a teardown
+// that observed an empty slot is a teardown no later prompt slips past.
+func TestPromptAdmissionIsTheClosureLinearization(t *testing.T) {
+	t.Setenv("AMP_API_KEY", "conformance-key")
+
+	agent := newTestAgent(WithExecutablePath(lifecycleHarness(t)), WithScratchDir(testScratchDir(t)))
+	t.Cleanup(func() { require.NoError(t, agent.Close()) })
+
+	closing, err := newAgentSession(t.Context(), agent, "T-closing", t.TempDir(), parsedSessionMeta{}, "", nil)
+	require.NoError(t, err)
+
+	// The prompt's own gate passes first, exactly as it does in flight.
+	require.NoError(t, closing.ready())
+	// The close then runs whole: it marks the session closed and observes an
+	// empty prompt slot, so it waits for nothing.
+	require.NoError(t, closing.Close(t.Context()))
+	require.ErrorIs(t, closing.admitPrompt(newPromptTurnState()), errSessionClosed)
+
+	deleting, err := newAgentSession(t.Context(), agent, "T-deleting", t.TempDir(), parsedSessionMeta{}, "", nil)
+	require.NoError(t, err)
+
+	t.Cleanup(func() { require.NoError(t, deleting.Close(t.Context())) })
+
+	require.NoError(t, deleting.ready())
+	// A session fenced for delete keeps nothing it writes, so a turn admitted
+	// after the fence would stream frames its own commit is forbidden to take.
+	deleting.fencePersistence()
+	require.ErrorIs(t, deleting.admitPrompt(newPromptTurnState()), errSessionClosed)
+
+	deleting.resumePersistence()
+
+	admitted := newPromptTurnState()
+	require.NoError(t, deleting.admitPrompt(admitted))
+	// A prompt the session admitted is one its teardown waits out, so the
+	// fixture settles it exactly as a real prompt does.
+	admitted.complete(nil)
+	deleting.clearActivePrompt(admitted)
+
+	// The whole prompt path refuses the same way. Readiness alone does not see a
+	// delete fence, so admission is the gate that keeps a fenced session from
+	// launching native work whose frames its own commit may not take.
+	created, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
+	require.NoError(t, err)
+
+	live, err := agent.session(created.SessionId)
+	require.NoError(t, err)
+
+	live.fencePersistence()
+	require.NoError(t, live.ready())
+
+	_, err = agent.Prompt(t.Context(), TextPromptRequest(created.SessionId, "fenced-turn", "hello"))
+	require.ErrorIs(t, err, errSessionClosed)
+}
+
+// TestIncompleteLaunchPublishesItsBoundaryOnTheLatch pins that a launch which
+// started a process and could not deliver its input reports an unsettled prompt.
+// The completion latch is what a close or delete waits on, so an incomplete
+// boundary published there as nil would let a teardown call the session settled
+// and remove the scratch state a surviving tree still runs against.
+func TestIncompleteLaunchPublishesItsBoundaryOnTheLatch(t *testing.T) {
+	t.Setenv("AMP_API_KEY", "conformance-key")
+
+	agent := NewAgent(testContainmentOptions([]Option{
+		WithExecutablePath(lifecycleHarness(t)),
+		WithScratchDir(testScratchDir(t)),
+	})...)
+	// The boundary never completed, so this agent reports it for the rest of its
+	// life and never releases the session's scratch.
+	t.Cleanup(func() { require.ErrorIs(t, agent.Close(), nativeamp.ErrProcessContainmentIncomplete) })
+
+	client := &lifecycleClient{}
+	agent.setConnection(client)
+
+	_, err := agent.Initialize(t.Context(), acp.InitializeRequest{Meta: lifecycleOffer(1.0)})
+	require.NoError(t, err)
+
+	created, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
+	require.NoError(t, err)
+
+	session, err := agent.session(created.SessionId)
+	require.NoError(t, err)
+
+	var latch *promptTurnState
+
+	agent.options.runtime.executeThread = func(context.Context, *nativeamp.Client, any) (*nativeamp.Turn, error) {
+		// The prompt is already published here, which is what a concurrent close
+		// or delete would find and wait on.
+		latch = session.activePromptState()
+
+		return nil, fmt.Errorf("%w: input delivery refused", nativeamp.ErrProcessContainmentIncomplete)
+	}
+
+	_, err = agent.Prompt(t.Context(), lifecyclePrompt(created.SessionId, "hello", "sub-1", "nonce-1"))
+	require.Error(t, err)
+	require.Equal(t, []string{"lifecycle_snapshot"}, client.eventTypes(t), "nothing was accepted")
+
+	require.NotNil(t, latch, "the prompt is admitted before it launches native work")
+	require.ErrorIs(t, latch.awaitCompletion(t.Context()), nativeamp.ErrProcessContainmentIncomplete,
+		"the latch carries the boundary this launch lost")
+
+	// The teardown every close and delete performs refuses to reclaim scratch
+	// state behind an unproven boundary.
+	require.ErrorIs(t, session.Close(t.Context()), nativeamp.ErrProcessContainmentIncomplete)
+	require.DirExists(t, session.settingsDir)
 }

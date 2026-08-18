@@ -354,11 +354,43 @@ func (s *agentSession) interruptState(ctx context.Context, state *promptTurnStat
 	return turn.Interrupt(cancelCtx, timeout)
 }
 
-func (s *agentSession) setActivePrompt(state *promptTurnState) {
+// admitPrompt publishes one prompt as the session's active turn. Admission takes
+// the same lock a close or delete takes to fence one, and it re-reads the
+// closure and delete fences under it, so the two orders are one linearization: a
+// prompt is admitted before any teardown observes an empty slot, or it is
+// refused and launches nothing.
+func (s *agentSession) admitPrompt(state *promptTurnState) error {
 	s.cancelMu.Lock()
 	defer s.cancelMu.Unlock()
 
+	s.mu.Lock()
+	closed := s.closed
+	// A session fenced for delete keeps nothing it writes, so a turn admitted
+	// here would stream frames its own commit is forbidden to take.
+	fenced := s.persistForbidden
+	s.mu.Unlock()
+
+	if closed || fenced {
+		return errSessionClosed
+	}
+
 	s.activePrompt = state
+
+	return nil
+}
+
+// fenceAdmission closes the session to new prompts and reports the one already
+// admitted, both under the lock admission takes. Whatever it returns is the
+// complete set of native work this teardown must wait out.
+func (s *agentSession) fenceAdmission() *promptTurnState {
+	s.cancelMu.Lock()
+	defer s.cancelMu.Unlock()
+
+	s.mu.Lock()
+	s.closed = true
+	s.mu.Unlock()
+
+	return s.activePrompt
 }
 
 func (s *agentSession) activePromptState() *promptTurnState {
@@ -387,13 +419,10 @@ func (s *agentSession) poison(cause string) error {
 }
 
 func (s *agentSession) Close(ctx context.Context) error {
-	s.mu.Lock()
-	s.closed = true
-	s.mu.Unlock()
+	state := s.fenceAdmission()
 
 	s.closeProviderAuth()
 
-	state := s.activePromptState()
 	if state != nil {
 		state.cancel()
 	}
@@ -412,20 +441,21 @@ func (s *agentSession) Close(ctx context.Context) error {
 
 		s.recordScratchContainment(completionErr)
 		err = errors.Join(err, completionErr)
-		boundaryErr = errors.Join(boundaryErr, completionErr)
+		// The boundary is re-read after the wait, not before it: a prompt that
+		// lost containment records it while this close is already waiting, and a
+		// close judging the session on the reading it took first would remove
+		// scratch state a surviving tree still runs against.
+		boundaryErr = errors.Join(s.scratchContainmentError(), completionErr)
 	}
 
 	return finalizeSessionScratch(err, boundaryErr, s.settingsDir, s.scratchRootRelease)
 }
 
 func (s *agentSession) Delete(ctx context.Context) error {
-	s.mu.Lock()
-	s.closed = true
-	s.mu.Unlock()
+	state := s.fenceAdmission()
 
 	s.closeProviderAuth()
 
-	state := s.activePromptState()
 	if state != nil {
 		state.cancel()
 	}
@@ -445,7 +475,9 @@ func (s *agentSession) Delete(ctx context.Context) error {
 
 		s.recordScratchContainment(completionErr)
 		interruptErr = errors.Join(interruptErr, completionErr)
-		boundaryErr = errors.Join(boundaryErr, completionErr)
+		// Re-read after the wait for the same reason a close does: the boundary a
+		// settling prompt lost is recorded while this delete is already waiting.
+		boundaryErr = errors.Join(s.scratchContainmentError(), completionErr)
 	}
 
 	if !amp.ProcessContainmentComplete(boundaryErr) {
@@ -595,16 +627,27 @@ func (s *agentSession) persistAfterTurn(ctx context.Context, transcript []Sessio
 	s.persistMu.Lock()
 	defer s.persistMu.Unlock()
 
-	if s.persistFenced() {
-		return nil
-	}
-
 	now := time.Now().UnixMilli()
 
 	s.mu.Lock()
-	s.updatedUnix = now
+	fenced := s.persistForbidden
 	pending := append(cloneEntries(s.unsyncedFrames), cloneEntries(transcript)...)
+
+	if !fenced {
+		s.updatedUnix = now
+	}
 	s.mu.Unlock()
+
+	// A fenced session is one whose delete is in flight: nothing it still holds
+	// may be written back, because Replace clears the tombstone of every key it
+	// lists. The frames are retained rather than dropped — a delete whose
+	// tombstone never lands hands the host back a live session, and that session's
+	// mirror must still say the frames it streamed were never committed.
+	if fenced {
+		s.retainUnsynced(pending)
+
+		return nil
+	}
 
 	if s.agent.store == nil {
 		s.mu.Lock()
@@ -741,15 +784,6 @@ func (s *agentSession) resumePersistence() {
 	defer s.mu.Unlock()
 
 	s.persistForbidden = false
-}
-
-// persistFenced reports that this session's row is being deleted, so nothing it
-// still holds may be written back.
-func (s *agentSession) persistFenced() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	return s.persistForbidden
 }
 
 // retainUnsynced marks the mirror as unsynced by keeping the exact frames that

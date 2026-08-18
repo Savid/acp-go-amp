@@ -526,7 +526,11 @@ func TestCancelAlreadyCancelledBranch(t *testing.T) {
 	session := &agentSession{agent: newTestAgent()}
 	state := newPromptTurnState()
 	state.cancel()
-	session.setActivePrompt(state)
+
+	if err := session.admitPrompt(state); err != nil {
+		t.Fatalf("admit prompt = %v", err)
+	}
+
 	if err := session.Cancel(context.Background()); err != nil {
 		t.Fatalf("cancel on already-cancelled prompt = %v", err)
 	}

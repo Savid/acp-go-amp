@@ -79,9 +79,11 @@ func lifecycleParamError(refusal *lifecycle.ParamError) error {
 }
 
 // rejectLifecycleMeta refuses the lifecycle key on a surface that never carries
-// it. A family literal is never foreign and never a no-op: an inbound surface
-// outside `initialize`, `session/prompt`, and `session/cancel` rejects it rather
-// than ignoring it as another namespace's business.
+// it. A family literal is never foreign and never a no-op: `initialize` and
+// `session/prompt` are the only inbound surfaces that read one, and every other
+// surface — `session/cancel` included, where the refusal fails the cancel closed
+// before the native interrupt — rejects it rather than ignoring it as another
+// namespace's business.
 func rejectLifecycleMeta(meta map[string]any) error {
 	if _, present := meta[lifecycle.MetaKey]; !present {
 		return nil
@@ -91,6 +93,21 @@ func rejectLifecycleMeta(meta map[string]any) error {
 		jsonFieldError: valUnsupported,
 		jsonFieldField: lifecycle.MetaPath,
 	})
+}
+
+// rejectLifecycleConfigOptionMeta refuses the key on either variant of
+// `session/set_config_option`. The variant a request chose decides where its
+// `_meta` lives, and neither placement is a surface that reads the key.
+func rejectLifecycleConfigOptionMeta(params acp.SetSessionConfigOptionRequest) error {
+	if params.Boolean != nil {
+		return rejectLifecycleMeta(params.Boolean.Meta)
+	}
+
+	if params.ValueId != nil {
+		return rejectLifecycleMeta(params.ValueId.Meta)
+	}
+
+	return nil
 }
 
 func rejectLifecycleMetaParams(params json.RawMessage) error {

@@ -318,18 +318,14 @@ func encodeListCursor(offset int) string {
 }
 
 func (a *Agent) Prompt(ctx context.Context, params acp.PromptRequest) (resp acp.PromptResponse, err error) {
-	requestCtx := ctx
-
 	ctx, finishReq := a.observe.StartACPRequest(ctx, acp.AgentMethodSessionPrompt)
 	defer func() { finishReq(err) }()
-
-	var lifecycleErr error
 
 	ctx, finishLifecycle, err := a.beginLifecycleOperation(ctx)
 	if err != nil {
 		return acp.PromptResponse{}, err
 	}
-	defer func() { finishLifecycle(errors.Join(err, lifecycleErr)) }()
+	defer func() { finishLifecycle(err) }()
 
 	session, err := a.session(params.SessionId)
 	if err != nil {
@@ -341,18 +337,17 @@ func (a *Agent) Prompt(ctx context.Context, params acp.PromptRequest) (resp acp.
 
 	resp, err = session.Prompt(ctx, params)
 
-	// A cancelled request reports a cancelled success only once the prompt
-	// settled. A settlement failure is the prompt failing, and it keeps the
-	// failure's own wire shape rather than being reported as a clean cancel.
+	// The turn's own settlement decides how it ended, and the terminal identity
+	// it recorded is the one the v1 response states. A cancel that lands while a
+	// turn is already failing does not convert that failure into a clean cancel:
+	// the lifecycle idle recorded `failed`, and a response saying `cancelled`
+	// would contradict the boundary the host was just shown.
+	//
+	// A settlement failure keeps the failure's own wire shape rather than the
+	// wrapper the prompt marked it as unsettled with.
 	var unsettled unsettledPromptError
 	if errors.As(err, &unsettled) {
 		return acp.PromptResponse{}, unsettled.err
-	}
-
-	if requestCtx.Err() != nil && err != nil {
-		lifecycleErr = err
-		resp = cancelledPromptResponse(resp.Usage, params.MessageId)
-		err = nil
 	}
 
 	return resp, err
@@ -503,6 +498,14 @@ func (a *Agent) SetSessionConfigOption(ctx context.Context, params acp.SetSessio
 	ctx, finish := a.observe.StartACPRequest(ctx, acp.AgentMethodSessionSetConfigOption)
 	defer func() { finish(err) }()
 
+	// The family literal is refused by name before the discriminator is judged.
+	// Both variants carry their own `_meta`, and "this adapter takes no boolean
+	// option" and "the key is not read here" are different answers: a reserved
+	// literal is never ignored because the request was going to be refused anyway.
+	if refusal := rejectLifecycleConfigOptionMeta(params); refusal != nil {
+		return acp.SetSessionConfigOptionResponse{}, refusal
+	}
+
 	// Amp advertises select options only, so the boolean variant is refused on
 	// the discriminator that chose it rather than on the value it carried.
 	if params.Boolean != nil {
@@ -511,10 +514,6 @@ func (a *Agent) SetSessionConfigOption(ctx context.Context, params acp.SetSessio
 
 	if params.ValueId == nil {
 		return acp.SetSessionConfigOptionResponse{}, unsupportedField(fieldValue)
-	}
-
-	if refusal := rejectLifecycleMeta(params.ValueId.Meta); refusal != nil {
-		return acp.SetSessionConfigOptionResponse{}, refusal
 	}
 
 	session, err := a.session(params.ValueId.SessionId)
@@ -532,6 +531,13 @@ func (a *Agent) SetSessionConfigOption(ctx context.Context, params acp.SetSessio
 func (a *Agent) SetSessionMode(ctx context.Context, params acp.SetSessionModeRequest) (resp acp.SetSessionModeResponse, err error) {
 	_, finish := a.observe.StartACPRequest(ctx, acp.AgentMethodSessionSetMode)
 	defer func() { finish(err) }()
+
+	// The family literal is refused by name before the method's own answer. A
+	// method this adapter does not route is still an inbound surface, and a
+	// reserved key on it is rejected rather than swallowed with the method.
+	if refusal := rejectLifecycleMeta(params.Meta); refusal != nil {
+		return acp.SetSessionModeResponse{}, refusal
+	}
 
 	return acp.SetSessionModeResponse{}, acp.NewMethodNotFound(acp.AgentMethodSessionSetMode)
 }

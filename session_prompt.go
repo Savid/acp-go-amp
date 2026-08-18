@@ -213,7 +213,15 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (ac
 
 	state.setCancelFunc(cancelContinue)
 
-	s.setActivePrompt(state)
+	// Admission and closure are one linearization: a prompt published here is a
+	// prompt every later close or delete waits out, and a session already closed
+	// or already fenced for delete admits none. Publishing after the checks that
+	// gate it would let a teardown see no active prompt and complete while this
+	// one went on to launch native work against the session it just tore down.
+	if admitErr := s.admitPrompt(state); admitErr != nil {
+		return acp.PromptResponse{}, admitErr
+	}
+
 	defer s.clearActivePrompt(state)
 	defer state.complete(nil)
 
@@ -247,6 +255,19 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (ac
 	turn, err := s.launchNativeTurn(continueCtx, promptClient, input)
 	if err != nil {
 		s.recordScratchContainment(err)
+
+		// A launch that started a process and could not deliver its input owns a
+		// tree its cleanup did not contain. That boundary is the latch's own
+		// business, so it is published there: a close or delete waiting on this
+		// prompt must not read an incomplete boundary as a settled one and go on
+		// to remove the scratch state a surviving tree still runs against. It
+		// outranks the cancel guard — a request whose boundary broke did not end
+		// cleanly, whatever the host asked for.
+		if !amp.ProcessContainmentComplete(err) {
+			state.complete(err)
+
+			return acp.PromptResponse{}, unsettled(classifyNativePromptError(err))
+		}
 
 		if state.isCancelled() {
 			return cancelledPromptResponse(nil, params.MessageId), nil

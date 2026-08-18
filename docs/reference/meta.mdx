@@ -256,6 +256,11 @@ prompt fails with that error and emits **no** terminal `idle` — a boundary mus
 never claim a foreground prefix the store does not hold, so the incarnation ends
 unsettled and the next prompt's snapshot states the truth about it.
 
+The outcome a settled turn recorded is the one its ACP response states. A cancel
+landing while a turn is already failing does not turn that failure into a
+cancelled result: the `idle` the host was just shown recorded `failed`, and the
+response carries the matching turn-failure error.
+
 ### Carriers and refusals
 
 Every lifecycle envelope rides its own identity-only `session_info_update`,
@@ -268,11 +273,16 @@ patches already carry are unaffected.
 Amp has no permission or elicitation surface, so no action correlation value is
 ever emitted. Every other inbound surface — `session/new`, `session/load`,
 `session/resume`, `session/close`, `session/delete`, `session/list`,
-`session/set_config_option`, `logout`, `authenticate`, `_amp/auth/*`, and
+`session/set_mode`, `session/set_config_option` in either variant, `logout`,
+`authenticate`, `_amp/auth/*`, and
 `_amp/session/fork` — rejects the key with `-32602` naming
-`_meta["acp-go.dev/lifecycle"]`. A `session/cancel` carrying it fails closed
-before the native interrupt and the cancel is never applied; being a
-notification it carries no response frame, so that refusal is wire-silent.
+`_meta["acp-go.dev/lifecycle"]`. A `session/cancel` carrying it
+fails closed before the native interrupt and the cancel is never applied; being
+a notification it carries no response frame, so that refusal is wire-silent.
 
-`session/set_mode` does not exist on this adapter, so it answers `-32601 method
-not found` before any parameter is inspected.
+`session/set_mode` does not exist on this adapter and answers `-32601 method not
+found`. The refusal above is judged first: a family literal is never ignored
+because the request was going to be refused anyway, so a `session/set_mode`
+carrying the key answers `-32602` naming it, and so does the boolean
+`session/set_config_option` variant this adapter otherwise rejects on its
+discriminator.

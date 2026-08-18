@@ -63,7 +63,18 @@ stdio or embed the agent directly in Go.
   idle.
 - `session/delete` fences the session's writes and waits out the commit in
   flight before its tombstone lands: a late `Replace` never clears a tombstone
-  it did not create.
+  it did not create. A commit the fence stops retains its frames as
+  mirror-unsynced: a delete whose tombstone never lands hands the host back a
+  live session, and that session may not report itself clean over frames it was
+  never allowed to write.
+- Admitting a prompt and closing a session are one linearization. A prompt
+  publishes itself as the session's active turn under the same lock a close or
+  delete fences one with, and a session already closed or already fenced for
+  delete admits none, so a teardown that observed an empty prompt slot is one no
+  later prompt slips past.
+- The outcome a settled turn recorded is the one its v1 response states: a
+  cancel landing while a turn is already failing never rewrites that failure
+  into a cancelled success.
 
 ## Testing Rules
 
