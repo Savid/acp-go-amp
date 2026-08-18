@@ -258,9 +258,8 @@ docs-audit:
 	@rg -q 'identity-only .session_info_update' docs/reference/meta.mdx docs/reference/updates.mdx
 	@rg -q 'no envelope attached' docs/reference/meta.mdx docs/reference/updates.mdx
 	@rg -q 'Only the answer is ordered' docs/reference/meta.mdx
-	@rg -q 'authenticate.*_amp/session/fork. .\n?.*rejects the key' -U docs/reference/meta.mdx
+	@rg -q 'authenticate.*_amp/auth/\*.*\n.*_amp/session/fork.*rejects the key' -U docs/reference/meta.mdx
 	@rg -q 'session/set_mode. does not exist on this adapter' docs/reference/meta.mdx
-	@rg -q 'the member that is not permitted' docs/reference/meta.mdx
 	@rg -q 'no action correlation value is' docs/reference/meta.mdx
 	@rg -q 'claimed before delivery is attempted' docs/reference/meta.mdx
 

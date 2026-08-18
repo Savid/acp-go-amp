@@ -735,6 +735,139 @@ func TestLifecycleKeyRefusedOnEverySurfaceThatNeverCarriesIt(t *testing.T) {
 	}
 }
 
+func TestLifecycleKeyRefusedBeforeExtensionDispatch(t *testing.T) {
+	fixture := newAuthFixture(t, "login")
+	flow := fixture.mustAuthorizeMethod("lifecycle-refusal", authMethodAPIKey)
+	record, ok, err := fixture.broker.ledger.read(authProviderID, "lifecycle-refusal")
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	fixture.broker.mu.Lock()
+	baselineGeneration := fixture.broker.generation
+	baselineFlow := fixture.broker.byID[flow.FlowID]
+	baselineFlowState := baselineFlow.state
+	baselineFlowReason := baselineFlow.reason
+	baselineCredential := append([]byte(nil), baselineFlow.credential...)
+	baselineFlows := len(fixture.broker.flows)
+	baselineByID := len(fixture.broker.byID)
+	baselineRetained := len(fixture.broker.retained)
+	fixture.broker.mu.Unlock()
+
+	fixture.agent.mu.Lock()
+	baselineSessions := len(fixture.agent.sessions)
+	fixture.agent.mu.Unlock()
+
+	meta := map[string]any{lifecycle.MetaKey: map[string]any{"version": 1.0}}
+	cases := []struct {
+		name   string
+		method string
+		params map[string]any
+	}{
+		{"auth methods", AuthMethodsMethod, map[string]any{authFieldSessionID: string(fixture.session.id), "_meta": meta}},
+		{"auth authorize", AuthAuthorizeMethod, map[string]any{
+			authFieldSessionID:          string(fixture.session.id),
+			authFieldProviderID:         authProviderID,
+			authFieldConnectionID:       "lifecycle-refusal-new",
+			authFieldMethodsGeneration:  baselineGeneration,
+			authFieldMethod:             authMethodAPIKey,
+			authFieldAuthorizeRequestID: "lifecycle-refusal-new",
+			"_meta":                     meta,
+		}},
+		{"auth callback", AuthCallbackMethod, map[string]any{
+			authFieldSessionID:  string(fixture.session.id),
+			authFieldProviderID: authProviderID,
+			authFieldMethod:     authMethodAPIKey,
+			authFieldFlowID:     flow.FlowID,
+			authFieldInput:      manualAmpKeyCanary,
+			"_meta":             meta,
+		}},
+		{"auth status", AuthStatusMethod, map[string]any{
+			authFieldSessionID:  string(fixture.session.id),
+			authFieldProviderID: authProviderID,
+			authFieldFlowID:     flow.FlowID,
+			"_meta":             meta,
+		}},
+		{"auth cancel", AuthCancelMethod, map[string]any{
+			authFieldSessionID:  string(fixture.session.id),
+			authFieldProviderID: authProviderID,
+			authFieldFlowID:     flow.FlowID,
+			"_meta":             meta,
+		}},
+		{"auth inventory", AuthInventoryMethod, map[string]any{authFieldSessionID: string(fixture.session.id), "_meta": meta}},
+		{"auth credential", AuthCredentialMethod, map[string]any{
+			authFieldSessionID:  string(fixture.session.id),
+			authFieldProviderID: authProviderID,
+			authFieldFlowID:     flow.FlowID,
+			"_meta":             meta,
+		}},
+		{"auth disconnect", AuthDisconnectMethod, map[string]any{
+			authFieldSessionID:         string(fixture.session.id),
+			authFieldProviderID:        authProviderID,
+			authFieldConnectionID:      record.ConnectionID,
+			authFieldBindingGeneration: record.BindingGeneration,
+			"_meta":                    meta,
+		}},
+		{"fork", ForkSessionMethod, map[string]any{
+			jsonFieldSessionID: string(fixture.session.id),
+			"cwd":              fixture.session.cwd,
+			"_meta":            meta,
+		}},
+	}
+
+	authMethods := make([]string, 0, len(cases)-1)
+	for _, testCase := range cases[:len(cases)-1] {
+		authMethods = append(authMethods, testCase.method)
+	}
+	require.Equal(t, authMethodNames(), authMethods)
+
+	connection := &localAgentConnection{agent: fixture.agent}
+	connection.initialized.Store(true)
+
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			raw, err := json.Marshal(testCase.params)
+			require.NoError(t, err)
+
+			_, requestErr := connection.handle(t.Context(), testCase.method, raw)
+			require.NotNil(t, requestErr)
+			require.Equal(t, invalidParamsCode, requestErr.Code)
+			data, ok := requestErr.Data.(map[string]any)
+			require.True(t, ok)
+			require.Equal(t, lifecycle.MetaPath, data[jsonFieldField])
+
+			fixture.broker.mu.Lock()
+			generation := fixture.broker.generation
+			currentFlow := fixture.broker.byID[flow.FlowID]
+			flowState := currentFlow.state
+			flowReason := currentFlow.reason
+			credential := append([]byte(nil), currentFlow.credential...)
+			flows := len(fixture.broker.flows)
+			byID := len(fixture.broker.byID)
+			retained := len(fixture.broker.retained)
+			fixture.broker.mu.Unlock()
+
+			require.Equal(t, baselineGeneration, generation)
+			require.Same(t, baselineFlow, currentFlow)
+			require.Equal(t, baselineFlowState, flowState)
+			require.Equal(t, baselineFlowReason, flowReason)
+			require.Equal(t, baselineCredential, credential)
+			require.Equal(t, baselineFlows, flows)
+			require.Equal(t, baselineByID, byID)
+			require.Equal(t, baselineRetained, retained)
+
+			currentRecord, present, err := fixture.broker.ledger.read(authProviderID, record.ConnectionID)
+			require.NoError(t, err)
+			require.True(t, present)
+			require.Equal(t, record, currentRecord)
+
+			fixture.agent.mu.Lock()
+			sessions := len(fixture.agent.sessions)
+			fixture.agent.mu.Unlock()
+			require.Equal(t, baselineSessions, sessions)
+		})
+	}
+}
+
 // TestLifecycleKeyFailsACancelClosed pins the cancel rule: the key fails the
 // cancel before native interrupt, the cancel is never applied, and because a
 // notification carries no response frame the refusal is wire-silent.

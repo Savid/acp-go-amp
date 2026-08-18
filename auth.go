@@ -182,6 +182,14 @@ func (a *Agent) handleAuthExtensionMethod(ctx context.Context, method string, pa
 	}
 
 	switch method {
+	case AuthMethodsMethod, AuthAuthorizeMethod, AuthCallbackMethod, AuthStatusMethod,
+		AuthCancelMethod, AuthInventoryMethod, AuthCredentialMethod, AuthDisconnectMethod:
+		if refusal := rejectLifecycleMetaParams(params); refusal != nil {
+			return nil, true, refusal
+		}
+	}
+
+	switch method {
 	case AuthMethodsMethod:
 		result, err := broker.methods(ctx, params)
 

@@ -362,6 +362,10 @@ func (a *Agent) HandleExtensionMethod(ctx context.Context, method string, params
 
 	switch method {
 	case ForkSessionMethod:
+		if refusal := rejectLifecycleMetaParams(params); refusal != nil {
+			return acp.UnstableForkSessionResponse{}, refusal
+		}
+
 		return acp.UnstableForkSessionResponse{}, acp.NewInvalidParams(map[string]any{
 			jsonFieldError: valUnsupported,
 			jsonFieldField: ForkSessionMethod,

@@ -268,18 +268,11 @@ patches already carry are unaffected.
 Amp has no permission or elicitation surface, so no action correlation value is
 ever emitted. Every other inbound surface — `session/new`, `session/load`,
 `session/resume`, `session/close`, `session/delete`, `session/list`,
-`session/set_config_option`, `logout`, `authenticate`, and `_amp/session/fork` —
-rejects the key with `-32602` naming `_meta["acp-go.dev/lifecycle"]`. A
-`session/cancel` carrying it fails closed before the native interrupt and the
-cancel is never applied; being a notification it carries no response frame, so
-that refusal is wire-silent.
+`session/set_config_option`, `logout`, `authenticate`, `_amp/auth/*`, and
+`_amp/session/fork` — rejects the key with `-32602` naming
+`_meta["acp-go.dev/lifecycle"]`. A `session/cancel` carrying it fails closed
+before the native interrupt and the cancel is never applied; being a
+notification it carries no response frame, so that refusal is wire-silent.
 
-Two surfaces answer with a narrower path, and both are the honest answer rather
-than an omission:
-
-- The `_amp/auth/*` legs decode their parameters against a closed permitted-member
-  set, so a `_meta` of any kind is already invalid params there. The refusal
-  names `_meta`, the member that is not permitted, rather than the key inside it.
-- `session/set_mode` does not exist on this adapter, so it answers
-  `-32601 method not found` before any parameter is inspected. A key on a method
-  that is not there is refused by the method's own absence.
+`session/set_mode` does not exist on this adapter, so it answers `-32601 method
+not found` before any parameter is inspected.

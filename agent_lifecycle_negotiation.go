@@ -1,6 +1,8 @@
 package ampacp
 
 import (
+	"encoding/json"
+
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-amp/internal/lifecycle"
 )
@@ -89,4 +91,14 @@ func rejectLifecycleMeta(meta map[string]any) error {
 		jsonFieldError: valUnsupported,
 		jsonFieldField: lifecycle.MetaPath,
 	})
+}
+
+func rejectLifecycleMetaParams(params json.RawMessage) error {
+	var carrier struct {
+		Meta map[string]any `json:"_meta"`
+	}
+
+	_ = json.Unmarshal(params, &carrier)
+
+	return rejectLifecycleMeta(carrier.Meta)
 }
