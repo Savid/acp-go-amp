@@ -13,6 +13,7 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 	nativeamp "github.com/savid/acp-go-amp/internal/amp"
+	"github.com/savid/acp-go-amp/internal/lifecycle"
 	"github.com/savid/acp-go-amp/internal/observer"
 )
 
@@ -45,6 +46,10 @@ type Agent struct {
 	containmentMode  RuntimeContainmentMode
 	configurationErr error
 	providerAuth     *providerAuth
+	// lifecycle is the answer this connection negotiated at initialize. It is
+	// the contract for the connection: with no answer present there is no
+	// envelope, no correlation read, and no lifecycle fact at all.
+	lifecycle lifecycle.Negotiated
 
 	// harnessMu guards harnessPath, the exact absolute amp binary the version
 	// and startup probes validated against the static base. Every child this
@@ -244,10 +249,19 @@ func (a *Agent) Initialize(ctx context.Context, params acp.InitializeRequest) (r
 		a.log.WarnContext(ctx, "image artifact sweep failed", slog.String(jsonFieldError, sweepErr.Error()))
 	}
 
+	// The lifecycle answer rides the response's own top-level `_meta`, never
+	// agentCapabilities._meta: later protocol work relocates capability objects
+	// and initialize `_meta` survives that move unchanged.
+	lifecycleMeta, err := a.negotiateLifecycle(params.Meta)
+	if err != nil {
+		return acp.InitializeResponse{}, err
+	}
+
 	title := a.options.AgentTitle
 	position := selectPositionEncoding(params.ClientCapabilities.PositionEncodings)
 
 	return acp.InitializeResponse{
+		Meta:            lifecycleMeta,
 		ProtocolVersion: acp.ProtocolVersionNumber,
 		AgentInfo: &acp.Implementation{
 			Name:    a.options.AgentName,
@@ -320,6 +334,10 @@ func (a *Agent) Authenticate(ctx context.Context, params acp.AuthenticateRequest
 func (a *Agent) Logout(ctx context.Context, params acp.LogoutRequest) (resp acp.LogoutResponse, err error) {
 	_, finish := a.observe.StartACPRequest(ctx, acp.AgentMethodLogout)
 	defer func() { finish(err) }()
+
+	if err := rejectLifecycleMeta(params.Meta); err != nil {
+		return acp.LogoutResponse{}, err
+	}
 
 	return acp.LogoutResponse{}, nil
 }

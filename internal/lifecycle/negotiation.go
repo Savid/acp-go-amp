@@ -1,6 +1,7 @@
 package lifecycle
 
 import (
+	"encoding/json"
 	"math"
 	"slices"
 )
@@ -38,33 +39,33 @@ type Offer struct {
 	Versions []int
 }
 
-// DecodeOffer reads the offer from `InitializeRequest._meta`. A connection whose
-// offer is absent reports ErrNoEnvelope: the host asked for nothing, and the
-// answer, every envelope, and every correlation read are then omitted for the
-// whole connection.
-func DecodeOffer(meta map[string]any) (Offer, error) {
+// DecodeOffer reads the offer from `InitializeRequest._meta`. An absent offer is
+// reported as not present rather than as a refusal: the host asked for nothing,
+// and the answer, every envelope, and every correlation read are then omitted for
+// the whole connection.
+func DecodeOffer(meta map[string]any) (Offer, bool, *ParamError) {
 	raw, present := meta[MetaKey]
 	if !present {
-		return Offer{}, ErrNoEnvelope
+		return Offer{}, false, nil
 	}
 
 	fields, ok := raw.(map[string]any)
 	if !ok {
-		return Offer{}, paramError()
+		return Offer{}, false, paramError()
 	}
 
 	for key := range fields {
 		if key != fieldVersions {
-			return Offer{}, paramError(key)
+			return Offer{}, false, paramError(key)
 		}
 	}
 
-	versions, err := decodeVersions(fields[fieldVersions])
-	if err != nil {
-		return Offer{}, err
+	versions, refusal := decodeVersions(fields[fieldVersions])
+	if refusal != nil {
+		return Offer{}, false, refusal
 	}
 
-	return Offer{Versions: versions}, nil
+	return Offer{Versions: versions}, true, nil
 }
 
 // Answer resolves the offer against the versions this adapter implements and the
@@ -90,7 +91,7 @@ func (o Offer) Answer(proven Negotiated) (Negotiated, bool) {
 
 // decodeVersions reads the ascending non-empty integer array every negotiation
 // object carries. It is validated on every offer whatever the version.
-func decodeVersions(raw any) ([]int, error) {
+func decodeVersions(raw any) ([]int, *ParamError) {
 	listed, ok := raw.([]any)
 	if !ok || len(listed) == 0 {
 		return nil, paramError(fieldVersions)
@@ -99,12 +100,12 @@ func decodeVersions(raw any) ([]int, error) {
 	versions := make([]int, 0, len(listed))
 
 	for _, entry := range listed {
-		number, ok := entry.(float64)
-		if !ok || number != math.Trunc(number) {
+		version, ok := integerValue(entry)
+		if !ok {
 			return nil, paramError(fieldVersions)
 		}
 
-		versions = append(versions, int(number))
+		versions = append(versions, version)
 	}
 
 	if !slices.IsSorted(versions) {
@@ -127,7 +128,7 @@ type Submission struct {
 // version 1 is negotiated. The key is required when negotiated and forbidden when
 // not, and either way the verdict is reached before the prompt is dispatched, so
 // no frame is written to the harness.
-func DecodePromptCorrelation(meta map[string]any, negotiated Negotiated) (Submission, error) {
+func DecodePromptCorrelation(meta map[string]any, negotiated Negotiated) (Submission, *ParamError) {
 	raw, present := meta[MetaKey]
 
 	switch {
@@ -150,23 +151,41 @@ func DecodePromptCorrelation(meta map[string]any, negotiated Negotiated) (Submis
 		}
 	}
 
-	if err := checkCorrelationVersion(fields, negotiated); err != nil {
-		return Submission{}, err
+	if refusal := checkCorrelationVersion(fields, negotiated); refusal != nil {
+		return Submission{}, refusal
 	}
 
 	return decodeSubmission(fields[fieldSubmission])
 }
 
-func checkCorrelationVersion(fields map[string]any, negotiated Negotiated) error {
-	version, ok := fields[fieldVersion].(float64)
-	if !ok || version != math.Trunc(version) || !negotiated.SupportsVersion(int(version)) {
+func checkCorrelationVersion(fields map[string]any, negotiated Negotiated) *ParamError {
+	version, ok := integerValue(fields[fieldVersion])
+	if !ok || !negotiated.SupportsVersion(version) {
 		return paramError(fieldVersion)
 	}
 
 	return nil
 }
 
-func decodeSubmission(raw any) (Submission, error) {
+// integerValue reads one JSON integer. A decoded wire value arrives as a float64
+// and an embedding Go host writes an int, so both are the same integer; a
+// fractional value is neither.
+func integerValue(raw any) (int, bool) {
+	switch value := raw.(type) {
+	case float64:
+		return int(value), value == math.Trunc(value)
+	case int:
+		return value, true
+	case json.Number:
+		number, err := value.Int64()
+
+		return int(number), err == nil
+	default:
+		return 0, false
+	}
+}
+
+func decodeSubmission(raw any) (Submission, *ParamError) {
 	fields, ok := raw.(map[string]any)
 	if !ok {
 		return Submission{}, paramError(fieldSubmission)
@@ -189,9 +208,9 @@ func decodeSubmission(raw any) (Submission, error) {
 		{fieldClientNonce, &submission.ClientNonce, true},
 		{fieldRunID, &submission.RunID, false},
 	} {
-		value, err := correlationIdentifier(fields, member.key, member.required)
-		if err != nil {
-			return Submission{}, err
+		value, refusal := correlationIdentifier(fields, member.key, member.required)
+		if refusal != nil {
+			return Submission{}, refusal
 		}
 
 		*member.target = value
@@ -202,7 +221,7 @@ func decodeSubmission(raw any) (Submission, error) {
 
 // correlationIdentifier reads one opaque handle. A required one is never empty,
 // and every one is bounded: an identifier is a correlation handle, not a payload.
-func correlationIdentifier(fields map[string]any, key string, required bool) (string, error) {
+func correlationIdentifier(fields map[string]any, key string, required bool) (string, *ParamError) {
 	raw, present := fields[key]
 	if !present {
 		if required {

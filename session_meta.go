@@ -51,6 +51,13 @@ func parseSessionMeta(meta map[string]any) (parsedSessionMeta, error) {
 			}
 		case "traceparent", "tracestate", "baggage":
 		default:
+			// A session lifecycle request never carries the lifecycle extension:
+			// the extension is a different thing and rides none of them, so the
+			// family literal is rejected here rather than ignored as another
+			// namespace's business.
+			if err := rejectLifecycleMeta(map[string]any{key: value}); err != nil {
+				return result, err
+			}
 		}
 	}
 

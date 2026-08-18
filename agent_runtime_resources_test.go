@@ -343,18 +343,13 @@ func TestRuntimeResourceHooks(t *testing.T) {
 	require.Equal(t, 1, releases)
 }
 
-func TestFinalizeNativePromptRetainsIncompleteBoundary(t *testing.T) {
-	response := acp.PromptResponse{StopReason: acp.StopReasonEndTurn}
+func TestFirstErrorKeepsTheLeadingFailureShape(t *testing.T) {
 	wantErr := errors.New("turn failed")
 
-	final, err := finalizeNativePrompt(response, wantErr, nativeamp.ErrProcessContainmentIncomplete)
-	require.Equal(t, acp.PromptResponse{}, final)
-	require.ErrorIs(t, err, wantErr)
-	require.ErrorIs(t, err, nativeamp.ErrProcessContainmentIncomplete)
-
-	final, err = finalizeNativePrompt(response, wantErr, nil)
-	require.Equal(t, response, final)
-	require.ErrorIs(t, err, wantErr)
+	require.ErrorIs(t, firstError(wantErr, nativeamp.ErrProcessContainmentIncomplete), wantErr)
+	require.NotErrorIs(t, firstError(wantErr, nativeamp.ErrProcessContainmentIncomplete), nativeamp.ErrProcessContainmentIncomplete)
+	require.ErrorIs(t, firstError(nil, nativeamp.ErrProcessContainmentIncomplete), nativeamp.ErrProcessContainmentIncomplete)
+	require.NoError(t, firstError(nil, nil))
 }
 
 func TestNativeInternalErrorPreservesLifecycleSentinels(t *testing.T) {
