@@ -100,6 +100,24 @@ func TestReducerRefusesAnIncompleteSnapshotForeground(t *testing.T) {
 	}
 }
 
+// TestReducerRefusesAMisshapenSnapshotForegroundTurn pins that the emit gate
+// holds a snapshot's foreground to the same turn shape the decoder enforces: an
+// idle foreground names no turn, origin travels exactly with the turn, and an
+// origin is one of the two causes.
+func TestReducerRefusesAMisshapenSnapshotForegroundTurn(t *testing.T) {
+	t.Parallel()
+
+	for _, foreground := range []Foreground{
+		{State: ForegroundIdle, CycleID: "cyc-0", TurnID: "turn-1"},
+		{State: ForegroundRunning, CycleID: "cyc-1", TurnID: "turn-1"},
+		{State: ForegroundRunning, CycleID: "cyc-1", Origin: CauseSubmission},
+		{State: ForegroundRunning, CycleID: "cyc-1", TurnID: "turn-1", Origin: "bogus"},
+	} {
+		requireReduceRefusal(t, richConfiguration(), ViolationMalformedEnvelope,
+			Event{Type: EventSnapshot, Snapshot: &Snapshot{Foreground: foreground}})
+	}
+}
+
 // TestSnapshotIntroducesEveryIdentityItNames pins that the state a snapshot
 // asserts predates the stream: its foreground turn, its activities' origin turns,
 // and its actions' owners are all introduced by the assertion itself.
@@ -219,7 +237,7 @@ func TestSnapshotForegroundTurnSettlesWithoutAcceptance(t *testing.T) {
 
 	reducer, refusal := reduceAll(t, richConfiguration(),
 		Event{Type: EventSnapshot, Snapshot: &Snapshot{
-			Foreground: Foreground{State: ForegroundRunning, CycleID: "cyc-1", TurnID: "turn-1"},
+			Foreground: Foreground{State: ForegroundRunning, CycleID: "cyc-1", TurnID: "turn-1", Origin: CauseSubmission},
 		}},
 		IdleEvent("cyc-1", "turn-1", StopReasonEndTurn, OutcomeSuccess),
 	)
