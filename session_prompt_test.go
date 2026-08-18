@@ -873,6 +873,89 @@ func TestSettlementFailureIsNotACancelledSuccess(t *testing.T) {
 	require.ErrorIs(t, marked, outage)
 }
 
+func TestCloseReportsSettlementCommitFailure(t *testing.T) {
+	ledger := &settlementLedger{}
+	agent, store, client, sessionID := settlementAgent(t, ledger)
+	outage := errors.New("session store outage after containment")
+	streamed := make(chan struct{})
+	client.onAgentChunk = func() {
+		store.fail(outage)
+		close(streamed)
+	}
+
+	promptErr := make(chan error, 1)
+	go func() {
+		_, err := agent.Prompt(t.Context(), lifecyclePrompt(sessionID, "hang", "sub-close-failure", "nonce-close-failure"))
+		promptErr <- err
+	}()
+
+	<-streamed
+
+	closeErr := make(chan error, 1)
+	go func() {
+		_, err := agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: sessionID})
+		closeErr <- err
+	}()
+
+	require.ErrorIs(t, <-promptErr, outage)
+	require.ErrorIs(t, <-closeErr, outage)
+	require.NotContains(t, ledger.snapshot(), "idle")
+}
+
+func TestDeleteReportsTerminalLifecycleFailureAfterTombstone(t *testing.T) {
+	ledger := &settlementLedger{}
+	agent, store, client, sessionID := settlementAgent(t, ledger)
+	deliveryFailure := errors.New("terminal lifecycle delivery failed")
+	streamed := make(chan struct{})
+	idleStarted := make(chan struct{})
+	idleRelease := make(chan struct{})
+	client.onAgentChunk = func() { close(streamed) }
+	client.idleStarted = idleStarted
+	client.idleRelease = idleRelease
+	client.idleErr = deliveryFailure
+
+	promptErr := make(chan error, 1)
+	go func() {
+		_, err := agent.Prompt(t.Context(), lifecyclePrompt(sessionID, "hang", "sub-delete-failure", "nonce-delete-failure"))
+		promptErr <- err
+	}()
+
+	<-streamed
+
+	deleteErr := make(chan error, 1)
+	go func() {
+		_, err := agent.UnstableDeleteSession(t.Context(), DeleteSessionRequest(sessionID))
+		deleteErr <- err
+	}()
+
+	<-idleStarted
+
+	main, err := store.Load(t.Context(), SessionKey{SessionID: string(sessionID), Subpath: SessionStoreMainSubpath})
+	require.NoError(t, err)
+	require.Empty(t, main)
+
+	select {
+	case err := <-deleteErr:
+		t.Fatalf("delete returned before terminal delivery settled: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(idleRelease)
+
+	require.ErrorIs(t, <-promptErr, deliveryFailure)
+	require.ErrorIs(t, <-deleteErr, deliveryFailure)
+
+	after := store.replaceCount()
+	main, err = store.Load(t.Context(), SessionKey{SessionID: string(sessionID), Subpath: SessionStoreMainSubpath})
+	require.NoError(t, err)
+	require.Empty(t, main)
+
+	transcript, err := store.Load(t.Context(), SessionKey{SessionID: string(sessionID), Subpath: transcriptSubpath})
+	require.NoError(t, err)
+	require.Empty(t, transcript)
+	require.Equal(t, after, store.replaceCount())
+}
+
 // TestDeleteFencesALaterSettlementCommit pins the other half of the delete
 // serialization: a settlement that reaches its commit after the tombstone landed
 // writes nothing at all, so the frames it held die with the session rather than

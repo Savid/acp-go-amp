@@ -781,7 +781,10 @@ func (s orderingStore) Replace(ctx context.Context, key SessionKey, replacements
 // ledger.
 type orderingClient struct {
 	lifecycleClient
-	record func(string)
+	record      func(string)
+	idleStarted chan<- struct{}
+	idleRelease <-chan struct{}
+	idleErr     error
 }
 
 func (c *orderingClient) SessionUpdate(ctx context.Context, notification acp.SessionNotification) error {
@@ -789,6 +792,15 @@ func (c *orderingClient) SessionUpdate(ctx context.Context, notification acp.Ses
 		if event, ok := envelope["event"].(map[string]any); ok {
 			if event["type"] == "state_update" && event["state"] == "idle" {
 				c.record("idle")
+				if c.idleStarted != nil {
+					c.idleStarted <- struct{}{}
+				}
+				if c.idleRelease != nil {
+					<-c.idleRelease
+				}
+				if c.idleErr != nil {
+					return c.idleErr
+				}
 			}
 		}
 	}

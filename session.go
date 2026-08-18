@@ -406,12 +406,13 @@ func (s *agentSession) Close(ctx context.Context) error {
 			context.WithoutCancel(ctx),
 			s.agent.options.runtime.nativeCancelTimeout+2*s.agent.options.runtime.nativeCloseTurnWait,
 		)
-		closeErr := state.awaitCompletion(waitCtx)
+		completionErr := state.awaitCompletion(waitCtx)
 
 		cancelWait()
 
-		s.recordScratchContainment(closeErr)
-		boundaryErr = errors.Join(boundaryErr, closeErr)
+		s.recordScratchContainment(completionErr)
+		err = errors.Join(err, completionErr)
+		boundaryErr = errors.Join(boundaryErr, completionErr)
 	}
 
 	return finalizeSessionScratch(err, boundaryErr, s.settingsDir, s.scratchRootRelease)
@@ -438,13 +439,13 @@ func (s *agentSession) Delete(ctx context.Context) error {
 			context.WithoutCancel(ctx),
 			s.agent.options.runtime.nativeCancelTimeout+2*s.agent.options.runtime.nativeCloseTurnWait,
 		)
-		closeErr := state.awaitCompletion(waitCtx)
+		completionErr := state.awaitCompletion(waitCtx)
 
 		cancelWait()
 
-		s.recordScratchContainment(closeErr)
-		interruptErr = errors.Join(interruptErr, closeErr)
-		boundaryErr = errors.Join(boundaryErr, closeErr)
+		s.recordScratchContainment(completionErr)
+		interruptErr = errors.Join(interruptErr, completionErr)
+		boundaryErr = errors.Join(boundaryErr, completionErr)
 	}
 
 	if !amp.ProcessContainmentComplete(boundaryErr) {

@@ -327,7 +327,7 @@ func (s *agentSession) settlePrompt(
 	state *promptTurnState,
 	incarnation *promptStream,
 	result promptResult,
-) (acp.PromptResponse, error) {
+) (response acp.PromptResponse, err error) {
 	settleCtx := context.WithoutCancel(ctx)
 
 	proof, closeErr := s.agent.options.runtime.settleTurn(turn)
@@ -342,7 +342,7 @@ func (s *agentSession) settlePrompt(
 	// terminal would let a close response fence a stream this prompt is still
 	// writing to, and let a close return before the frames it was shown are
 	// durable.
-	defer state.complete(closeErr)
+	defer func() { state.complete(err) }()
 
 	if !amp.ProcessContainmentComplete(closeErr) {
 		return acp.PromptResponse{}, unsettled(errors.Join(result.err, closeErr))
