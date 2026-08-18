@@ -95,7 +95,7 @@ func rejectLifecycleMeta(meta map[string]any) error {
 
 func rejectLifecycleMetaParams(params json.RawMessage) error {
 	var carrier struct {
-		Meta map[string]any `json:"_meta"`
+		Meta map[string]any `json:"_meta"` //nolint:tagliatelle // ACP fixes this reserved field name.
 	}
 
 	_ = json.Unmarshal(params, &carrier)

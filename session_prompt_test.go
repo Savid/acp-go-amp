@@ -935,8 +935,8 @@ func TestDeleteReportsTerminalLifecycleFailureAfterTombstone(t *testing.T) {
 	require.Empty(t, main)
 
 	select {
-	case err := <-deleteErr:
-		t.Fatalf("delete returned before terminal delivery settled: %v", err)
+	case resultErr := <-deleteErr:
+		t.Fatalf("delete returned before terminal delivery settled: %v", resultErr)
 	case <-time.After(50 * time.Millisecond):
 	}
 
