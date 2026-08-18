@@ -221,3 +221,28 @@ func TestUnprovenVacancyOpensTheNextIncarnationNegative(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, map[string]any{"quiescent": false}, event["quiescence"])
 }
+
+// TestRecoveredVacancyStatesTheBoundaryItProved pins that the quiescence fact is
+// governed by the proof the settling boundary completed, never by the fact the
+// opening snapshot carried: an incarnation that opened unable to state a
+// boundary still states the one it went on to prove.
+func TestRecoveredVacancyStatesTheBoundaryItProved(t *testing.T) {
+	client := &lifecycleClient{}
+	session := lifecycleStreamSession(t, authoritativeAnswer(), client)
+	session.recordVacancy(false)
+
+	incarnation, err := session.openPromptStream(t.Context())
+	require.NoError(t, err)
+	require.NoError(t, incarnation.accept(t.Context(), lifecycle.Submission{SubmissionID: "s", ClientNonce: "n"}))
+	require.NoError(t, incarnation.settle(t.Context(),
+		lifecycleOutcome{stopReason: "end_turn", outcome: lifecycle.OutcomeSuccess},
+		nativeamp.ContainmentProof{Root: 4242, Proven: true}))
+
+	require.Equal(t, []string{
+		"lifecycle_snapshot", "prompt_accepted", "state_update", "state_update", "quiescence_update",
+	}, client.eventTypes(t))
+
+	state := reduceEmittedStream(t, client, authoritativeAnswer()).State()
+	require.True(t, state.Quiescence.Certified)
+	require.Equal(t, "amp-process-tree/4242", state.Quiescence.Barrier)
+}
