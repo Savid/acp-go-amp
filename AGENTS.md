@@ -11,12 +11,15 @@ stdio or embed the agent directly in Go.
 - Root package `ampacp`: ACP agent methods, request builders, metadata parsing,
   raw events, config options, and session-store API.
 - `internal/amp`: Amp process boundary, stream-json parsing, environment
-  construction, and interrupt handling.
+  construction, interrupt handling, and the contained-descendant inventory.
+- `internal/lifecycle`: the self-contained `acp-go.dev/lifecycle` reducer,
+  decoder, negotiation and correlation readers, and ordered emitter.
 - `cmd/acp-go-amp`: stdio ACP command with `-path`, `-home`, `-model`,
   `-scratch-dir`, `-debug`, `-version`, and repeatable `-seed-file` flags, plus
   Darwin containment operations.
 - `examples`: embeddable host examples that must stay covered by tests.
 - `integration`: smoke and live tests for installed Amp binaries.
+- `testdata/lifecycle`: the canonical family reducer battery, verbatim.
 - `docs`: public documentation mirrored by `docs.json` navigation.
 
 ## Commands
@@ -45,6 +48,12 @@ stdio or embed the agent directly in Go.
   Image-bearing tool results use canonical artifact references so base64 and
   signed URLs do not leak into transcript or diagnostic surfaces.
 - Do not persist auth, settings, API keys, or other secrets.
+- Answer the lifecycle negotiation only with facts the active configuration
+  proves, resolved from the same code path that enforces containment. A
+  degenerate answer is correct; an unprovable one is not.
+- Settle a prompt in one order: native terminal, containment and vacancy proof,
+  durable commit, terminal idle, quiescence fact, response. One commit point
+  covers every exit path.
 
 ## Testing Rules
 
@@ -54,6 +63,11 @@ stdio or embed the agent directly in Go.
 - Conformance tests must pin strict `_meta.amp` handling, the mode-only config
   surface, no fork capability, no elicitation metadata, command silence, MCP
   accept/reject behavior, and backpressure errors.
+- Run every vector in `testdata/lifecycle` with exact-equality projection
+  matching. Those files are the family's contract: never edit, reorder, or
+  delete one.
+- Reduce this adapter's own emitted lifecycle stream through the same reducer
+  the vectors drive.
 - Live tests may spend tokens only when explicitly env-gated.
 
 ## Security And Boundaries

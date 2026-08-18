@@ -4,7 +4,9 @@ description: The _meta.amp metadata the adapter accepts on requests, emits on up
 ---
 
 Lifecycle requests carry Amp-owned settings under the `_meta.amp` namespace.
-Unknown keys fail closed; foreign namespaces are ignored.
+Unknown keys fail closed; foreign vendor namespaces are ignored. The
+family-reserved `acp-go.dev/*` literals are never foreign: each one is either
+read or rejected on every surface it can reach.
 
 ## Request metadata
 
@@ -158,3 +160,105 @@ Amp does not advertise `_meta["acp-go.dev/route"]`, stamp it on callbacks, or
 validate a turn nonce — and that says nothing about the media envelope, which is
 advertised regardless. Its prompt-builder nonce parameter is intentionally
 ignored; cancellation remains structurally scoped by `sessionId`.
+
+## Session lifecycle
+
+`acp-go.dev/lifecycle` is the fourth family-reserved literal this adapter
+handles, alongside `acp-go.dev/mediaEnvelope`, `acp-go.dev/handoff`, and
+`acp-go.dev/route` — the one it deliberately does not implement. Unlike a vendor
+namespace, a family literal is never ignored: every surface either reads it or
+rejects it.
+
+### Negotiation
+
+The host offers on `InitializeRequest._meta`, carrying exactly one member:
+
+```json
+{"acp-go.dev/lifecycle": {"versions": [1]}}
+```
+
+The adapter answers on the **response's own top-level `_meta`**, never inside
+`agentCapabilities._meta`. The answer describes the active configuration and is
+resolved from the same code path that enforces containment:
+
+```json
+{
+  "acp-go.dev/lifecycle": {
+    "versions": [1],
+    "updatesOutsidePrompt": false,
+    "authoritativeQuiescence": true,
+    "quiescenceSource": "process-containment",
+    "activityKinds": []
+  }
+}
+```
+
+| Field | Value | Why |
+|---|---|---|
+| `versions` | `[1]` | The intersection of the offer and the versions this adapter implements. An empty intersection omits the whole key rather than answering with an empty array. |
+| `updatesOutsidePrompt` | always `false` | A prompt is one short-lived `amp` process. Nothing survives it, so there is no channel between prompts. |
+| `authoritativeQuiescence` | `true` only under Linux process isolation | Only the isolation boundary enumerates the whole contained descendant set, so only it can prove vacancy. |
+| `quiescenceSource` | `process-containment`, present exactly when the line above is `true` | Ordinary same-identity execution and the Darwin best-effort opt-in prove a weaker boundary, and a weaker boundary is never promoted. |
+| `activityKinds` | always `[]` | This adapter reports no owned background work, so it emits no `activity_update` at all. |
+
+A truthfully degenerate answer is a correct answer, not a gap. A malformed
+offer — a non-object, a missing or non-ascending `versions`, or any additional
+member — is rejected with `-32602` naming the exact path, for example
+`{"error": "unsupported", "field": "_meta[\"acp-go.dev/lifecycle\"].versions"}`.
+With no offer at all, the response carries no lifecycle member and the
+connection has no lifecycle surface: no envelope, no correlation read, no
+lifecycle fact.
+
+### The prompt correlation value
+
+While version 1 is negotiated, every `session/prompt` carries:
+
+```json
+{"version": 1, "submission": {"submissionId": "opaque", "clientNonce": "opaque", "runId": "optional"}}
+```
+
+It is read and validated before dispatch, so a prompt this adapter cannot
+correlate writes no frame to the harness. `submissionId` and `clientNonce` are
+echoed verbatim on the acceptance event. With the extension not negotiated the
+key must be absent, and a present one is rejected the same way.
+
+### One incarnation per prompt
+
+A prompt is one contained process, so a prompt is one whole native lifecycle
+source lifetime. Each prompt opens its own stream with its own `streamId`,
+sequence space, and entities:
+
+1. `lifecycle_snapshot` — the first notification inside the prompt, stating the
+   idle foreground, empty activity and action sets, and the quiescence fact this
+   configuration can prove at stream open.
+2. `prompt_accepted` — emitted once the native dispatcher owns the frame,
+   echoing the submission identity.
+3. `state_update` `running` — the transcript then flows as ordinary
+   `session/update` notifications with **no envelope attached**.
+4. `state_update` `idle` — the truthful stop reason and the recorded outcome
+   (`success`, `cancelled`, `limit`, `failed`).
+5. `quiescence_update` — only where the containment boundary actually proved an
+   empty descendant set, carrying the watermark that proof covers and a barrier
+   naming the contained native root.
+
+The contained process exit fences the stream; the next prompt opens a new one.
+Sequences are claimed before delivery is attempted, so a lost event leaves a
+detectable gap rather than a silently contiguous stream.
+
+### Carriers and refusals
+
+Every lifecycle envelope rides its own identity-only `session_info_update`,
+beside `sessionId` and `update` on the notification's `_meta`. No other
+`sessionUpdate` variant carries one: message and tool-call patches have
+per-entity `_meta` reduction semantics a conformant client may coalesce, which
+would make an envelope placed there unrecoverable. The `_meta.amp` tags those
+patches already carry are unaffected.
+
+Amp has no permission or elicitation surface, so no action correlation value is
+ever emitted. Every other inbound surface — `session/new`, `session/load`,
+`session/resume`, `session/close`, `session/delete`, `session/list`,
+`session/set_config_option`, `logout`, and `_amp/session/fork` — rejects the key
+with `-32602` naming `_meta["acp-go.dev/lifecycle"]`. A `session/cancel`
+carrying it fails closed before the native interrupt and the cancel is never
+applied; being a notification it carries no response frame, so that refusal is
+wire-silent.

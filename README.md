@@ -118,6 +118,12 @@ rejects at session start.
   cannot prove escaped descendants absent, and retains a numeric PGID-reuse
   collateral-signalling risk.
 - Prompt streaming for assistant messages, tool calls, and thread results.
+- Ordered session lifecycle through the `acp-go.dev/lifecycle` extension when a
+  host offers it: one incarnation per prompt, opening on a snapshot, echoing the
+  prompt's submission identity, and settling on a terminal state with the
+  harness's own stop reason. The answer states only what the active
+  configuration proves, so authoritative quiescence is advertised under Linux
+  process isolation and nowhere else.
 - Static PNG, JPEG, GIF, and WebP prompt input with structural validation before
   Amp starts, as embedded base64 or — for a co-located host that sets
   `WithInputHandoffRoot` — as a digest-verified local file handed over on disk.

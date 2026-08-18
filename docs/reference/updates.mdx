@@ -20,6 +20,13 @@ turns and store replay. Each frame type maps to one update kind.
 The `usage_update` `size` field carries Amp's native `usage.max_tokens`
 verbatim, or `0` when absent.
 
+While the lifecycle extension is negotiated, the same prompt turn also emits
+identity-only `session_info_update` notifications whose only content is the
+ordered lifecycle envelope on the notification's `_meta`. They mutate no state
+and set neither `title` nor `updatedAt`; a host that does not reduce the
+extension can ignore them, and no frame-derived update above ever carries that
+envelope. See [Meta](/docs/reference/meta#session-lifecycle).
+
 ## Message identity
 
 Main-agent `agent_message_chunk` updates carry the same wrapper-derived UUID in

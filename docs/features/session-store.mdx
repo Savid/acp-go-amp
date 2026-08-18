@@ -34,13 +34,17 @@ under a separate fixed `60s` bound.
 | Subpath | Contents |
 |---|---|
 | main | Manifest: `sessionId` (the adapter-minted ACP session ID), `nativeSessionId` (the Amp thread ID, absent until the first prompt turn creates the thread), `cwd`, `title`, selected `mode`, and Unix-millisecond create/update timestamps. |
-| `transcript` | The full ordered Amp stream-JSON frame mirror for completed prompt turns. |
+| `transcript` | The full ordered Amp stream-JSON frame mirror for every prompt turn, including what a cancelled or failed turn streamed before it ended. |
 | `_artifacts/images/<digest>.json` | Canonical typed image tool-result record containing embedded base64 and media type, or an HTTP(S) resource URI, plus native identity, checksum, and creation time. |
 
-Each completed turn publishes the manifest, full transcript, and current image
-records together in one `Replace` generation. These records back
-`session/load` replay. Auth environment values, settings files, and API keys
-are never written to the store.
+Each turn publishes the manifest, full transcript, and current image records
+together in one `Replace` generation. Every turn does: a cancelled, failed, or
+timed-out turn commits the frames it already streamed, so what the store holds
+never diverges from what the client was shown. The commit runs after the turn
+process containment boundary completes and before the terminal state the host
+sees, so no settled turn claims a prefix the store does not hold. These records
+back `session/load` replay. Auth environment values, settings files, and API
+keys are never written to the store.
 
 Ordinary transcript frames retain the exact native Amp stream JSON. An
 image-bearing tool-result frame is rewritten to stable artifact references
