@@ -47,13 +47,13 @@ func (r *Reducer) applySnapshot(delivery Delivery) error {
 func (r *Reducer) adoptSnapshotActivities(delivery Delivery, activities []ActivityUpdate) error {
 	first := len(r.state.Activities)
 
-	for _, activity := range activities {
-		if err := r.checkActivityIdentity(delivery, activity); err != nil {
+	for index := range activities {
+		if err := r.checkActivityIdentity(delivery, activities[index]); err != nil {
 			return err
 		}
 
-		r.recordActivity(delivery, activity)
-		r.seeTurn(activity.OriginTurnID, delivery.Sequence)
+		r.recordActivity(delivery, activities[index])
+		r.seeTurn(activities[index].OriginTurnID, delivery.Sequence)
 	}
 
 	for offset := range activities {
@@ -359,8 +359,8 @@ func (r *Reducer) patchActivity(delivery Delivery, update ActivityUpdate) error 
 // checkDescendantsTerminal refuses a parent that would terminalize while part of
 // the subtree it claims to have finished is still live.
 func (r *Reducer) checkDescendantsTerminal(delivery Delivery, activityID string) error {
-	for _, child := range r.state.Activities {
-		if child.ParentID == activityID && !child.State.Terminal() {
+	for index := range r.state.Activities {
+		if child := &r.state.Activities[index]; child.ParentID == activityID && !child.State.Terminal() {
 			return r.fail(delivery, ViolationParentTerminalBeforeChild, "child "+child.ActivityID+" is live")
 		}
 	}

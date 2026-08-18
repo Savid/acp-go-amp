@@ -346,7 +346,7 @@ func firstError(errs ...error) error {
 
 // runPromptTurn consumes the native stream to its end. Every exit reports the
 // frames it accumulated, so the caller's single commit point covers all of them.
-func (s *agentSession) runPromptTurn( //nolint:gocyclo // The loop owns the complete turn state machine.
+func (s *agentSession) runPromptTurn(
 	ctx context.Context,
 	turn *amp.Turn,
 	state *promptTurnState,

@@ -107,8 +107,8 @@ func (s State) Vacant() bool {
 		return false
 	}
 
-	for _, activity := range s.Activities {
-		if !activity.State.Terminal() {
+	for index := range s.Activities {
+		if !s.Activities[index].State.Terminal() {
 			return false
 		}
 	}

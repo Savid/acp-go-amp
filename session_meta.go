@@ -55,8 +55,8 @@ func parseSessionMeta(meta map[string]any) (parsedSessionMeta, error) {
 			// the extension is a different thing and rides none of them, so the
 			// family literal is rejected here rather than ignored as another
 			// namespace's business.
-			if err := rejectLifecycleMeta(map[string]any{key: value}); err != nil {
-				return result, err
+			if refusal := rejectLifecycleMeta(map[string]any{key: value}); refusal != nil {
+				return result, refusal
 			}
 		}
 	}

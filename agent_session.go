@@ -163,8 +163,8 @@ func (a *Agent) ListSessions(ctx context.Context, params acp.ListSessionsRequest
 	ctx, finish := a.observe.StartACPRequest(ctx, acp.AgentMethodSessionList)
 	defer func() { finish(err) }()
 
-	if err := rejectLifecycleMeta(params.Meta); err != nil {
-		return acp.ListSessionsResponse{}, err
+	if refusal := rejectLifecycleMeta(params.Meta); refusal != nil {
+		return acp.ListSessionsResponse{}, refusal
 	}
 
 	ctx, finishLifecycle, err := a.beginLifecycleOperation(ctx)
@@ -356,8 +356,8 @@ func (a *Agent) Cancel(ctx context.Context, params acp.CancelNotification) (err 
 	// A cancel carrying the lifecycle key fails closed before native interrupt,
 	// and the cancel is never applied. Being a notification it carries no response
 	// frame, so the refusal is this method own internal error and is wire-silent.
-	if err := rejectLifecycleMeta(params.Meta); err != nil {
-		return err
+	if refusal := rejectLifecycleMeta(params.Meta); refusal != nil {
+		return refusal
 	}
 
 	session, err := a.session(params.SessionId)
@@ -372,8 +372,8 @@ func (a *Agent) CloseSession(ctx context.Context, params acp.CloseSessionRequest
 	ctx, finish := a.observe.StartACPRequest(ctx, acp.AgentMethodSessionClose)
 	defer func() { finish(err) }()
 
-	if err := rejectLifecycleMeta(params.Meta); err != nil {
-		return acp.CloseSessionResponse{}, err
+	if refusal := rejectLifecycleMeta(params.Meta); refusal != nil {
+		return acp.CloseSessionResponse{}, refusal
 	}
 
 	ctx, finishLifecycle, err := a.beginLifecycleOperation(ctx)
@@ -394,8 +394,8 @@ func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDe
 	ctx, finish := a.observe.StartACPRequest(ctx, acp.AgentMethodSessionDelete)
 	defer func() { finish(err) }()
 
-	if err := rejectLifecycleMeta(params.Meta); err != nil {
-		return acp.UnstableDeleteSessionResponse{}, err
+	if refusal := rejectLifecycleMeta(params.Meta); refusal != nil {
+		return acp.UnstableDeleteSessionResponse{}, refusal
 	}
 
 	ctx, finishLifecycle, err := a.beginLifecycleOperation(ctx)
@@ -486,8 +486,8 @@ func (a *Agent) SetSessionConfigOption(ctx context.Context, params acp.SetSessio
 		return acp.SetSessionConfigOptionResponse{}, unsupportedField(fieldValue)
 	}
 
-	if err := rejectLifecycleMeta(params.ValueId.Meta); err != nil {
-		return acp.SetSessionConfigOptionResponse{}, err
+	if refusal := rejectLifecycleMeta(params.ValueId.Meta); refusal != nil {
+		return acp.SetSessionConfigOptionResponse{}, refusal
 	}
 
 	session, err := a.session(params.ValueId.SessionId)

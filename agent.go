@@ -335,8 +335,8 @@ func (a *Agent) Logout(ctx context.Context, params acp.LogoutRequest) (resp acp.
 	_, finish := a.observe.StartACPRequest(ctx, acp.AgentMethodLogout)
 	defer func() { finish(err) }()
 
-	if err := rejectLifecycleMeta(params.Meta); err != nil {
-		return acp.LogoutResponse{}, err
+	if refusal := rejectLifecycleMeta(params.Meta); refusal != nil {
+		return acp.LogoutResponse{}, refusal
 	}
 
 	return acp.LogoutResponse{}, nil

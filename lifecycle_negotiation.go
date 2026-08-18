@@ -16,17 +16,13 @@ func (a *Agent) negotiateLifecycle(meta map[string]any) (map[string]any, error) 
 		return nil, lifecycleParamError(refusal)
 	}
 
-	if !offered {
-		a.retainNegotiatedLifecycle(lifecycle.Negotiated{})
-
-		return nil, nil
-	}
-
 	answer, common := offer.Answer(a.provenLifecycleFacts())
-	if !common {
+	if !offered || !common {
 		a.retainNegotiatedLifecycle(lifecycle.Negotiated{})
 
-		return nil, nil
+		// An omitted key and an empty answer are the same wire fact: the response
+		// carries no lifecycle member at all.
+		return map[string]any{}, nil
 	}
 
 	a.retainNegotiatedLifecycle(answer)

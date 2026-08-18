@@ -46,6 +46,7 @@ type promptStream struct {
 func (s *agentSession) openPromptStream(ctx context.Context) (*promptStream, error) {
 	negotiated := s.agent.negotiatedLifecycle()
 	if !negotiated.Present() {
+		//nolint:nilnil // A connection with no answer opens no incarnation, and every promptStream method is nil-safe.
 		return nil, nil
 	}
 
