@@ -147,6 +147,9 @@ func TestDecodePromptCorrelationStrictness(t *testing.T) {
 		{"over-bound run id", map[string]any{"version": 1.0, "submission": map[string]any{
 			"submissionId": "sub-1", "clientNonce": "non-1", "runId": strings.Repeat("r", IdentifierBound+1),
 		}}, MetaPath + ".submission.runId"},
+		{"empty run id", map[string]any{"version": 1.0, "submission": map[string]any{
+			"submissionId": "sub-1", "clientNonce": "non-1", "runId": "",
+		}}, MetaPath + ".submission.runId"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

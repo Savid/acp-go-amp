@@ -219,8 +219,10 @@ func decodeSubmission(raw any) (Submission, *ParamError) {
 	return submission, nil
 }
 
-// correlationIdentifier reads one opaque handle. A required one is never empty,
-// and every one is bounded: an identifier is a correlation handle, not a payload.
+// correlationIdentifier reads one opaque handle. An identifier is a correlation
+// handle, not a payload: it is bounded, and it is never empty — an optional one
+// is omitted rather than emptied, so a member present carrying the empty string
+// is malformed rather than absent.
 func correlationIdentifier(fields map[string]any, key string, required bool) (string, *ParamError) {
 	raw, present := fields[key]
 	if !present {
@@ -232,7 +234,7 @@ func correlationIdentifier(fields map[string]any, key string, required bool) (st
 	}
 
 	value, ok := raw.(string)
-	if !ok || len(value) > IdentifierBound || (value == "" && required) {
+	if !ok || value == "" || len(value) > IdentifierBound {
 		return "", paramError(fieldSubmission, key)
 	}
 
