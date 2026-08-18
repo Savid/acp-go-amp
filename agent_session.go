@@ -340,6 +340,15 @@ func (a *Agent) Prompt(ctx context.Context, params acp.PromptRequest) (resp acp.
 	defer func() { finish(promptResultForObserver(resp, err, a.options.DefaultModel)) }()
 
 	resp, err = session.Prompt(ctx, params)
+
+	// A cancelled request reports a cancelled success only once the prompt
+	// settled. A settlement failure is the prompt failing, and it keeps the
+	// failure's own wire shape rather than being reported as a clean cancel.
+	var unsettled unsettledPromptError
+	if errors.As(err, &unsettled) {
+		return acp.PromptResponse{}, unsettled.err
+	}
+
 	if requestCtx.Err() != nil && err != nil {
 		lifecycleErr = err
 		resp = cancelledPromptResponse(resp.Usage, params.MessageId)
@@ -431,6 +440,16 @@ func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDe
 
 	nativeID := manifest.NativeSessionID
 
+	// The live session stops writing before the tombstone lands. Replace clears
+	// the tombstone of every key it lists, so a settlement commit landing after
+	// the delete would durably resurrect a session the host was told is gone.
+	// Fencing waits out the commit already in flight, which is what makes the
+	// tombstone the last write to this row.
+	live, _ := a.session(params.SessionId)
+	if live != nil {
+		live.fencePersistence()
+	}
+
 	if a.store != nil {
 		deleteCtx, cancelDelete := a.sessionStoreWriteContext(ctx)
 		deleteErr := a.store.Delete(deleteCtx, SessionKey{SessionID: string(params.SessionId), Subpath: SessionStoreMainSubpath})
@@ -438,6 +457,12 @@ func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDe
 		cancelDelete()
 
 		if deleteErr != nil {
+			// No tombstone landed, so the session is still the host's and must be
+			// able to commit its next turn.
+			if live != nil {
+				live.resumePersistence()
+			}
+
 			return acp.UnstableDeleteSessionResponse{}, deleteErr
 		}
 	}
@@ -448,6 +473,8 @@ func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDe
 	// one this delete owns: no expected pointer is passed.
 	session := a.takeSession(ctx, params.SessionId, nil)
 	if session != nil {
+		session.fencePersistence()
+
 		nativeID = session.nativeSessionID()
 	}
 

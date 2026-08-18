@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/coder/acp-go-sdk"
+	"github.com/savid/acp-go-amp/internal/amp"
 	"github.com/stretchr/testify/require"
 )
 
@@ -471,6 +472,13 @@ func TestRemainingBranches(t *testing.T) {
 	cancelled.cancel()
 	if resp, err := streamEndedWithoutTerminal(ctx, cancelled, nil, nil, fakeTurnErrors{errs: make(chan error)}); err != nil || resp.StopReason != acp.StopReasonCancelled {
 		t.Fatalf("cancelled stream end = %#v, %v", resp, err)
+	}
+	// A cancel and a successful terminal frame can both be ready at the same
+	// select. A turn the host already cancelled reports cancelled whichever one
+	// the loop happened to read.
+	success := &amp.ResultMessage{Subtype: "success"}
+	if resp, err := (&agentSession{}).resolveTerminal(ctx, cancelled, success, nil, nil, "", "", fakeTurnErrors{errs: make(chan error)}); err != nil || resp.StopReason != acp.StopReasonCancelled {
+		t.Fatalf("cancelled terminal = %#v, %v", resp, err)
 	}
 
 	rawAgent := newTestAgent(WithConcurrencyLimits(ConcurrencyLimits{MaxConcurrentClientCalls: 1}))

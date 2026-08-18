@@ -711,6 +711,14 @@ func TestLifecycleKeyRefusedOnEverySurfaceThatNeverCarriesIt(t *testing.T) {
 
 			return err
 		},
+		// Amp advertises no auth method, so authenticate has its own refusal to
+		// give. The family literal is rejected by name first: "the method does
+		// not exist" and "the key is not read here" are different answers.
+		"authenticate": func() error {
+			_, err := agent.Authenticate(t.Context(), acp.AuthenticateRequest{MethodId: "amp", Meta: key})
+
+			return err
+		},
 	}
 
 	for method, call := range calls {

@@ -151,11 +151,15 @@ type agentSession struct {
 	// enumerate an empty contained descendant set. A session that has never
 	// prompted started no process at all, so it opens with nothing outstanding.
 	vacancyUnproven bool
-	turn            chan struct{}
-	cancelMu        sync.Mutex
-	activePrompt    *promptTurnState
-	persistMu       sync.Mutex
-	mu              sync.Mutex
+	// persistForbidden fences durable writes once the session's row is being
+	// deleted, so nothing this session still holds is written back over the
+	// tombstone.
+	persistForbidden bool
+	turn             chan struct{}
+	cancelMu         sync.Mutex
+	activePrompt     *promptTurnState
+	persistMu        sync.Mutex
+	mu               sync.Mutex
 }
 
 func newAgentSession(ctx context.Context, agent *Agent, id acp.SessionId, cwd string, meta parsedSessionMeta, mcpConfigJSON string, additionalDirs []string) (_ *agentSession, err error) {
@@ -590,6 +594,10 @@ func (s *agentSession) persistAfterTurn(ctx context.Context, transcript []Sessio
 	s.persistMu.Lock()
 	defer s.persistMu.Unlock()
 
+	if s.persistFenced() {
+		return nil
+	}
+
 	now := time.Now().UnixMilli()
 
 	s.mu.Lock()
@@ -708,6 +716,39 @@ func (s *agentSession) vacancyProven() bool {
 	defer s.mu.Unlock()
 
 	return !s.vacancyUnproven
+}
+
+// fencePersistence stops this session's durable writes and waits out the one
+// already in flight. A delete tombstones the row, and Replace clears the
+// tombstone of every key it lists, so a commit that landed after the tombstone
+// would durably resurrect a session the host was told is gone. Taking the same
+// lock the commit holds is what makes the tombstone the last write to the row.
+func (s *agentSession) fencePersistence() {
+	s.persistMu.Lock()
+	defer s.persistMu.Unlock()
+
+	s.mu.Lock()
+	s.persistForbidden = true
+	s.mu.Unlock()
+}
+
+// resumePersistence lifts the fence. A delete whose tombstone never landed left
+// the session where it was, and a session the host still owns commits its next
+// turn.
+func (s *agentSession) resumePersistence() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.persistForbidden = false
+}
+
+// persistFenced reports that this session's row is being deleted, so nothing it
+// still holds may be written back.
+func (s *agentSession) persistFenced() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.persistForbidden
 }
 
 // retainUnsynced marks the mirror as unsynced by keeping the exact frames that

@@ -328,6 +328,14 @@ func (a *Agent) Authenticate(ctx context.Context, params acp.AuthenticateRequest
 	_, finish := a.observe.StartACPRequest(ctx, acp.AgentMethodAuthenticate)
 	defer func() { finish(err) }()
 
+	// A family literal is never foreign, so it is rejected by name before the
+	// method's own refusal: this adapter advertises no auth method, but "the
+	// method does not exist" and "the key is not read here" are different
+	// answers and the host is owed the second one.
+	if refusal := rejectLifecycleMeta(params.Meta); refusal != nil {
+		return acp.AuthenticateResponse{}, refusal
+	}
+
 	return acp.AuthenticateResponse{}, acp.NewInvalidParams(map[string]any{"methodId": params.MethodId})
 }
 

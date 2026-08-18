@@ -580,16 +580,17 @@ func (c *Client) startTurn(ctx context.Context, args []string, input any) (*Turn
 	}
 	turn.start(ctx)
 
+	// A launch that fails after the process started still owns a contained tree.
+	// The cleanup close's own error travels with the transport failure so the
+	// caller's scratch containment sees an incomplete boundary: a discarded one
+	// would let a surviving native process escape both the prompt boundary and
+	// the session poison latch.
 	if err := turn.Send(ctx, input); err != nil {
-		_ = turn.Close()
-
-		return nil, err
+		return nil, errors.Join(err, turn.Close())
 	}
 
 	if err := closeWriteCloser(stdin); err != nil {
-		_ = turn.Close()
-
-		return nil, fmt.Errorf("close amp stdin: %w", err)
+		return nil, errors.Join(fmt.Errorf("close amp stdin: %w", err), turn.Close())
 	}
 
 	return turn, nil

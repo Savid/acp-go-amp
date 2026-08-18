@@ -295,12 +295,32 @@ func (s *agentSession) launchNativeTurn(ctx context.Context, client *amp.Client,
 	return turn, err
 }
 
+// unsettledPrompt marks a failure that stopped the prompt from settling. The
+// v1 response for a cancelled request is a cancelled success, but only once the
+// prompt actually settled: reporting one over a commit the store never took, or
+// a boundary that was never emitted, would tell the host a turn ended cleanly
+// while its durable state and its lifecycle stream say otherwise.
+type unsettledPromptError struct{ err error }
+
+func (e unsettledPromptError) Error() string { return e.err.Error() }
+func (e unsettledPromptError) Unwrap() error { return e.err }
+
+// unsettled marks a settlement failure, keeping the underlying failure's exact
+// wire shape for the caller that reads it.
+func unsettled(err error) error { return unsettledPromptError{err: err} }
+
 // settlePrompt closes the turn in the one order the close-fenced proof class
 // binds: the native terminal is already past, so the whole-tree containment and
 // vacancy proof completes first, then the durable commit, then the terminal idle,
 // then the quiescence fact the completed proof produced, and only then the v1
-// response. A failed commit fails the boundary it precedes, so no terminal idle
-// claims a foreground prefix the store does not hold.
+// response. A failed commit or an incomplete boundary fails the prompt and emits
+// no terminal idle, so no boundary claims a foreground prefix the store does not
+// hold and the incarnation ends unsettled for the next snapshot to state.
+//
+// Settlement runs on a context detached from the request's. A cancelled request
+// still gets its durable commit, its terminal boundary, and its fenced stream:
+// the cancellation ends the native turn, never the settlement of what that turn
+// already streamed.
 func (s *agentSession) settlePrompt(
 	ctx context.Context,
 	turn *amp.Turn,
@@ -308,21 +328,32 @@ func (s *agentSession) settlePrompt(
 	incarnation *promptStream,
 	result promptResult,
 ) (acp.PromptResponse, error) {
+	settleCtx := context.WithoutCancel(ctx)
+
 	proof, closeErr := s.agent.options.runtime.settleTurn(turn)
-	state.complete(closeErr)
 	s.recordScratchContainment(closeErr)
-	s.recordVacancy(proof.Vacant())
+	// Vacancy is readable only from a boundary that completed. An enumeration
+	// taken after an incomplete containment describes a tree the supervisor lost,
+	// so it proves nothing and the next incarnation opens without a claim.
+	s.recordVacancy(proof.Vacant() && amp.ProcessContainmentComplete(closeErr))
+
+	// The completion latch is what close and delete wait on, so it is published
+	// only once the prompt is wholly settled. Publishing it at the native
+	// terminal would let a close response fence a stream this prompt is still
+	// writing to, and let a close return before the frames it was shown are
+	// durable.
+	defer state.complete(closeErr)
 
 	if !amp.ProcessContainmentComplete(closeErr) {
-		return acp.PromptResponse{}, errors.Join(result.err, closeErr)
+		return acp.PromptResponse{}, unsettled(errors.Join(result.err, closeErr))
 	}
 
-	if err := s.persistAfterTurn(ctx, result.transcript); err != nil {
-		return acp.PromptResponse{}, firstError(result.err, err)
+	if err := s.persistAfterTurn(settleCtx, result.transcript); err != nil {
+		return acp.PromptResponse{}, unsettled(firstError(result.err, err))
 	}
 
-	if err := incarnation.settle(ctx, lifecycleOutcomeFor(result.response, result.err), proof); err != nil {
-		return acp.PromptResponse{}, firstError(result.err, err)
+	if err := incarnation.settle(settleCtx, lifecycleOutcomeFor(result.response, result.err), proof); err != nil {
+		return acp.PromptResponse{}, unsettled(firstError(result.err, err))
 	}
 
 	if result.err != nil {
@@ -451,9 +482,11 @@ func (s *agentSession) runPromptTurn(
 }
 
 // resolveTerminal maps the native stream's end to the v1 pair. The cancel guard
-// runs before all failure mapping, and the reported stop reason is the native
-// harness's own: a turn stopped by a token ceiling or a turn-request ceiling says
-// so instead of claiming it ended on its own.
+// runs before every mapping, success included: a cancel and a terminal frame can
+// both be ready at the same select, and a turn the host already cancelled reports
+// cancelled whichever the loop happened to read. The reported stop reason is the
+// native harness's own: a turn stopped by a token ceiling or a turn-request
+// ceiling says so instead of claiming it ended on its own.
 func (s *agentSession) resolveTerminal(
 	ctx context.Context,
 	state *promptTurnState,
@@ -464,12 +497,17 @@ func (s *agentSession) resolveTerminal(
 	finalMessageID string,
 	turn turnErrorReader,
 ) (acp.PromptResponse, error) {
+	if state.isCancelled() || ctx.Err() != nil {
+		//nolint:nilerr // A cancelled turn reports cancelled, not the context's own error.
+		return cancelledPromptResponse(usage, messageID), nil
+	}
+
 	if terminal == nil {
 		return streamEndedWithoutTerminal(ctx, state, usage, messageID, turn)
 	}
 
 	if terminal.IsError {
-		if state.isCancelled() || isNativeCancelResult(terminal) {
+		if isNativeCancelResult(terminal) {
 			return cancelledPromptResponse(usage, messageID), nil
 		}
 
@@ -832,6 +870,13 @@ func (s *agentSession) adoptNativeSessionID(ctx context.Context, threadID string
 	s.nativeID = threadID
 	s.mu.Unlock()
 
+	// The binding is recorded as soon as it is adopted, so a thread this adapter
+	// created is never orphaned by a crash before the turn settles. It carries no
+	// pending-turn frame — the prompt loop appends the init frame after this
+	// returns, and a prompt never starts with an unsynced mirror — so the
+	// adoption commit adds exactly the adopted binding to the last committed
+	// state and tombstones nothing. A failure here is not fatal: the turn's own
+	// settlement commits the binding again.
 	if err := s.persistAfterTurn(ctx, nil); err != nil {
 		s.agent.log.DebugContext(ctx, "persist adopted amp thread id failed", slog.String(jsonFieldSessionID, string(s.id)), slog.String(jsonFieldError, err.Error()))
 	}

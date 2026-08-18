@@ -37,6 +37,10 @@ type promptStream struct {
 	openCycleID string
 	cycleID     string
 	turnID      string
+	// negotiated is the answer this connection carries. The quiescence fact a
+	// boundary may state is governed by it and by that boundary's own proof,
+	// never by what the opening snapshot happened to claim.
+	negotiated lifecycle.Negotiated
 	// proof is the quiescence fact this configuration can state at stream open.
 	proof lifecycle.QuiescenceFact
 }
@@ -61,6 +65,7 @@ func (s *agentSession) openPromptStream(ctx context.Context) (*promptStream, err
 		openCycleID: id + lifecycleOpenCycleSuffix,
 		cycleID:     id + lifecycleCycleSuffix,
 		turnID:      id + lifecycleTurnSuffix,
+		negotiated:  negotiated,
 	}
 
 	// The stream opens on a certified boundary only where one was actually
@@ -99,10 +104,14 @@ func (p *promptStream) accept(ctx context.Context, submission lifecycle.Submissi
 }
 
 // settle ends the turn and, where the configuration's proof class actually
-// completed, states the quiescence fact the completed boundary produced. It runs
-// after the containment boundary and after the durable commit: the terminal idle
-// is emitted only once the foreground prefix is durable, and the quiescence fact
-// only once the resumable snapshot is.
+// completed, states the quiescence fact this boundary produced. It runs after the
+// containment boundary and after the durable commit: the terminal idle is emitted
+// only once the foreground prefix is durable, and the quiescence fact only once
+// the resumable snapshot is.
+//
+// The fact is governed by the answer and by the proof this boundary completed,
+// never by the one the opening snapshot carried. An incarnation that opened
+// unable to state a boundary still states the one it went on to prove.
 func (p *promptStream) settle(ctx context.Context, outcome lifecycleOutcome, proof amp.ContainmentProof) error {
 	if p == nil {
 		return nil
@@ -112,13 +121,13 @@ func (p *promptStream) settle(ctx context.Context, outcome lifecycleOutcome, pro
 		return err
 	}
 
-	if !p.proof.Quiescent || !proof.Vacant() {
+	if !p.negotiated.AuthoritativeQuiescence || !proof.Vacant() {
 		return nil
 	}
 
 	return p.emit(ctx, lifecycle.QuiescenceEvent(lifecycle.QuiescenceFact{
 		Quiescent: true,
-		Source:    p.proof.Source,
+		Source:    p.negotiated.QuiescenceSource,
 		Watermark: p.stream.State().ReducedThrough,
 		Barrier:   lifecycleBarrierPrefix + strconv.Itoa(proof.Root),
 	}))

@@ -50,8 +50,10 @@ func (r *Reducer) checkSnapshot(delivery Delivery, snapshot Snapshot) error {
 // complete nonterminal one, so an entry that is already terminal asserts as
 // current a state that is over.
 func (r *Reducer) checkSnapshotActivities(delivery Delivery, snapshot Snapshot, introduced introductions) error {
-	for _, activity := range snapshot.Activities {
-		if err := r.checkActivityIdentity(delivery, activity); err != nil {
+	for index := range snapshot.Activities {
+		activity := &snapshot.Activities[index]
+
+		if err := r.checkActivityIdentity(delivery, *activity); err != nil {
 			return err
 		}
 
@@ -103,9 +105,9 @@ func (r *Reducer) projectSnapshot(delivery Delivery, snapshot Snapshot) {
 		r.seeTurn(foreground.TurnID, delivery.Sequence)
 	}
 
-	for _, activity := range snapshot.Activities {
-		r.seeTurn(activity.OriginTurnID, delivery.Sequence)
-		r.recordActivity(delivery, activity)
+	for index := range snapshot.Activities {
+		r.seeTurn(snapshot.Activities[index].OriginTurnID, delivery.Sequence)
+		r.recordActivity(delivery, snapshot.Activities[index])
 	}
 
 	for _, action := range snapshot.Actions {
@@ -127,9 +129,9 @@ func (s Snapshot) introduces() introductions {
 		introduced.turns[s.Foreground.TurnID] = true
 	}
 
-	for _, activity := range s.Activities {
-		introduced.turns[activity.OriginTurnID] = true
-		introduced.activities[activity.ActivityID] = true
+	for index := range s.Activities {
+		introduced.turns[s.Activities[index].OriginTurnID] = true
+		introduced.activities[s.Activities[index].ActivityID] = true
 	}
 
 	return introduced
