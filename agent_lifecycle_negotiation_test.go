@@ -1457,3 +1457,135 @@ func TestIncompleteLaunchPublishesItsBoundaryOnTheLatch(t *testing.T) {
 	require.ErrorIs(t, session.Close(t.Context()), nativeamp.ErrProcessContainmentIncomplete)
 	require.DirExists(t, session.settingsDir)
 }
+
+// TestCloseEmitsNothingOnAFencedOrNeverOpenedIncarnation pins the close ladder's
+// emission rungs against the only incarnations this configuration ever has. A
+// prompt-contained source opens one incarnation per prompt and fences it when the
+// contained process exits, so a close always meets a dead or never-opened stream:
+// it emits nothing on it, and the terminal state was already reported by whatever
+// fenced it. The non-emission rungs — the containment proof and the durable
+// commit — ran inside the prompt and stand.
+func TestCloseEmitsNothingOnAFencedOrNeverOpenedIncarnation(t *testing.T) {
+	t.Setenv("AMP_API_KEY", "conformance-key")
+
+	client := &lifecycleClient{}
+	agent, neverPrompted := lifecycleAgentWithClient(t, lifecycleOffer(1.0), client)
+
+	_, err := agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: neverPrompted})
+	require.NoError(t, err, "a session whose incarnation never opened still closes")
+	require.Empty(t, client.eventTypes(t), "a never-opened incarnation has no stream to emit on")
+
+	prompted, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
+	require.NoError(t, err)
+
+	streamed := make(chan struct{})
+	client.onAgentChunk = func() { close(streamed) }
+
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+
+		resp, promptErr := agent.Prompt(t.Context(), lifecyclePrompt(prompted.SessionId, "hang", "sub-1", "nonce-1"))
+		require.NoError(t, promptErr)
+		require.Equal(t, acp.StopReasonCancelled, resp.StopReason)
+	}()
+
+	<-streamed
+	require.NoError(t, agent.Cancel(t.Context(), acp.CancelNotification{SessionId: prompted.SessionId}))
+	<-done
+
+	fenced := client.eventTypes(t)
+	require.Equal(t,
+		[]string{"lifecycle_snapshot", "prompt_accepted", "state_update", "state_update"},
+		fenced, "the cancelled turn settled on its own stream")
+
+	stored, err := agent.store.Load(t.Context(), SessionKey{
+		SessionID: string(prompted.SessionId), Subpath: transcriptSubpath,
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, stored, "the durable commit landed before the stream was fenced")
+
+	_, err = agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: prompted.SessionId})
+	require.NoError(t, err, "a cancel-then-close succeeds")
+	require.Equal(t, fenced, client.eventTypes(t), "the close emitted nothing on the fenced stream")
+
+	after, err := agent.store.Load(t.Context(), SessionKey{
+		SessionID: string(prompted.SessionId), Subpath: transcriptSubpath,
+	})
+	require.NoError(t, err)
+	require.Equal(t, stored, after, "the close rewrote nothing the prompt already committed")
+}
+
+// TestCloseNeverRewritesALossTerminalizedFailure pins the durable branch of the
+// close ladder. A turn the incarnation's own loss terminalized as `failed` holds
+// that ending: the close that follows the cancel finds nothing nonterminal to
+// terminalize, emits nothing, and never restates the turn as cancelled — not on
+// the fenced stream and not over the frames the failure committed.
+func TestCloseNeverRewritesALossTerminalizedFailure(t *testing.T) {
+	client := &lifecycleClient{}
+	agent, sessionID := lifecycleAgentWithClient(t, lifecycleOffer(1.0), client)
+
+	_, err := agent.Prompt(t.Context(), lifecyclePrompt(sessionID, "provider-failure", "sub-1", "nonce-1"))
+	require.Error(t, err)
+
+	settled := client.eventTypes(t)
+
+	stored, err := agent.store.Load(t.Context(), SessionKey{
+		SessionID: string(sessionID), Subpath: transcriptSubpath,
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, stored)
+
+	require.NoError(t, agent.Cancel(t.Context(), acp.CancelNotification{SessionId: sessionID}))
+
+	_, err = agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: sessionID})
+	require.NoError(t, err)
+	require.Equal(t, settled, client.eventTypes(t), "the close emitted nothing on the fenced stream")
+
+	after, err := agent.store.Load(t.Context(), SessionKey{
+		SessionID: string(sessionID), Subpath: transcriptSubpath,
+	})
+	require.NoError(t, err)
+	require.Equal(t, stored, after, "the failure's durable frames are the ones that stand")
+
+	state := reduceEmittedStream(t, client, negotiatedAnswer()).State()
+	require.Len(t, state.Turns, 1)
+	require.Equal(t, lifecycle.OutcomeFailed, state.Turns[0].Outcome,
+		"a failed turn is never rewritten to cancelled")
+}
+
+// TestCancelCarriesNoRouteVerdictToPrecedeTheReservedKey pins this adapter's
+// structural exception to the refusal-precedence rule. Route validation precedes
+// the reserved-key refusal on every surface that carries both, and this adapter
+// carries only one: one short-lived process serves one prompt and there is no
+// elicitation surface, so `acp-go.dev/route` is neither advertised nor validated
+// and a cancel bearing it is applied. The lifecycle key is the single verdict a
+// cancel can produce here, and a cancel carrying both still reports it.
+func TestCancelCarriesNoRouteVerdictToPrecedeTheReservedKey(t *testing.T) {
+	agent, _, sessionID := lifecycleAgent(t, lifecycleOffer(1.0))
+
+	malformedRoute := map[string]any{"version": 99.0, "turnNonce": ""}
+
+	require.NoError(t, agent.Cancel(t.Context(), acp.CancelNotification{
+		SessionId: sessionID,
+		Meta:      map[string]any{"acp-go.dev/route": malformedRoute},
+	}), "this adapter validates no turn nonce, so a route envelope produces no verdict")
+
+	err := agent.Cancel(t.Context(), acp.CancelNotification{
+		SessionId: sessionID,
+		Meta: map[string]any{
+			"acp-go.dev/route": malformedRoute,
+			lifecycle.MetaKey:  map[string]any{"version": 1.0},
+		},
+	})
+
+	var requestErr *acp.RequestError
+
+	require.ErrorAs(t, err, &requestErr)
+	require.Equal(t, invalidParamsCode, requestErr.Code)
+
+	data, ok := requestErr.Data.(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, lifecycle.MetaPath, data[jsonFieldField])
+}
