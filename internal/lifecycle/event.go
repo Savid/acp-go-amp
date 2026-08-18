@@ -112,6 +112,31 @@ type StateTransition struct {
 	Outcome    Outcome
 }
 
+// endingIdleDefect reports why an idle transition that settles a turn is
+// structurally incomplete, or the empty string when it is not. An idle naming a
+// turn ends it, so the outcome is always required; the stop reason is required
+// with it except on a failure, where no ACP v1 stop reason names one and the v1
+// error carries it instead.
+//
+// Both the decoder and the reducer consult it, so an event this adapter emits is
+// held to the same rule as one it reads.
+func endingIdleDefect(transition StateTransition) string {
+	if transition.State != ForegroundIdle || transition.TurnID == "" {
+		return ""
+	}
+
+	switch {
+	case transition.Outcome == "":
+		return "an idle transition that ends a turn records its outcome"
+	case transition.Outcome == OutcomeFailed && transition.StopReason != "":
+		return "a failed outcome states no stop reason"
+	case transition.Outcome != OutcomeFailed && transition.StopReason == "":
+		return "an idle transition that ends a turn records its stop reason"
+	default:
+		return ""
+	}
+}
+
 // ActivityUpdate reports one activity. A first sight carries every immutable
 // identity field; a later update carries state and progress only.
 type ActivityUpdate struct {

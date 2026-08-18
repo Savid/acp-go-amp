@@ -206,6 +206,10 @@ func (r *Reducer) applyStateUpdate(delivery Delivery) error {
 		return r.fail(delivery, ViolationMalformedEnvelope, "the transition payload is missing")
 	}
 
+	if detail := endingIdleDefect(*transition); detail != "" {
+		return r.fail(delivery, ViolationMalformedEnvelope, detail)
+	}
+
 	if err := r.checkBlockedCycle(delivery, *transition); err != nil {
 		return err
 	}

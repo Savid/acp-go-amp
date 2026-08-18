@@ -249,6 +249,31 @@ func TestBlockingActionOwesItsForegroundTransition(t *testing.T) {
 		IdleEvent("cyc-1", "turn-1", StopReasonEndTurn, OutcomeSuccess))
 }
 
+// TestEmittedEndingIdleRecordsHowItSettled pins the rule on the emitter's own
+// path: the reducer an emitted event is validated through holds an ending idle
+// to the same structure a decoded one is, so an event this adapter cannot state
+// truthfully fails at the point of emission.
+func TestEmittedEndingIdleRecordsHowItSettled(t *testing.T) {
+	t.Parallel()
+
+	accepted := Event{Type: EventPromptAccepted, PromptAccepted: &PromptAccepted{
+		SubmissionID: "sub-1", ClientNonce: "non-1", TurnID: "turn-1",
+	}}
+
+	for _, ending := range []StateTransition{
+		{State: ForegroundIdle, CycleID: "cyc-1", TurnID: "turn-1", Cause: CauseSubmission, StopReason: StopReasonEndTurn},
+		{State: ForegroundIdle, CycleID: "cyc-1", TurnID: "turn-1", Cause: CauseSubmission, Outcome: OutcomeSuccess},
+		{
+			State: ForegroundIdle, CycleID: "cyc-1", TurnID: "turn-1", Cause: CauseSubmission,
+			StopReason: StopReasonEndTurn, Outcome: OutcomeFailed,
+		},
+	} {
+		requireReduceRefusal(t, richConfiguration(), ViolationMalformedEnvelope,
+			openSnapshot(), accepted, RunningEvent("cyc-1", "turn-1"),
+			Event{Type: EventStateUpdate, State: &ending})
+	}
+}
+
 // TestActivityIdentityIsImmutable pins every restated identity field.
 func TestActivityIdentityIsImmutable(t *testing.T) {
 	t.Parallel()

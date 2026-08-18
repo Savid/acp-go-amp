@@ -303,29 +303,12 @@ func (d *decoder) stateUpdate(fields map[string]json.RawMessage) Event {
 	case transition.Outcome != "" && !transition.Outcome.Valid():
 		d.fail(ViolationMalformedEnvelope, "outcome "+string(transition.Outcome))
 	default:
-		d.ending(*transition)
+		if detail := endingIdleDefect(*transition); detail != "" {
+			d.fail(ViolationMalformedEnvelope, detail)
+		}
 	}
 
 	return Event{Type: EventStateUpdate, State: transition}
-}
-
-// ending validates the pair an idle transition that settles a turn records. An
-// idle naming a turn ends it, so the outcome is always required; the stop reason
-// is required with it except on a failure, where no ACP v1 stop reason names one
-// and the v1 error carries it instead.
-func (d *decoder) ending(transition StateTransition) {
-	if transition.State != ForegroundIdle || transition.TurnID == "" {
-		return
-	}
-
-	switch {
-	case transition.Outcome == "":
-		d.fail(ViolationMalformedEnvelope, "an idle transition that ends a turn records its outcome")
-	case transition.Outcome == OutcomeFailed && transition.StopReason != "":
-		d.fail(ViolationMalformedEnvelope, "a failed outcome states no stop reason")
-	case transition.Outcome != OutcomeFailed && transition.StopReason == "":
-		d.fail(ViolationMalformedEnvelope, "an idle transition that ends a turn records its stop reason")
-	}
 }
 
 func (d *decoder) activityUpdate(fields map[string]json.RawMessage) Event {

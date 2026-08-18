@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -754,14 +755,24 @@ func TestLifecycleKeyFailsACancelClosed(t *testing.T) {
 
 // orderingStore records the moment a durable commit lands in the same ledger the
 // containment release and the emitted stream write to, so the settlement order is
-// observed rather than asserted.
+// observed rather than asserted. Each commit is recorded with the number of
+// transcript frames the generation published, which is what distinguishes the
+// adoption generation from the turn's own.
 type orderingStore struct {
 	SessionStore
 	record func(string)
 }
 
 func (s orderingStore) Replace(ctx context.Context, key SessionKey, replacements []SessionStoreReplacement) error {
-	s.record("commit")
+	frames := 0
+
+	for _, replacement := range replacements {
+		if replacement.Key.Subpath == transcriptSubpath {
+			frames = len(replacement.Entries)
+		}
+	}
+
+	s.record("commit:" + strconv.Itoa(frames))
 
 	return s.SessionStore.Replace(ctx, key, replacements)
 }
@@ -839,10 +850,11 @@ func TestLifecycleSettlementOrder(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	// The first commit is the early manifest persist that records the thread amp
-	// just minted, so a mid-turn death can never leave a created server-side
-	// thread unrecorded. The turn own commit is the one the boundary precedes.
-	require.Equal(t, []string{"commit", "containment", "commit", "idle", "response"}, ledger)
+	// The first commit is the adoption generation: it records the thread amp just
+	// minted so a mid-turn death can never leave a created server-side thread
+	// unrecorded, and it publishes the state already committed — no frame from the
+	// turn in flight. The turn own commit is the one the boundary precedes.
+	require.Equal(t, []string{"commit:0", "containment", "commit:3", "idle", "response"}, ledger)
 }
 
 // TestLifecycleCancelPersistsWhatStreamed pins that a cancelled turn commits the
