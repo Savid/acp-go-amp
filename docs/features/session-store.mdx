@@ -42,9 +42,20 @@ together in one `Replace` generation. Every turn does: a cancelled, failed, or
 timed-out turn commits the frames it already streamed, so what the store holds
 never diverges from what the client was shown. The commit runs after the turn
 process containment boundary completes and before the terminal state the host
-sees, so no settled turn claims a prefix the store does not hold. These records
-back `session/load` replay. Auth environment values, settings files, and API
-keys are never written to the store.
+sees, so no settled turn claims a prefix the store does not hold. It also runs
+on a context detached from the prompt request, so cancelling the request ends
+the native turn and never the commit of what that turn already streamed. These
+records back `session/load` replay. Auth environment values, settings files, and
+API keys are never written to the store.
+
+The first turn of a session publishes one additional generation the moment Amp
+reports the thread it just created: the manifest plus the state already
+committed, carrying no frames from the turn in flight. It exists so a crash
+mid-turn can never leave a created server-side thread unrecorded.
+
+`session/delete` stops the session's writes and waits out the commit already in
+flight before its tombstone lands, so a turn settling alongside the delete can
+never write the deleted session back into the store.
 
 Ordinary transcript frames retain the exact native Amp stream JSON. An
 image-bearing tool-result frame is rewritten to stable artifact references

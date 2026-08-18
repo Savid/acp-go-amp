@@ -53,7 +53,13 @@ stdio or embed the agent directly in Go.
   degenerate answer is correct; an unprovable one is not.
 - Settle a prompt in one order: native terminal, containment and vacancy proof,
   durable commit, terminal idle, quiescence fact, response. One commit point
-  covers every exit path.
+  covers every exit path. Settlement runs on a context detached from the
+  request's, and the completion latch close and delete wait on is published only
+  once the whole order has run. A failed commit or an incomplete boundary fails
+  the prompt and emits no terminal idle.
+- `session/delete` fences the session's writes and waits out the commit in
+  flight before its tombstone lands: a late `Replace` never clears a tombstone
+  it did not create.
 
 ## Testing Rules
 
@@ -64,8 +70,8 @@ stdio or embed the agent directly in Go.
   surface, no fork capability, no elicitation metadata, command silence, MCP
   accept/reject behavior, and backpressure errors.
 - Run every vector in `testdata/lifecycle` with exact-equality projection
-  matching. Those files are the family's contract: never edit, reorder, or
-  delete one.
+  matching, including each vector's `postRefusal` inputs. Those files are the
+  contract: never edit, reorder, or delete one.
 - Reduce this adapter's own emitted lifecycle stream through the same reducer
   the vectors drive.
 - Live tests may spend tokens only when explicitly env-gated.

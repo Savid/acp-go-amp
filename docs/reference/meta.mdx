@@ -4,9 +4,9 @@ description: The _meta.amp metadata the adapter accepts on requests, emits on up
 ---
 
 Lifecycle requests carry Amp-owned settings under the `_meta.amp` namespace.
-Unknown keys fail closed; foreign vendor namespaces are ignored. The
-family-reserved `acp-go.dev/*` literals are never foreign: each one is either
-read or rejected on every surface it can reach.
+Unknown keys fail closed; foreign vendor namespaces are ignored. The reserved
+`acp-go.dev/*` literals are never foreign: each one is either read or rejected
+on every surface it can reach.
 
 ## Request metadata
 
@@ -163,10 +163,10 @@ ignored; cancellation remains structurally scoped by `sessionId`.
 
 ## Session lifecycle
 
-`acp-go.dev/lifecycle` is the fourth family-reserved literal this adapter
-handles, alongside `acp-go.dev/mediaEnvelope`, `acp-go.dev/handoff`, and
+`acp-go.dev/lifecycle` is the fourth reserved literal this adapter handles,
+alongside `acp-go.dev/mediaEnvelope`, `acp-go.dev/handoff`, and
 `acp-go.dev/route` — the one it deliberately does not implement. Unlike a vendor
-namespace, a family literal is never ignored: every surface either reads it or
+namespace, a reserved literal is never ignored: every surface either reads it or
 rejects it.
 
 ### Negotiation
@@ -202,12 +202,13 @@ resolved from the same code path that enforces containment:
 | `activityKinds` | always `[]` | This adapter reports no owned background work, so it emits no `activity_update` at all. |
 
 A truthfully degenerate answer is a correct answer, not a gap. A malformed
-offer — a non-object, a missing or non-ascending `versions`, or any additional
+offer — a non-object, a missing or non-integer `versions`, or any additional
 member — is rejected with `-32602` naming the exact path, for example
 `{"error": "unsupported", "field": "_meta[\"acp-go.dev/lifecycle\"].versions"}`.
-With no offer at all, the response carries no lifecycle member and the
-connection has no lifecycle surface: no envelope, no correlation read, no
-lifecycle fact.
+Only the answer is ordered: an offer may list its versions in any order and is
+intersected rather than refused. With no offer at all, the response carries no
+lifecycle member and the connection has no lifecycle surface: no envelope, no
+correlation read, no lifecycle fact.
 
 ### The prompt correlation value
 
@@ -235,8 +236,10 @@ sequence space, and entities:
    echoing the submission identity.
 3. `state_update` `running` — the transcript then flows as ordinary
    `session/update` notifications with **no envelope attached**.
-4. `state_update` `idle` — the truthful stop reason and the recorded outcome
-   (`success`, `cancelled`, `limit`, `failed`).
+4. `state_update` `idle` — the recorded outcome (`success`, `cancelled`,
+   `limit`, `failed`) and, on every outcome but `failed`, the truthful stop
+   reason. No ACP v1 stop reason names a failure, so a failed cycle records its
+   outcome and states none; the v1 error carries the cause instead.
 5. `quiescence_update` — only where the containment boundary actually proved an
    empty descendant set, carrying the watermark that proof covers and a barrier
    naming the contained native root.
@@ -244,6 +247,14 @@ sequence space, and entities:
 The contained process exit fences the stream; the next prompt opens a new one.
 Sequences are claimed before delivery is attempted, so a lost event leaves a
 detectable gap rather than a silently contiguous stream.
+
+Settlement runs on a context detached from the request's, so a cancelled prompt
+still commits the frames it streamed, states its terminal boundary, and fences
+its stream before the response. The one exception is a settlement that cannot
+complete: when the containment boundary or the durable commit itself fails, the
+prompt fails with that error and emits **no** terminal `idle` — a boundary must
+never claim a foreground prefix the store does not hold, so the incarnation ends
+unsettled and the next prompt's snapshot states the truth about it.
 
 ### Carriers and refusals
 
@@ -257,8 +268,18 @@ patches already carry are unaffected.
 Amp has no permission or elicitation surface, so no action correlation value is
 ever emitted. Every other inbound surface — `session/new`, `session/load`,
 `session/resume`, `session/close`, `session/delete`, `session/list`,
-`session/set_config_option`, `logout`, and `_amp/session/fork` — rejects the key
-with `-32602` naming `_meta["acp-go.dev/lifecycle"]`. A `session/cancel`
-carrying it fails closed before the native interrupt and the cancel is never
-applied; being a notification it carries no response frame, so that refusal is
-wire-silent.
+`session/set_config_option`, `logout`, `authenticate`, and `_amp/session/fork` —
+rejects the key with `-32602` naming `_meta["acp-go.dev/lifecycle"]`. A
+`session/cancel` carrying it fails closed before the native interrupt and the
+cancel is never applied; being a notification it carries no response frame, so
+that refusal is wire-silent.
+
+Two surfaces answer with a narrower path, and both are the honest answer rather
+than an omission:
+
+- The `_amp/auth/*` legs decode their parameters against a closed permitted-member
+  set, so a `_meta` of any kind is already invalid params there. The refusal
+  names `_meta`, the member that is not permitted, rather than the key inside it.
+- `session/set_mode` does not exist on this adapter, so it answers
+  `-32601 method not found` before any parameter is inspected. A key on a method
+  that is not there is refused by the method's own absence.
