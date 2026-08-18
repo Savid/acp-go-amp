@@ -308,7 +308,7 @@ func (s *agentSession) settlePrompt(
 	incarnation *promptStream,
 	result promptResult,
 ) (acp.PromptResponse, error) {
-	closeErr := turn.Close()
+	proof, closeErr := s.agent.options.runtime.settleTurn(turn)
 	state.complete(closeErr)
 	s.recordScratchContainment(closeErr)
 
@@ -320,7 +320,7 @@ func (s *agentSession) settlePrompt(
 		return acp.PromptResponse{}, firstError(result.err, err)
 	}
 
-	if err := incarnation.settle(ctx, lifecycleOutcomeFor(result.response, result.err), turn.ContainmentProof()); err != nil {
+	if err := incarnation.settle(ctx, lifecycleOutcomeFor(result.response, result.err), proof); err != nil {
 		return acp.PromptResponse{}, firstError(result.err, err)
 	}
 

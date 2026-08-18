@@ -193,6 +193,11 @@ type runtimeOptions struct {
 	executeThread  func(context.Context, *nativeamp.Client, any) (*nativeamp.Turn, error)
 	continueThread func(context.Context, *nativeamp.Client, string, any) (*nativeamp.Turn, error)
 	exportThread   func(context.Context, *nativeamp.Client, string) (json.RawMessage, error)
+	// settleTurn completes the prompt containment boundary and reports what that
+	// boundary proved about the native tree it owned. It is a seam so tests can
+	// drive an incomplete boundary and a proven vacancy deterministically;
+	// production always closes the real contained process.
+	settleTurn func(*nativeamp.Turn) (nativeamp.ContainmentProof, error)
 	// newTurnTimer builds the per-turn deadline channel. It is a seam so tests
 	// can drive the timeout branch deterministically against a coincident
 	// cancel; production always uses a real time.Timer.
@@ -236,6 +241,11 @@ func applyOptions(opts []Option) Options {
 			},
 			exportThread: func(ctx context.Context, client *nativeamp.Client, threadID string) (json.RawMessage, error) {
 				return client.ExportThread(ctx, threadID)
+			},
+			settleTurn: func(turn *nativeamp.Turn) (nativeamp.ContainmentProof, error) {
+				closeErr := turn.Close()
+
+				return turn.ContainmentProof(), closeErr
 			},
 		},
 	}

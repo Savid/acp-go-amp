@@ -3,6 +3,7 @@ package ampacp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
+	nativeamp "github.com/savid/acp-go-amp/internal/amp"
 	"github.com/savid/acp-go-amp/internal/lifecycle"
 	"github.com/stretchr/testify/require"
 )
@@ -219,6 +221,17 @@ func lifecycleHarness(t *testing.T) string {
 func lifecycleAgent(t *testing.T, offer map[string]any) (*Agent, *lifecycleClient, acp.SessionId) {
 	t.Helper()
 
+	client := &lifecycleClient{}
+	agent, sessionID := lifecycleAgentWithClient(t, offer, client)
+
+	return agent, client, sessionID
+}
+
+// lifecycleAgentWithClient establishes an agent whose host offered version 1,
+// with the given connection attached and one session open.
+func lifecycleAgentWithClient(t *testing.T, offer map[string]any, client agentClient) (*Agent, acp.SessionId) {
+	t.Helper()
+
 	t.Setenv("AMP_API_KEY", "conformance-key")
 
 	agent := NewAgent(testContainmentOptions([]Option{
@@ -227,7 +240,6 @@ func lifecycleAgent(t *testing.T, offer map[string]any) (*Agent, *lifecycleClien
 	})...)
 	t.Cleanup(func() { require.NoError(t, agent.Close()) })
 
-	client := &lifecycleClient{}
 	agent.setConnection(client)
 
 	_, err := agent.Initialize(t.Context(), acp.InitializeRequest{Meta: offer})
@@ -236,7 +248,7 @@ func lifecycleAgent(t *testing.T, offer map[string]any) (*Agent, *lifecycleClien
 	session, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
 	require.NoError(t, err)
 
-	return agent, client, session.SessionId
+	return agent, session.SessionId
 }
 
 func lifecyclePrompt(sessionID acp.SessionId, text, submissionID, nonce string) acp.PromptRequest {
@@ -855,4 +867,98 @@ func TestLifecycleCancelPersistsWhatStreamed(t *testing.T) {
 	require.Len(t, state.Turns, 1)
 	require.True(t, state.Turns[0].Terminal)
 	require.Equal(t, lifecycle.OutcomeCancelled, state.Turns[0].Outcome)
+}
+
+// TestPromptFailsWhenTheIncarnationCannotOpen pins that a prompt whose stream
+// cannot be identified never reaches the harness.
+func TestPromptFailsWhenTheIncarnationCannotOpen(t *testing.T) {
+	agent, _, sessionID := lifecycleAgent(t, lifecycleOffer(1.0))
+
+	original := randRead
+	randRead = func([]byte) (int, error) { return 0, errors.New("no entropy") }
+
+	t.Cleanup(func() { randRead = original })
+
+	_, err := agent.Prompt(t.Context(), lifecyclePrompt(sessionID, "hello", "sub-1", "nonce-1"))
+	require.ErrorContains(t, err, "no entropy")
+}
+
+// TestPromptSettlesATurnWhoseAcceptanceCouldNotBePublished pins that once the
+// native dispatcher owns the frame the turn exists and is settled, even when the
+// acceptance itself could not be delivered.
+func TestPromptSettlesATurnWhoseAcceptanceCouldNotBePublished(t *testing.T) {
+	client := &failingLifecycleClient{failAt: 2}
+	agent, sessionID := lifecycleAgentWithClient(t, lifecycleOffer(1.0), client)
+
+	_, err := agent.Prompt(t.Context(), lifecyclePrompt(sessionID, "hello", "sub-1", "nonce-1"))
+	require.ErrorContains(t, err, "transport refused")
+
+	stored, storeErr := agent.store.Load(t.Context(), SessionKey{SessionID: string(sessionID), Subpath: transcriptSubpath})
+	require.NoError(t, storeErr)
+	require.Empty(t, stored, "an unaccepted turn streamed nothing to commit")
+}
+
+// TestPromptRetainsAnIncompleteContainmentBoundary pins that a boundary that did
+// not complete fails the prompt and commits nothing: the durable commit is a
+// step the boundary precedes.
+func TestPromptRetainsAnIncompleteContainmentBoundary(t *testing.T) {
+	t.Setenv("AMP_API_KEY", "conformance-key")
+
+	agent := NewAgent(testContainmentOptions([]Option{
+		WithExecutablePath(lifecycleHarness(t)),
+		WithScratchDir(testScratchDir(t)),
+	})...)
+	// A session whose boundary never completed is never released, so this agent
+	// reports the incomplete boundary for the rest of its life.
+	t.Cleanup(func() { require.ErrorIs(t, agent.Close(), nativeamp.ErrProcessContainmentIncomplete) })
+
+	client := &lifecycleClient{}
+	agent.setConnection(client)
+	agent.options.runtime.settleTurn = func(turn *nativeamp.Turn) (nativeamp.ContainmentProof, error) {
+		_ = turn.Close()
+
+		return turn.ContainmentProof(), nativeamp.ErrProcessContainmentIncomplete
+	}
+
+	_, err := agent.Initialize(t.Context(), acp.InitializeRequest{Meta: lifecycleOffer(1.0)})
+	require.NoError(t, err)
+
+	session, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
+	require.NoError(t, err)
+
+	_, err = agent.Prompt(t.Context(), lifecyclePrompt(session.SessionId, "hello", "sub-1", "nonce-1"))
+	require.ErrorIs(t, err, nativeamp.ErrProcessContainmentIncomplete)
+	require.Equal(t, []string{"lifecycle_snapshot", "prompt_accepted", "state_update"}, client.eventTypes(t),
+		"no turn settles behind an unproven boundary")
+}
+
+// idleRefusingClient refuses exactly the terminal idle, so the settlement step
+// after the durable commit can be driven deterministically.
+type idleRefusingClient struct {
+	lifecycleClient
+}
+
+func (c *idleRefusingClient) SessionUpdate(ctx context.Context, notification acp.SessionNotification) error {
+	if envelope, ok := notification.Meta[lifecycle.MetaKey].(map[string]any); ok {
+		if event, ok := envelope["event"].(map[string]any); ok && event["state"] == "idle" {
+			return errors.New("transport refused the terminal idle")
+		}
+	}
+
+	return c.lifecycleClient.SessionUpdate(ctx, notification)
+}
+
+// TestPromptFailsWhenTheTurnCannotSettle pins that a turn whose terminal
+// transition cannot be published fails the prompt rather than returning a
+// response the host's projection would never reach.
+func TestPromptFailsWhenTheTurnCannotSettle(t *testing.T) {
+	client := &idleRefusingClient{}
+	agent, sessionID := lifecycleAgentWithClient(t, lifecycleOffer(1.0), client)
+
+	_, err := agent.Prompt(t.Context(), lifecyclePrompt(sessionID, "hello", "sub-1", "nonce-1"))
+	require.ErrorContains(t, err, "transport refused the terminal idle")
+
+	stored, storeErr := agent.store.Load(t.Context(), SessionKey{SessionID: string(sessionID), Subpath: transcriptSubpath})
+	require.NoError(t, storeErr)
+	require.NotEmpty(t, stored, "the commit precedes the terminal idle")
 }
