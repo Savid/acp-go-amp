@@ -256,6 +256,11 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (ac
 	if err != nil {
 		s.recordScratchContainment(err)
 
+		// A launch that failed accepted nothing and will emit nothing more, so
+		// the incarnation ends here rather than at a settlement this prompt never
+		// reaches. It precedes the latch below for the same reason it does there.
+		incarnation.fence()
+
 		// A launch that started a process and could not deliver its input owns a
 		// tree its cleanup did not contain. That boundary is the latch's own
 		// business, so it is published there: a close or delete waiting on this
@@ -375,6 +380,13 @@ func (s *agentSession) settlePrompt(
 	// let a close response fence a stream this prompt is still writing to, and
 	// let a close return before the frames it was shown are durable.
 	defer func() { state.complete(settlementErr) }()
+
+	// The incarnation ends with the prompt, on every exit: a boundary that did not
+	// complete, a commit that failed, and a terminal fact that could not be
+	// delivered all end it exactly as a settled turn does. The fence runs before
+	// the latch publishes, so a close or delete woken by that latch never observes
+	// a live incarnation for a prompt that has finished with it.
+	defer incarnation.fence()
 
 	if !amp.ProcessContainmentComplete(closeErr) {
 		settlementErr = closeErr

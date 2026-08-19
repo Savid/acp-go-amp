@@ -94,8 +94,11 @@ func (r *Reducer) State() State { return r.state.clone() }
 // Failed reports the latched refusal, if any.
 func (r *Reducer) Failed() *ViolationError { return r.failed }
 
-// Close records that the addressed session's close completed. The incarnation is
-// fenced: any later event bearing its identity is stale.
+// Close records that the incarnation this reducer follows has ended — the
+// addressed session's close completed for a consumer, the prompt's contained
+// boundary for the emitter that judges its own bytes. The incarnation is fenced:
+// any later event bearing its identity is stale, and a closed session admits no
+// incarnation at all.
 func (r *Reducer) Close() { r.state.Closed = true }
 
 // ReduceSessionUpdate decodes one session/update notification payload and reduces

@@ -93,6 +93,40 @@ func TestEmittedStreamReducesThroughTheSameReducer(t *testing.T) {
 	require.Equal(t, "contained-exit-1", state.Quiescence.Barrier)
 }
 
+// TestFenceEndsTheIncarnationOnTheJudgingReducer proves the fence is the same
+// fact on both sides of the wire. It is recorded on the reducer that judges every
+// emission, so an event attempted after it is refused here with the very token a
+// consumer reducing these bytes past a session_closed would report — rather than
+// published on an incarnation this adapter has already finished with.
+func TestFenceEndsTheIncarnationOnTheJudgingReducer(t *testing.T) {
+	t.Parallel()
+
+	stream := NewStream("strm-1", containedConfiguration())
+	emitPromptIncarnation(t, stream)
+
+	require.False(t, stream.Fenced(), "a stream that settled its turn is not yet ended")
+
+	stream.Fence()
+	require.True(t, stream.Fenced())
+
+	// Fencing twice is the same fact stated twice, not a second end.
+	stream.Fence()
+	require.True(t, stream.Fenced())
+
+	before := stream.State()
+
+	envelope, err := stream.Emit(RunningEvent("cyc-2", "turn-2"))
+	require.Nil(t, envelope, "a fenced incarnation hands back nothing")
+
+	var refusal *ViolationError
+
+	require.ErrorAs(t, err, &refusal)
+	require.Equal(t, ViolationStaleStream, refusal.Kind)
+	require.Equal(t, uint64(6), stream.sequence, "the refused event still consumed its sequence")
+	require.Equal(t, before.ReducedThrough, stream.State().ReducedThrough,
+		"nothing reaches the projection of an incarnation already ended")
+}
+
 // TestEmitClaimsTheSequenceBeforeDelivery proves a refused event consumes its
 // sequence: a counter that advanced only on success would make loss invisible,
 // which is the exact failure contiguity exists to expose.

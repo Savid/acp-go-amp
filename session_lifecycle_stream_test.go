@@ -150,6 +150,45 @@ func TestPromptStreamRefusesAnEventItCannotSupport(t *testing.T) {
 	require.Len(t, client.envelopes(t), 1, "a refused event is never published")
 }
 
+// TestFencedIncarnationPublishesNothingFurther pins the end-of-emissions mark a
+// prompt leaves behind. A prompt is one contained amp process, so the incarnation
+// ends with the prompt: an event attempted afterwards is refused at this adapter
+// with the verdict a consumer of these bytes would reach, and no consumer ever
+// sees it. The absent stream fences as harmlessly as it emits.
+func TestFencedIncarnationPublishesNothingFurther(t *testing.T) {
+	client := &lifecycleClient{}
+	session := lifecycleStreamSession(t, authoritativeAnswer(), client)
+
+	incarnation, err := session.openPromptStream(t.Context())
+	require.NoError(t, err)
+	require.NoError(t, incarnation.accept(t.Context(), lifecycle.Submission{SubmissionID: "s", ClientNonce: "n"}))
+	require.NoError(t, incarnation.settle(t.Context(),
+		lifecycleOutcome{stopReason: "end_turn", outcome: lifecycle.OutcomeSuccess},
+		nativeamp.ContainmentProof{Root: 4242, Proven: true}))
+	require.False(t, incarnation.stream.Fenced(), "a settled turn has not yet ended the incarnation")
+
+	incarnation.fence()
+	require.True(t, incarnation.stream.Fenced())
+
+	published := len(client.envelopes(t))
+
+	err = incarnation.emit(t.Context(), lifecycle.RunningEvent("cyc-2", "turn-2"))
+
+	var requestErr *acp.RequestError
+
+	require.ErrorAs(t, err, &requestErr)
+
+	data, ok := requestErr.Data.(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "amp_lifecycle_violation", data[jsonFieldError])
+	require.Contains(t, data[keyDetail], string(lifecycle.ViolationStaleStream))
+	require.Len(t, client.envelopes(t), published, "a fenced incarnation publishes nothing")
+
+	var absent *promptStream
+
+	absent.fence()
+}
+
 // TestAuthoritativeStreamStatesTheProvenBoundary pins the two facts only a
 // whole-tree proof produces: the snapshot opens on a certified boundary, and the
 // settled turn is followed by the quiescence fact the completed proof produced.

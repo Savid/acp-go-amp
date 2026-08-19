@@ -133,6 +133,23 @@ func (p *promptStream) settle(ctx context.Context, outcome lifecycleOutcome, pro
 	}))
 }
 
+// fence ends this incarnation. A prompt is one contained amp process, so a prompt
+// is one whole native lifecycle source lifetime: the incarnation ends where the
+// prompt does, whether it settled or failed, and the fence is that end-of-emissions
+// mark rather than a second claim about containment. It is recorded on the reducer
+// that judges every emission, so an event attempted after it is refused at this
+// adapter with the same verdict a consumer of these bytes would reach.
+//
+// `session/close` fences nothing of its own here: the incarnation belongs to the
+// prompt, and a close waits out the settlement that already ended it.
+func (p *promptStream) fence() {
+	if p == nil {
+		return
+	}
+
+	p.stream.Fence()
+}
+
 // emit claims the next sequence, validates the event through the same reducer the
 // canonical vectors drive, and delivers it on its own identity-only carrier. An
 // event this adapter cannot state truthfully fails the prompt here rather than

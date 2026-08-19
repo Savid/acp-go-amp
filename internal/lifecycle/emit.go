@@ -35,6 +35,17 @@ func (s *Stream) ID() string { return s.id }
 // State returns the projection the emitted stream proves.
 func (s *Stream) State() State { return s.reducer.State() }
 
+// Fence ends the incarnation by recording its close on the reducer that judges
+// every emission. A fenced stream is terminal: nothing more may be emitted on
+// it, and later conversation reuse opens a new incarnation with a new identity
+// and a fresh snapshot. The fence lives on the reducer rather than beside it so
+// the emitter refuses a post-fence event by the same rule, and with the same
+// verdict, a consumer of these bytes would.
+func (s *Stream) Fence() { s.reducer.Close() }
+
+// Fenced reports whether the incarnation has ended.
+func (s *Stream) Fenced() bool { return s.reducer.State().Closed }
+
 // Emit claims the next sequence, renders the envelope the notification will
 // carry, and validates it by decoding and reducing those very bytes. A refused
 // event is never handed back and its sequence stays consumed, which is exactly
