@@ -644,6 +644,23 @@ func (a *Agent) loadOrResume(ctx context.Context, sessionID acp.SessionId, cwd s
 	}
 
 	a.mu.Lock()
+
+	// The entry check is not the last word. Preparation reads the store, starts
+	// the runtime and builds a settings and scratch home, and a delete can land
+	// anywhere in that window: the tombstone is re-read under the same hold that
+	// publishes the session, so a delete that completed while this replacement
+	// was being prepared wins however far the preparation got. Installing behind
+	// it would name a live session with an id every door already answers unknown
+	// for — unreachable, never torn down, holding its slot and its directories
+	// for the rest of the agent's life.
+	if a.isDeletedLocked(sessionID) {
+		a.mu.Unlock()
+
+		closeErr := session.Close(context.Background())
+
+		return nil, nil, false, errors.Join(unknownSessionError(), closeErr)
+	}
+
 	if len(a.sessions) >= a.maxActiveSessions() {
 		a.mu.Unlock()
 
@@ -858,6 +875,16 @@ func (a *Agent) isDeleted(id acp.SessionId) (struct{}, bool) {
 	value, ok := a.deleted[id]
 
 	return value, ok
+}
+
+// isDeletedLocked reads the same marker under a lock the caller already holds.
+// The install path needs it that way: the tombstone and the publication have to
+// be one atomic decision, or a delete landing between them leaves a session
+// nothing can ever address.
+func (a *Agent) isDeletedLocked(id acp.SessionId) bool {
+	_, ok := a.deleted[id]
+
+	return ok
 }
 
 // markPendingNativeDelete queues a failed native thread delete for retry. The

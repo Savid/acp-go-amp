@@ -8,6 +8,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -655,4 +657,130 @@ func TestHandoffAdvertisementFollowsTheConfiguredReadRoot(t *testing.T) {
 	encoded, err := json.Marshal(meta[metaHandoffKey])
 	require.NoError(t, err)
 	require.JSONEq(t, `{"versions":[1]}`, string(encoded))
+}
+
+// loadGate parks the first main-subpath Load after arming, once the underlying
+// read has already returned. That puts a concurrent load exactly where
+// loadOrResume has passed its entry tombstone check and holds a pre-delete
+// manifest, so a delete completing behind it races the install.
+type loadGate struct {
+	SessionStore
+
+	mu      sync.Mutex
+	armed   bool
+	started chan struct{}
+	release chan struct{}
+}
+
+func (g *loadGate) Load(ctx context.Context, key SessionKey) ([]SessionStoreEntry, error) {
+	entries, err := g.SessionStore.Load(ctx, key)
+
+	g.mu.Lock()
+	armed := g.armed && key.Subpath == SessionStoreMainSubpath
+	if armed {
+		g.armed = false
+	}
+	g.mu.Unlock()
+
+	if armed {
+		g.started <- struct{}{}
+		<-g.release
+	}
+
+	return entries, err
+}
+
+func (g *loadGate) arm() {
+	g.mu.Lock()
+	g.armed = true
+	g.mu.Unlock()
+}
+
+// TestLoadRacingADeleteInstallsNothingAndLeaksNothing pins the concurrent
+// tombstone class: a load already past its entry check when a delete completes
+// installs nothing, tears its fully prepared replacement down, and leaves the
+// deletion marker set. The leak this refuses is total — the installed session
+// would be unreachable through every door, holding its active-session slot, its
+// settings directory and its scratch reservation for the rest of the agent's
+// life.
+func TestLoadRacingADeleteInstallsNothingAndLeaksNothing(t *testing.T) {
+	ctx := context.Background()
+	path, _ := fakeAgentAmpPath(t, "")
+	scratch := testScratchDir(t)
+	store := &loadGate{
+		SessionStore: NewInMemorySessionStore(),
+		started:      make(chan struct{}, 1),
+		release:      make(chan struct{}),
+	}
+
+	var reserved, released atomic.Int64
+
+	agent := newTestAgent(
+		WithExecutablePath(path),
+		WithScratchDir(scratch),
+		WithSessionStore(store),
+		WithRuntimeResourceHooks(RuntimeResourceHooks{
+			ReserveScratchRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
+				reserved.Add(1)
+
+				return func() { released.Add(1) }, nil
+			},
+		}),
+	)
+	t.Cleanup(func() { _ = agent.Close() })
+
+	created, err := agent.NewSession(ctx, NewSessionRequest(t.TempDir()))
+	require.NoError(t, err)
+
+	sessionID := created.SessionId
+	cwd := t.TempDir()
+
+	// Evict the live session so the delete below finds only the store row: with
+	// no session to fence, the tombstone is the sole thing the racing load has
+	// to lose to.
+	_, err = agent.CloseSession(ctx, acp.CloseSessionRequest{SessionId: sessionID})
+	require.NoError(t, err)
+
+	store.arm()
+
+	loaded := make(chan error, 1)
+
+	go func() {
+		_, loadErr := agent.LoadSession(ctx, LoadSessionRequest(sessionID, cwd))
+		loaded <- loadErr
+	}()
+
+	// The load is parked inside loadManifest now: past its entry check, holding
+	// a manifest the delete is about to invalidate.
+	<-store.started
+
+	_, err = agent.UnstableDeleteSession(ctx, DeleteSessionRequest(sessionID))
+	require.NoError(t, err)
+
+	close(store.release)
+
+	loadErr := <-loaded
+	require.Error(t, loadErr, "a load that lost the race hands back no session")
+	requireRequestErrorCode(t, loadErr, invalidParamsCode)
+
+	agent.mu.Lock()
+	_, mapped := agent.sessions[sessionID]
+	deleted := agent.isDeletedLocked(sessionID)
+	agent.mu.Unlock()
+
+	require.False(t, mapped, "the replacement that lost the race is never installed")
+	require.True(t, deleted, "installing never clears the deletion marker")
+
+	_, reachable := agent.session(sessionID)
+	require.Error(t, reachable, "the tombstoned id answers unknown at every door")
+
+	main, storeErr := store.Load(ctx, SessionKey{SessionID: string(sessionID), Subpath: SessionStoreMainSubpath})
+	require.NoError(t, storeErr)
+	require.Empty(t, main, "the tombstone is the last word on a deleted session")
+
+	require.Equal(t, reserved.Load(), released.Load(), "the prepared replacement releases its scratch reservation")
+
+	sessionDirs, err := filepath.Glob(filepath.Join(scratch, "acp-go-amp-session-*"))
+	require.NoError(t, err)
+	require.Empty(t, sessionDirs, "the prepared replacement releases its settings directory")
 }
