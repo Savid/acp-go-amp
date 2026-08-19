@@ -42,6 +42,44 @@ func testNativeIsolation() *nativeamp.ProcessIsolation {
 	}
 }
 
+// containmentReadyWait bounds how long an isolated fixture may take to publish
+// its readiness. These two launches claim the standalone agent identity, and
+// that claim proves the identity vacant across every task in the PID namespace
+// — the whole host under the privileged suite, walked by a supervisor that is
+// the instrumented test binary itself. The generic one-second helper is sized
+// for launches that claim nothing, and it reports that walk as a fixture which
+// never started, so these cases carry a supervised bound instead.
+const containmentReadyWait = 30 * time.Second
+
+// awaitContainmentReady waits out the supervised bound for a fixture's
+// readiness file. A prompt that ended first reports its own failure: a launch
+// that never reached the fixture is not a missing file, and saying so names the
+// cause instead of the symptom. A nil channel belongs to a case with no prompt
+// of its own.
+func awaitContainmentReady(t *testing.T, path string, promptEnded <-chan error) {
+	t.Helper()
+
+	deadline := time.Now().Add(containmentReadyWait)
+
+	for {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+
+		select {
+		case err := <-promptEnded:
+			t.Fatalf("the prompt ended before %s was created: %v", path, err)
+		default:
+		}
+
+		if time.Now().After(deadline) {
+			t.Fatalf("%s was not created within %s", path, containmentReadyWait)
+		}
+
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func TestCancelContainsDescendantBeforeReturn(t *testing.T) {
 	path, stateDir := fakeAgentAmpPath(t, "sigint-descendant")
 	client := nativeamp.NewClient(nil, nativeamp.Options{
@@ -64,7 +102,7 @@ func TestCancelContainsDescendantBeforeReturn(t *testing.T) {
 	agent.options.runtime.nativeCloseTurnWait = 10 * time.Second
 	session := &agentSession{agent: agent, activePrompt: state}
 
-	waitForPath(t, filepath.Join(stateDir, "continue-ready"))
+	awaitContainmentReady(t, filepath.Join(stateDir, "continue-ready"), nil)
 	descendantPID := readHelperJSON[int](t, filepath.Join(stateDir, "descendant-pid.jsonl"))[0]
 	requireProcessAlive(t, descendantPID, "before cancel")
 
@@ -129,7 +167,7 @@ func TestTurnTimeoutContainsDescendantBeforeReturn(t *testing.T) {
 		errCh <- promptErr
 	}()
 
-	waitForPath(t, filepath.Join(stateDir, "continue-ready"))
+	awaitContainmentReady(t, filepath.Join(stateDir, "continue-ready"), errCh)
 	descendantPID := readHelperJSON[int](t, filepath.Join(stateDir, "descendant-pid.jsonl"))[0]
 	requireProcessAlive(t, descendantPID, "before timeout")
 
