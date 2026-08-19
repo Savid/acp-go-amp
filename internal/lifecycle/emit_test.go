@@ -217,7 +217,7 @@ func TestRichSnapshotIsEncodedWhole(t *testing.T) {
 			Progress:     json.RawMessage(`{"done":1}`),
 		}},
 		Actions: []ActionUpdate{{
-			ActionID:         "acn-1",
+			ActionID:         "act-1",
 			Kind:             ActionPermission,
 			State:            ActionPending,
 			Owner:            Owner{Type: OwnerTurn, ID: "turn-1"},
@@ -325,7 +325,7 @@ func TestActivityAndActionUpdatesAreEncoded(t *testing.T) {
 	require.Equal(t, activity, delivery.Event)
 
 	action := Event{Type: EventActionUpdate, Action: &ActionUpdate{
-		ActionID:         "acn-1",
+		ActionID:         "act-1",
 		Kind:             ActionElicitation,
 		State:            ActionPending,
 		Owner:            Owner{Type: OwnerActivity, ID: "act-1"},
