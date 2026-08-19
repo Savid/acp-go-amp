@@ -246,3 +246,88 @@ func TestActivityAndActionUpdatesAreEncoded(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, action, delivery.Event)
 }
+
+// TestEmitValidatesTheRenderedBytes pins that emitter self-validation runs on
+// the notification the consumer will actually read, not on the struct behind it.
+// The progress member below reduces perfectly well as a Go value and renders to
+// bytes no consumer can decode: an emitter that judged the struct would publish
+// it, and the stream would fail at every consumer instead of at its source.
+func TestEmitValidatesTheRenderedBytes(t *testing.T) {
+	t.Parallel()
+
+	stream := NewStream("strm-1", richConfiguration())
+
+	_, err := stream.Emit(SnapshotEvent("cyc-0", QuiescenceFact{}))
+	require.NoError(t, err)
+
+	_, err = stream.Emit(AcceptedEvent(Submission{SubmissionID: "sub-1", ClientNonce: "non-1"}, "turn-1"))
+	require.NoError(t, err)
+
+	_, err = stream.Emit(RunningEvent("cyc-1", "turn-1"))
+	require.NoError(t, err)
+
+	before := stream.State()
+
+	envelope, err := stream.Emit(Event{Type: EventActivityUpdate, Activity: &ActivityUpdate{
+		ActivityID:   "act-1",
+		Kind:         ActivityTask,
+		State:        ActivityRunning,
+		Cause:        CauseSubmission,
+		OriginTurnID: "turn-1",
+		Progress:     json.RawMessage(`{"unterminated":`),
+	}})
+
+	require.Nil(t, envelope, "an envelope this adapter cannot state is never handed back")
+
+	var refusal *ViolationError
+
+	require.ErrorAs(t, err, &refusal)
+	require.Equal(t, ViolationMalformedEnvelope, refusal.Kind)
+	require.Equal(t, uint64(4), stream.sequence, "the refused event still consumed its sequence")
+	require.Equal(t, before.ReducedThrough, stream.State().ReducedThrough,
+		"nothing an emission could not state reaches the projection")
+
+	_, ok := stream.State().Activity("act-1")
+	require.False(t, ok, "the activity the refused frame named was never projected")
+}
+
+// TestEmitRefusesADiscriminantWithoutItsPayload pins the caller defect the
+// decoder can never produce. It is judged before the sequence is claimed: no
+// frame existed to leave a gap for, and the encoder that follows reads the very
+// payload the discriminant names.
+func TestEmitRefusesADiscriminantWithoutItsPayload(t *testing.T) {
+	t.Parallel()
+
+	stream := NewStream("strm-1", containedConfiguration())
+
+	for _, event := range []Event{
+		{Type: EventSnapshot},
+		{Type: EventPromptAccepted},
+		{Type: EventStateUpdate},
+		{Type: EventActivityUpdate},
+		{Type: EventActionUpdate},
+		{Type: EventQuiescenceUpdate},
+		// The discriminant names one payload and a second rides along.
+		{Type: EventSnapshot, Snapshot: &Snapshot{}, Quiescence: &QuiescenceFact{}},
+		// The payload is present but the discriminant names another one.
+		{Type: EventStateUpdate, Snapshot: &Snapshot{}},
+		// The discriminant is outside the closed six.
+		{Type: EventType("promoted"), Snapshot: &Snapshot{}},
+	} {
+		envelope, err := stream.Emit(event)
+		require.Nil(t, envelope)
+
+		var refusal *ViolationError
+
+		require.ErrorAs(t, err, &refusal)
+		require.Equal(t, ViolationMalformedEnvelope, refusal.Kind)
+		require.Equal(t, uint64(1), refusal.Sequence, "the sequence a valid first event would claim")
+	}
+
+	require.Equal(t, uint64(0), stream.sequence, "a caller defect claims no sequence")
+
+	// The stream is untouched: the next real event opens it at sequence one.
+	envelope, err := stream.Emit(SnapshotEvent("cyc-0", QuiescenceFact{}))
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), envelope[fieldSequence])
+}

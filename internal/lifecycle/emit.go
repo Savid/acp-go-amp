@@ -1,10 +1,18 @@
 package lifecycle
 
+import "encoding/json"
+
 // Stream is one incarnation's ordered emitter. It claims a sequence before
 // delivery is attempted, so a lost or refused event leaves a detectable gap
-// rather than a silently contiguous stream, and it reduces every event through
-// the same reducer the fixture battery drives, so a stream this adapter could not
-// support fails at the point of emission instead of at its consumers.
+// rather than a silently contiguous stream.
+//
+// Every emission is rendered as the notification it will ride and then read back
+// through DecodeSessionUpdate before it is reduced, so emitter input passes the
+// same structural, carrier and ordering validation as decoded wire input. "The
+// envelopes this adapter emits are well formed" is a claim about bytes, and only
+// the consumer's own path can settle it: a struct that reduces cleanly and then
+// renders to something a consumer refuses is exactly the defect this ordering
+// catches.
 //
 // A Stream is not safe for concurrent use; a prompt owns its incarnation and
 // emits from one goroutine.
@@ -27,28 +35,50 @@ func (s *Stream) ID() string { return s.id }
 // State returns the projection the emitted stream proves.
 func (s *Stream) State() State { return s.reducer.State() }
 
-// Emit claims the next sequence, reduces the event, and renders the envelope for
-// the notification's `_meta`. A refused event is never rendered and its sequence
-// stays consumed, which is exactly the detectable gap the ordering rule wants.
+// Emit claims the next sequence, renders the envelope the notification will
+// carry, and validates it by decoding and reducing those very bytes. A refused
+// event is never handed back and its sequence stays consumed, which is exactly
+// the detectable gap the ordering rule wants.
 func (s *Stream) Emit(event Event) (map[string]any, error) {
-	s.sequence++
-
-	err := s.reducer.Reduce(Delivery{
-		StreamID: s.id,
-		Sequence: s.sequence,
-		Carrier:  CarrierSessionInfo,
-		Event:    event,
-	})
-	if err != nil {
-		return nil, err
+	// The payload is judged before anything is claimed or dereferenced: a
+	// discriminant without its payload is a caller defect, not a delivery this
+	// stream ever carried, and the encoder below reads the payload the
+	// discriminant names.
+	if !event.strictShape() {
+		return nil, violation(ViolationMalformedEnvelope, s.id, s.sequence+1,
+			"event payload does not match type "+string(event.Type))
 	}
 
-	return map[string]any{
+	s.sequence++
+
+	envelope := map[string]any{
 		fieldVersion:  Version,
 		fieldStreamID: s.id,
 		fieldSequence: s.sequence,
 		fieldEvent:    encodeEvent(event),
-	}, nil
+	}
+
+	// A rendered value the encoder could not state as JSON is refused here rather
+	// than escaping as an untyped error: the notification never existed, so the
+	// verdict is the envelope's own.
+	params, marshalErr := json.Marshal(map[string]any{
+		updateField: map[string]any{sessionUpdateField: string(CarrierSessionInfo)},
+		metaField:   map[string]any{MetaKey: envelope},
+	})
+	if marshalErr != nil {
+		return nil, violation(ViolationMalformedEnvelope, s.id, s.sequence, marshalErr.Error())
+	}
+
+	delivery, err := DecodeSessionUpdate(params, s.reducer.negotiated)
+	if err == nil {
+		err = s.reducer.Reduce(delivery)
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	return envelope, nil
 }
 
 // SnapshotEvent opens a stream from the whole state this adapter can state

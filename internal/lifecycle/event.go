@@ -70,6 +70,35 @@ type Event struct {
 	Quiescence     *QuiescenceFact
 }
 
+// strictShape reports the invariant the decoder guarantees and an in-process
+// caller does not: exactly one payload is present and it is the one Type names.
+// The emitter checks it because the encoder reads the payload the discriminant
+// names, and a value the decoder could never have produced is a caller defect
+// rather than a frame.
+func (e Event) strictShape() bool {
+	payloads := 0
+
+	for _, present := range []bool{
+		e.Snapshot != nil, e.PromptAccepted != nil, e.State != nil,
+		e.Activity != nil, e.Action != nil, e.Quiescence != nil,
+	} {
+		if present {
+			payloads++
+		}
+	}
+
+	if payloads != 1 {
+		return false
+	}
+
+	return e.Type == EventSnapshot && e.Snapshot != nil ||
+		e.Type == EventPromptAccepted && e.PromptAccepted != nil ||
+		e.Type == EventStateUpdate && e.State != nil ||
+		e.Type == EventActivityUpdate && e.Activity != nil ||
+		e.Type == EventActionUpdate && e.Action != nil ||
+		e.Type == EventQuiescenceUpdate && e.Quiescence != nil
+}
+
 // Snapshot opens a stream with the whole truth it can state: the foreground state
 // and cycle, the complete nonterminal activity and action sets, and the current
 // quiescence fact with its proof source.
