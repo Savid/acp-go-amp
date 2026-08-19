@@ -131,8 +131,9 @@ func (s *InMemorySessionStore) Load(ctx context.Context, key SessionKey) ([]Sess
 
 // isTombstonedLocked reports whether a key is hidden by a tombstone. A tombstone
 // on the main key cascades to every subpath of that session (including subpaths
-// created after the main delete), and is cleared only by a valid Replace
-// generation that re-publishes the main key.
+// created after the main delete), and nothing clears it: a session a Delete
+// tombstoned stays deleted, and the only tombstones a Replace lifts are the ones
+// an earlier Replace wrote over its own unlisted subpaths.
 func (s *InMemorySessionStore) isTombstonedLocked(key SessionKey) bool {
 	if _, ok := s.deleted[key]; ok {
 		return true
@@ -189,6 +190,14 @@ func (s *InMemorySessionStore) Replace(ctx context.Context, main SessionKey, rep
 	defer s.mu.Unlock()
 
 	s.ensure()
+
+	// A tombstone is final in the store itself, not merely in the adapter that
+	// wrote it. A replacement landing after a delete would durably resurrect a
+	// session every wire door already answers unknown for, and an adapter-level
+	// deletion marker cannot prevent it: the write is already on its way here.
+	if s.isTombstonedLocked(main) {
+		return nil
+	}
 
 	for key := range s.entries {
 		if key.SessionID == main.SessionID {

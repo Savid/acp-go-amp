@@ -342,3 +342,83 @@ func TestInMemoryStoreZeroValueSelfHeals(t *testing.T) {
 		t.Fatal("nil-receiver Load did not error")
 	}
 }
+
+// TestInMemoryStoreTombstoneFinality pins the finality the store owes on its
+// own: neither an append nor a replacement addressed to a tombstoned session
+// writes anything or clears anything, and both answer success because the
+// deleted state is already the caller's answer. An adapter-level deletion
+// marker is not a substitute — a write that is already in flight when the
+// tombstone lands reaches the store regardless of what the adapter believes.
+func TestInMemoryStoreTombstoneFinality(t *testing.T) {
+	ctx := context.Background()
+	store := NewInMemorySessionStore()
+	main := SessionKey{SessionID: "T-1", Subpath: SessionStoreMainSubpath}
+	transcript := SessionKey{SessionID: "T-1", Subpath: transcriptSubpath}
+	manifest, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, SessionID: "T-1", NativeSessionID: "T-1", Cwd: "/tmp", UpdatedAtUnixMilli: 5})
+
+	if err := store.Replace(ctx, main, []SessionStoreReplacement{
+		{Key: main, Entries: []SessionStoreEntry{manifest}},
+		{Key: transcript, Entries: []SessionStoreEntry{json.RawMessage(`{"type":"result"}`)}},
+	}); err != nil {
+		t.Fatalf("seed replace: %v", err)
+	}
+
+	if err := store.Delete(ctx, main); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+
+	// Append over the tombstone: writes nothing, clears nothing, succeeds.
+	if err := store.Append(ctx, main, []SessionStoreEntry{manifest}); err != nil {
+		t.Fatalf("append over a tombstone: %v", err)
+	}
+	if err := store.Append(ctx, transcript, []SessionStoreEntry{json.RawMessage(`{"type":"late"}`)}); err != nil {
+		t.Fatalf("append over a cascaded tombstone: %v", err)
+	}
+
+	// Replace over the tombstone: the same three answers. This is the write a
+	// commit racing a delete makes, and the one that durably resurrects a
+	// deleted session when the store does not refuse it itself.
+	if err := store.Replace(ctx, main, []SessionStoreReplacement{
+		{Key: main, Entries: []SessionStoreEntry{manifest}},
+		{Key: transcript, Entries: []SessionStoreEntry{json.RawMessage(`{"type":"late"}`)}},
+	}); err != nil {
+		t.Fatalf("replace over a tombstone: %v", err)
+	}
+
+	for _, key := range []SessionKey{main, transcript} {
+		entries, err := store.Load(ctx, key)
+		if err != nil {
+			t.Fatalf("load %q after refused writes: %v", key.Subpath, err)
+		}
+		if len(entries) != 0 {
+			t.Fatalf("tombstoned key %q holds %d entries after refused writes", key.Subpath, len(entries))
+		}
+	}
+
+	summaries, err := store.ListSessions(ctx)
+	if err != nil {
+		t.Fatalf("list sessions: %v", err)
+	}
+	if len(summaries) != 0 {
+		t.Fatalf("a refused write relisted a deleted session: %+v", summaries)
+	}
+
+	subkeys, err := store.ListSubkeys(ctx, main)
+	if err != nil {
+		t.Fatalf("list subkeys: %v", err)
+	}
+	if len(subkeys) != 0 {
+		t.Fatalf("a refused write relisted a deleted subpath: %#v", subkeys)
+	}
+
+	// A different session is untouched by the first one's tombstone.
+	other := SessionKey{SessionID: "T-2", Subpath: SessionStoreMainSubpath}
+	otherManifest, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, SessionID: "T-2", NativeSessionID: "T-2", Cwd: "/tmp", UpdatedAtUnixMilli: 6})
+	if err := store.Replace(ctx, other, []SessionStoreReplacement{{Key: other, Entries: []SessionStoreEntry{otherManifest}}}); err != nil {
+		t.Fatalf("replace an untombstoned session: %v", err)
+	}
+	entries, err := store.Load(ctx, other)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("untombstoned replace: entries=%d err=%v", len(entries), err)
+	}
+}

@@ -842,14 +842,19 @@ func TestTombstoneCascade(t *testing.T) {
 		t.Fatalf("tombstoned subkeys listed: %#v err=%v", subkeys, err)
 	}
 
+	// Re-publishing the main key does not lift the tombstone: the cascade holds
+	// over every subpath, and the append that follows it writes nothing either.
 	if err := store.Replace(ctx, main, []SessionStoreReplacement{{Key: main, Entries: []SessionStoreEntry{manifest}}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Append(ctx, future, []SessionStoreEntry{json.RawMessage(`"y"`)}); err != nil {
 		t.Fatal(err)
 	}
-	if entries, err := store.Load(ctx, future); err != nil || len(entries) != 1 {
-		t.Fatalf("append after tombstone clear failed: entries=%d err=%v", len(entries), err)
+	if entries, err := store.Load(ctx, future); err != nil || len(entries) != 0 {
+		t.Fatalf("a replacement resurrected a cascaded subpath: entries=%d err=%v", len(entries), err)
+	}
+	if entries, err := store.Load(ctx, main); err != nil || len(entries) != 0 {
+		t.Fatalf("a replacement resurrected a tombstoned session: entries=%d err=%v", len(entries), err)
 	}
 }
 
