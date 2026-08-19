@@ -5,12 +5,18 @@ import (
 	"encoding/json"
 
 	"github.com/coder/acp-go-sdk"
+	"github.com/savid/acp-go-amp/internal/lifecycle"
 )
 
 const (
 	ampOptionsKey       = "options"
 	metaOutputSchemaKey = "outputSchema"
 	metaEnabledKey      = "enabled"
+
+	// metaRouteKey is the family literal Amp deliberately does not implement. It
+	// is named here anyway: a builder refuses a caller's collision with a reserved
+	// key whether or not this adapter would have read it.
+	metaRouteKey = "acp-go.dev/route"
 )
 
 // SessionRequestOption configures embedded-Go ACP session lifecycle requests.
@@ -117,12 +123,20 @@ func WithSessionAdditionalDirectories(paths ...string) SessionRequestOption {
 	}
 }
 
-// WithSessionMeta sets metadata for a session lifecycle request.
+// WithSessionMeta merges metadata into a session lifecycle request. Merging is
+// what makes the options commutative: every other option on this request writes
+// into `_meta.amp`, and an assignment here would discard whatever they had
+// already built purely because the host listed this one last.
+//
+// It panics on a caller key naming an `acp-go.dev/*` family literal; see
+// [rejectReservedFamilyMeta].
 func WithSessionMeta(meta map[string]any) SessionRequestOption {
+	rejectReservedFamilyMeta("WithSessionMeta", meta)
+
 	cloned := cloneAnyMap(meta)
 
 	return func(cfg *sessionRequestConfig) {
-		cfg.meta = cloned
+		cfg.meta = mergeAnyMap(cfg.meta, cloned)
 	}
 }
 
@@ -252,12 +266,16 @@ func WithListSessionsCursor(cursor string) ListSessionsRequestOption {
 	}
 }
 
-// WithListSessionsMeta sets metadata on a session/list request.
+// WithListSessionsMeta merges metadata into a session/list request, on the same
+// terms as [WithSessionMeta]: it accumulates rather than replacing, and it panics
+// on a caller key naming an `acp-go.dev/*` family literal.
 func WithListSessionsMeta(meta map[string]any) ListSessionsRequestOption {
+	rejectReservedFamilyMeta("WithListSessionsMeta", meta)
+
 	cloned := cloneAnyMap(meta)
 
 	return func(req *acp.ListSessionsRequest) {
-		req.Meta = cloned
+		req.Meta = mergeAnyMap(req.Meta, cloned)
 	}
 }
 
@@ -287,6 +305,64 @@ func (cfg sessionRequestConfig) stableMCPServers() []acp.McpServer {
 
 func (cfg sessionRequestConfig) additionalDirectoriesClone() []string {
 	return append([]string(nil), cfg.additionalDirectories...)
+}
+
+// reservedFamilyLiterals is the closed set of family-global `acp-go.dev/*` keys.
+// Each one is versioned, carries exactly the fields the family fixes, and is
+// written by the adapter or read from a place no caller `_meta` map reaches.
+// Amp advertises no route capability and still refuses the route literal by
+// name: a reserved key is never ignored because this adapter would not have read
+// it anyway.
+func reservedFamilyLiterals() []string {
+	return []string{
+		metaRouteKey,
+		metaMediaEnvelopeKey,
+		metaHandoffKey,
+		lifecycle.MetaKey,
+	}
+}
+
+// rejectReservedFamilyMeta refuses a caller `_meta` map that names a family
+// literal. Every builder taking host-supplied metadata calls it, because that
+// map is the one place a reserved-literal collision can arise on a
+// family-built request.
+//
+// The refusal is a panic because these builders answer with a request rather
+// than an error, and the three quieter options are all worse: merging or
+// overwriting lets a host speak for the family under a name the family owns,
+// and dropping the key leaves the host believing metadata rode that never did.
+// A caller never writes one of these four names legitimately, so this is a
+// construction defect, deterministic and caught by the first call.
+func rejectReservedFamilyMeta(builder string, meta map[string]any) {
+	for _, literal := range reservedFamilyLiterals() {
+		if _, present := meta[literal]; present {
+			panic(builder + `: _meta key "` + literal + `" is a reserved acp-go.dev family literal`)
+		}
+	}
+}
+
+// mergeAnyMap overlays one metadata map onto another, descending into nested
+// objects so two options writing different members of `_meta.amp` both survive.
+// A non-object overlay value replaces whatever stood at that key.
+func mergeAnyMap(base map[string]any, overlay map[string]any) map[string]any {
+	merged := cloneAnyMap(base)
+	if merged == nil {
+		merged = map[string]any{}
+	}
+
+	for key, value := range overlay {
+		if valueMap, ok := value.(map[string]any); ok {
+			if existing, ok := merged[key].(map[string]any); ok {
+				merged[key] = mergeAnyMap(existing, valueMap)
+
+				continue
+			}
+		}
+
+		merged[key] = cloneAny(value)
+	}
+
+	return merged
 }
 
 func ensureAmpMeta(cfg *sessionRequestConfig) map[string]any {
