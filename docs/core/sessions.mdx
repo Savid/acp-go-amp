@@ -50,14 +50,17 @@ gone, load still replays local history but the next prompt returns a terminal
 
 ## Mirror commit ordering
 
-Only a clean `end_turn` publishes its frames to the store; cancelled or errored
-turns are never mirrored locally, even though the server-side thread advances
-regardless. If a store write fails after a completed turn, the adapter keeps the
+Every settled turn publishes its frames to the store at one commit point: a
+cancelled, failed, or timed-out turn commits what it already streamed, exactly
+as a clean `end_turn` does, so the local mirror never holds less than the client
+was shown while the server-side thread advances. The commit runs after the
+turn's process containment boundary completes and before the terminal state the
+host sees. If a store write fails after a settled turn, the adapter keeps the
 exact frames in memory and blocks the next prompt with a `mirror_unsynced`
 error until the mirror is reconciled, so the local record never silently drifts
 from what Amp produced. `session/close` reconciles it too: the close retries the
 retained frames before the session is reclaimed and fails when it cannot, so the
-request that ends a session is never the one that drops a completed turn. A
+request that ends a session is never the one that drops a settled turn. A
 session already fenced for `session/delete` writes nothing there — the tombstone
 is the last write to that row, and the frames stay retained. `Agent.Close`
 reconciles it too, for the same reason and with the same failure: an embedded

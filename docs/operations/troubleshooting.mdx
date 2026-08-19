@@ -80,8 +80,9 @@ the complete taxonomy.
 ## Unsynced mirror
 
 The adapter mirrors the remote thread's stream-JSON frames into the session
-store. When a completed native turn's store write fails, the turn is retained
-in memory and the next prompt is blocked with a loud `mirror_unsynced` error;
+store. When a settled turn's store write fails — cancelled and failed turns
+commit what they already streamed too — the turn is retained in memory and the
+next prompt is blocked with a loud `mirror_unsynced` error;
 once the store recovers, the exact retained frames are durably re-committed
 before a new turn runs, so load replay still contains every turn. Reproduced by
 `TestMirrorUnsyncedRetention` (`session_test.go`).
