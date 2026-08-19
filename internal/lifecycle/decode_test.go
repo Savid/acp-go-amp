@@ -164,6 +164,8 @@ func TestDecodeEventStructure(t *testing.T) {
 		{`{"type":"state_update","state":"waiting","cycleId":"c","turnId":"t","cause":"submission"}`, ViolationMalformedEnvelope},
 		{`{"type":"state_update","state":"running","cycleId":"c","turnId":"t","cause":"whim"}`, ViolationMalformedEnvelope},
 		{`{"type":"state_update","state":"running","cycleId":"c","cause":"submission"}`, ViolationMalformedEnvelope},
+		{`{"type":"state_update","state":"running","cycleId":"c","cause":"session"}`, ViolationMalformedEnvelope},
+		{`{"type":"state_update","state":"requires_action","cycleId":"c","cause":"session"}`, ViolationMalformedEnvelope},
 		{`{"type":"state_update","state":"running","cycleId":"c","turnId":"t","cause":"submission","stopReason":"end_turn"}`, ViolationMalformedEnvelope},
 		{`{"type":"state_update","state":"idle","cycleId":"c","turnId":"t","cause":"submission","stopReason":"stop"}`, ViolationMalformedEnvelope},
 		{`{"type":"state_update","state":"idle","cycleId":"c","turnId":"t","cause":"submission","outcome":"partial"}`, ViolationMalformedEnvelope},
@@ -206,6 +208,10 @@ func TestDecodeEventStructure(t *testing.T) {
 		{`{"type":"lifecycle_snapshot","foreground":{"state":"running","cycleId":"c","turnId":"t","origin":"session"},` +
 			`"activities":[],"actions":[],"quiescence":{"quiescent":false}}`, ViolationMalformedEnvelope},
 		{`{"type":"lifecycle_snapshot","foreground":{"state":"running","cycleId":"c","turnId":"t"},` +
+			`"activities":[],"actions":[],"quiescence":{"quiescent":false}}`, ViolationMalformedEnvelope},
+		{`{"type":"lifecycle_snapshot","foreground":{"state":"running","cycleId":"c"},` +
+			`"activities":[],"actions":[],"quiescence":{"quiescent":false}}`, ViolationMalformedEnvelope},
+		{`{"type":"lifecycle_snapshot","foreground":{"state":"requires_action","cycleId":"c"},` +
 			`"activities":[],"actions":[],"quiescence":{"quiescent":false}}`, ViolationMalformedEnvelope},
 		{`{"type":"state_update","state":"idle","cycleId":"c","turnId":"t","cause":"submission","outcome":"success"}`,
 			ViolationMalformedEnvelope},

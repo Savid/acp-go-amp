@@ -31,6 +31,9 @@ func (r *Reducer) checkSnapshot(delivery Delivery, snapshot Snapshot) error {
 		return r.fail(delivery, ViolationMalformedEnvelope, "the snapshot's foreground is incomplete")
 	case foreground.State == ForegroundIdle && foreground.TurnID != "":
 		return r.fail(delivery, ViolationMalformedEnvelope, "an idle foreground reports no turn")
+	case foreground.State != ForegroundIdle && foreground.TurnID == "":
+		return r.fail(delivery, ViolationMalformedEnvelope,
+			"a "+string(foreground.State)+" foreground names the turn that owns it")
 	case (foreground.TurnID == "") != (foreground.Origin == ""):
 		return r.fail(delivery, ViolationMalformedEnvelope, "foreground origin is present exactly while a turn is")
 	case foreground.Origin != "" && foreground.Origin != CauseSubmission && foreground.Origin != CauseActivity:
@@ -243,7 +246,10 @@ func (r *Reducer) applyStateUpdate(delivery Delivery) error {
 		return r.fail(delivery, ViolationMalformedEnvelope, "the transition payload is missing")
 	}
 
-	if detail := endingIdleDefect(*transition); detail != "" {
+	// The event's own shape is judged first. A transition missing a member its
+	// state requires names no entity to resolve and states nothing about a cycle,
+	// so it never reports an unresolvable reference or an inconsistent foreground.
+	if detail := transitionDefect(*transition); detail != "" {
 		return r.fail(delivery, ViolationMalformedEnvelope, detail)
 	}
 

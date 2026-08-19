@@ -141,14 +141,37 @@ type StateTransition struct {
 	Outcome    Outcome
 }
 
+// transitionDefect reports why a transition's own shape is incomplete, or the
+// empty string when it is not. Every defect it names is structural, so both the
+// decoder and the reducer consult it before anything the stream holds is
+// consulted: an event missing a member its state requires resolves no name and
+// says nothing about a cycle, so it can report neither an unresolvable reference
+// nor an inconsistent foreground.
+func transitionDefect(transition StateTransition) string {
+	if detail := liveForegroundDefect(transition); detail != "" {
+		return detail
+	}
+
+	return endingIdleDefect(transition)
+}
+
+// liveForegroundDefect reports a transition to a live foreground state that names
+// no turn. A running foreground is a turn running and a requires_action one is
+// owned work blocked, so a transition to either names the turn that owns it
+// whatever its cause; only a session-caused idle may omit one.
+func liveForegroundDefect(transition StateTransition) string {
+	if transition.State == ForegroundIdle || transition.TurnID != "" {
+		return ""
+	}
+
+	return "a " + string(transition.State) + " transition names the turn that owns it"
+}
+
 // endingIdleDefect reports why an idle transition that settles a turn is
 // structurally incomplete, or the empty string when it is not. An idle naming a
 // turn ends it, so the outcome is always required; the stop reason is required
 // with it except on a failure, where no ACP v1 stop reason names one and the v1
 // error carries it instead.
-//
-// Both the decoder and the reducer consult it, so an event this adapter emits is
-// held to the same rule as one it reads.
 func endingIdleDefect(transition StateTransition) string {
 	if transition.State != ForegroundIdle || transition.TurnID == "" {
 		return ""

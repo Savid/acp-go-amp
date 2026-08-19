@@ -231,9 +231,11 @@ func (d *decoder) snapshot(fields map[string]json.RawMessage) Event {
 }
 
 // foreground reads the snapshot's foreground object. Presence is a rule rather
-// than a preference: a turn is named exactly while one is open, and its origin
-// is named exactly with it, so a resumed turn always carries recorded
-// provenance.
+// than a preference, and it binds in both directions: an idle foreground names no
+// turn, a live one names the turn that owns it, and the origin is named exactly
+// with the turn, so a resumed turn always carries recorded provenance. A snapshot
+// asserting a live foreground with no turn asserts a cycle nothing owns, which is
+// a state no stream may reach and no resumed projection could repair.
 func (d *decoder) foreground(raw json.RawMessage) Foreground {
 	fields, ok := jsonObject(raw)
 	if !ok {
@@ -256,6 +258,8 @@ func (d *decoder) foreground(raw json.RawMessage) Foreground {
 		d.fail(ViolationMalformedEnvelope, "foreground state "+string(foreground.State))
 	case foreground.State == ForegroundIdle && foreground.TurnID != "":
 		d.fail(ViolationMalformedEnvelope, "an idle foreground reports no turn")
+	case foreground.State != ForegroundIdle && foreground.TurnID == "":
+		d.fail(ViolationMalformedEnvelope, "a "+string(foreground.State)+" foreground names the turn that owns it")
 	case (foreground.TurnID == "") != (foreground.Origin == ""):
 		d.fail(ViolationMalformedEnvelope, "foreground origin is present exactly while a turn is")
 	case foreground.Origin != "" && foreground.Origin != CauseSubmission && foreground.Origin != CauseActivity:
@@ -276,6 +280,10 @@ func (d *decoder) promptAccepted(fields map[string]json.RawMessage) Event {
 	}}
 }
 
+// stateUpdate reads one foreground transition. A turn is named by construction on
+// a submission- or activity-caused transition, and by the state on every
+// transition to a live foreground: the structural shape is settled here, before
+// the stream this transition would move is consulted at all.
 func (d *decoder) stateUpdate(fields map[string]json.RawMessage) Event {
 	d.known(fields, string(EventStateUpdate), fieldType, fieldState, fieldCycleID, fieldTurnID,
 		fieldCause, fieldStopReason, fieldOutcome)
@@ -303,7 +311,7 @@ func (d *decoder) stateUpdate(fields map[string]json.RawMessage) Event {
 	case transition.Outcome != "" && !transition.Outcome.Valid():
 		d.fail(ViolationMalformedEnvelope, "outcome "+string(transition.Outcome))
 	default:
-		if detail := endingIdleDefect(*transition); detail != "" {
+		if detail := transitionDefect(*transition); detail != "" {
 			d.fail(ViolationMalformedEnvelope, detail)
 		}
 	}

@@ -101,9 +101,10 @@ func TestReducerRefusesAnIncompleteSnapshotForeground(t *testing.T) {
 }
 
 // TestReducerRefusesAMisshapenSnapshotForegroundTurn pins that the emit gate
-// holds a snapshot's foreground to the same turn shape the decoder enforces: an
-// idle foreground names no turn, origin travels exactly with the turn, and an
-// origin is one of the two causes.
+// holds a snapshot's foreground to the same turn shape the decoder enforces. The
+// presence rule binds in both directions: an idle foreground names no turn, a
+// live one names the turn that owns it, origin travels exactly with the turn, and
+// an origin is one of the two causes.
 func TestReducerRefusesAMisshapenSnapshotForegroundTurn(t *testing.T) {
 	t.Parallel()
 
@@ -111,6 +112,8 @@ func TestReducerRefusesAMisshapenSnapshotForegroundTurn(t *testing.T) {
 		{State: ForegroundIdle, CycleID: "cyc-0", TurnID: "turn-1"},
 		{State: ForegroundRunning, CycleID: "cyc-1", TurnID: "turn-1"},
 		{State: ForegroundRunning, CycleID: "cyc-1", Origin: CauseSubmission},
+		{State: ForegroundRunning, CycleID: "cyc-1"},
+		{State: ForegroundRequiresAction, CycleID: "cyc-1"},
 		{State: ForegroundRunning, CycleID: "cyc-1", TurnID: "turn-1", Origin: "bogus"},
 	} {
 		requireReduceRefusal(t, richConfiguration(), ViolationMalformedEnvelope,
@@ -228,6 +231,37 @@ func TestForegroundTransitionsResolveTheirTurn(t *testing.T) {
 		Event{Type: EventStateUpdate, State: &StateTransition{State: ForegroundIdle, CycleID: "cyc-1", Cause: CauseSession}})
 	require.Nil(t, refusal)
 	require.Equal(t, &Foreground{State: ForegroundIdle, CycleID: "cyc-1"}, reducer.State().Foreground)
+}
+
+// TestLiveForegroundNamesTheTurnThatOwnsIt pins the structural rule ahead of both
+// rules it could be mistaken for. A session-caused transition to a live state
+// carrying no turn is refused for its own shape: it names no entity, so it never
+// reports an unresolvable reference, and it says nothing about a cycle, so a
+// properly blocked one never converts it into a consistency verdict.
+func TestLiveForegroundNamesTheTurnThatOwnsIt(t *testing.T) {
+	t.Parallel()
+
+	requireReduceRefusal(t, richConfiguration(), ViolationMalformedEnvelope, openSnapshot(),
+		Event{Type: EventStateUpdate, State: &StateTransition{
+			State: ForegroundRunning, CycleID: "cyc-1", Cause: CauseSession,
+		}})
+
+	accepted := Event{Type: EventPromptAccepted, PromptAccepted: &PromptAccepted{
+		SubmissionID: "sub-1", ClientNonce: "non-1", TurnID: "turn-1",
+	}}
+	blocking := actionEvent(ActionUpdate{
+		ActionID: "req-1", Kind: ActionPermission, State: ActionPending,
+		Owner: Owner{Type: OwnerTurn, ID: "turn-1"}, BlocksForeground: stated(true),
+	})
+	blocked := Event{Type: EventStateUpdate, State: &StateTransition{
+		State: ForegroundRequiresAction, CycleID: "cyc-1", TurnID: "turn-1", Cause: CauseSubmission,
+	}}
+
+	requireReduceRefusal(t, richConfiguration(), ViolationMalformedEnvelope,
+		openSnapshot(), accepted, RunningEvent("cyc-1", "turn-1"), blocking, blocked,
+		Event{Type: EventStateUpdate, State: &StateTransition{
+			State: ForegroundRequiresAction, CycleID: "cyc-1", Cause: CauseSession,
+		}})
 }
 
 // TestSnapshotForegroundTurnSettlesWithoutAcceptance pins that a turn the
