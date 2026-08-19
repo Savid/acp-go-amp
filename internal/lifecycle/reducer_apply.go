@@ -60,15 +60,16 @@ func (r *Reducer) checkSnapshot(delivery Delivery, snapshot Snapshot) error {
 // current a state that is over, and an id listed twice asserts two current states
 // for one entity — malformed even when the two entries agree, because a
 // whole-state assertion is judged whole rather than repaired by deduplication.
+//
+// Set membership precedes entry judgment: an entry that both repeats an id and
+// fails its own first-sight check is a malformed envelope, because a set that
+// names one entity twice states nothing about either entry that is worth
+// judging.
 func (r *Reducer) checkSnapshotActivities(delivery Delivery, snapshot Snapshot, introduced introductions) error {
 	listed := make(map[string]bool, len(snapshot.Activities))
 
 	for index := range snapshot.Activities {
 		activity := &snapshot.Activities[index]
-
-		if err := r.checkActivityIdentity(delivery, *activity); err != nil {
-			return err
-		}
 
 		if listed[activity.ActivityID] {
 			return r.fail(delivery, ViolationMalformedEnvelope,
@@ -76,6 +77,10 @@ func (r *Reducer) checkSnapshotActivities(delivery Delivery, snapshot Snapshot, 
 		}
 
 		listed[activity.ActivityID] = true
+
+		if err := r.checkActivityIdentity(delivery, *activity); err != nil {
+			return err
+		}
 
 		if activity.State.Terminal() {
 			return r.fail(delivery, ViolationMalformedEnvelope, "activity "+activity.ActivityID+" is terminal")
@@ -89,23 +94,23 @@ func (r *Reducer) checkSnapshotActivities(delivery Delivery, snapshot Snapshot, 
 	return nil
 }
 
-// checkSnapshotActions validates the asserted action set. Uniqueness is stated
-// per set because that is where an id has to be unique: activities and actions
-// are distinct id spaces, so the same opaque string naming one of each is two
-// entities rather than a collision.
+// checkSnapshotActions validates the asserted action set under the same order.
+// Uniqueness is stated per set because that is where an id has to be unique:
+// activities and actions are distinct id spaces, so the same opaque string
+// naming one of each is two entities rather than a collision.
 func (r *Reducer) checkSnapshotActions(delivery Delivery, snapshot Snapshot, introduced introductions) error {
 	listed := make(map[string]bool, len(snapshot.Actions))
 
 	for _, action := range snapshot.Actions {
-		if err := r.checkActionIdentity(delivery, action); err != nil {
-			return err
-		}
-
 		if listed[action.ActionID] {
 			return r.fail(delivery, ViolationMalformedEnvelope, "action "+action.ActionID+" is listed twice")
 		}
 
 		listed[action.ActionID] = true
+
+		if err := r.checkActionIdentity(delivery, action); err != nil {
+			return err
+		}
 
 		if action.State.Terminal() {
 			return r.fail(delivery, ViolationMalformedEnvelope, "action "+action.ActionID+" is terminal")

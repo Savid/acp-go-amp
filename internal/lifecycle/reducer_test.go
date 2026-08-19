@@ -968,3 +968,49 @@ func TestSupersededStreamNeverOpensAgain(t *testing.T) {
 	require.Equal(t, ViolationStaleStream, reducer.Failed().Kind)
 	require.Equal(t, replaced, reducer.State())
 }
+
+// TestSetMembershipPrecedesEntryJudgment pins the order the two checks run in.
+// A snapshot set that names one id twice states nothing about either entry that
+// is worth judging, so the duplicate is the verdict even when the repeated entry
+// also fails its own first-sight check: judging the entry first would answer
+// immutable_identity_change or unnegotiated_fact for a set that was malformed
+// before any entry in it was read.
+func TestSetMembershipPrecedesEntryJudgment(t *testing.T) {
+	t.Parallel()
+
+	// The repeated activity is missing the immutable members a first sight owes.
+	requireReduceRefusal(t, richConfiguration(), ViolationMalformedEnvelope,
+		Event{Type: EventSnapshot, Snapshot: &Snapshot{
+			Foreground: Foreground{State: ForegroundIdle, CycleID: "cyc-0"},
+			Activities: []ActivityUpdate{
+				{ActivityID: "act-1", Kind: ActivityTask, State: ActivityRunning, Cause: CauseSession, OriginTurnID: "turn-1"},
+				{ActivityID: "act-1", State: ActivityRunning},
+			},
+		}})
+
+	// The repeated activity names a kind the configuration never negotiated.
+	degenerate := Negotiated{Versions: []int{Version}, ActivityKinds: []ActivityKind{ActivityTask}}
+
+	requireReduceRefusal(t, degenerate, ViolationMalformedEnvelope,
+		Event{Type: EventSnapshot, Snapshot: &Snapshot{
+			Foreground: Foreground{State: ForegroundIdle, CycleID: "cyc-0"},
+			Activities: []ActivityUpdate{
+				{ActivityID: "act-1", Kind: ActivityTask, State: ActivityRunning, Cause: CauseSession, OriginTurnID: "turn-1"},
+				{ActivityID: "act-1", Kind: ActivityMonitor, State: ActivityRunning, Cause: CauseSession, OriginTurnID: "turn-1"},
+			},
+		}})
+
+	// The action set is judged on the same order, in its own id space.
+	requireReduceRefusal(t, richConfiguration(), ViolationMalformedEnvelope,
+		Event{Type: EventSnapshot, Snapshot: &Snapshot{
+			Foreground: Foreground{State: ForegroundRequiresAction, CycleID: "cyc-0"},
+			Activities: []ActivityUpdate{
+				{ActivityID: "act-1", Kind: ActivityTask, State: ActivityRunning, Cause: CauseSession, OriginTurnID: "turn-1"},
+			},
+			Actions: []ActionUpdate{
+				{ActionID: "req-1", Kind: ActionPermission, State: ActionPending, BlocksForeground: stated(true),
+					Owner: Owner{Type: OwnerActivity, ID: "act-1"}},
+				{ActionID: "req-1", State: ActionPending},
+			},
+		}})
+}
