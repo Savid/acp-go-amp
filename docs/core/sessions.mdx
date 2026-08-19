@@ -59,4 +59,8 @@ from what Amp produced. `session/close` reconciles it too: the close retries the
 retained frames before the session is reclaimed and fails when it cannot, so the
 request that ends a session is never the one that drops a completed turn. A
 session already fenced for `session/delete` writes nothing there — the tombstone
-is the last write to that row, and the frames stay retained.
+is the last write to that row, and the frames stay retained. `Agent.Close`
+reconciles it too, for the same reason and with the same failure: an embedded
+host's shutdown must not drop with the wrapper what a wire close would have
+committed. Shutdown still releases every session's isolated home either way,
+because nothing runs after it.

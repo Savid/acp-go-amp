@@ -57,6 +57,13 @@ mid-turn can never leave a created server-side thread unrecorded.
 flight before its tombstone lands, so a turn settling alongside the delete can
 never write the deleted session back into the store.
 
+A tombstone is final in the store itself, not only in the adapter that wrote
+it. Over a key `Delete` tombstoned, both `Append` and `Replace` write nothing,
+clear nothing, and return success — the deleted state is already the caller's
+answer. A store implemented over another backend owes the same guarantee: a
+write already in flight when a delete lands reaches the backend regardless of
+what the adapter above it believes, so refusing it is the backend's job.
+
 Ordinary transcript frames retain the exact native Amp stream JSON. An
 image-bearing tool-result frame is rewritten to stable artifact references
 before raw-event emission or storage, preventing a second base64 copy or an

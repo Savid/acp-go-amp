@@ -48,6 +48,9 @@ stdio or embed the agent directly in Go.
   Image-bearing tool results use canonical artifact references so base64 and
   signed URLs do not leak into transcript or diagnostic surfaces.
 - Do not persist auth, settings, API keys, or other secrets.
+- Every request builder that accepts a caller `_meta` map merges rather than
+  assigns, so option order carries no meaning, and refuses any `acp-go.dev/*`
+  family literal in that map rather than merging, overwriting, or dropping it.
 - Answer the lifecycle negotiation only with facts the active configuration
   proves, resolved from the same code path that enforces containment. A
   degenerate answer is correct; an unprovable one is not.
@@ -67,6 +70,21 @@ stdio or embed the agent directly in Go.
   addressable: a commit the close cannot land fails the close and reclaims
   nothing, so only a settled close evicts the session. A session already fenced
   for delete commits nothing there.
+- `Agent.Close` owes the same rung: the shutdown ladder applies identically to
+  an embedded close, so a commit a wire close would have made is made there or
+  reported as the store's refusal, never dropped with the wrapper. Shutdown is
+  the last word on its sessions, so the failure is fail-closed on the commit
+  alone — every session still releases its settings and scratch state, because
+  no later close exists to release it.
+- The session store enforces tombstone finality itself. Over a key `Delete`
+  tombstoned, `Append` and `Replace` both write nothing, clear nothing, and
+  return success; an adapter-level deletion marker is not a substitute for a
+  write already in flight.
+- `session/load` and `session/resume` re-check the deletion marker under the
+  same lock that installs the session, tear down a fully prepared replacement
+  that lost the race, and never clear the marker as a side effect of
+  installing: a delete that completes while a load is preparing wins, however
+  far the preparation got.
 - `session/delete` fences the session's writes and waits out the commit in
   flight before its tombstone lands: a late `Replace` never clears a tombstone
   it did not create. A commit the fence stops retains its frames as
@@ -94,7 +112,8 @@ stdio or embed the agent directly in Go.
   matching, including each vector's `postRefusal` inputs. Those files are the
   contract: never edit, reorder, or delete one.
 - Reduce this adapter's own emitted lifecycle stream through the same reducer
-  the vectors drive.
+  the vectors drive. The emitter validates the rendered notification, not the
+  struct behind it: render, marshal, decode, then reduce.
 - Live tests may spend tokens only when explicitly env-gated.
 
 ## Security And Boundaries

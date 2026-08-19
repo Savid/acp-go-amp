@@ -264,6 +264,13 @@ and reclaims nothing — the session keeps its identity and its frames, and the
 close is retried once the store is back. A session already fenced for delete
 commits nothing there, because the tombstone is the last write to that row.
 
+`Agent.Close` owes the same rung. An embedded host's shutdown is the last thing
+that will ever run for its sessions, so a commit a wire close would have made is
+made there too, or reported as the store's refusal — never dropped with the
+wrapper. Shutdown differs in one way only: no later close exists to reclaim what
+a failure leaves behind, so every session still releases its isolated home and
+its native tree, and the commit failure is what `Agent.Close` returns.
+
 Settlement runs on a context detached from the request's, so a cancelled prompt
 still commits the frames it streamed, states its terminal boundary, and fences
 its stream before the response. The one exception is a settlement that cannot
