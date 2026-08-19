@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"encoding/json"
+	"math"
 	"strings"
 	"testing"
 
@@ -41,6 +42,7 @@ func TestDecodeOfferStrictness(t *testing.T) {
 		{"empty versions", offerMeta([]any{}), MetaPath + ".versions"},
 		{"non-array versions", offerMeta(1.0), MetaPath + ".versions"},
 		{"fractional version", offerMeta([]any{1.5}), MetaPath + ".versions"},
+		{"unrepresentable version", offerMeta([]any{1e300}), MetaPath + ".versions"},
 		{"string version", offerMeta([]any{"1"}), MetaPath + ".versions"},
 		{"unparsable number", offerMeta([]any{json.Number("one")}), MetaPath + ".versions"},
 	} {
@@ -89,6 +91,34 @@ func TestDecodeOfferReadsEveryIntegerSpelling(t *testing.T) {
 	}
 }
 
+// TestIntegerValueRequiresExactRepresentability pins the value rule this reader
+// judges a number by. A float64 names an integer only when it is its own
+// truncation and falls inside the range an int converts exactly: 1e300 truncates
+// to itself and still names no int, and one past the largest int is refused with
+// it. Nothing lexical is available to judge instead — the SDK pre-decodes `_meta`
+// to map[string]any, so no lexeme survives to this reader.
+func TestIntegerValueRequiresExactRepresentability(t *testing.T) {
+	t.Parallel()
+
+	for _, refused := range []float64{
+		1e300,
+		-1e300,
+		-float64(math.MinInt),
+		math.Inf(1),
+		math.Inf(-1),
+		math.NaN(),
+	} {
+		_, ok := integerValue(refused)
+		require.False(t, ok, "%v names no int", refused)
+	}
+
+	for _, accepted := range []float64{0, 1, -1, float64(math.MinInt)} {
+		value, ok := integerValue(accepted)
+		require.True(t, ok, "%v names an int", accepted)
+		require.Equal(t, int(accepted), value)
+	}
+}
+
 func correlationMeta(value any) map[string]any {
 	return map[string]any{MetaKey: value}
 }
@@ -130,6 +160,7 @@ func TestDecodePromptCorrelationStrictness(t *testing.T) {
 		{"unknown member", map[string]any{"version": 1.0, "submission": submission, "streamId": "x"}, MetaPath + ".streamId"},
 		{"missing version", map[string]any{"submission": submission}, MetaPath + ".version"},
 		{"fractional version", map[string]any{"version": 1.5, "submission": submission}, MetaPath + ".version"},
+		{"unrepresentable version", map[string]any{"version": 1e300, "submission": submission}, MetaPath + ".version"},
 		{"unsupported version", map[string]any{"version": 2.0, "submission": submission}, MetaPath + ".version"},
 		{"missing submission", map[string]any{"version": 1.0}, MetaPath + ".submission"},
 		{"unknown submission member", map[string]any{"version": 1.0, "submission": map[string]any{

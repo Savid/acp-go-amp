@@ -167,13 +167,29 @@ func checkCorrelationVersion(fields map[string]any, negotiated Negotiated) *Para
 	return nil
 }
 
+// intRangeFloor is the most negative int as a float64. An int's range is bounded
+// by powers of two, so the constant converts exactly on every platform, and its
+// negation is exactly one past the largest int — which makes this one constant
+// both bounds.
+const intRangeFloor = float64(math.MinInt)
+
 // integerValue reads one JSON integer. A decoded wire value arrives as a float64
 // and an embedding Go host writes an int, so both are the same integer; a
 // fractional value is neither.
+//
+// Integrality alone does not make a float an integer. A magnitude no int holds —
+// 1e300 — is its own truncation and still names no integer, so a float64 must
+// also fall inside the range that converts exactly. Nothing lexical is available
+// to judge instead: the SDK pre-decodes `_meta` to map[string]any, so no lexeme
+// survives to this reader and the value itself is the whole evidence.
 func integerValue(raw any) (int, bool) {
 	switch value := raw.(type) {
 	case float64:
-		return int(value), value == math.Trunc(value)
+		if value != math.Trunc(value) || value < intRangeFloor || value >= -intRangeFloor {
+			return 0, false
+		}
+
+		return int(value), true
 	case int:
 		return value, true
 	case json.Number:
