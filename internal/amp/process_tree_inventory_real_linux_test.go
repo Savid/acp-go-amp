@@ -66,6 +66,41 @@ func awaitDescendants(t *testing.T, root, want int) []linuxProcessIdentity {
 	}
 }
 
+// awaitDeepDescendants polls the real enumeration until it reports a descendant
+// whose own parent is a descendant too. Depth is not a count: the fixture's
+// outer shell publishes both of its direct children before the inner one has
+// forked anything, so a set of two is routinely a flat set, and a case about
+// the walk descending would then read the subtree one fork too early.
+func awaitDeepDescendants(t *testing.T, root int) {
+	t.Helper()
+
+	deadline := time.Now().Add(realTreeSettleTimeout)
+
+	for {
+		descendants, err := linuxDescendants(root)
+		if err != nil {
+			t.Fatalf("enumerate descendants of %d: %v", root, err)
+		}
+
+		inside := make(map[int]bool, len(descendants))
+		for _, descendant := range descendants {
+			inside[descendant.pid] = true
+		}
+
+		for _, descendant := range descendants {
+			if inside[descendant.parentPID] {
+				return
+			}
+		}
+
+		if time.Now().After(deadline) {
+			t.Fatalf("enumeration %v found no descendant below the root's own children", descendants)
+		}
+
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 func processAlive(pid int) bool {
 	_, err := os.Stat(filepath.Join(turnSupervisorProcRoot, strconv.Itoa(pid)))
 
@@ -79,24 +114,7 @@ func processAlive(pid int) bool {
 func TestDescendantEnumerationWalksARealContainedTree(t *testing.T) {
 	root := startRealTree(t, "/bin/sh -c 'sleep 300 & wait' & sleep 300")
 
-	descendants := awaitDescendants(t, root, 2)
-
-	inside := make(map[int]bool, len(descendants))
-	for _, descendant := range descendants {
-		inside[descendant.pid] = true
-	}
-
-	deep := false
-
-	for _, descendant := range descendants {
-		if inside[descendant.parentPID] {
-			deep = true
-		}
-	}
-
-	if !deep {
-		t.Fatalf("enumeration %v found no descendant below the root's own children", descendants)
-	}
+	awaitDeepDescendants(t, root)
 
 	count, available := (&processTree{pgid: root, supervised: true}).descendantCount()
 	if !available || count < 2 {
