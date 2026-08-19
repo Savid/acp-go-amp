@@ -858,6 +858,11 @@ func main() {
 		os.Stdout.WriteString("deleted\n")
 	case "continue":
 		if mode == "bad-adopt" {
+			// Drain stdin before answering, exactly as every other mode does. A
+			// child that exits with the prompt still unread races the wrapper's
+			// write: the EPIPE would surface as a transport failure and hide the
+			// identity verdict this fixture exists to produce.
+			_, _ = io.ReadAll(os.Stdin)
 			os.Stdout.WriteString("{\"type\":\"system\",\"subtype\":\"init\",\"cwd\":\"/tmp/project\",\"session_id\":\"not-a-thread\"}\n")
 			os.Stdout.WriteString("{\"type\":\"result\",\"subtype\":\"success\",\"duration_ms\":1,\"is_error\":false,\"num_turns\":1,\"result\":\"late\",\"session_id\":\"not-a-thread\"}\n")
 			return
