@@ -40,7 +40,10 @@ under a separate fixed `60s` bound.
 Each turn publishes the manifest, full transcript, and current image records
 together in one `Replace` generation. Every turn does: a cancelled, failed, or
 timed-out turn commits the frames it already streamed, so what the store holds
-never diverges from what the client was shown. The commit runs after the turn
+never diverges from what the client was shown. A generation states each key
+exactly once — the shipped store refuses a duplicated key by name rather than
+letting slice order decide that row, and a store over another backend owes the
+same refusal. The commit runs after the turn
 process containment boundary completes and before the terminal state the host
 sees, so no settled turn claims a prefix the store does not hold. It also runs
 on a context detached from the prompt request, so cancelling the request ends

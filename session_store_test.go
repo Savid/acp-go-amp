@@ -50,6 +50,66 @@ func TestInMemoryStoreReplaceAppendDelete(t *testing.T) {
 	}
 }
 
+// TestInMemoryStoreRefusesDuplicateReplacementKeys pins the generation rule: one
+// Replace states each key exactly once, so a key stated twice is refused by the
+// duplicated key's own name rather than resolved by slice order. The refusal is
+// the whole effect — the generation the store already holds is untouched.
+func TestInMemoryStoreRefusesDuplicateReplacementKeys(t *testing.T) {
+	ctx := context.Background()
+	store := NewInMemorySessionStore()
+	main := SessionKey{SessionID: "T-1", Subpath: SessionStoreMainSubpath}
+	transcript := SessionKey{SessionID: "T-1", Subpath: transcriptSubpath}
+	manifest, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, SessionID: "T-1", NativeSessionID: "T-1", Cwd: "/tmp", UpdatedAtUnixMilli: 2})
+	committed := json.RawMessage(`{"type":"committed"}`)
+
+	if err := store.Replace(ctx, main, []SessionStoreReplacement{
+		{Key: main, Entries: []SessionStoreEntry{manifest}},
+		{Key: transcript, Entries: []SessionStoreEntry{committed}},
+	}); err != nil {
+		t.Fatalf("first generation: %v", err)
+	}
+
+	for _, testCase := range []struct {
+		name         string
+		replacements []SessionStoreReplacement
+		wantMessage  string
+	}{
+		{
+			name: "duplicate subpath",
+			replacements: []SessionStoreReplacement{
+				{Key: main, Entries: []SessionStoreEntry{manifest}},
+				{Key: transcript, Entries: []SessionStoreEntry{json.RawMessage(`{"type":"first"}`)}},
+				{Key: transcript, Entries: []SessionStoreEntry{json.RawMessage(`{"type":"last"}`)}},
+			},
+			wantMessage: `duplicate replacement subpath "transcript"`,
+		},
+		{
+			name: "duplicate main",
+			replacements: []SessionStoreReplacement{
+				{Key: main, Entries: []SessionStoreEntry{manifest}},
+				{Key: main, Entries: []SessionStoreEntry{manifest}},
+			},
+			wantMessage: `duplicate replacement subpath ""`,
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			err := store.Replace(ctx, main, testCase.replacements)
+			if err == nil || err.Error() != testCase.wantMessage {
+				t.Fatalf("replace error = %v, want %q", err, testCase.wantMessage)
+			}
+		})
+	}
+
+	entries, err := store.Load(ctx, transcript)
+	if err != nil {
+		t.Fatalf("load transcript: %v", err)
+	}
+
+	if len(entries) != 1 || string(entries[0]) != string(committed) {
+		t.Fatalf("a refused generation changed the transcript: %s", entries)
+	}
+}
+
 func TestInMemoryStoreContractEdges(t *testing.T) {
 	ctx := context.Background()
 	cancelCtx, cancel := context.WithCancel(ctx)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sort"
 	"sync"
 	"time"
@@ -165,7 +166,7 @@ func (s *InMemorySessionStore) Replace(ctx context.Context, main SessionKey, rep
 		return errors.New("main subpath must be empty")
 	}
 
-	mainCount := 0
+	mainIncluded := false
 
 	next := make(map[SessionKey][]SessionStoreEntry, len(replacements))
 	for _, replacement := range replacements {
@@ -173,14 +174,23 @@ func (s *InMemorySessionStore) Replace(ctx context.Context, main SessionKey, rep
 			return errors.New("replacement session id mismatch")
 		}
 
+		// One generation states each key exactly once. A key stated twice makes
+		// slice position decide what the session holds, so the caller's own
+		// generation does not say what it wants and no reading of it is the
+		// caller's: the whole generation is refused by the duplicated key's name
+		// rather than resolved by last-write-wins.
+		if _, duplicate := next[replacement.Key]; duplicate {
+			return fmt.Errorf("duplicate replacement subpath %q", replacement.Key.Subpath)
+		}
+
 		if replacement.Key == main {
-			mainCount++
+			mainIncluded = true
 		}
 
 		next[replacement.Key] = cloneEntries(replacement.Entries)
 	}
 
-	if mainCount != 1 {
+	if !mainIncluded {
 		return errors.New("replacement must include main exactly once")
 	}
 
