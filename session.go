@@ -486,14 +486,41 @@ func (s *agentSession) commitOnClose(ctx context.Context) error {
 }
 
 // Close settles the session and removes its scratch state. It carries no durable
-// rung: the retry that rung exists for is only meaningful while the session is
-// still addressable, so it belongs to `session/close` — this one is what agent
-// shutdown and a delete that found no stored row run, and neither leaves a
-// session behind for a host to close again.
+// rung, because every caller of it is a path where nothing durable is owed: a
+// session whose admission was refused never wrote a row, and a delete that found
+// no stored row is fencing writes rather than making them.
 func (s *agentSession) Close(ctx context.Context) error {
 	settlement := s.settleClose(ctx)
 
 	return finalizeSessionScratch(settlement.runtimeErr, settlement.boundaryErr, s.settingsDir, s.scratchRootRelease)
+}
+
+// closeAtShutdown is the ladder embedded shutdown runs. It carries the same
+// fail-closed durable rung a wire `session/close` does — an Agent.Close that owes
+// a commit a wire close would have made makes it, rather than dropping the
+// session's retained frames with the wrapper.
+//
+// The rung is fail-closed on the commit and on nothing else. Shutdown is the last
+// word on this session: no later close exists to release what this one holds, so
+// the scratch bookkeeping runs on every path and the commit's failure is joined
+// to whatever the teardown already found. Reporting a failure and leaking the
+// settings directory that reported it would answer a durable defect with a
+// resource one.
+func (s *agentSession) closeAtShutdown(ctx context.Context) error {
+	settlement := s.settleClose(ctx)
+
+	// Same order a prompt and a wire close settle in: the containment boundary is
+	// proven before anything durable is written, so a shutdown that ends on an
+	// unproven boundary commits nothing.
+	var commitErr error
+	if amp.ProcessContainmentComplete(settlement.boundaryErr) {
+		commitErr = s.commitOnClose(ctx)
+	}
+
+	return errors.Join(
+		finalizeSessionScratch(settlement.runtimeErr, settlement.boundaryErr, s.settingsDir, s.scratchRootRelease),
+		commitErr,
+	)
 }
 
 func (s *agentSession) Delete(ctx context.Context) error {

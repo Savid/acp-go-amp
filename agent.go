@@ -209,9 +209,14 @@ func (a *Agent) Close() error {
 		boundaryErr := a.lifecycleContainmentErr
 		a.mu.Unlock()
 
+		// Each session runs the whole ladder, durable rung included: the shutdown
+		// ladder applies identically to a wire close and an embedded one, and a
+		// settlement whose commit failed retains frames this is the last chance to
+		// land. A commit this close cannot make is reported rather than dropped
+		// with the wrapper.
 		closeErr := boundaryErr
 		for _, session := range sessions {
-			closeErr = errors.Join(closeErr, session.Close(context.Background()))
+			closeErr = errors.Join(closeErr, session.closeAtShutdown(context.Background()))
 		}
 
 		a.observe.AddActiveSession(context.Background(), -int64(len(sessions)))

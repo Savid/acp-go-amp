@@ -724,6 +724,19 @@ func (s *gatedStore) gate() {
 	s.gated = true
 }
 
+// heal disarms both the hold and the outage. Agent shutdown carries the same
+// durable rung a wire close does, so a scenario that left the store broken would
+// have its cleanup either park on the gate or answer with the outage — reporting
+// the scenario's own store defect as a shutdown failure. The scenario is over by
+// then; the frames it retained are what shutdown is there to land.
+func (s *gatedStore) heal() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.gated = false
+	s.failWith = nil
+}
+
 func (s *gatedStore) fail(err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -795,7 +808,10 @@ func settlementAgent(t *testing.T, ledger *settlementLedger) (*Agent, *gatedStor
 		WithScratchDir(testScratchDir(t)),
 		WithSessionStore(store),
 	})...)
-	t.Cleanup(func() { require.NoError(t, agent.Close()) })
+	t.Cleanup(func() {
+		store.heal()
+		require.NoError(t, agent.Close())
+	})
 
 	agent.setConnection(client)
 

@@ -1368,3 +1368,132 @@ func TestConsumerHeldBearerCarriesAcrossAgentRebuild(t *testing.T) {
 		t.Fatalf("load without the consumer-held bearer = %v, want the missing-key refusal", err)
 	}
 }
+
+// TestAgentCloseCommitsRetainedUnsyncedFrames proves the shutdown ladder carries
+// the same durable rung a wire close does. The ladder applies identically to
+// `session/close`, `session/delete` and `Agent.Close`, and the retained frames an
+// embedded host holds at shutdown are the only copy of a natively completed turn:
+// dropping them with the wrapper would leave the store silently omitting a turn
+// the server-side thread already advanced past.
+func TestAgentCloseCommitsRetainedUnsyncedFrames(t *testing.T) {
+	ctx := context.Background()
+	path, _ := fakeAgentAmpPath(t, "")
+	cwd := t.TempDir()
+	store := &flakyReplaceStore{InMemorySessionStore: NewInMemorySessionStore()}
+	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(testScratchDir(t)), WithSessionStore(store))
+	resp, err := agent.NewSession(ctx, NewSessionRequest(cwd))
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	id := resp.SessionId
+
+	if _, err = agent.Prompt(ctx, TextPromptRequest(id, "test-turn", "seed thread")); err != nil {
+		t.Fatalf("seed prompt: %v", err)
+	}
+
+	// Fail exactly the settlement commit of the second turn: the prompt fails and
+	// its frames are retained mirror-unsynced on a session no wire close ever
+	// reclaims.
+	store.failReplaces = 1
+	if _, err = agent.Prompt(ctx, TextPromptRequest(id, "test-turn", "turn two")); err == nil {
+		t.Fatal("prompt with failing persist returned no error")
+	}
+
+	live, err := agent.session(id)
+	if err != nil {
+		t.Fatalf("session lookup: %v", err)
+	}
+	live.mu.Lock()
+	retained := len(live.unsyncedFrames)
+	live.mu.Unlock()
+	if retained == 0 {
+		t.Fatal("failed settlement retained no frames for shutdown to commit")
+	}
+
+	// The store is healthy again. Agent.Close is the ladder that lands them.
+	if closeErr := agent.Close(); closeErr != nil {
+		t.Fatalf("Agent.Close: %v", closeErr)
+	}
+
+	entries, err := store.Load(ctx, SessionKey{SessionID: string(id), Subpath: transcriptSubpath})
+	if err != nil {
+		t.Fatalf("load transcript: %v", err)
+	}
+	results := 0
+	for _, entry := range entries {
+		if bytes.Contains(entry, []byte(`"type":"result"`)) {
+			results++
+		}
+	}
+	if results != 2 {
+		t.Fatalf("durable transcript has %d result frames, want both natively completed turns", results)
+	}
+
+	restored := newTestAgent(WithExecutablePath(path), WithScratchDir(testScratchDir(t)), WithSessionStore(store))
+	defer func() { _ = restored.Close() }()
+	if _, err := restored.LoadSession(ctx, LoadSessionRequest(id, cwd)); err != nil {
+		t.Fatalf("load replay after shutdown commit: %v", err)
+	}
+}
+
+// TestAgentCloseFailsOverAnUncommittableMirrorAndStillReleases pins the other
+// half of the rung, and the difference between shutdown's rung and a wire
+// close's. The commit is fail-closed either way — the store's refusal is
+// Agent.Close's answer, not something dropped with the wrapper — but shutdown is
+// the last word on every session it holds: there is no later close to reclaim
+// what a failure left behind, so the scratch bookkeeping runs regardless and the
+// process exits owning nothing. Answering a durable defect with a leaked
+// directory and a live amp tree would be a worse failure than the one reported.
+func TestAgentCloseFailsOverAnUncommittableMirrorAndStillReleases(t *testing.T) {
+	ctx := context.Background()
+	path, _ := fakeAgentAmpPath(t, "")
+	scratch := testScratchDir(t)
+	store := &flakyReplaceStore{InMemorySessionStore: NewInMemorySessionStore()}
+	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(scratch), WithSessionStore(store))
+	resp, err := agent.NewSession(ctx, NewSessionRequest(t.TempDir()))
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	id := resp.SessionId
+
+	if _, err = agent.Prompt(ctx, TextPromptRequest(id, "test-turn", "seed thread")); err != nil {
+		t.Fatalf("seed prompt: %v", err)
+	}
+
+	// The settlement commit fails, and so does the shutdown retry of it.
+	store.failReplaces = 2
+	if _, err = agent.Prompt(ctx, TextPromptRequest(id, "test-turn", "turn two")); err == nil {
+		t.Fatal("prompt with failing persist returned no error")
+	}
+
+	live, err := agent.session(id)
+	if err != nil {
+		t.Fatalf("session lookup: %v", err)
+	}
+
+	closeErr := agent.Close()
+	if closeErr == nil || !strings.Contains(closeErr.Error(), "mirror_unsynced") {
+		t.Fatalf("Agent.Close over an uncommittable mirror = %v, want mirror_unsynced", closeErr)
+	}
+
+	// Reported, and still released: the settings home is gone, the scratch parent
+	// holds no session directory, and the agent holds no session.
+	if _, statErr := os.Stat(live.settingsDir); !os.IsNotExist(statErr) {
+		t.Fatalf("failed shutdown leaked the settings dir: %v", statErr)
+	}
+	sessionDirs, globErr := filepath.Glob(filepath.Join(scratch, "acp-go-amp-session-*"))
+	if globErr != nil || len(sessionDirs) != 0 {
+		t.Fatalf("failed shutdown leaked scratch state: %#v err=%v", sessionDirs, globErr)
+	}
+	agent.mu.Lock()
+	remaining := len(agent.sessions)
+	agent.mu.Unlock()
+	if remaining != 0 {
+		t.Fatalf("failed shutdown left %d sessions behind", remaining)
+	}
+
+	// Close is idempotent and keeps answering with the commit it owed.
+	if repeated := agent.Close(); !errors.Is(repeated, closeErr) && repeated.Error() != closeErr.Error() {
+		t.Fatalf("repeated Agent.Close = %v, want the first answer %v", repeated, closeErr)
+	}
+}
