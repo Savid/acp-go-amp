@@ -156,9 +156,11 @@ func emitted(t *testing.T, envelope map[string]any) json.RawMessage {
 }
 
 // TestRichSnapshotIsEncodedWhole pins that a snapshot's nonterminal sets survive
-// encoding. A set rendered empty over entities the reducer accepted would assert
-// a vacancy the emitter never claimed, and a consumer would read the incarnation
-// as holding nothing live.
+// encoding. A set rendered empty over entities the snapshot holds would assert a
+// vacancy the emitter never claimed, and the rendered-bytes sandwich would not
+// catch it — the smaller snapshot decodes and reduces cleanly. Amp's own
+// snapshots open empty on both sets; this drives the sets the shared Snapshot can
+// carry, over a configuration amp itself never answers.
 func TestRichSnapshotIsEncodedWhole(t *testing.T) {
 	t.Parallel()
 
@@ -198,9 +200,66 @@ func TestRichSnapshotIsEncodedWhole(t *testing.T) {
 	require.Equal(t, snapshot, delivery.Event, "the decoded assertion is the one that was emitted")
 }
 
-// TestActivityAndActionUpdatesAreEncoded pins that every event the reducer admits
-// is one the encoder can state. An event committed to the projection and lost on
-// the wire would leave the emitter's own state ahead of every consumer's.
+// TestThisAdapterConstructsNoActivityOrActionEvent pins where "amp sends no
+// action" is actually written: in the constructor set. The encoder's activity and
+// action arms are consumer-side — they render the shared Event the decoder
+// produces — and no frame this adapter publishes reaches them. An adapter that
+// grew an emitter for either form would fail here rather than quietly start
+// asserting facts its negotiated answer never claimed.
+func TestThisAdapterConstructsNoActivityOrActionEvent(t *testing.T) {
+	t.Parallel()
+
+	submission := Submission{SubmissionID: "sub-1", ClientNonce: "non-1"}
+	proof := QuiescenceFact{Quiescent: true, Source: ProofClassProcessContainment}
+
+	sent := []Event{
+		SnapshotEvent("cyc-0", proof),
+		AcceptedEvent(submission, "turn-1"),
+		RunningEvent("cyc-1", "turn-1"),
+		IdleEvent("cyc-1", "turn-1", StopReasonEndTurn, OutcomeSuccess),
+		QuiescenceEvent(proof),
+	}
+
+	for _, event := range sent {
+		require.NotEqual(t, EventActivityUpdate, event.Type)
+		require.NotEqual(t, EventActionUpdate, event.Type)
+		require.Nil(t, event.Activity)
+		require.Nil(t, event.Action)
+	}
+
+	// The one form carrying the sets opens with both of them empty: a
+	// prompt-contained incarnation holds nothing live at its first sequence.
+	require.Empty(t, sent[0].Snapshot.Activities)
+	require.Empty(t, sent[0].Snapshot.Actions)
+}
+
+// TestEncoderIsTotalOverEveryShapeTheEmitterAdmits pins why the two
+// consumer-side arms stay. strictShape states an invariant of the decoder's own
+// Event, so it admits all six discriminants; the encoder reads the payload the
+// discriminant names. An encoder narrower than the check in front of it would
+// send an admitted event to the default arm and dereference a nil State, turning
+// the caller defect that check exists to name into a panic.
+func TestEncoderIsTotalOverEveryShapeTheEmitterAdmits(t *testing.T) {
+	t.Parallel()
+
+	for _, event := range []Event{
+		{Type: EventSnapshot, Snapshot: &Snapshot{}},
+		{Type: EventPromptAccepted, PromptAccepted: &PromptAccepted{}},
+		{Type: EventStateUpdate, State: &StateTransition{}},
+		{Type: EventActivityUpdate, Activity: &ActivityUpdate{}},
+		{Type: EventActionUpdate, Action: &ActionUpdate{}},
+		{Type: EventQuiescenceUpdate, Quiescence: &QuiescenceFact{}},
+	} {
+		require.True(t, event.strictShape(), "%s is admitted", event.Type)
+		require.Equal(t, string(event.Type), encodeEvent(event)[fieldType],
+			"%s renders as the form it names", event.Type)
+	}
+}
+
+// TestActivityAndActionUpdatesAreEncoded pins that the consumer-side arms render
+// faithfully, over a configuration amp itself never answers. A stream that
+// accepted one of these and rendered it lossily would hand a consumer a smaller
+// truth than the one its own projection holds.
 func TestActivityAndActionUpdatesAreEncoded(t *testing.T) {
 	t.Parallel()
 

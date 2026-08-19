@@ -134,11 +134,19 @@ func QuiescenceEvent(fact QuiescenceFact) Event {
 	return Event{Type: EventQuiescenceUpdate, Quiescence: &fact}
 }
 
-// encodeEvent renders an event the reducer just admitted. A prompt-contained
-// configuration proves no activity kind and holds no action awaiting an answer,
-// so this adapter has no emitter that builds those two forms; the encoder still
-// renders all six, because an event the reducer accepted and the encoder could
-// not state would be committed to the projection and lost on the wire.
+// encodeEvent renders an event this stream is about to publish. A
+// prompt-contained configuration proves no activity kind and this adapter
+// bridges no permission or elicitation, so it constructs neither of those two
+// forms: the constructors above are the whole set of events it sends, and the
+// activity and action arms are here for the consumer-side type they share, never
+// for a frame amp emits.
+//
+// The encoder is nonetheless total over every shape strictShape admits, and that
+// totality is the guard rather than a courtesy. strictShape states an invariant
+// of the decoder's own Event — exactly one payload, and it is the one Type names
+// — so it admits all six. An encoder narrower than that would route an admitted
+// event to the default arm and dereference a nil State: a caller defect would
+// become a panic where the shape check exists precisely to make it a verdict.
 func encodeEvent(event Event) map[string]any {
 	switch event.Type {
 	case EventSnapshot:
@@ -172,8 +180,11 @@ func encodeEvent(event Event) map[string]any {
 
 // encodeSnapshot renders the whole-state assertion. The nonterminal sets are
 // always present and carry exactly what the snapshot asserts: a set rendered
-// empty over entities the reducer accepted would assert a vacancy the emitter
-// never claimed.
+// empty over entities the snapshot holds would assert a vacancy the emitter
+// never claimed, and the sandwich below could not catch it — such a snapshot
+// decodes and reduces perfectly well, just as a smaller truth. This adapter's
+// own snapshots open empty on both sets, so the loops render nothing for a frame
+// it sends; they render the sets the shared Snapshot can carry.
 func encodeSnapshot(snapshot Snapshot) map[string]any {
 	activities := make([]any, 0, len(snapshot.Activities))
 	for index := range snapshot.Activities {
@@ -223,9 +234,11 @@ func encodeActivity(activity ActivityUpdate) map[string]any {
 	return encoded
 }
 
-// encodeAction renders one action. blocksForeground is stated only when the
-// update states it: rendering an absent claim as false would demote a blocking
-// request to a background one.
+// encodeAction renders one action. This adapter sends none — it bridges no
+// permission and no elicitation, and has no constructor that builds one — so
+// this is reached only through the two consumer-side arms above.
+// blocksForeground is stated only when the update states it: rendering an absent
+// claim as false would demote a blocking request to a background one.
 func encodeAction(action ActionUpdate) map[string]any {
 	encoded := map[string]any{
 		fieldActionID: action.ActionID,
