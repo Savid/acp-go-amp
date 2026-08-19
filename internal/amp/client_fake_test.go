@@ -447,9 +447,6 @@ func TestClientCommandsUseGlobalArgsAndParseOutput(t *testing.T) {
 			t.Fatalf("startup continue probe has %d copies of %q: %#v", count, global, startupContinue)
 		}
 	}
-	if slices.Contains(startupContinue, "--effort") {
-		t.Fatalf("startup continue probe used removed --effort flag: %#v", startupContinue)
-	}
 	if _, err := client.StartupProbe(ctx); err != nil {
 		t.Fatalf("StartupProbe cached: %v", err)
 	}

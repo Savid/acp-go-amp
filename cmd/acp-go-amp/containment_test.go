@@ -40,15 +40,19 @@ func TestRunContainmentUsage(t *testing.T) {
 	}
 }
 
-func TestRunContainmentDispatchAndRemovedDarwinFlag(t *testing.T) {
+// TestRunContainmentDispatchAndUndefinedFlag pins the two ways the entrypoint
+// refuses before it serves: the containment subcommand dispatches to its own
+// parser, and a flag this command does not define exits 2 rather than starting an
+// agent on arguments it did not understand.
+func TestRunContainmentDispatchAndUndefinedFlag(t *testing.T) {
 	var stderr bytes.Buffer
 	if code := run(t.Context(), []string{"containment"}, strings.NewReader(""), &bytes.Buffer{}, &stderr); code != 2 {
 		t.Fatalf("containment dispatch = %d, stderr=%q", code, stderr.String())
 	}
 
 	stderr.Reset()
-	if code := run(t.Context(), []string{"-darwin-best-effort-containment"}, strings.NewReader(""), &bytes.Buffer{}, &stderr); code != 2 || !strings.Contains(stderr.String(), "flag provided but not defined") {
-		t.Fatalf("removed Darwin flag = %d, stderr=%q", code, stderr.String())
+	if code := run(t.Context(), []string{"-not-a-flag"}, strings.NewReader(""), &bytes.Buffer{}, &stderr); code != 2 || !strings.Contains(stderr.String(), "flag provided but not defined") {
+		t.Fatalf("undefined flag = %d, stderr=%q", code, stderr.String())
 	}
 }
 

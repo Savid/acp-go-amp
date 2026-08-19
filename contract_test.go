@@ -88,7 +88,7 @@ func TestStrictMetaAndConfigResponse(t *testing.T) {
 		{name: "rawEvent enabled not bool", meta: map[string]any{"amp": map[string]any{"rawEvent": map[string]any{"enabled": "yes"}}}, field: "_meta.amp.rawEvent.enabled"},
 		{name: "rawEvent unknown", meta: map[string]any{"amp": map[string]any{"rawEvent": map[string]any{"extra": true}}}, field: "_meta.amp.rawEvent.extra"},
 		{name: "model not string", meta: map[string]any{"amp": map[string]any{"options": map[string]any{"model": 1}}}, field: "_meta.amp.options.model"},
-		{name: "removed effort", meta: map[string]any{"amp": map[string]any{"options": map[string]any{"effort": "high"}}}, field: "_meta.amp.options.effort"},
+		{name: "options unknown", meta: map[string]any{"amp": map[string]any{"options": map[string]any{"unknown": "x"}}}, field: "_meta.amp.options.unknown"},
 		{name: "outputSchema empty", meta: map[string]any{"amp": map[string]any{"options": map[string]any{"outputSchema": map[string]any{}}}}, field: "_meta.amp.options.outputSchema"},
 		{name: "own namespace unknown", meta: map[string]any{"amp": map[string]any{"unknown": true}}, field: "_meta.amp.unknown"},
 	} {
@@ -406,7 +406,7 @@ func TestRemainingBranches(t *testing.T) {
 	}
 	for _, raw := range []map[string]any{
 		{"mode": 1},
-		{"effort": "low"},
+		{"unknown": "x"},
 	} {
 		if _, _, err := parseAmpOptionsWithPresence(raw); err == nil {
 			t.Fatalf("invalid options accepted: %#v", raw)

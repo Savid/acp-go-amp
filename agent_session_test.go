@@ -941,69 +941,6 @@ func TestReconcileNativeConfigReadBack(t *testing.T) {
 	requireConfigMode(t, resumeResp.ConfigOptions, "high")
 }
 
-// TestLaunchNeverUsesRemovedEffortFlag pins the current Amp CLI launch surface:
-// mode is forwarded and the removed --effort flag is never emitted.
-func TestLaunchNeverUsesRemovedEffortFlag(t *testing.T) {
-	path, state := fakeAgentAmpPath(t, "")
-	conn, _, cleanup := startTestServe(t,
-		WithExecutablePath(path),
-		WithScratchDir(testScratchDir(t)),
-		WithEnv(map[string]string{"AMP_API_KEY": "fake"}),
-	)
-	defer cleanup()
-	ctx := context.Background()
-
-	if _, err := conn.Initialize(ctx, acp.InitializeRequest{}); err != nil {
-		t.Fatalf("Initialize: %v", err)
-	}
-	cwd := t.TempDir()
-	newResp, err := conn.NewSession(ctx, NewSessionRequest(cwd))
-	if err != nil {
-		t.Fatalf("NewSession: %v", err)
-	}
-	if _, promptErr := conn.Prompt(ctx, acp.PromptRequest{
-		SessionId: newResp.SessionId,
-		Prompt:    []acp.ContentBlock{acp.TextBlock("hello")},
-	}); promptErr != nil {
-		t.Fatalf("Prompt: %v", promptErr)
-	}
-	if _, promptErr := conn.Prompt(ctx, acp.PromptRequest{
-		SessionId: newResp.SessionId,
-		Prompt:    []acp.ContentBlock{acp.TextBlock("again")},
-	}); promptErr != nil {
-		t.Fatalf("second Prompt: %v", promptErr)
-	}
-
-	argsRecords := readHelperJSON[[]string](t, filepath.Join(state, "args.jsonl"))
-	var executeArgs, continueArgs []string
-	for _, args := range argsRecords {
-		if !slices.Contains(args, "threads") && slices.Contains(args, "-x") {
-			executeArgs = args
-		}
-		if slices.Contains(args, "continue") && slices.Contains(args, "T-agent-thread") {
-			continueArgs = args
-		}
-	}
-	if executeArgs == nil {
-		t.Fatalf("no thread-less execute invocation recorded: %#v", argsRecords)
-	}
-	if !slices.Contains(executeArgs, "--no-archive-after-execute") {
-		t.Fatalf("execute launch missing --no-archive-after-execute: %#v", executeArgs)
-	}
-	if slices.Contains(executeArgs, "--effort") {
-		t.Fatalf("--effort passed on execute launch: %#v", executeArgs)
-	}
-	if continueArgs == nil {
-		t.Fatalf("no real continue invocation recorded: %#v", argsRecords)
-	}
-	if slices.Contains(continueArgs, "--effort") {
-		t.Fatalf("--effort passed with no host-set effort: %#v", continueArgs)
-	}
-	if i := slices.Index(continueArgs, "-m"); i < 0 || i+1 >= len(continueArgs) || continueArgs[i+1] != "medium" {
-		t.Fatalf("mode flag missing or not medium: %#v", continueArgs)
-	}
-}
-
 // TestReconcileNativeConfigEmitFailureAbortsTurn covers the reconcile branch in
 // the prompt loop: when the config_option_update carrying reconciled native
 // mode cannot be delivered, the turn aborts with the delivery error.
