@@ -42,14 +42,15 @@ func testNativeIsolation() *nativeamp.ProcessIsolation {
 	}
 }
 
-// containmentReadyWait bounds how long an isolated fixture may take to publish
-// its readiness. These two launches claim the standalone agent identity, and
-// that claim proves the identity vacant across every task in the PID namespace
-// — the whole host under the privileged suite, walked by a supervisor that is
-// the instrumented test binary itself. The generic one-second helper is sized
-// for launches that claim nothing, and it reports that walk as a fixture which
-// never started, so these cases carry a supervised bound instead.
-const containmentReadyWait = 30 * time.Second
+// containmentSupervisedWait bounds every wait these two cases place on a
+// supervised launch: the fixture publishing its readiness, and the prompt
+// returning once its deadline has fired. Those cross the standalone agent
+// identity claim and the containment and vacancy proofs, and each of them walks
+// every task in the PID namespace — the whole host under the privileged suite,
+// walked by a supervisor that is the race- and coverage-instrumented test
+// binary itself. A bound sized for a launch that claims nothing reports that
+// walk as a fixture which never started or a prompt that never returned.
+const containmentSupervisedWait = 30 * time.Second
 
 // awaitContainmentReady waits out the supervised bound for a fixture's
 // readiness file. A prompt that ended first reports its own failure: a launch
@@ -59,7 +60,7 @@ const containmentReadyWait = 30 * time.Second
 func awaitContainmentReady(t *testing.T, path string, promptEnded <-chan error) {
 	t.Helper()
 
-	deadline := time.Now().Add(containmentReadyWait)
+	deadline := time.Now().Add(containmentSupervisedWait)
 
 	for {
 		if _, err := os.Stat(path); err == nil {
@@ -73,7 +74,7 @@ func awaitContainmentReady(t *testing.T, path string, promptEnded <-chan error) 
 		}
 
 		if time.Now().After(deadline) {
-			t.Fatalf("%s was not created within %s", path, containmentReadyWait)
+			t.Fatalf("%s was not created within %s", path, containmentSupervisedWait)
 		}
 
 		time.Sleep(10 * time.Millisecond)
@@ -181,7 +182,7 @@ func TestTurnTimeoutContainsDescendantBeforeReturn(t *testing.T) {
 		}
 		requireTurnFailure(t, promptErr, causeTimeout, "WithTurnTimeout")
 		requireProcessExited(t, descendantPID, "timeout Prompt returned")
-	case <-time.After(3 * time.Second):
+	case <-time.After(containmentSupervisedWait):
 		t.Fatal("timeout prompt did not return")
 	}
 }
