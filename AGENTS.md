@@ -61,6 +61,12 @@ stdio or embed the agent directly in Go.
   failed prompt over a boundary that settled is a successful close and delete. A
   failed commit or an incomplete boundary fails the prompt and emits no terminal
   idle.
+- `session/close` carries the same durable commit as its own rung. A settlement
+  whose commit failed retains its frames, and the close retries them after the
+  completion wait, on a detached context, while the session is still
+  addressable: a commit the close cannot land fails the close and reclaims
+  nothing, so only a settled close evicts the session. A session already fenced
+  for delete commits nothing there.
 - `session/delete` fences the session's writes and waits out the commit in
   flight before its tombstone lands: a late `Replace` never clears a tombstone
   it did not create. A commit the fence stops retains its frames as

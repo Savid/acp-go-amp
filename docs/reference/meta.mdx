@@ -253,8 +253,16 @@ detectable gap rather than a silently contiguous stream.
 session whose incarnation never opened, and it emits nothing on either: the
 terminal state was reported by whatever fenced the stream, and a turn recorded
 as `failed` is never restated as cancelled by the close that follows it. The
-containment proof and the durable commit are unconditional and already ran
-inside the prompt, so a close that finds an unproven boundary still fails.
+containment proof is unconditional and already ran inside the prompt, so a close
+that finds an unproven boundary still fails.
+
+The durable commit ran inside the prompt too, but a settlement whose commit
+failed keeps its frames rather than dropping them, so `session/close` carries the
+same commit as its own rung: it retries the retained frames on a detached context
+before the session stops being addressable. A close that cannot land them fails
+and reclaims nothing — the session keeps its identity and its frames, and the
+close is retried once the store is back. A session already fenced for delete
+commits nothing there, because the tombstone is the last write to that row.
 
 Settlement runs on a context detached from the request's, so a cancelled prompt
 still commits the frames it streamed, states its terminal boundary, and fences

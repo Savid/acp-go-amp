@@ -418,7 +418,21 @@ func (s *agentSession) poison(cause string) error {
 	return acp.NewInternalError(map[string]any{jsonFieldError: cause})
 }
 
-func (s *agentSession) Close(ctx context.Context) error {
+// closeSettlement is what a close proved before anything is reclaimed: the error
+// the teardown itself produced and the containment boundary the session ends on.
+type closeSettlement struct {
+	runtimeErr  error
+	boundaryErr error
+}
+
+// settleClose runs every rung of a close that must complete while the session is
+// still whole: the admission fence, the native cancel and interrupt, the wait for
+// the prompt already admitted, and the containment re-read.
+//
+// It reclaims nothing. What a settled close still owes — the durable rung and the
+// scratch removal — belongs to the caller, because only a caller that still holds
+// the session's slot can leave it addressable when the rung fails.
+func (s *agentSession) settleClose(ctx context.Context) closeSettlement {
 	state := s.fenceAdmission()
 
 	s.closeProviderAuth()
@@ -448,7 +462,38 @@ func (s *agentSession) Close(ctx context.Context) error {
 		boundaryErr = errors.Join(s.scratchContainmentError(), completionErr)
 	}
 
-	return finalizeSessionScratch(err, boundaryErr, s.settingsDir, s.scratchRootRelease)
+	return closeSettlement{runtimeErr: err, boundaryErr: boundaryErr}
+}
+
+// commitOnClose is the close ladder's durable rung. A settlement whose Replace
+// failed keeps its frames mirror-unsynced rather than dropping them, and the
+// close is the last request that can still write them, because the session it
+// reclaims takes them with it. The retry runs on a context detached from the
+// request's and bounded by the store's own read and write bounds, so a host that
+// walked away from the close does not decide whether the frames land.
+//
+// A session fenced for delete commits nothing here: the retry is a no-op on it,
+// because Replace clears the tombstone of every key it lists and a commit landing
+// after the tombstone would durably resurrect the row.
+func (s *agentSession) commitOnClose(ctx context.Context) error {
+	commitCtx, cancelCommit := context.WithTimeout(
+		context.WithoutCancel(ctx),
+		s.agent.sessionStoreLoadTimeout()+sessionStoreWriteTimeout,
+	)
+	defer cancelCommit()
+
+	return s.ensureMirrorSynced(commitCtx)
+}
+
+// Close settles the session and removes its scratch state. It carries no durable
+// rung: the retry that rung exists for is only meaningful while the session is
+// still addressable, so it belongs to `session/close` — this one is what agent
+// shutdown and a delete that found no stored row run, and neither leaves a
+// session behind for a host to close again.
+func (s *agentSession) Close(ctx context.Context) error {
+	settlement := s.settleClose(ctx)
+
+	return finalizeSessionScratch(settlement.runtimeErr, settlement.boundaryErr, s.settingsDir, s.scratchRootRelease)
 }
 
 func (s *agentSession) Delete(ctx context.Context) error {

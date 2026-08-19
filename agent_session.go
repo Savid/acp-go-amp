@@ -692,12 +692,34 @@ func (a *Agent) takeSession(ctx context.Context, sessionID acp.SessionId, expect
 // removeSession tears down session only while it still owns sessionID, so
 // close and rollback paths cannot reap a session installed after they read
 // theirs.
+//
+// The settlement and the durable rung both run before the eviction, so the rung
+// runs while the session is still addressable: a commit this close cannot land
+// leaves the session in the map holding its own unsynced frames, and the host
+// closes the same session again once its store is back. A close whose commit
+// failed evicts nothing.
 func (a *Agent) removeSession(ctx context.Context, sessionID acp.SessionId, session *agentSession) error {
+	settlement := session.settleClose(ctx)
+
+	// Same order a prompt settles in: the containment boundary is proven before
+	// anything durable is written, so a close that ends on an unproven boundary
+	// commits nothing. That close still ends the session — the eviction below is
+	// unconditional — and only the scratch state a surviving tree may still run
+	// against is left where it is.
+	if amp.ProcessContainmentComplete(settlement.boundaryErr) {
+		// The commit is added to what the teardown already found rather than
+		// replacing it: the settlement this close waited out reports its own
+		// failure through the latch, and both are this close's answer.
+		if commitErr := session.commitOnClose(ctx); commitErr != nil {
+			return errors.Join(settlement.runtimeErr, commitErr)
+		}
+	}
+
 	if a.takeSession(ctx, sessionID, session) == nil {
 		return nil
 	}
 
-	return session.Close(ctx)
+	return finalizeSessionScratch(settlement.runtimeErr, settlement.boundaryErr, session.settingsDir, session.scratchRootRelease)
 }
 
 // sessionStoreLoadTimeout resolves the WithSessionStoreLoadTimeout bound for

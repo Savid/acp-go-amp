@@ -979,6 +979,10 @@ func TestDeleteSucceedsOverANativeFailureThatSettled(t *testing.T) {
 // failure as its primary wire shape and the close states the settlement failure.
 // A latch carrying the native error instead would hide the store outage from the
 // only surface that reports it.
+//
+// The close also retries the commit the settlement retained, so the gate sees a
+// second write from it. Both the latch and the retry name the same outage, and
+// the close states it either way.
 func TestCloseReportsACommitOutageBehindANativeFailure(t *testing.T) {
 	ledger := &settlementLedger{}
 	agent, store, _, sessionID := settlementAgent(t, ledger)
@@ -1015,12 +1019,22 @@ func TestCloseReportsACommitOutageBehindANativeFailure(t *testing.T) {
 
 	store.release <- struct{}{}
 
+	// The close's own durable rung retries the frames the settlement retained,
+	// and the outage is still armed, so the retry is the second write to arrive.
+	<-store.started
+	store.release <- struct{}{}
+
 	failure := <-promptErr
 	requireTurnFailure(t, failure, causeProvider, "upstream refused")
 	require.NotErrorIs(t, failure, outage, "the native failure is the prompt's primary, unflattened")
 	require.ErrorIs(t, <-closeErr, outage)
 	require.NotContains(t, ledger.snapshot(), "idle",
 		"no terminal boundary claims a foreground prefix the store does not hold")
+
+	// A close that could not commit reclaims nothing, so the session is still the
+	// agent's and the host can close it again once the store is back.
+	_, addressable := agent.session(sessionID)
+	require.NoError(t, addressable, "a failed close left the session unaddressable")
 }
 
 // TestDeleteReportsATerminalDeliveryOutageBehindANativeFailure pins the same

@@ -32,8 +32,11 @@ continuity.
   delete failure is returned after the local session is already hidden from
   list/load/resume, and cleanup is retried by later list/load/resume/delete
   calls.
-- `session/close` stops accepting new prompts for the local session and removes
-  its isolated native home. It does not delete the server-side Amp thread.
+- `session/close` stops accepting new prompts for the local session, commits any
+  frames a failed store write left unsynced, and removes its isolated native
+  home. A close that cannot commit those frames fails and reclaims nothing, so
+  the session stays addressable and the close is retried once the store is back.
+  It does not delete the server-side Amp thread.
 
 ## Server-side state and the local mirror
 
@@ -52,4 +55,8 @@ turns are never mirrored locally, even though the server-side thread advances
 regardless. If a store write fails after a completed turn, the adapter keeps the
 exact frames in memory and blocks the next prompt with a `mirror_unsynced`
 error until the mirror is reconciled, so the local record never silently drifts
-from what Amp produced.
+from what Amp produced. `session/close` reconciles it too: the close retries the
+retained frames before the session is reclaimed and fails when it cannot, so the
+request that ends a session is never the one that drops a completed turn. A
+session already fenced for `session/delete` writes nothing there — the tombstone
+is the last write to that row, and the frames stay retained.
