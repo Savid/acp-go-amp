@@ -120,6 +120,7 @@ func TestReducerFixtures(t *testing.T) {
 			switch vector.Expect.Verdict {
 			case "accepted":
 				require.Nil(t, refusal, "the fixture expects every input to reduce")
+				require.Empty(t, vector.PostRefusal, "an accepted fixture has nothing to latch")
 			case "fail_closed":
 				require.NotNil(t, refusal, "the fixture expects a refusal")
 				require.Equal(t, ViolationKind(vector.Expect.Violation), refusal.Kind)
@@ -136,7 +137,9 @@ func TestReducerFixtures(t *testing.T) {
 }
 
 // driveFixture reduces every input in delivery order, stopping at the first
-// refusal so the projection is the one that stood at the moment it was refused.
+// refusal so the projection is the one that stood at the moment it was refused. A
+// control element is an out-of-band wire event with no notification of its own, and
+// it occupies its own index in the refusal position the fixture names.
 func driveFixture(t *testing.T, reducer *Reducer, vector fixture) (*ViolationError, int) {
 	t.Helper()
 
@@ -169,11 +172,19 @@ func driveFixture(t *testing.T, reducer *Reducer, vector fixture) (*ViolationErr
 // one reports the same token at the same identity the refusal named, and the
 // projection is the one that stood when the stream failed closed. A consumer that
 // stopped reducing and one that kept going past its own verdict are otherwise
-// indistinguishable.
+// indistinguishable. Post-refusal inputs carry the same shape as delivered ones, so
+// a control element is honored there too and asserts nothing of its own.
 func requireLatched(t *testing.T, reducer *Reducer, vector fixture, refusal *ViolationError) {
 	t.Helper()
 
 	for index, input := range vector.PostRefusal {
+		if input.Control != "" {
+			require.Equal(t, "session_closed", input.Control, "unknown control event")
+			reducer.Close()
+
+			continue
+		}
+
 		require.Equal(t, "session/update", input.Method, "post-refusal input %d", index)
 
 		var latched *ViolationError
