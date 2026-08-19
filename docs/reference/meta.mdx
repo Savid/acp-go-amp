@@ -249,6 +249,13 @@ The contained process exit fences the stream; the next prompt opens a new one.
 Sequences are claimed before delivery is attempted, so a lost event leaves a
 detectable gap rather than a silently contiguous stream.
 
+`session/close` therefore always meets a stream that is already fenced, or a
+session whose incarnation never opened, and it emits nothing on either: the
+terminal state was reported by whatever fenced the stream, and a turn recorded
+as `failed` is never restated as cancelled by the close that follows it. The
+containment proof and the durable commit are unconditional and already ran
+inside the prompt, so a close that finds an unproven boundary still fails.
+
 Settlement runs on a context detached from the request's, so a cancelled prompt
 still commits the frames it streamed, states its terminal boundary, and fences
 its stream before the response. The one exception is a settlement that cannot
