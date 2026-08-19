@@ -1609,3 +1609,69 @@ func TestCancelCarriesNoRouteVerdictToPrecedeTheReservedKey(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, lifecycle.MetaPath, data[jsonFieldField])
 }
+
+// TestLifecycleKeyRefusedBeforeExtensionMethodResolution pins the precedence on
+// the extension surface: the reserved key is answered before the method name is
+// resolved, so a method this adapter does not dispatch reports the key rather
+// than its own absence. The same names without the key still answer
+// method-not-found, so the refusal is a real precedence and not a door that
+// refuses everything, and a method the adapter does dispatch reports the key on
+// the key's field path rather than on its own.
+func TestLifecycleKeyRefusedBeforeExtensionMethodResolution(t *testing.T) {
+	agent := newTestAgent()
+	require.Nil(t, agent.providerAuth, "no configured extension leg answers ahead of the key")
+
+	connection := &localAgentConnection{agent: agent}
+	connection.initialized.Store(true)
+
+	stamped, err := json.Marshal(map[string]any{
+		"_meta": map[string]any{lifecycle.MetaKey: map[string]any{"version": 1.0}},
+	})
+	require.NoError(t, err)
+
+	for _, method := range []string{"_amp/unknown", "_amp/auth/nonexistent", "_other/vendor/method"} {
+		t.Run(method, func(t *testing.T) {
+			result, absent := connection.handle(t.Context(), method, json.RawMessage(`{}`))
+			require.Nil(t, result)
+			require.NotNil(t, absent)
+			require.Equal(t, methodNotFoundCode, absent.Code)
+			require.Equal(t, map[string]any{jsonFieldMethod: method}, absent.Data)
+
+			result, refusal := connection.handle(t.Context(), method, stamped)
+			require.Nil(t, result)
+			require.NotNil(t, refusal)
+			require.Equal(t, invalidParamsCode, refusal.Code)
+
+			data, ok := refusal.Data.(map[string]any)
+			require.True(t, ok)
+			require.Equal(t, valUnsupported, data[jsonFieldError])
+			require.Equal(t, lifecycle.MetaPath, data[jsonFieldField])
+		})
+	}
+
+	// The dispatched method's own refusal names the fork surface; stamped, the
+	// same call names the key instead, which is what "before resolution" means.
+	_, unsupported := connection.handle(t.Context(), ForkSessionMethod, json.RawMessage(`{}`))
+	require.NotNil(t, unsupported)
+	require.Equal(t, invalidParamsCode, unsupported.Code)
+	require.Equal(t, map[string]any{
+		jsonFieldError: valUnsupported,
+		jsonFieldField: ForkSessionMethod,
+	}, unsupported.Data)
+
+	_, refusal := connection.handle(t.Context(), ForkSessionMethod, stamped)
+	require.NotNil(t, refusal)
+	require.Equal(t, invalidParamsCode, refusal.Code)
+	require.Equal(t, map[string]any{
+		jsonFieldError: valUnsupported,
+		jsonFieldField: lifecycle.MetaPath,
+	}, refusal.Data)
+
+	// The refusal is the whole effect: no session opened and no broker appeared
+	// behind a method name that never resolved.
+	agent.mu.Lock()
+	sessions := len(agent.sessions)
+	agent.mu.Unlock()
+	require.Empty(t, sessions)
+	require.Nil(t, agent.providerAuth)
+}

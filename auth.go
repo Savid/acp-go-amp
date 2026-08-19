@@ -176,19 +176,11 @@ func (p *providerAuth) capability() map[string]any {
 }
 
 func (a *Agent) handleAuthExtensionMethod(ctx context.Context, method string, params json.RawMessage) (any, bool, error) {
-	// The family literal is refused by name on every leg of this surface,
-	// configured or not: it is refused before the surface's own answer, so an
-	// agent with no usable ledger root answers "the key is not read here" rather
-	// than "no such method". The two are different answers and the host is owed
-	// the first one.
-	switch method {
-	case AuthMethodsMethod, AuthAuthorizeMethod, AuthCallbackMethod, AuthStatusMethod,
-		AuthCancelMethod, AuthInventoryMethod, AuthCredentialMethod, AuthDisconnectMethod:
-		if refusal := rejectLifecycleMetaParams(params); refusal != nil {
-			return nil, true, refusal
-		}
-	}
-
+	// The family literal is already refused for this whole surface by the
+	// extension dispatcher above, before any method name is resolved: an agent
+	// with no usable ledger root answers "the key is not read here" rather than
+	// "no such method", and so does a leg name nobody serves. Nothing is left
+	// for this table to check, which is why it starts at the broker.
 	broker := a.providerAuth
 	if broker == nil {
 		return nil, false, nil

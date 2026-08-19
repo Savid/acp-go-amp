@@ -359,18 +359,25 @@ func (a *Agent) HandleExtensionMethod(ctx context.Context, method string, params
 	_, finish := a.observe.StartACPRequest(ctx, method)
 	defer func() { finish(err) }()
 
-	// A closed agent rejects every call before dispatch: -32600 first, then
-	// -32601 for unknown methods, then parameter validation.
+	// A closed agent rejects every call before dispatch: -32600 first, then the
+	// reserved family key, then -32601 for unknown methods, then parameter
+	// validation.
 	if err := a.ensureOpen(); err != nil {
 		return nil, err
 	}
 
+	// The reserved key is read before the method name is resolved, so it is
+	// refused on every method this surface dispatches — including one this
+	// adapter does not have. A method name is the caller's guess; the key is a
+	// family literal that means something here, and answering "no such method"
+	// would reply to the guess and leave the key unanswered, as if it had been
+	// another namespace's business all along.
+	if refusal := rejectLifecycleMetaParams(params); refusal != nil {
+		return nil, refusal
+	}
+
 	switch method {
 	case ForkSessionMethod:
-		if refusal := rejectLifecycleMetaParams(params); refusal != nil {
-			return acp.UnstableForkSessionResponse{}, refusal
-		}
-
 		return acp.UnstableForkSessionResponse{}, acp.NewInvalidParams(map[string]any{
 			jsonFieldError: valUnsupported,
 			jsonFieldField: ForkSessionMethod,

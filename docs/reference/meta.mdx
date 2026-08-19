@@ -309,3 +309,10 @@ because the request was going to be refused anyway, so a `session/set_mode`
 carrying the key answers `-32602` naming it, and so does the boolean
 `session/set_config_option` variant this adapter otherwise rejects on its
 discriminator.
+
+Extension methods are judged the same way and before their names are resolved
+at all. An `_`-prefixed method this adapter does not dispatch answers `-32601
+method not found` on its own, but carrying the key it answers `-32602` naming
+`_meta["acp-go.dev/lifecycle"]`: a method name is the caller's guess, while the
+key is a literal this adapter reserves, and the guess is not the part that is
+owed an answer first.
