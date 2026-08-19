@@ -1517,11 +1517,22 @@ func TestCloseEmitsNothingOnAFencedOrNeverOpenedIncarnation(t *testing.T) {
 	require.Equal(t, stored, after, "the close rewrote nothing the prompt already committed")
 }
 
-// TestCloseNeverRewritesALossTerminalizedFailure pins the durable branch of the
-// close ladder. A turn the incarnation's own loss terminalized as `failed` holds
-// that ending: the close that follows the cancel finds nothing nonterminal to
-// terminalize, emits nothing, and never restates the turn as cancelled — not on
-// the fenced stream and not over the frames the failure committed.
+// TestCloseNeverRewritesALossTerminalizedFailure pins what a close does to a turn
+// the incarnation's own loss already terminalized as `failed`. The reduction runs
+// first and is the test's premise, not its finding: it establishes that the
+// settled stream really does record `failed`, so the two equalities that follow
+// the close are the assertions with content.
+//
+// Both are load-bearing because this close carries a durable rung. The close
+// emits nothing on the fenced stream, and its commit of whatever the settlement
+// retained writes nothing over the frames the failure already committed: neither
+// the stream nor the store restates the ending.
+//
+// This adapter holds no durable lifecycle entity state — every entity lives in
+// the prompt-contained incarnation and dies with it, and the store holds Amp's
+// own stream-json frames only — so the durable clause of the no-rewrite rule is
+// enforced here by construction. The store equality is what stands in for it: the
+// only durable record a close could rewrite is the transcript, and it does not.
 func TestCloseNeverRewritesALossTerminalizedFailure(t *testing.T) {
 	client := &lifecycleClient{}
 	agent, sessionID := lifecycleAgentWithClient(t, lifecycleOffer(1.0), client)
@@ -1531,11 +1542,25 @@ func TestCloseNeverRewritesALossTerminalizedFailure(t *testing.T) {
 
 	settled := client.eventTypes(t)
 
+	state := reduceEmittedStream(t, client, negotiatedAnswer()).State()
+	require.Len(t, state.Turns, 1)
+	require.Equal(t, lifecycle.OutcomeFailed, state.Turns[0].Outcome,
+		"the incarnation's own loss terminalized the turn as failed")
+
 	stored, err := agent.store.Load(t.Context(), SessionKey{
 		SessionID: string(sessionID), Subpath: transcriptSubpath,
 	})
 	require.NoError(t, err)
 	require.NotEmpty(t, stored)
+
+	// The settlement's own commit landed, so the close's durable rung has nothing
+	// of its own to write: the store equality below is earned rather than lucky.
+	live, lookupErr := agent.session(sessionID)
+	require.NoError(t, lookupErr)
+	live.mu.Lock()
+	retained := len(live.unsyncedFrames)
+	live.mu.Unlock()
+	require.Zero(t, retained, "a settlement that committed retains nothing for the close to commit")
 
 	require.NoError(t, agent.Cancel(t.Context(), acp.CancelNotification{SessionId: sessionID}))
 
@@ -1547,12 +1572,7 @@ func TestCloseNeverRewritesALossTerminalizedFailure(t *testing.T) {
 		SessionID: string(sessionID), Subpath: transcriptSubpath,
 	})
 	require.NoError(t, err)
-	require.Equal(t, stored, after, "the failure's durable frames are the ones that stand")
-
-	state := reduceEmittedStream(t, client, negotiatedAnswer()).State()
-	require.Len(t, state.Turns, 1)
-	require.Equal(t, lifecycle.OutcomeFailed, state.Turns[0].Outcome,
-		"a failed turn is never rewritten to cancelled")
+	require.Equal(t, stored, after, "the close's own commit rewrote no frame the failure committed")
 }
 
 // TestCancelCarriesNoRouteVerdictToPrecedeTheReservedKey pins this adapter's
