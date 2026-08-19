@@ -80,7 +80,10 @@ func TestTurnTimeoutContainsDescendantBeforeReturn(t *testing.T) {
 	agent := newTestAgent(
 		WithExecutablePath(path),
 		WithScratchDir(testScratchDir(t)),
-		WithTurnTimeout(100*time.Millisecond),
+		// The deadline is configured only so the prompt arms one; it never
+		// elapses. What fires it is the seam below, after this test has proven
+		// the descendant alive.
+		WithTurnTimeout(time.Hour),
 		WithProcessIsolation(ProcessIsolation{
 			UID: uid, GID: gid,
 			BaseEnvironment: map[string]string{
@@ -92,6 +95,18 @@ func TestTurnTimeoutContainsDescendantBeforeReturn(t *testing.T) {
 	)
 	agent.options.runtime.nativeCancelTimeout = 100 * time.Millisecond
 	agent.options.runtime.nativeCloseTurnWait = 10 * time.Second
+	// The fixture becomes the subject of this case only once it has started its
+	// escaped descendant, waited for that descendant to leave the process group,
+	// and recorded its own readiness. A wall-clock deadline raced that handshake:
+	// when the timer won, the ladder contained the fake amp before it wrote
+	// continue-ready, and the case failed on a missing readiness file rather than
+	// on the containment it exists to prove. Drive the deadline through the
+	// newTurnTimer seam instead and fire it below, so the order is stated rather
+	// than hoped for.
+	turnDeadline := make(chan time.Time, 1)
+	agent.options.runtime.newTurnTimer = func(time.Duration) (<-chan time.Time, func()) {
+		return turnDeadline, func() {}
+	}
 	t.Cleanup(func() {
 		if err := agent.Close(); err != nil {
 			t.Errorf("Close: %v", err)
@@ -117,6 +132,8 @@ func TestTurnTimeoutContainsDescendantBeforeReturn(t *testing.T) {
 	waitForPath(t, filepath.Join(stateDir, "continue-ready"))
 	descendantPID := readHelperJSON[int](t, filepath.Join(stateDir, "descendant-pid.jsonl"))[0]
 	requireProcessAlive(t, descendantPID, "before timeout")
+
+	turnDeadline <- time.Now()
 
 	select {
 	case promptErr := <-errCh:
