@@ -187,16 +187,6 @@ func (b *imagePromptBudget) gate(field string, index int, mimeType string, decod
 		return validatedPromptImage{}, err
 	}
 
-	if sizeBytes > ampNativeMaxImageBytes {
-		return validatedPromptImage{}, promptMediaSizeError(
-			field,
-			index,
-			imageErrorNativeEnvelope,
-			sizeBytes,
-			ampNativeMaxImageBytes,
-		)
-	}
-
 	if width > ampNativeMaxImageDimension || height > ampNativeMaxImageDimension {
 		return validatedPromptImage{}, promptMediaError(field, index, imageErrorNativeEnvelope)
 	}
@@ -204,12 +194,16 @@ func (b *imagePromptBudget) gate(field string, index int, mimeType string, decod
 	return validatedPromptImage{base64: base64.StdEncoding.EncodeToString(decoded)}, nil
 }
 
-// charge applies the configured per-image bound and adds the payload to the
-// prompt's running decoded total. Both bounds are shared by every gated media
-// block, so the caller supplies the field its channel reports.
+// charge applies the per-image byte gate and adds the payload to the prompt's
+// running decoded total. Both bounds are shared by every gated media block, so
+// the caller supplies the field its channel reports. The per-image terms are
+// judged before the payload joins the aggregate: a block the gate refuses on its
+// own size was never part of the prompt's total.
 func (b *imagePromptBudget) charge(field string, index int, sizeBytes int64) error {
-	if maxBytes := b.limits.MaxInputBytesPerImage; maxBytes > 0 && sizeBytes > maxBytes {
-		return promptMediaSizeError(field, index, imageErrorTooLarge, sizeBytes, maxBytes)
+	for _, term := range perImageByteTerms(b.limits) {
+		if sizeBytes > term.maxBytes {
+			return promptMediaSizeError(field, index, term.value, sizeBytes, term.maxBytes)
+		}
 	}
 
 	b.totalBytes += sizeBytes

@@ -199,3 +199,60 @@ func sortedMetaKeys(meta map[string]any) []string {
 
 	return keys
 }
+
+// TestAdvertisedPerImageBoundIsTheGatesOwnResolution pins that the advertised
+// `maxBytes` and the verdict a send actually gets come from one resolution. The
+// advertisement is the tightest term; the term that produced it is the one that
+// names the refusal, so a host at the advertised bound passes and a host one byte
+// over is refused by the same term the advertisement came from.
+func TestAdvertisedPerImageBoundIsTheGatesOwnResolution(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		configured int64
+		want       int64
+		verdict    string
+	}{
+		{
+			name:       "the native envelope is the tightest term",
+			configured: 0,
+			want:       ampNativeMaxImageBytes,
+			verdict:    imageErrorNativeEnvelope,
+		},
+		{
+			name:       "a configured limit above the envelope never loosens it",
+			configured: ampNativeMaxImageBytes * 2,
+			want:       ampNativeMaxImageBytes,
+			verdict:    imageErrorNativeEnvelope,
+		},
+		{
+			name:       "a configured limit below the envelope is the bound and the verdict",
+			configured: 4096,
+			want:       4096,
+			verdict:    imageErrorTooLarge,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			limits := ImageLimits{MaxInputBytesPerImage: test.configured}
+
+			advertised, ok := mediaEnvelopeMeta(limits)[keyMaxBytes].(int64)
+			require.True(t, ok)
+			require.Equal(t, test.want, advertised, "the advertisement is the gate's own bound")
+
+			budget := &imagePromptBudget{limits: limits}
+			require.NoError(t, budget.charge(imageField, 0, advertised),
+				"a payload exactly at the advertised bound passes")
+
+			over := &imagePromptBudget{limits: limits}
+			err := over.charge(imageField, 0, advertised+1)
+			requireInvalidParamsData(t, err, imageSizeErrorData(0, test.verdict, advertised+1, advertised))
+
+			// The declared-size path a handoff block takes reads the same terms.
+			handoff := &imagePromptBudget{limits: limits}
+			require.Nil(t, handoff.declaredSizeVerdict(advertised))
+			refusal := handoff.declaredSizeVerdict(advertised + 1)
+			require.NotNil(t, refusal)
+			require.Equal(t, test.verdict, refusal.value)
+			require.Equal(t, advertised, refusal.maxBytes)
+		})
+	}
+}
