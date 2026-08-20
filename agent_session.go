@@ -1109,29 +1109,36 @@ func (s *agentSession) loadTranscript(ctx context.Context) ([]SessionStoreEntry,
 	return s.agent.store.Load(loadCtx, SessionKey{SessionID: string(s.id), Subpath: transcriptSubpath})
 }
 
+// advertisedModes is the menu a host renders, not a gate a value has to pass:
+// amp owns the mode namespace, so the list names the modes the shipping CLI
+// documents and nothing here refuses a mode outside it. A current value the
+// list does not contain is the expected shape whenever a host or amp itself
+// names a mode this build has never heard of.
+func advertisedModes() []string {
+	return []string{modeLow, modeMedium, modeHigh, modeUltra}
+}
+
 func (s *agentSession) configOptions() []acp.SessionConfigOption {
 	modeCategory := acp.SessionConfigOptionCategoryMode
 
-	return []acp.SessionConfigOption{selectConfig(configMode, "Mode", modeCategory, s.mode, validModes())}
+	return []acp.SessionConfigOption{selectConfig(configMode, "Mode", modeCategory, s.mode, advertisedModes())}
 }
 
+// setConfig names the only config option this adapter serves and forwards its
+// value verbatim. A mode selects amp's model, system prompt, and tool set on the
+// hosted backend, so the value list belongs to amp: an id this adapter does not
+// serve is refused by name, and every value under `mode` travels to the native
+// `-m` flag for amp to accept or reject. The mode amp actually ran is read back
+// from the turn's init frame by reconcileNativeConfig.
 func (s *agentSession) setConfig(ctx context.Context, id acp.SessionConfigId, value acp.SessionConfigValueId) error {
 	s.mu.Lock()
-	switch id {
-	case configMode:
-		if !slices.Contains(validModes(), string(value)) {
-			s.mu.Unlock()
-
-			return unsupportedField(fieldValue)
-		}
-
-		s.mode = string(value)
-	default:
+	if id != configMode {
 		s.mu.Unlock()
 
 		return unsupportedField(fieldConfigID)
 	}
 
+	s.mode = string(value)
 	s.updatedUnix = time.Now().UnixMilli()
 	s.mu.Unlock()
 
@@ -1149,6 +1156,11 @@ func (s *agentSession) setConfig(ctx context.Context, id acp.SessionConfigId, va
 // reconciled state differs from what was last advertised, a config_option_update
 // is emitted so the host reads back amp's truth rather than its own request. The
 // reconciled state is persisted with the transcript at turn end.
+//
+// Nothing local judges a mode value, so this read-back is the only thing that
+// makes a server-side substitution visible: a mode amp declined and fell back
+// from is reported here under its real name, and a host that asked for a mode
+// this build never heard of learns what it actually got.
 func (s *agentSession) reconcileNativeConfig(ctx context.Context, sys *amp.SystemMessage) error {
 	s.mu.Lock()
 	changed := false

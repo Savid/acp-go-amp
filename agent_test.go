@@ -67,7 +67,7 @@ func TestAgentMetaCarriesNoModelCapabilitiesArray(t *testing.T) {
 		t.Fatalf("amp meta carries a capabilities array: %s", encodedMeta)
 	}
 
-	encodedOptions, err := json.Marshal((&agentSession{mode: validModes()[0]}).configOptions())
+	encodedOptions, err := json.Marshal((&agentSession{mode: advertisedModes()[0]}).configOptions())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -414,9 +414,6 @@ func TestAgentErrorAndConformanceBranches(t *testing.T) {
 	}
 	if err := newTestAgent().validateSessionStartOptions(AmpOptions{OutputSchema: map[string]any{}}); err == nil {
 		t.Fatal("empty output schema accepted")
-	}
-	if err := newTestAgent().validateSessionStartOptions(AmpOptions{Mode: "large"}); err == nil {
-		t.Fatal("hidden mode accepted")
 	}
 	configurationAgent := newTestAgent()
 	configurationAgent.configurationErr = errors.New("configuration")

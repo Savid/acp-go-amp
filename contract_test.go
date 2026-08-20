@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -113,6 +114,116 @@ func TestStrictMetaAndConfigResponse(t *testing.T) {
 	if len(resp.ConfigOptions) != 1 {
 		t.Fatalf("config response options = %#v", resp.ConfigOptions)
 	}
+}
+
+// TestModeTravelsToNativeOnBothRoutes pins full mode passthrough on the
+// mode-only config surface. Amp's mode is its native model selection — it picks
+// the model, the system prompt, and the tool set — so the value namespace
+// belongs to amp and this adapter keeps no list to refuse one against. A mode
+// the advert does not name reaches the native `-m` flag unchanged over both
+// doors a host can push a mode through: the establishment `_meta.amp.options`
+// and a later `session/set_config_option`. `ultra` ships with the CLI, so it is
+// accepted and advertised; `turbo-experimental` is a value no build here knows,
+// and it travels just as far.
+func TestModeTravelsToNativeOnBothRoutes(t *testing.T) {
+	const unknownMode = "turbo-experimental"
+
+	ctx := context.Background()
+	path, state := fakeAgentAmpPath(t, "")
+	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(testScratchDir(t)))
+	_, cleanup := attachRecordingClient(t, agent)
+	defer cleanup()
+
+	newResp, err := agent.NewSession(ctx, NewSessionRequest(t.TempDir(),
+		WithSessionAmpOptions(NewAmpOptions(WithAmpMode(modeUltra))),
+	))
+	if err != nil {
+		t.Fatalf("NewSession %q: %v", modeUltra, err)
+	}
+	requireConfigMode(t, newResp.ConfigOptions, modeUltra)
+	requireAdvertisedModes(t, newResp.ConfigOptions)
+
+	if _, promptErr := agent.Prompt(ctx, TextPromptRequest(newResp.SessionId, "turn-1", "x")); promptErr != nil {
+		t.Fatalf("Prompt %q: %v", modeUltra, promptErr)
+	}
+	// The first prompt is the thread-less execute, so it is the argv carrying
+	// `-x` without a `threads` subcommand.
+	requireNativeModeFlag(t, state, modeUltra, func(args []string) bool {
+		return slices.Contains(args, "-x") && !slices.Contains(args, "threads")
+	})
+
+	setResp, err := agent.SetSessionConfigOption(ctx, SetConfigOptionRequest(newResp.SessionId, configMode, unknownMode))
+	if err != nil {
+		t.Fatalf("SetSessionConfigOption %q: %v", unknownMode, err)
+	}
+	// A current value the advertised list does not contain is the accepted
+	// shape: the list is a menu a host renders, and amp is the authority on what
+	// it will actually run.
+	requireConfigMode(t, setResp.ConfigOptions, unknownMode)
+	requireAdvertisedModes(t, setResp.ConfigOptions)
+
+	if _, promptErr := agent.Prompt(ctx, TextPromptRequest(newResp.SessionId, "turn-2", "x")); promptErr != nil {
+		t.Fatalf("Prompt %q: %v", unknownMode, promptErr)
+	}
+	// Every prompt after the first continues the adopted server-side thread, so
+	// the argv naming that thread is the one to read.
+	requireNativeModeFlag(t, state, unknownMode, func(args []string) bool {
+		return slices.Contains(args, "continue") && slices.Contains(args, "T-agent-thread")
+	})
+}
+
+// requireNativeModeFlag reads the recorded native argv, selects the most recent
+// child the predicate accepts, and requires `-m` to be followed by exactly the
+// requested mode. Presence of the token is not enough: the pin is that the value
+// arrives unrewritten, in the flag's own position.
+func requireNativeModeFlag(t *testing.T, state string, want string, match func([]string) bool) {
+	t.Helper()
+
+	var selected []string
+	for _, args := range readHelperJSON[[]string](t, filepath.Join(state, "args.jsonl")) {
+		if match(args) {
+			selected = args
+		}
+	}
+	if selected == nil {
+		t.Fatalf("no recorded native child matched for mode %q", want)
+	}
+
+	flag := slices.Index(selected, "-m")
+	if flag < 0 || flag+1 >= len(selected) {
+		t.Fatalf("native argv carries no -m value: %#v", selected)
+	}
+	if selected[flag+1] != want {
+		t.Fatalf("native -m value = %q, want %q: %#v", selected[flag+1], want, selected)
+	}
+}
+
+// requireAdvertisedModes pins the advertised menu itself, so the list a host
+// renders stays the shipping CLI's documented set even as the current value
+// ranges outside it.
+func requireAdvertisedModes(t *testing.T, options []acp.SessionConfigOption) {
+	t.Helper()
+
+	for _, option := range options {
+		if option.Select == nil || option.Select.Id != configMode {
+			continue
+		}
+		if option.Select.Options.Ungrouped == nil {
+			t.Fatalf("mode option advertises no ungrouped values: %#v", option.Select.Options)
+		}
+
+		got := make([]string, 0, len(*option.Select.Options.Ungrouped))
+		for _, value := range *option.Select.Options.Ungrouped {
+			got = append(got, string(value.Value))
+		}
+		if !slices.Equal(got, []string{modeLow, modeMedium, modeHigh, modeUltra}) {
+			t.Fatalf("advertised modes = %#v", got)
+		}
+
+		return
+	}
+
+	t.Fatalf("no mode config option: %#v", options)
 }
 
 func TestClientBackpressureAndSessionIDDrift(t *testing.T) {

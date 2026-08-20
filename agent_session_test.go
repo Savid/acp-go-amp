@@ -888,6 +888,11 @@ func (f fakeTurnErrors) Errors() <-chan error { return f.errs }
 // reconciles session state to amp's truth, emits a config_option_update, and
 // subsequent config-option reads report the native values rather than the echoed
 // request.
+//
+// The requested mode is deliberately one this build does not advertise. Nothing
+// local judges a mode value, so this read-back is the whole safety net: it is
+// what turns a server-side substitution into something the host can see, and it
+// has to work for exactly the values the adapter itself cannot recognize.
 func TestReconcileNativeConfigReadBack(t *testing.T) {
 	path, _ := fakeAgentAmpPath(t, "reconcile-config")
 	conn, client, cleanup := startTestServe(t,
@@ -903,14 +908,15 @@ func TestReconcileNativeConfigReadBack(t *testing.T) {
 	}
 	cwd := t.TempDir()
 	newResp, err := conn.NewSession(ctx, NewSessionRequest(cwd,
-		WithSessionAmpOptions(NewAmpOptions(WithAmpMode("medium"))),
+		WithSessionAmpOptions(NewAmpOptions(WithAmpMode("turbo-experimental"))),
 	))
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
 	}
 
-	// Requested surface is echoed before any native report.
-	requireConfigMode(t, newResp.ConfigOptions, "medium")
+	// Requested surface is echoed before any native report, unadvertised value
+	// and all: establishment carries the host's word to amp without judging it.
+	requireConfigMode(t, newResp.ConfigOptions, "turbo-experimental")
 
 	if _, promptErr := conn.Prompt(ctx, acp.PromptRequest{
 		SessionId: newResp.SessionId,
@@ -933,7 +939,7 @@ func TestReconcileNativeConfigReadBack(t *testing.T) {
 	requireConfigMode(t, reconciled, "high")
 
 	// A subsequent read-back (resume of the active session) reports amp's truth,
-	// not the originally requested medium/low.
+	// not the mode the host originally asked for.
 	resumeResp, err := conn.ResumeSession(ctx, ResumeSessionRequest(newResp.SessionId, cwd))
 	if err != nil {
 		t.Fatalf("ResumeSession: %v", err)

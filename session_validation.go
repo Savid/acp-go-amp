@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
-	"slices"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -47,10 +46,6 @@ func (a *Agent) validateSessionStartOptions(options AmpOptions) error {
 
 	if options.OutputSchema != nil {
 		return unsupportedField(metaOutputSchemaKey)
-	}
-
-	if options.Mode != "" && !slices.Contains(validModes(), options.Mode) {
-		return unsupportedField("_meta.amp.options.mode")
 	}
 
 	for key := range options.Env {
@@ -283,8 +278,4 @@ func mcpConfigJSON(servers []acp.McpServer) (string, error) {
 	data, _ := json.Marshal(payload)
 
 	return string(data), nil
-}
-
-func validModes() []string {
-	return []string{modeLow, modeMedium, modeHigh}
 }

@@ -91,6 +91,7 @@ const (
 	modeLow    = "low"
 	modeMedium = "medium"
 	modeHigh   = "high"
+	modeUltra  = "ultra"
 )
 
 var (

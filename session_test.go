@@ -101,12 +101,9 @@ func TestLoadResumeManifestAndConfigBranches(t *testing.T) {
 		t.Fatalf("set mode: %v", setErr)
 	}
 
-	// Every refusal on the config surface names the offending member in the
-	// uniform two-key shape.
-	_, err := agent.SetSessionConfigOption(ctx, SetConfigOptionRequest("T-load", "mode", "bad"))
-	requireUnsupportedField(t, err, fieldValue)
-
-	_, err = agent.SetSessionConfigOption(ctx, SetConfigOptionRequest("T-load", "unknown", "x"))
+	// The config id is the only member this surface judges, and its refusal
+	// names the offending member in the uniform two-key shape.
+	_, err := agent.SetSessionConfigOption(ctx, SetConfigOptionRequest("T-load", "unknown", "x"))
 	requireUnsupportedField(t, err, fieldConfigID)
 	if _, err := agent.SetSessionConfigOption(ctx, SetConfigOptionRequest("T-missing", "mode", "low")); err == nil {
 		t.Fatal("unknown config session accepted")

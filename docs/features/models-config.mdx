@@ -1,27 +1,54 @@
 ---
 title: Models And Config
-description: Configure Amp turns with its select-only mode option, image input, and seeded on-disk native state.
+description: Configure Amp turns with the mode option that selects Amp's model, plus image input and seeded on-disk native state.
 ---
 
-Amp exposes one ACP session config option: `mode`. It is select-only, so a host
-presents a fixed value list rather than free text. There is no ACP model option,
-because Amp is locked to its hosted backend.
+Amp exposes one ACP session config option: `mode`. It is typed as a select, so a
+host can render the documented values as a list. There is no separate ACP model
+option, because on Amp the mode *is* the model selection.
 
 ## Config options
 
-| Option | Accepted values | Sent to Amp as |
+| Option | Advertised values | Sent to Amp as |
 |---|---|---|
-| `mode` | `low`, `medium`, `high` | `-m` |
+| `mode` | `low`, `medium`, `high`, `ultra` | `-m` |
 
-The adapter passes the selected value straight through. Set it per session
-through `_meta.amp.options` (`AmpOptions.Mode`) or update it with
-`session/set_config_option`.
+The advertised values are the ones the shipping Amp CLI documents. That list is
+a menu, not a gate: the adapter keeps no value list of its own, so whatever you
+set travels to `-m` unchanged and Amp alone decides whether it will run it. Set
+the mode per session through `_meta.amp.options` (`AmpOptions.Mode`) or update it
+with `session/set_config_option` — both doors behave identically, and neither
+refuses a value.
+
+A mode the advertised list does not name is therefore accepted, and the option's
+current value can legitimately be a value its own list does not contain. That is
+the expected shape whenever you name a mode this adapter release predates. The
+only refusal on this surface is an unknown config *id*, reported with the uniform
+unsupported error naming field `configId`.
+
+Being advertised is not a promise that your account may run it. Which modes an
+Amp account is entitled to depends on its plan, and the adapter advertises the
+documented set rather than anything account-specific, so treat the list as the
+shape of the option and the read-back below as the truth about a given turn.
+
+### Effective mode read-back
+
+Amp reports the mode it actually ran in the turn's `system`/`init` frame. When
+that differs from the mode you asked for, the adapter adopts Amp's value and
+emits a `config_option_update` carrying it, so a mode Amp declined and fell back
+from is reported under its real name instead of your request being echoed back at
+you. Because nothing is validated locally, this read-back is the only signal that
+a requested mode did not survive: take the effective mode from that notification,
+or from the config options a later `session/load` or `session/resume` returns.
 
 ## No model option
 
-There is no ACP model config option for Amp. A non-empty `WithDefaultModel`,
-`AmpOptions.Model`, or `_meta.amp.options.model` fails session start with the
-uniform unsupported error naming field `model`.
+There is no ACP model config option for Amp, and `mode` is the reason. On Amp a
+mode selects the model the turn runs on, together with the system prompt and the
+tool set that come with it — choosing a mode is choosing a model, so a second
+selector would be a second name for the same knob. A non-empty
+`WithDefaultModel`, `AmpOptions.Model`, or `_meta.amp.options.model` fails session
+start with the uniform unsupported error naming field `model`.
 
 ## Image input
 

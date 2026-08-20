@@ -24,7 +24,7 @@ common symptoms to their causes and to the tests that pin each behavior.
 | Prompt blocked with `mirror_unsynced` | A prior store write failed | Restore the [session store](/docs/features/session-store) backend so the mirror can commit |
 | Session start rejects an MCP server | Unsupported transport or bad field | [MCP](/docs/features/mcp) — only stdio and HTTP are accepted |
 | `_amp/session/fork` returns an error | Amp has no fork surface | Fork requests are always rejected |
-| Session start or resume rejects a model | Amp does not support model selection | Remove the model option; the rejection is fail-closed |
+| Session start or resume rejects a model | Amp has no separate model option — `mode` selects the model | Remove the model option and choose a `mode`; the rejection is fail-closed |
 | Live integration tests fail without `AMP_API_KEY` | Credential missing from the test environment | Export `AMP_API_KEY`; live tests fail rather than skip |
 
 ## Remote-thread loss
@@ -96,12 +96,14 @@ than emulating a fork it cannot honor. Reproduced by
 
 ## Model selection
 
-Amp does not support model selection. A default model configured on the agent
+Amp has no separate model selector: its `mode` chooses the model. So the ACP
+model option does not exist here — a default model configured on the agent
 rejects every session start, and a per-session model on any
 session-establishing path is rejected the same way — fail-closed with the
 uniform unsupported `model` field error, never silently ignored. Reproduced by
 `TestAgentLifecycleErrorBranches` and `TestRemainingAgentBranches`
-(`session_test.go`).
+(`session_test.go`). Choose the model through `mode` instead; see
+[Models and config](/docs/features/models-config#config-options).
 
 ## Live-test credentials
 
