@@ -423,6 +423,71 @@ func TestLifecyclePromptIncarnationShape(t *testing.T) {
 	require.Equal(t, lifecycle.OutcomeSuccess, state.Turns[0].Outcome)
 }
 
+// TestLifecycleSnapshotOpensAFullShapeSessionsPrompt pins the opening snapshot
+// against the params a host actually sends rather than the minimal ones a test
+// can get away with: a populated mcpServers array and an object-valued `_meta`
+// carrying this adapter's own object beside a foreign namespace's, handed over
+// as wire bytes so the connection's own decode runs. A session's shape is no
+// part of the incarnation boundary — the boundary is the prompt — so the stream
+// still opens with the snapshot before acceptance.
+func TestLifecycleSnapshotOpensAFullShapeSessionsPrompt(t *testing.T) {
+	t.Setenv("AMP_API_KEY", "conformance-key")
+
+	agent := NewAgent(testContainmentOptions([]Option{
+		WithExecutablePath(lifecycleHarness(t)),
+		WithScratchDir(testScratchDir(t)),
+	})...)
+	t.Cleanup(func() { require.NoError(t, agent.Close()) })
+
+	client := &lifecycleClient{}
+	agent.setConnection(client)
+
+	_, err := agent.Initialize(t.Context(), acp.InitializeRequest{Meta: lifecycleOffer(1.0)})
+	require.NoError(t, err)
+
+	connection := &localAgentConnection{agent: agent}
+	connection.initialized.Store(true)
+
+	opened, err := json.Marshal(NewSessionRequest(t.TempDir(),
+		WithSessionMCPServers(
+			StdioMCPServer("stdio", "printf", []string{"ok"}, map[string]string{"A": "B"}),
+			HTTPMCPServer("http", "https://example.com/mcp", map[string]string{"H": "V"}),
+		),
+		WithSessionAdditionalDirectories(t.TempDir()),
+		WithSessionRawEvents(true),
+		WithSessionAmpOptions(NewAmpOptions(
+			WithAmpEnv(map[string]string{"AMP_URL": "https://amp.example.test"}),
+			WithAmpMode("high"),
+		)),
+		WithSessionMeta(map[string]any{"example.com/trace": map[string]any{"traceId": "t-1"}}),
+	))
+	require.NoError(t, err)
+
+	created, requestErr := connection.handle(t.Context(), acp.AgentMethodSessionNew, opened)
+	require.Nil(t, requestErr)
+
+	session, ok := created.(acp.NewSessionResponse)
+	require.True(t, ok)
+	require.Empty(t, client.envelopes(t), "opening a session owes the stream nothing")
+
+	submitted, err := json.Marshal(lifecyclePrompt(session.SessionId, "hello", "sub-1", "nonce-1"))
+	require.NoError(t, err)
+
+	answered, requestErr := connection.handle(t.Context(), acp.AgentMethodSessionPrompt, submitted)
+	require.Nil(t, requestErr)
+
+	settled, ok := answered.(acp.PromptResponse)
+	require.True(t, ok)
+	require.Equal(t, acp.StopReasonEndTurn, settled.StopReason)
+
+	require.Equal(t, []string{"lifecycle_snapshot", "prompt_accepted", "state_update", "state_update"}, client.eventTypes(t))
+
+	state := reduceEmittedStream(t, client, negotiatedAnswer()).State()
+	require.Len(t, state.Turns, 1)
+	require.True(t, state.Turns[0].Terminal)
+	require.Equal(t, lifecycle.OutcomeSuccess, state.Turns[0].Outcome)
+}
+
 // TestLifecycleOpensOneIncarnationPerPrompt pins the shape a configuration
 // answering updatesOutsidePrompt false owes: no channel exists between prompts,
 // so each prompt is a distinct stream with its own snapshot and sequence space.
