@@ -9,5 +9,5 @@ package amp
 // the launch is contained refuses to run rather than opening the operator's
 // browser.
 func newBrowserShim(string) (*browserShim, error) {
-	return nil, errBrowserShimUnsupported
+	return nil, ErrBrowserLaunchUnsupported
 }

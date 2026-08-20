@@ -119,12 +119,14 @@ Hosted brokering runs against the default Amp deployment on a supported login
 platform only. The single host a relayed URL may name and the single store key
 a hosted harvest reads are measured facts about that deployment, so a hosted
 flow whose `AMP_URL` names another one is refused at `authorize` with
-`unsupported_variant` before a login child exists. Darwin and Windows return
-the same cause before native minting: Darwin Amp account login has no audited
-browserless contract, while on Windows the adapter's launcher shim cannot
-contain a browser the system loader opens out of the system directory. Neither
-refusal stops ordinary native Amp commands on those platforms. The manual
-`api-key` method starts no native login and does not depend on those
+`unsupported_variant` before a login child exists. Windows returns the same
+cause before native minting: the adapter's launcher shim cannot contain a
+browser the system loader opens out of the system directory. Darwin and Linux
+each run behind the shim only after the resolved executable passes a
+per-platform audit of its embedded account-login shape — a build the audit
+cannot prove answers `unsupported_variant` the same way, before any child
+exists. No refusal stops ordinary native Amp commands on any platform. The
+manual `api-key` method starts no native login and does not depend on those
 hosted-login facts; ordinary Amp commands still honor `AMP_URL` where the
 runtime containment policy permits it.
 

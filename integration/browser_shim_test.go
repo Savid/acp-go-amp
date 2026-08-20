@@ -30,8 +30,8 @@ const (
 	browserShimProbePath         = "/usr/local/bin/browsershim.test"
 	browserShimProbeCase         = "TestLoginNeverExecsABrowserLauncher"
 	pinnedAmpContainerPath       = "/usr/local/bin/amp"
-	pinnedAmpProbeCase           = "TestInstalledLinuxAmpLoginExecsOnlyShimLauncher"
-	installedLinuxAmpProbeEnv    = "ACP_GO_AMP_TEST_INSTALLED_LINUX_AMP"
+	pinnedAmpProbeCase           = "TestInstalledAmpLoginExecsOnlyShimLauncher"
+	installedAmpProbeEnv         = "ACP_GO_AMP_TEST_INSTALLED_AMP"
 	networklessContainerModeName = "none"
 	pinnedLinuxAmpVersion        = "0.0.1785846794-g0de1fc"
 	pinnedLinuxAmpURL            = "https://static.ampcode.com/cli/0.0.1785846794-g0de1fc/amp-linux-x64.gz"
@@ -41,24 +41,14 @@ const (
 
 // TestSmokeInstalledAmpBrokeredLoginCompatibilityCanary inspects the real
 // installed binary without executing `amp login`, so the canary itself cannot
-// open a browser or initiate provider authorization. Darwin must report the
-// boundary as incompatible; Linux must prove its account-login call reaches
-// the audited bare xdg-open branch and contains no known absolute launcher.
+// open a browser or initiate provider authorization. Darwin and Linux must
+// each prove the account-login call reaches the audited bare PATH-resolved
+// branch — `open` and `xdg-open` respectively — and names no direct launcher
+// for the platform.
 func TestSmokeInstalledAmpBrokeredLoginCompatibilityCanary(t *testing.T) {
 	path := integrationAmpPath(t)
-	err := amp.CheckAuthLoginBrowserCompatibility(path)
 
-	if runtime.GOOS == "darwin" {
-		if err == nil {
-			t.Fatal("Darwin brokered login was accepted without an audited headless account-login contract")
-		}
-
-		t.Logf("Darwin brokered login refused before launch: %v", err)
-
-		return
-	}
-
-	if err != nil {
+	if err := amp.CheckAuthLoginBrowserCompatibility(path); err != nil {
 		t.Fatalf("brokered login compatibility = %v", err)
 	}
 }
@@ -176,7 +166,7 @@ func TestNativeBrowserPinnedLinuxAmpLoginExecsOnlyShimLauncher(t *testing.T) {
 
 	code, output, err := container.Exec(ctx, []string{
 		"/usr/bin/env",
-		installedLinuxAmpProbeEnv + "=" + pinnedAmpContainerPath,
+		installedAmpProbeEnv + "=" + pinnedAmpContainerPath,
 		browserShimProbePath,
 		"-test.v",
 		"-test.run", "^" + pinnedAmpProbeCase + "$",

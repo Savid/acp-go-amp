@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -422,6 +423,12 @@ func (p *providerAuth) mintPresentation(ctx context.Context, session *agentSessi
 
 	login, err := authStartLogin(client, ctx)
 	if err != nil {
+		// A launch the audit refused is a variant this adapter does not
+		// broker, not a native process failure: no child ever existed.
+		if errors.Is(err, nativeamp.ErrBrowserLaunchUnsupported) {
+			return authAuthorizeResult{}, authCauseUnsupportedVariant
+		}
+
 		return authAuthorizeResult{}, authCauseProcess
 	}
 

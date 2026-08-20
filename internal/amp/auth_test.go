@@ -242,11 +242,14 @@ func TestAuthDeploymentSupported(t *testing.T) {
 		t.Fatal("an unset deployment selector was refused")
 	}
 
-	for _, platform := range []string{darwinPlatform, windowsPlatform} {
-		client := newTestClient(t, nil, Options{TestOnlyAuthLoginPlatform: platform})
-		if client.AuthDeploymentSupported() {
-			t.Fatalf("%s account login was reported as supported", platform)
-		}
+	// Darwin intercepts through the launcher shim exactly as Linux does; only
+	// Windows lacks a PATH-shadowable launch and is refused before any child.
+	if !newTestClient(t, nil, Options{TestOnlyAuthLoginPlatform: darwinPlatform}).AuthDeploymentSupported() {
+		t.Fatal("darwin account login was reported as unsupported")
+	}
+
+	if newTestClient(t, nil, Options{TestOnlyAuthLoginPlatform: windowsPlatform}).AuthDeploymentSupported() {
+		t.Fatal("windows account login was reported as supported")
 	}
 
 	if NewClient(nil, Options{TestOnlyAuthLoginPlatform: linuxPlatform, Isolation: &ProcessIsolation{}}).AuthDeploymentSupported() {

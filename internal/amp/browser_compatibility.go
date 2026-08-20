@@ -11,7 +11,10 @@ import (
 	"runtime"
 )
 
-var errBrowserShimUnsupported = errors.New("browser launch cannot be neutralised on this platform")
+// ErrBrowserLaunchUnsupported reports a brokered login refused before any
+// native child exists: the platform, or the resolved executable's own
+// account-login shape, gives the launcher shim nothing it can prove.
+var ErrBrowserLaunchUnsupported = errors.New("browser launch cannot be neutralised on this platform")
 
 const (
 	darwinPlatform              = "darwin"
@@ -23,8 +26,19 @@ const (
 )
 
 var (
-	linuxAuthLoginFallback      = []byte("If your browser does not open automatically")
-	linuxBrowserOpener          = regexp.MustCompile(`(?s)async function ([A-Za-z_$][A-Za-z0-9_$]*)\([^)]{1,128}\)\{try\{.{0,1000}?case"darwin":await ([A-Za-z_$][A-Za-z0-9_$]*)\("open",\[[^]]{1,128}\],[^)]{1,128}\);break;default:await ([A-Za-z_$][A-Za-z0-9_$]*)\("xdg-open",\[[^]]{1,128}\],[^)]{1,128}\);break`)
+	authLoginFallback = []byte("If your browser does not open automatically")
+	browserOpener     = regexp.MustCompile(`(?s)async function ([A-Za-z_$][A-Za-z0-9_$]*)\([^)]{1,128}\)\{try\{.{0,1000}?case"darwin":await ([A-Za-z_$][A-Za-z0-9_$]*)\("open",\[[^]]{1,128}\],[^)]{1,128}\);break;default:await ([A-Za-z_$][A-Za-z0-9_$]*)\("xdg-open",\[[^]]{1,128}\],[^)]{1,128}\);break`)
+	// darwinDirectLauncherLiterals are the source-literal spellings through
+	// which embedded application code could name the absolute Darwin launcher.
+	// The bare NUL-delimited path also present in every bundle belongs to the
+	// runtime's own string table — its editor-open feature — which no
+	// account-login call reaches, so only a quoted literal is the
+	// application's.
+	darwinDirectLauncherLiterals = [][]byte{
+		[]byte(`"` + darwinDirectBrowserLauncher + `"`),
+		[]byte(`'` + darwinDirectBrowserLauncher + `'`),
+		[]byte("`" + darwinDirectBrowserLauncher + "`"),
+	}
 	linuxDirectBrowserLaunchers = [][]byte{
 		[]byte("/usr/bin/xdg-open"),
 		[]byte("/usr/local/bin/xdg-open"),
@@ -38,20 +52,22 @@ var (
 )
 
 type authLoginBinaryInspection struct {
-	digest                     [sha256.Size]byte
-	darwinDirectLauncher       bool
-	linuxDirectLauncher        string
-	linuxAccountLoginUsesPath  bool
-	linuxBrowserOpenerFunction string
-	linuxLoginPrefixes         [][]byte
+	digest               [sha256.Size]byte
+	darwinDirectLauncher bool
+	linuxDirectLauncher  string
+	accountLoginUsesPath bool
+	browserOpenerFunc    string
+	loginPrefixes        [][]byte
 }
 
 // CheckAuthLoginBrowserCompatibility inspects the installed Amp executable
-// without running it. Darwin account login has no headless contract that this
-// adapter can prove, so every build is refused. Linux is accepted only when
-// the embedded account-login path calls the platform opener whose Linux branch
-// executes bare `xdg-open`, and when no known absolute Linux launcher exists.
-// Unknown shapes are fingerprinted and refused before command construction.
+// without running it. Darwin and Linux are each accepted only when the
+// embedded account-login path calls the platform opener whose branch for that
+// platform executes a bare PATH-resolved launcher — `open` on Darwin,
+// `xdg-open` on Linux — and when no direct launcher for that platform exists:
+// a quoted `/usr/bin/open` source literal on Darwin, any known absolute
+// launcher path on Linux. Unknown shapes are fingerprinted and refused before
+// command construction.
 func CheckAuthLoginBrowserCompatibility(path string) error {
 	return checkAuthLoginBrowserCompatibilityOnPlatform(runtime.GOOS, path)
 }
@@ -69,7 +85,7 @@ func checkAuthLoginBrowserCompatibility(goos string, path string, openFile func(
 
 	file, err := openFile(path)
 	if err != nil {
-		return fmt.Errorf("%w: inspect Amp executable: %v", errBrowserShimUnsupported, err)
+		return fmt.Errorf("%w: inspect Amp executable: %v", ErrBrowserLaunchUnsupported, err)
 	}
 
 	inspection, inspectErr := inspectAuthLoginBinary(file)
@@ -77,23 +93,27 @@ func checkAuthLoginBrowserCompatibility(goos string, path string, openFile func(
 	closeErr := file.Close()
 
 	if inspectErr != nil || closeErr != nil {
-		return fmt.Errorf("%w: inspect Amp executable: %v", errBrowserShimUnsupported, errors.Join(inspectErr, closeErr))
+		return fmt.Errorf("%w: inspect Amp executable: %v", ErrBrowserLaunchUnsupported, errors.Join(inspectErr, closeErr))
 	}
 
 	if goos == darwinPlatform {
 		if inspection.darwinDirectLauncher {
-			return fmt.Errorf("%w: Amp executable sha256:%x contains the direct Darwin browser launcher %s", errBrowserShimUnsupported, inspection.digest, darwinDirectBrowserLauncher)
+			return fmt.Errorf("%w: Amp executable sha256:%x names the direct Darwin browser launcher %s in its embedded source", ErrBrowserLaunchUnsupported, inspection.digest, darwinDirectBrowserLauncher)
 		}
 
-		return fmt.Errorf("%w: Amp executable sha256:%x exposes no audited headless account-login contract", errBrowserShimUnsupported, inspection.digest)
+		if !inspection.accountLoginUsesPath {
+			return fmt.Errorf("%w: Amp executable sha256:%x exposes no audited PATH-mediated Darwin account-login launcher", ErrBrowserLaunchUnsupported, inspection.digest)
+		}
+
+		return nil
 	}
 
 	if inspection.linuxDirectLauncher != "" {
-		return fmt.Errorf("%w: Amp executable sha256:%x contains the direct Linux browser launcher %s", errBrowserShimUnsupported, inspection.digest, inspection.linuxDirectLauncher)
+		return fmt.Errorf("%w: Amp executable sha256:%x contains the direct Linux browser launcher %s", ErrBrowserLaunchUnsupported, inspection.digest, inspection.linuxDirectLauncher)
 	}
 
-	if !inspection.linuxAccountLoginUsesPath {
-		return fmt.Errorf("%w: Amp executable sha256:%x exposes no audited PATH-mediated Linux account-login launcher", errBrowserShimUnsupported, inspection.digest)
+	if !inspection.accountLoginUsesPath {
+		return fmt.Errorf("%w: Amp executable sha256:%x exposes no audited PATH-mediated Linux account-login launcher", ErrBrowserLaunchUnsupported, inspection.digest)
 	}
 
 	return nil
@@ -130,13 +150,21 @@ func inspectAuthLoginBinary(reader io.Reader) (authLoginBinaryInspection, error)
 	}
 
 	copy(inspection.digest[:], hash.Sum(nil))
-	inspection.linkLinuxAccountLogin()
+	inspection.linkAccountLogin()
 
 	return inspection, nil
 }
 
 func (inspection *authLoginBinaryInspection) inspectWindow(window []byte) {
-	inspection.darwinDirectLauncher = inspection.darwinDirectLauncher || bytes.Contains(window, []byte(darwinDirectBrowserLauncher))
+	if !inspection.darwinDirectLauncher {
+		for _, literal := range darwinDirectLauncherLiterals {
+			if bytes.Contains(window, literal) {
+				inspection.darwinDirectLauncher = true
+
+				break
+			}
+		}
+	}
 
 	if inspection.linuxDirectLauncher == "" {
 		for _, launcher := range linuxDirectBrowserLaunchers {
@@ -148,35 +176,38 @@ func (inspection *authLoginBinaryInspection) inspectWindow(window []byte) {
 		}
 	}
 
-	if inspection.linuxBrowserOpenerFunction == "" {
-		match := linuxBrowserOpener.FindSubmatch(window)
+	if inspection.browserOpenerFunc == "" {
+		match := browserOpener.FindSubmatch(window)
 		if len(match) == 4 && bytes.Equal(match[2], match[3]) {
-			inspection.linuxBrowserOpenerFunction = string(match[1])
+			inspection.browserOpenerFunc = string(match[1])
 		}
 	}
 
-	for remaining := window; len(inspection.linuxLoginPrefixes) < 2; {
-		marker := bytes.Index(remaining, linuxAuthLoginFallback)
+	for remaining := window; len(inspection.loginPrefixes) < 2; {
+		marker := bytes.Index(remaining, authLoginFallback)
 		if marker < 0 {
 			break
 		}
 
 		start := max(0, marker-2048)
 		prefix := append([]byte(nil), remaining[start:marker]...)
-		inspection.linuxLoginPrefixes = append(inspection.linuxLoginPrefixes, prefix)
-		remaining = remaining[marker+len(linuxAuthLoginFallback):]
+		inspection.loginPrefixes = append(inspection.loginPrefixes, prefix)
+		remaining = remaining[marker+len(authLoginFallback):]
 	}
 }
 
-func (inspection *authLoginBinaryInspection) linkLinuxAccountLogin() {
-	if inspection.linuxBrowserOpenerFunction == "" {
+// linkAccountLogin ties the account-login region to the audited opener: the
+// same platform-switch function serves every platform's branch, so one link
+// proves the Darwin and Linux launches alike.
+func (inspection *authLoginBinaryInspection) linkAccountLogin() {
+	if inspection.browserOpenerFunc == "" {
 		return
 	}
 
-	call := []byte("try{await " + inspection.linuxBrowserOpenerFunction + "(")
-	for _, prefix := range inspection.linuxLoginPrefixes {
+	call := []byte("try{await " + inspection.browserOpenerFunc + "(")
+	for _, prefix := range inspection.loginPrefixes {
 		if bytes.Contains(prefix, call) {
-			inspection.linuxAccountLoginUsesPath = true
+			inspection.accountLoginUsesPath = true
 
 			return
 		}

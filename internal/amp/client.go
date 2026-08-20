@@ -177,9 +177,9 @@ func NewClient(log *slog.Logger, options Options) *Client {
 	checkAuthLoginCompatibility := CheckAuthLoginBrowserCompatibility
 
 	if options.TestOnlyAuthLoginPlatform != "" {
-		if options.TestOnlyAuthLoginPlatform == linuxPlatform {
+		if options.TestOnlyAuthLoginPlatform == linuxPlatform || options.TestOnlyAuthLoginPlatform == darwinPlatform {
 			// Fake Amp binaries used by the login tests model the supported
-			// Linux variant behaviorally; they do not carry Amp's bundled JS.
+			// variants behaviorally; they do not carry Amp's bundled JS.
 			checkAuthLoginCompatibility = func(string) error { return nil }
 		} else {
 			checkAuthLoginCompatibility = func(path string) error {

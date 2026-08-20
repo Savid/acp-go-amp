@@ -238,7 +238,7 @@ func TestLaunchResAuthLoginAbandonsAnUnstartableLaunch(t *testing.T) {
 	}
 
 	path, _ := fakeAmpPath(t, "login")
-	scratch := makeInstalledLinuxAmpScratchParent(t)
+	scratch := makeInstalledAmpScratchParent(t)
 	client := newTestClient(t, nil, Options{CLIPath: path, Cwd: t.TempDir(), ScratchParent: scratch})
 
 	before := launchResDescriptors(t)

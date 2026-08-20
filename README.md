@@ -149,8 +149,10 @@ rejects at session start.
   harvested once and redelivered as `AMP_API_KEY`. The broker
   admits a keyless `session/new` for this flow, while the first prompt and all
   load/resume paths remain credential-gated. `disconnect` releases the ledger
-  slot and promises no Amp-side revocation. Hosted authorization on Darwin and
-  Windows fails with `unsupported_variant` before `amp login` starts; the
+  slot and promises no Amp-side revocation. Hosted authorization runs on
+  Darwin and Linux behind a PATH-shadowing launcher shim after a
+  per-executable audit of the account-login shape; Windows and unaudited
+  builds fail with `unsupported_variant` before `amp login` starts. The
   manual method starts no native login child.
 - Durable mirroring through a host-provided `SessionStore`; ordinary frames are
   retained under `transcript`, while image-bearing tool frames use canonical
