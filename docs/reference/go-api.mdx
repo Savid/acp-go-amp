@@ -141,7 +141,7 @@ wire shape and verdicts.
 | Field | Behavior |
 |---|---|
 | `Env` | Per-session environment overrides. |
-| `Mode` | Amp's mode, which selects its model. `low`, `medium`, `high`, and `ultra` are advertised; any value is accepted and forwarded to Amp. |
+| `Mode` | Amp's mode, which selects its model. `low`, `medium`, `high`, and `ultra` are advertised; any mode is accepted and forwarded to Amp. Left empty it states no selection and the session takes the advertised default; a wire request that sends `mode` as an empty string names no mode and is rejected. |
 | `Model`, `OutputSchema` | Present for API symmetry; rejected when supplied. |
 
 ## Request builders

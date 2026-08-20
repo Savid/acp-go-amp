@@ -516,6 +516,17 @@ func (a *Agent) SetSessionConfigOption(ctx context.Context, params acp.SetSessio
 		return acp.SetSessionConfigOptionResponse{}, unsupportedField(fieldValue)
 	}
 
+	// A value member that carries nothing is the same defect as no value member
+	// at all, so it is refused on the same field. This judges the request's
+	// shape, not the mode: nothing here holds a list of modes to measure a value
+	// against, and every real value travels to amp unchanged for amp to answer
+	// for. The empty string is not one of those values — it names no mode, and
+	// forwarding it would drop `-m` from the native argv entirely and run the
+	// account default while the host reads back a mode it believes it selected.
+	if params.ValueId.Value == "" {
+		return acp.SetSessionConfigOptionResponse{}, unsupportedField(fieldValue)
+	}
+
 	session, err := a.session(params.ValueId.SessionId)
 	if err != nil {
 		return acp.SetSessionConfigOptionResponse{}, err

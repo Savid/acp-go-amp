@@ -32,11 +32,14 @@ func TestConfigOptions(t *testing.T) {
 	}
 }
 
-// The two members that can make a set-config request unsupported are distinct
+// The members that can make a set-config request unsupported are distinct
 // caller mistakes and are named as such: a boolean payload chose the wrong
-// request discriminator, while a request carrying neither variant supplied no
-// value at all. Both variants are marshalled inline, so the discriminator the
-// caller got wrong is reachable on the wire only as `type`.
+// request discriminator, while a request carrying neither variant — or a value
+// variant carrying the empty string — supplied no value at all. Both variants
+// are marshalled inline, so the discriminator the caller got wrong is reachable
+// on the wire only as `type`. The empty value is refused on the request's shape
+// and not as a value gate: it is the one string that names no mode, while every
+// mode amp might know travels through untouched.
 func TestSetSessionConfigOptionNamesTheMemberThatFailed(t *testing.T) {
 	agent := newTestAgent()
 	t.Cleanup(func() {
@@ -51,6 +54,12 @@ func TestSetSessionConfigOptionNamesTheMemberThatFailed(t *testing.T) {
 	requireUnsupportedField(t, err, fieldType)
 
 	_, err = agent.SetSessionConfigOption(t.Context(), acp.SetSessionConfigOptionRequest{})
+	requireUnsupportedField(t, err, fieldValue)
+
+	// The empty value is refused on the same member and before the session is
+	// even looked up, because a request that names no mode is malformed whether
+	// or not the session it names exists.
+	_, err = agent.SetSessionConfigOption(t.Context(), SetConfigOptionRequest("T-config", configMode, ""))
 	requireUnsupportedField(t, err, fieldValue)
 }
 

@@ -89,6 +89,9 @@ func TestStrictMetaAndConfigResponse(t *testing.T) {
 		{name: "rawEvent enabled not bool", meta: map[string]any{"amp": map[string]any{"rawEvent": map[string]any{"enabled": "yes"}}}, field: "_meta.amp.rawEvent.enabled"},
 		{name: "rawEvent unknown", meta: map[string]any{"amp": map[string]any{"rawEvent": map[string]any{"extra": true}}}, field: "_meta.amp.rawEvent.extra"},
 		{name: "model not string", meta: map[string]any{"amp": map[string]any{"options": map[string]any{"model": 1}}}, field: "_meta.amp.options.model"},
+		// A mode key that arrived carrying nothing is the same shape defect as
+		// one carrying a non-string: it states a selection and names none.
+		{name: "mode empty", meta: map[string]any{"amp": map[string]any{"options": map[string]any{"mode": ""}}}, field: "_meta.amp.options.mode"},
 		{name: "options unknown", meta: map[string]any{"amp": map[string]any{"options": map[string]any{"unknown": "x"}}}, field: "_meta.amp.options.unknown"},
 		{name: "outputSchema empty", meta: map[string]any{"amp": map[string]any{"options": map[string]any{"outputSchema": map[string]any{}}}}, field: "_meta.amp.options.outputSchema"},
 		{name: "own namespace unknown", meta: map[string]any{"amp": map[string]any{"unknown": true}}, field: "_meta.amp.unknown"},
@@ -224,6 +227,73 @@ func requireAdvertisedModes(t *testing.T, options []acp.SessionConfigOption) {
 	}
 
 	t.Fatalf("no mode config option: %#v", options)
+}
+
+// TestEmptyModeIsRefusedWhileAbsenceIsNot pins the one mode value this adapter
+// still judges, at both doors a host can push a mode through. Deleting the enum
+// gates handed amp the whole namespace, but the empty string is not a member of
+// it: it names no mode, and the argv builder would answer it by omitting `-m`
+// altogether — the session would run amp's default while the host read back a
+// selection it never got. So it is refused on the member that carried it, the
+// same way a mode that is not a string is, and for the same reason: request
+// shape, not a value gate. Absence is the other request entirely and stays
+// legal — a session established with no mode key names no selection, builds no
+// `-m`, and lets amp's own default stand.
+func TestEmptyModeIsRefusedWhileAbsenceIsNot(t *testing.T) {
+	ctx := context.Background()
+	path, state := fakeAgentAmpPath(t, "")
+	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(testScratchDir(t)))
+	_, cleanup := attachRecordingClient(t, agent)
+	defer cleanup()
+
+	// Door one, establishment. The Go request builder cannot even express this
+	// request — an empty Mode is omitted from the payload — so the refusal is
+	// pinned on the wire shape a host can actually send.
+	emptyMode := WithSessionMeta(map[string]any{
+		ampMetaKey: map[string]any{ampOptionsKey: map[string]any{optionModeKey: ""}},
+	})
+	_, err := agent.NewSession(ctx, NewSessionRequest(t.TempDir(), emptyMode))
+	requireUnsupportedField(t, err, "_meta.amp.options.mode")
+
+	// The same door on the load and resume routes, which validate the request
+	// identically before an active session may be reused.
+	_, err = agent.LoadSession(ctx, LoadSessionRequest("T-empty-mode", t.TempDir(), emptyMode))
+	requireUnsupportedField(t, err, "_meta.amp.options.mode")
+	_, err = agent.ResumeSession(ctx, ResumeSessionRequest("T-empty-mode", t.TempDir(), emptyMode))
+	requireUnsupportedField(t, err, "_meta.amp.options.mode")
+
+	// Absence is the accepted request: it states no selection, so the session
+	// takes the default it advertises and carries that real value to the native
+	// child. What absence never produces is a turn with no `-m` at all.
+	newResp, err := agent.NewSession(ctx, NewSessionRequest(t.TempDir()))
+	if err != nil {
+		t.Fatalf("NewSession without a mode: %v", err)
+	}
+	requireConfigMode(t, newResp.ConfigOptions, modeMedium)
+	if _, promptErr := agent.Prompt(ctx, TextPromptRequest(newResp.SessionId, "turn-1", "x")); promptErr != nil {
+		t.Fatalf("Prompt without a mode: %v", promptErr)
+	}
+	requireNativeModeFlag(t, state, modeMedium, func(args []string) bool {
+		return slices.Contains(args, "-x") && !slices.Contains(args, "threads")
+	})
+
+	// Door two, session/set_config_option. The refusal names `value`, and the
+	// session keeps the mode it had rather than recording a selection nothing
+	// would carry to the native child.
+	setResp, err := agent.SetSessionConfigOption(ctx, SetConfigOptionRequest(newResp.SessionId, configMode, modeHigh))
+	if err != nil {
+		t.Fatalf("SetSessionConfigOption %q: %v", modeHigh, err)
+	}
+	requireConfigMode(t, setResp.ConfigOptions, modeHigh)
+
+	_, err = agent.SetSessionConfigOption(ctx, SetConfigOptionRequest(newResp.SessionId, configMode, ""))
+	requireUnsupportedField(t, err, fieldValue)
+
+	session, err := agent.session(newResp.SessionId)
+	if err != nil {
+		t.Fatalf("session after the refusal: %v", err)
+	}
+	requireConfigMode(t, session.configOptions(), modeHigh)
 }
 
 func TestClientBackpressureAndSessionIDDrift(t *testing.T) {

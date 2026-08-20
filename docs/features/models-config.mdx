@@ -18,13 +18,20 @@ a menu, not a gate: the adapter keeps no value list of its own, so whatever you
 set travels to `-m` unchanged and Amp alone decides whether it will run it. Set
 the mode per session through `_meta.amp.options` (`AmpOptions.Mode`) or update it
 with `session/set_config_option` — both doors behave identically, and neither
-refuses a value.
+judges the mode you name.
 
 A mode the advertised list does not name is therefore accepted, and the option's
 current value can legitimately be a value its own list does not contain. That is
-the expected shape whenever you name a mode this adapter release predates. The
-only refusal on this surface is an unknown config *id*, reported with the uniform
-unsupported error naming field `configId`.
+the expected shape whenever you name a mode this adapter release predates.
+
+Two refusals remain, and neither is a value list. An unknown config *id* is
+reported with the uniform unsupported error naming field `configId`. An empty
+mode value is refused the same way — naming field `value` on
+`session/set_config_option` and `_meta.amp.options.mode` at session start —
+because the empty string names no mode: it would erase `-m` from the Amp command
+line and run something other than the selection you would then read back. Leaving
+the mode out entirely is a different request and stays valid: a session that
+states no mode takes the advertised default, `medium`.
 
 Being advertised is not a promise that your account may run it. Which modes an
 Amp account is entitled to depends on its plan, and the adapter advertises the
