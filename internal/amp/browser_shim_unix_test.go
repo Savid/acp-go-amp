@@ -13,7 +13,11 @@ import (
 	"time"
 )
 
-const installedAmpEnv = "ACP_GO_AMP_TEST_INSTALLED_AMP"
+// installedAmpEnv is the private carrier the pinned-binary fixture uses to hand
+// this probe the path of the real Amp it must drive. Only the Linux container
+// fixture plants that binary and sets the carrier, so the name says so; an
+// ordinary run anywhere else leaves it unset and the probe skips.
+const installedAmpEnv = "ACP_GO_AMP_TEST_INSTALLED_LINUX_AMP"
 
 // browserProbeDir plants an executable for every name a launcher might exec,
 // each of which records the invocation instead of opening anything. A recorded

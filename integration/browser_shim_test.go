@@ -31,7 +31,7 @@ const (
 	browserShimProbeCase         = "TestLoginNeverExecsABrowserLauncher"
 	pinnedAmpContainerPath       = "/usr/local/bin/amp"
 	pinnedAmpProbeCase           = "TestInstalledAmpLoginExecsOnlyShimLauncher"
-	installedAmpProbeEnv         = "ACP_GO_AMP_TEST_INSTALLED_AMP"
+	installedAmpProbeEnv         = "ACP_GO_AMP_TEST_INSTALLED_LINUX_AMP"
 	networklessContainerModeName = "none"
 	pinnedLinuxAmpVersion        = "0.0.1785846794-g0de1fc"
 	pinnedLinuxAmpURL            = "https://static.ampcode.com/cli/0.0.1785846794-g0de1fc/amp-linux-x64.gz"
