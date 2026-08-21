@@ -155,14 +155,15 @@ func TestTerminalPreparationRefusesAnInvalidQuiescenceAfterIdle(t *testing.T) {
 	require.NoError(t, incarnation.accept(t.Context(), lifecycle.Submission{SubmissionID: "s", ClientNonce: "n"}))
 
 	// The stream reducer retains the negotiated process-containment authority.
-	// Mutating only the publisher-side source makes the idle valid and the
-	// following quiescence claim invalid, pinning the second preparation seam.
-	incarnation.negotiated.QuiescenceSource = lifecycle.ProofClassNativeSettledBarrier
+	// Mutating only the publisher-side source to a class the closed set does not
+	// contain makes the idle valid and the following quiescence claim invalid,
+	// pinning the second preparation seam.
+	incarnation.negotiated.QuiescenceSource = lifecycle.ProofClass("quiet-for-a-while")
 	_, err = incarnation.terminalDelivery(
 		lifecycleOutcome{stopReason: "end_turn", outcome: lifecycle.OutcomeSuccess},
 		nativeamp.ContainmentProof{Root: 42, Proven: true},
 	)
-	require.ErrorContains(t, err, string(lifecycle.ViolationUnnegotiatedFact))
+	require.ErrorContains(t, err, string(lifecycle.ViolationMalformedEnvelope))
 	require.Len(t, client.envelopes(t), 3, "prepared terminal facts are not delivered before the whole pair validates")
 }
 
