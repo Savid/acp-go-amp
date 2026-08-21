@@ -377,8 +377,9 @@ func TestSessionScratchReleaseContainmentBoundaries(t *testing.T) {
 		require.NoError(t, os.Mkdir(root, 0o700))
 		runtimeErr := errors.New("ordinary close error")
 		scratchReleases := 0
+		session := &agentSession{settingsDir: root, scratchRootRelease: func() { scratchReleases++ }}
 
-		err := finalizeSessionScratch(runtimeErr, runtimeErr, root, func() { scratchReleases++ })
+		err := session.finalizeScratch(runtimeErr, runtimeErr)
 
 		require.ErrorIs(t, err, runtimeErr)
 		require.Equal(t, 1, scratchReleases)
@@ -389,8 +390,9 @@ func TestSessionScratchReleaseContainmentBoundaries(t *testing.T) {
 		root := filepath.Join(t.TempDir(), "settings")
 		require.NoError(t, os.Mkdir(root, 0o700))
 		scratchReleases := 0
+		session := &agentSession{settingsDir: root, scratchRootRelease: func() { scratchReleases++ }}
 
-		err := finalizeSessionScratch(nil, nativeamp.ErrProcessContainmentIncomplete, root, func() { scratchReleases++ })
+		err := session.finalizeScratch(nil, nativeamp.ErrProcessContainmentIncomplete)
 
 		require.ErrorIs(t, err, nativeamp.ErrProcessContainmentIncomplete)
 		require.Zero(t, scratchReleases)
@@ -409,8 +411,9 @@ func TestSessionScratchReleaseContainmentBoundaries(t *testing.T) {
 		}
 		t.Cleanup(func() { removeSessionDir = originalRemoveAll })
 		scratchReleases := 0
+		session := &agentSession{settingsDir: root, scratchRootRelease: func() { scratchReleases++ }}
 
-		err := finalizeSessionScratch(nil, nil, root, func() { scratchReleases++ })
+		err := session.finalizeScratch(nil, nil)
 
 		require.ErrorIs(t, err, deleteErr)
 		require.Zero(t, scratchReleases)
@@ -480,6 +483,19 @@ func TestSessionConstructionRetainsScratchWhenUnwindDeletionFails(t *testing.T) 
 	require.ErrorIs(t, err, createErr)
 	require.ErrorIs(t, err, deleteErr)
 	require.Zero(t, scratchReleases)
+	owner, retained := agent.cleanupOwner("T-session")
+	require.True(t, retained)
+	require.NotNil(t, owner.session)
+	require.NotEmpty(t, owner.session.settingsDir)
+	exactPath := owner.session.settingsDir
+
+	removeSessionDir = originalRemoveAll
+	require.NoError(t, agent.Close())
+	require.Equal(t, 1, scratchReleases)
+	_, statErr := os.Stat(exactPath)
+	require.True(t, os.IsNotExist(statErr))
+	_, retained = agent.cleanupOwner("T-session")
+	require.False(t, retained)
 }
 
 func TestAmpSessionResourceAdmission(t *testing.T) {
@@ -603,9 +619,12 @@ func TestActiveLoadStoreFailureAndDeleteCompletionFence(t *testing.T) {
 	cwd := t.TempDir()
 	session, err := newAgentSession(t.Context(), agent, "T-active-load", cwd, parsedSessionMeta{}, "", nil)
 	require.NoError(t, err)
-	agent.sessions[session.id] = session
+	agent.mu.Lock()
+	agent.activateSessionLocked(session)
+	agent.mu.Unlock()
+	agent.observe.AddActiveSession(t.Context(), 1)
 
-	loaded, transcript, started, err := agent.loadOrResume(t.Context(), session.id, cwd, nil, nil, nil)
+	loaded, transcript, started, _, err := agent.loadOrResume(t.Context(), session.id, cwd, nil, nil, nil)
 	require.ErrorIs(t, err, loadErr)
 	require.Nil(t, loaded)
 	require.Nil(t, transcript)
@@ -642,7 +661,9 @@ func TestPendingDeleteContainmentFailureStopsEveryLifecycleRetry(t *testing.T) {
 				return nil, ErrProcessContainmentIncomplete
 			},
 		}))
-		agent.markPendingNativeDelete(id, "T-pending-native")
+		wrapper := &agentSession{agent: agent, id: id, nativeID: "T-pending-native", turn: make(chan struct{}, 1)}
+		agent.cleanupOwners[id] = []agentCleanupOwner{{session: wrapper, kind: agentCleanupDeleted}}
+		agent.deleted[id] = struct{}{}
 
 		return agent
 	}

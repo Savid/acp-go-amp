@@ -91,12 +91,14 @@ func (s *agentSession) emitNativeMessageIdentity(ctx context.Context, messageID 
 		return nil
 	}
 
-	return conn.SessionUpdate(ctx, acp.SessionNotification{
-		SessionId: s.id,
-		Meta:      ampMessageMeta(nil, messageID),
-		Update: acp.SessionUpdate{
-			SessionInfoUpdate: &acp.SessionSessionInfoUpdate{},
-		},
+	return invokeExternalResult(ctx, func() error {
+		return conn.SessionUpdate(ctx, acp.SessionNotification{
+			SessionId: s.id,
+			Meta:      ampMessageMeta(nil, messageID),
+			Update: acp.SessionUpdate{
+				SessionInfoUpdate: &acp.SessionSessionInfoUpdate{},
+			},
+		})
 	})
 }
 

@@ -840,6 +840,18 @@ func main() {
 		}
 		os.Stdout.WriteString("{\"thread\":\"" + args[len(args)-1] + "\"}\n")
 	case "delete":
+		if mode == "delete-fail-twice" {
+			marker := filepath.Join(state, "delete-failure-count")
+			failures := 0
+			if data, err := os.ReadFile(marker); err == nil {
+				failures, _ = strconv.Atoi(string(data))
+			}
+			if failures < 2 {
+				_ = os.WriteFile(marker, []byte(strconv.Itoa(failures+1)), 0600)
+				os.Stderr.WriteString("delete failed twice\n")
+				os.Exit(1)
+			}
+		}
 		if mode == "delete-fail-once" {
 			marker := filepath.Join(state, "delete-failed-once")
 			if _, err := os.Stat(marker); err != nil {

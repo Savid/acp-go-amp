@@ -186,6 +186,10 @@ func validateSessionPaths(cwd string, additionalDirs []string) error {
 	return nil
 }
 
+func validSessionCwd(cwd string) bool {
+	return validateSessionPaths(cwd, nil) == nil
+}
+
 func mismatchField(field string) error {
 	return acp.NewInvalidParams(map[string]any{jsonFieldError: valMismatch, jsonFieldField: field})
 }

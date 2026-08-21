@@ -19,14 +19,14 @@ import (
 var newLifecycleAgentSession = newAgentSession
 
 func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (resp acp.NewSessionResponse, err error) {
-	ctx, finish := a.observe.StartACPRequest(ctx, acp.AgentMethodSessionNew)
-	defer func() { finish(err) }()
-
-	ctx, finishLifecycle, err := a.beginLifecycleOperation(ctx)
+	ctx, finishCall, err := a.beginAgentCall(ctx)
 	if err != nil {
 		return acp.NewSessionResponse{}, err
 	}
-	defer func() { finishLifecycle(err) }()
+	defer func() { finishCall(err) }()
+
+	ctx, finish := a.observe.StartACPRequest(ctx, acp.AgentMethodSessionNew)
+	defer func() { finish(err) }()
 
 	ctx = a.observe.Extract(ctx, params.Meta)
 
@@ -78,12 +78,15 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (r
 		a.releaseSessionSlot("")
 
 		closeErr := session.Close(context.Background())
+		if closeErr == nil {
+			a.clearCleanupOwner(session.id, session)
+		}
 
 		return acp.NewSessionResponse{}, errors.Join(persistErr, closeErr)
 	}
 
 	a.mu.Lock()
-	a.sessions[session.id] = session
+	a.activateSessionLocked(session)
 	a.pending--
 	a.mu.Unlock()
 	a.observe.AddActiveSession(ctx, 1)
@@ -92,25 +95,31 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (r
 }
 
 func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) (resp acp.LoadSessionResponse, err error) {
+	ctx, finishCall, err := a.beginAgentCall(ctx, params.SessionId)
+	if err != nil {
+		return acp.LoadSessionResponse{}, err
+	}
+	defer func() { finishCall(err) }()
+
 	ctx, finish := a.observe.StartACPRequest(ctx, acp.AgentMethodSessionLoad)
 	defer func() { finish(err) }()
 
-	ctx, finishLifecycle, err := a.beginLifecycleOperation(ctx)
-	if err != nil {
-		return acp.LoadSessionResponse{}, err
-	}
-	defer func() { finishLifecycle(err) }()
-
 	ctx = a.observe.Extract(ctx, params.Meta)
 
-	session, transcript, started, err := a.loadOrResume(ctx, params.SessionId, params.Cwd, params.McpServers, params.AdditionalDirectories, params.Meta)
+	session, transcript, started, use, err := a.loadOrResume(ctx, params.SessionId, params.Cwd, params.McpServers, params.AdditionalDirectories, params.Meta)
 	if err != nil {
 		return acp.LoadSessionResponse{}, err
 	}
+
+	ctx = withCallbackProvenance(ctx, a, use)
+	defer func() { a.finishSessionUse(params.SessionId, use) }()
 
 	if replayErr := session.replayTranscriptEntries(ctx, transcript); replayErr != nil {
 		var cleanupErr error
+
 		if started {
+			a.finishSessionUse(params.SessionId, use)
+			use = nil
 			cleanupErr = a.removeSession(ctx, params.SessionId, session)
 		}
 
@@ -121,26 +130,32 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 }
 
 func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionRequest) (resp acp.ResumeSessionResponse, err error) {
+	ctx, finishCall, err := a.beginAgentCall(ctx, params.SessionId)
+	if err != nil {
+		return acp.ResumeSessionResponse{}, err
+	}
+	defer func() { finishCall(err) }()
+
 	ctx, finish := a.observe.StartACPRequest(ctx, acp.AgentMethodSessionResume)
 	defer func() { finish(err) }()
 
-	ctx, finishLifecycle, err := a.beginLifecycleOperation(ctx)
-	if err != nil {
-		return acp.ResumeSessionResponse{}, err
-	}
-	defer func() { finishLifecycle(err) }()
-
 	ctx = a.observe.Extract(ctx, params.Meta)
 
-	session, transcript, started, err := a.loadOrResume(ctx, params.SessionId, params.Cwd, params.McpServers, params.AdditionalDirectories, params.Meta)
+	session, transcript, started, use, err := a.loadOrResume(ctx, params.SessionId, params.Cwd, params.McpServers, params.AdditionalDirectories, params.Meta)
 	if err != nil {
 		return acp.ResumeSessionResponse{}, err
 	}
+
+	ctx = withCallbackProvenance(ctx, a, use)
+	defer func() { a.finishSessionUse(params.SessionId, use) }()
 
 	messageID, identityErr := terminalAssistantMessageIdentity(params.SessionId, transcript)
 	if identityErr != nil {
 		var cleanupErr error
+
 		if started {
+			a.finishSessionUse(params.SessionId, use)
+			use = nil
 			cleanupErr = a.removeSession(ctx, params.SessionId, session)
 		}
 
@@ -149,7 +164,10 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 
 	if emitErr := session.emitNativeMessageIdentity(ctx, messageID); emitErr != nil {
 		var cleanupErr error
+
 		if started {
+			a.finishSessionUse(params.SessionId, use)
+			use = nil
 			cleanupErr = a.removeSession(ctx, params.SessionId, session)
 		}
 
@@ -160,6 +178,12 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 }
 
 func (a *Agent) ListSessions(ctx context.Context, params acp.ListSessionsRequest) (resp acp.ListSessionsResponse, err error) {
+	ctx, finishCall, err := a.beginAgentCall(ctx)
+	if err != nil {
+		return acp.ListSessionsResponse{}, err
+	}
+	defer func() { finishCall(err) }()
+
 	ctx, finish := a.observe.StartACPRequest(ctx, acp.AgentMethodSessionList)
 	defer func() { finish(err) }()
 
@@ -167,17 +191,11 @@ func (a *Agent) ListSessions(ctx context.Context, params acp.ListSessionsRequest
 		return acp.ListSessionsResponse{}, refusal
 	}
 
-	ctx, finishLifecycle, err := a.beginLifecycleOperation(ctx)
-	if err != nil {
-		return acp.ListSessionsResponse{}, err
-	}
-	defer func() { finishLifecycle(err) }()
-
 	if pathErr := validateOptionalAbsolutePath("cwd", params.Cwd); pathErr != nil {
 		return acp.ListSessionsResponse{}, pathErr
 	}
 
-	if retryErr := a.retryPendingNativeDeletes(ctx); retryErr != nil {
+	if retryErr := a.retryCleanupOwners(ctx); retryErr != nil {
 		return acp.ListSessionsResponse{}, retryErr
 	}
 
@@ -318,14 +336,14 @@ func encodeListCursor(offset int) string {
 }
 
 func (a *Agent) Prompt(ctx context.Context, params acp.PromptRequest) (resp acp.PromptResponse, err error) {
-	ctx, finishReq := a.observe.StartACPRequest(ctx, acp.AgentMethodSessionPrompt)
-	defer func() { finishReq(err) }()
-
-	ctx, finishLifecycle, err := a.beginLifecycleOperation(ctx)
+	ctx, finishCall, err := a.beginAgentCall(ctx, params.SessionId)
 	if err != nil {
 		return acp.PromptResponse{}, err
 	}
-	defer func() { finishLifecycle(err) }()
+	defer func() { finishCall(err) }()
+
+	ctx, finishReq := a.observe.StartACPRequest(ctx, acp.AgentMethodSessionPrompt)
+	defer func() { finishReq(err) }()
 
 	session, err := a.session(params.SessionId)
 	if err != nil {
@@ -354,6 +372,12 @@ func (a *Agent) Prompt(ctx context.Context, params acp.PromptRequest) (resp acp.
 }
 
 func (a *Agent) Cancel(ctx context.Context, params acp.CancelNotification) (err error) {
+	ctx, finishCall, err := a.beginAgentCall(ctx, params.SessionId)
+	if err != nil {
+		return err
+	}
+	defer func() { finishCall(err) }()
+
 	ctx, finish := a.observe.StartACPRequest(ctx, acp.AgentMethodSessionCancel)
 	defer func() { finish(err) }()
 
@@ -364,7 +388,7 @@ func (a *Agent) Cancel(ctx context.Context, params acp.CancelNotification) (err 
 		return refusal
 	}
 
-	session, err := a.session(params.SessionId)
+	session, err := a.sessionForCancel(params.SessionId)
 	if err != nil {
 		return err
 	}
@@ -373,18 +397,18 @@ func (a *Agent) Cancel(ctx context.Context, params acp.CancelNotification) (err 
 }
 
 func (a *Agent) CloseSession(ctx context.Context, params acp.CloseSessionRequest) (resp acp.CloseSessionResponse, err error) {
+	ctx, finishCall, err := a.beginAgentCall(ctx, params.SessionId)
+	if err != nil {
+		return acp.CloseSessionResponse{}, err
+	}
+	defer func() { finishCall(err) }()
+
 	ctx, finish := a.observe.StartACPRequest(ctx, acp.AgentMethodSessionClose)
 	defer func() { finish(err) }()
 
 	if refusal := rejectLifecycleMeta(params.Meta); refusal != nil {
 		return acp.CloseSessionResponse{}, refusal
 	}
-
-	ctx, finishLifecycle, err := a.beginLifecycleOperation(ctx)
-	if err != nil {
-		return acp.CloseSessionResponse{}, err
-	}
-	defer func() { finishLifecycle(err) }()
 
 	session, err := a.session(params.SessionId)
 	if err != nil {
@@ -395,6 +419,12 @@ func (a *Agent) CloseSession(ctx context.Context, params acp.CloseSessionRequest
 }
 
 func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDeleteSessionRequest) (resp acp.UnstableDeleteSessionResponse, err error) {
+	ctx, finishCall, err := a.beginAgentCall(ctx, params.SessionId)
+	if err != nil {
+		return acp.UnstableDeleteSessionResponse{}, err
+	}
+	defer func() { finishCall(err) }()
+
 	ctx, finish := a.observe.StartACPRequest(ctx, acp.AgentMethodSessionDelete)
 	defer func() { finish(err) }()
 
@@ -402,99 +432,326 @@ func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDe
 		return acp.UnstableDeleteSessionResponse{}, refusal
 	}
 
-	ctx, finishLifecycle, err := a.beginLifecycleOperation(ctx)
-	if err != nil {
-		return acp.UnstableDeleteSessionResponse{}, err
-	}
-	defer func() { finishLifecycle(err) }()
-
 	ctx = a.observe.Extract(ctx, params.Meta)
 	if params.SessionId == "" {
 		return acp.UnstableDeleteSessionResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldField: jsonFieldSessionID})
 	}
 
-	if a.isPendingNativeDelete(params.SessionId) {
-		if retryErr := a.retryPendingNativeDelete(ctx, params.SessionId); retryErr != nil {
-			return acp.UnstableDeleteSessionResponse{}, retryErr
-		}
-
-		return acp.UnstableDeleteSessionResponse{}, nil
-	}
-
-	if retryErr := a.retryPendingNativeDeletes(ctx); retryErr != nil {
-		return acp.UnstableDeleteSessionResponse{}, retryErr
-	}
-
-	// The native thread id must be captured before the store row is deleted:
-	// once the manifest is gone it is the only remaining record of which
-	// server-side thread this session owns.
-	manifest, stored, err := a.storedManifest(ctx, params.SessionId)
+	ctx, flight, err := a.beginSessionFlight(ctx, params.SessionId, agentSessionDeleteFlight, nil)
 	if err != nil {
 		return acp.UnstableDeleteSessionResponse{}, err
 	}
+	defer a.finishSessionFlightOnReturn(params.SessionId, flight)
 
-	nativeID := manifest.NativeSessionID
-
-	// The live session stops writing before the tombstone lands. Replace clears
-	// the tombstone of every key it lists, so a settlement commit landing after
-	// the delete would durably resurrect a session the host was told is gone.
-	// Fencing waits out the commit already in flight, which is what makes the
-	// tombstone the last write to this row.
-	live, _ := a.session(params.SessionId)
-	if live != nil {
-		live.fencePersistence()
+	if retryErr := a.retryCleanupOwnersExcept(ctx, params.SessionId); retryErr != nil {
+		return acp.UnstableDeleteSessionResponse{}, retryErr
 	}
 
-	if a.store != nil {
-		deleteCtx, cancelDelete := a.sessionStoreWriteContext(ctx)
-		deleteErr := a.store.Delete(deleteCtx, SessionKey{SessionID: string(params.SessionId), Subpath: SessionStoreMainSubpath})
+	return acp.UnstableDeleteSessionResponse{}, a.deleteSession(ctx, params.SessionId, flight)
+}
 
-		cancelDelete()
+func (a *Agent) deleteSession(ctx context.Context, id acp.SessionId, flight *agentSessionFlight) error {
+	owner, tombstoned, active, err := a.deleteOwnerSnapshot(id, flight)
+	if err != nil {
+		return err
+	}
 
-		if deleteErr != nil {
-			// No tombstone landed, so the session is still the host's and must be
-			// able to commit its next turn.
-			if live != nil {
-				live.resumePersistence()
+	if tombstoned {
+		return a.retryTombstonedDelete(ctx, id, flight, owner)
+	}
+
+	var (
+		persistenceFence sessionPersistenceFence
+		tombstoneLanded  bool
+	)
+
+	defer func() {
+		if !tombstoneLanded && owner != nil {
+			owner.rollbackPersistenceFence(persistenceFence)
+
+			if active {
+				owner.rollbackDeleteAdmission()
 			}
+		}
+	}()
 
-			return acp.UnstableDeleteSessionResponse{}, deleteErr
+	// Publish the delete fence before the first Store callback. An active
+	// wrapper is already the flight's single-assignment owner, so any ordinary
+	// writer admitted after this point must be refused rather than slipping in
+	// while manifest discovery is in progress.
+	if owner != nil {
+		persistenceFence, err = owner.fencePersistenceForDeleteRollback(ctx)
+		if err != nil {
+			return err
 		}
 	}
 
-	a.markDeleted(params.SessionId)
-
-	// The tombstone lands first, so whichever session occupies the slot is the
-	// one this delete owns: no expected pointer is passed.
-	session := a.takeSession(ctx, params.SessionId, nil)
-	if session != nil {
-		session.fencePersistence()
-
-		nativeID = session.nativeSessionID()
+	manifest, stored, err := a.storedManifest(ctx, id)
+	if err != nil {
+		return err
 	}
 
-	if !stored {
-		if session == nil {
-			return acp.UnstableDeleteSessionResponse{}, nil
+	if validationErr := a.validateSessionFlight(id, flight, owner); validationErr != nil {
+		return validationErr
+	}
+
+	owner, active, err = a.prepareDeleteOwner(ctx, id, flight, owner, active, manifest, stored)
+	if err != nil {
+		return err
+	}
+
+	if owner != nil && !active {
+		// A cold wrapper was constructed only after the store read and therefore
+		// did not exist when the early active-owner fence was installed.
+		persistenceFence, err = owner.fencePersistenceForDeleteRollback(ctx)
+		if err != nil {
+			return errors.Join(err, a.recoverRefusedDelete(id, owner, active, persistenceFence))
+		}
+	}
+
+	if err := a.writeDeleteTombstone(ctx, id); err != nil {
+		return errors.Join(err, a.recoverRefusedDelete(id, owner, active, persistenceFence))
+	}
+
+	tombstoneLanded = true
+
+	if err := a.validateSessionFlight(id, flight, owner); err != nil {
+		return err
+	}
+
+	removed := a.publishDeletedOwner(id, flight, owner)
+	if removed {
+		a.observe.AddActiveSession(ctx, -1)
+	}
+
+	if owner == nil {
+		return a.reclaimConstructionOwners(ctx, id, nil)
+	}
+
+	if err := owner.Delete(ctx); err != nil {
+		return err
+	}
+
+	if err := a.validateSessionFlight(id, flight, owner); err != nil {
+		return err
+	}
+
+	a.clearCleanupOwner(id, owner)
+
+	return a.reclaimConstructionOwners(ctx, id, owner)
+}
+
+func (a *Agent) deleteOwnerSnapshot(id acp.SessionId, flight *agentSessionFlight) (*agentSession, bool, bool, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if a.sessionFlights[id] != flight || a.sessionFlights[id].generation != flight.generation {
+		return nil, false, false, acp.NewInternalError(map[string]any{jsonFieldError: deleteOwnershipChanged})
+	}
+
+	_, tombstoned := a.deleted[id]
+
+	owner := flight.session
+	if tombstoned {
+		if retained, ok := a.cleanupOwnerOfKindLocked(id, agentCleanupDeleted); ok && owner == nil {
+			owner = retained.session
+			flight.session = owner
+		}
+	}
+
+	active := owner != nil && a.sessions[id] == owner
+
+	return owner, tombstoned, active, nil
+}
+
+func (a *Agent) retryTombstonedDelete(ctx context.Context, id acp.SessionId, flight *agentSessionFlight, owner *agentSession) error {
+	if owner == nil {
+		return a.reclaimConstructionOwners(ctx, id, nil)
+	}
+
+	if err := owner.Delete(ctx); err != nil {
+		return err
+	}
+
+	if err := a.validateSessionFlight(id, flight, owner); err != nil {
+		return err
+	}
+
+	a.clearCleanupOwner(id, owner)
+
+	return a.reclaimConstructionOwners(ctx, id, owner)
+}
+
+func (a *Agent) reclaimConstructionOwners(ctx context.Context, id acp.SessionId, except *agentSession) error {
+	a.mu.Lock()
+	owners := append([]agentCleanupOwner(nil), a.cleanupOwners[id]...)
+	a.mu.Unlock()
+
+	var cleanupErr error
+
+	for _, owner := range owners {
+		if owner.session == except || owner.kind != agentCleanupConstructing {
+			continue
 		}
 
-		return acp.UnstableDeleteSessionResponse{}, session.Close(ctx)
-	}
+		if err := owner.session.Close(ctx); err != nil {
+			cleanupErr = errors.Join(cleanupErr, err)
 
-	if err := a.deleteNativeThread(ctx, params.SessionId, nativeID, session); err != nil {
-		if nativeID != "" {
-			a.markPendingNativeDelete(params.SessionId, nativeID)
+			continue
 		}
 
-		return acp.UnstableDeleteSessionResponse{}, err
+		a.clearCleanupOwner(id, owner.session)
 	}
 
-	a.clearPendingNativeDelete(params.SessionId)
+	return cleanupErr
+}
 
-	return acp.UnstableDeleteSessionResponse{}, nil
+func (a *Agent) prepareDeleteOwner(
+	ctx context.Context,
+	id acp.SessionId,
+	flight *agentSessionFlight,
+	owner *agentSession,
+	active bool,
+	manifest ampManifest,
+	stored bool,
+) (*agentSession, bool, error) {
+	if owner != nil || !stored || manifest.NativeSessionID == "" {
+		return owner, active, nil
+	}
+
+	if !validSessionCwd(manifest.Cwd) {
+		return owner, active, nil
+	}
+
+	prepared, err := newAgentSession(
+		ctx,
+		a,
+		id,
+		manifest.Cwd,
+		parsedSessionMeta{options: AmpOptions{Mode: manifest.Mode}},
+		"",
+		nil,
+	)
+	if err != nil {
+		return nil, false, err
+	}
+
+	prepared.nativeID = manifest.NativeSessionID
+	prepared.title = manifest.Title
+	prepared.createdUnix = manifest.CreatedAtUnixMilli
+	prepared.updatedUnix = manifest.UpdatedAtUnixMilli
+
+	a.mu.Lock()
+
+	current := a.sessionFlights[id]
+	if current == flight && current.generation == flight.generation && current.session == nil {
+		current.session = prepared
+		a.mu.Unlock()
+
+		return prepared, false, nil
+	}
+
+	var winnerSession *agentSession
+	if current != nil && current == flight && current.generation == flight.generation {
+		winnerSession = current.session
+	}
+	a.mu.Unlock()
+
+	cleanupErr := prepared.Close(context.Background())
+	if cleanupErr == nil {
+		a.clearCleanupOwner(id, prepared)
+	}
+
+	if winnerSession != nil {
+		return winnerSession, false, cleanupErr
+	}
+
+	return nil, false, errors.Join(
+		acp.NewInternalError(map[string]any{jsonFieldError: deleteOwnershipChanged}),
+		cleanupErr,
+	)
+}
+
+func (a *Agent) writeDeleteTombstone(ctx context.Context, id acp.SessionId) error {
+	if a.store == nil {
+		return nil
+	}
+
+	if beforeDelete := a.options.runtime.beforeDeleteTombstone; beforeDelete != nil {
+		beforeDelete()
+	}
+
+	deleteCtx, cancelDelete := a.sessionStoreWriteContext(ctx)
+	defer cancelDelete()
+
+	return a.store.Delete(deleteCtx, SessionKey{SessionID: string(id), Subpath: SessionStoreMainSubpath})
+}
+
+func (a *Agent) recoverRefusedDelete(id acp.SessionId, owner *agentSession, active bool, fence sessionPersistenceFence) error {
+	if owner == nil {
+		return nil
+	}
+
+	owner.rollbackPersistenceFence(fence)
+
+	if active {
+		return nil
+	}
+
+	cleanupErr := owner.Close(context.Background())
+	if cleanupErr == nil {
+		a.clearCleanupOwner(id, owner)
+	}
+
+	return cleanupErr
+}
+
+func (a *Agent) publishDeletedOwner(id acp.SessionId, flight *agentSessionFlight, owner *agentSession) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	a.deleted[id] = struct{}{}
+
+	removed := owner != nil && a.sessions[id] == owner
+	if removed {
+		delete(a.sessions, id)
+	}
+
+	if owner != nil {
+		a.retainCleanupOwnerLocked(id, owner, agentCleanupDeleted)
+	}
+
+	flight.session = owner
+
+	return removed
+}
+
+func (a *Agent) validateSessionFlight(id acp.SessionId, flight *agentSessionFlight, owner *agentSession) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	current := a.sessionFlights[id]
+	if current != flight || current.generation != flight.generation || current.session != owner {
+		return acp.NewInternalError(map[string]any{jsonFieldError: deleteOwnershipChanged})
+	}
+
+	return nil
 }
 
 func (a *Agent) SetSessionConfigOption(ctx context.Context, params acp.SetSessionConfigOptionRequest) (resp acp.SetSessionConfigOptionResponse, err error) {
+	var sessionID acp.SessionId
+	if params.ValueId != nil {
+		sessionID = params.ValueId.SessionId
+	} else if params.Boolean != nil {
+		sessionID = params.Boolean.SessionId
+	}
+
+	ctx, finishCall, err := a.beginAgentCall(ctx, sessionID)
+	if err != nil {
+		return acp.SetSessionConfigOptionResponse{}, err
+	}
+	defer func() { finishCall(err) }()
+
 	ctx, finish := a.observe.StartACPRequest(ctx, acp.AgentMethodSessionSetConfigOption)
 	defer func() { finish(err) }()
 
@@ -540,6 +797,12 @@ func (a *Agent) SetSessionConfigOption(ctx context.Context, params acp.SetSessio
 }
 
 func (a *Agent) SetSessionMode(ctx context.Context, params acp.SetSessionModeRequest) (resp acp.SetSessionModeResponse, err error) {
+	ctx, finishCall, err := a.beginAgentCall(ctx, params.SessionId)
+	if err != nil {
+		return acp.SetSessionModeResponse{}, err
+	}
+	defer func() { finishCall(err) }()
+
 	_, finish := a.observe.StartACPRequest(ctx, acp.AgentMethodSessionSetMode)
 	defer func() { finish(err) }()
 
@@ -553,35 +816,40 @@ func (a *Agent) SetSessionMode(ctx context.Context, params acp.SetSessionModeReq
 	return acp.SetSessionModeResponse{}, acp.NewMethodNotFound(acp.AgentMethodSessionSetMode)
 }
 
-func (a *Agent) loadOrResume(ctx context.Context, sessionID acp.SessionId, cwd string, mcpServers []acp.McpServer, additionalDirs []string, rawMeta map[string]any) (*agentSession, []SessionStoreEntry, bool, error) {
-	if retryErr := a.retryPendingNativeDeletes(ctx); retryErr != nil {
-		return nil, nil, false, retryErr
-	}
-
+func (a *Agent) loadOrResume(ctx context.Context, sessionID acp.SessionId, cwd string, mcpServers []acp.McpServer, additionalDirs []string, rawMeta map[string]any) (_ *agentSession, _ []SessionStoreEntry, _ bool, use *agentSessionUse, err error) {
 	if _, deleted := a.isDeleted(sessionID); deleted {
-		return nil, nil, false, unknownSessionError()
+		return nil, nil, false, nil, unknownSessionError()
 	}
 
-	// X1: validate the full request identically to the cold path FIRST, so an
-	// already-active session cannot bypass strict _meta, cwd/additional-dir,
-	// MCP transport, and model/mode validation. Only after validation
-	// succeeds may an active session be reused.
-	meta, err := parseSessionMeta(rawMeta)
+	if retryErr := a.retryCleanupOwner(ctx, sessionID); retryErr != nil {
+		return nil, nil, false, nil, retryErr
+	}
+
+	if retryErr := a.retryCleanupOwnersExcept(ctx, sessionID); retryErr != nil {
+		return nil, nil, false, nil, retryErr
+	}
+
+	ctx, use, err = a.beginSessionUse(ctx, sessionID)
 	if err != nil {
-		return nil, nil, false, err
+		return nil, nil, false, nil, err
 	}
 
-	if optErr := a.validateSessionStartOptions(meta.options); optErr != nil {
-		return nil, nil, false, optErr
+	if admitted := a.options.runtime.afterSessionUseAdmitted; admitted != nil {
+		admitted(use)
 	}
 
-	if pathErr := validateSessionPaths(cwd, additionalDirs); pathErr != nil {
-		return nil, nil, false, pathErr
-	}
+	lease := use
+	keepUse := false
 
-	mcpConfig, err := mcpConfigJSON(mcpServers)
+	defer func() {
+		if !keepUse {
+			a.finishSessionUse(sessionID, lease)
+		}
+	}()
+
+	meta, mcpConfig, err := a.validateLoadRequest(cwd, mcpServers, additionalDirs, rawMeta)
 	if err != nil {
-		return nil, nil, false, err
+		return nil, nil, false, nil, err
 	}
 
 	readinessStarted := time.Now()
@@ -589,39 +857,101 @@ func (a *Agent) loadOrResume(ctx context.Context, sessionID acp.SessionId, cwd s
 	observeRuntimeStartupStage(ctx, a.options.RuntimeResourceHooks, RuntimeResourceDiscovery, RuntimeStartupReadiness, readinessStarted, startErr)
 
 	if startErr != nil {
-		return nil, nil, false, startErr
+		return nil, nil, false, nil, startErr
 	}
 
-	a.mu.Lock()
-	if session := a.sessions[sessionID]; session != nil {
-		a.mu.Unlock()
-
-		if applyErr := session.applyActiveRequest(meta, cwd, mcpConfig, additionalDirs); applyErr != nil {
-			return nil, nil, false, applyErr
-		}
-
-		if syncErr := session.ensureMirrorSynced(ctx); syncErr != nil {
-			return nil, nil, false, syncErr
-		}
-
-		if verifyErr := session.verifyContinuable(ctx); verifyErr != nil {
-			return nil, nil, false, verifyErr
-		}
-
-		transcript, loadErr := session.loadTranscript(ctx)
-		if loadErr != nil {
-			return nil, nil, false, loadErr
-		}
-
-		session.setTranscriptFrameCount(len(transcript))
-
-		return session, transcript, false, nil
+	if useErr := a.validateSessionUse(sessionID, use, use.session); useErr != nil {
+		return nil, nil, false, nil, useErr
 	}
-	a.mu.Unlock()
 
+	if session := use.session; session != nil {
+		transcript, activeErr := a.loadActiveSession(ctx, sessionID, use, session, meta, cwd, mcpConfig, additionalDirs)
+		if activeErr != nil {
+			return nil, nil, false, nil, activeErr
+		}
+
+		keepUse = true
+
+		return session, transcript, false, use, nil
+	}
+
+	session, transcript, coldErr := a.loadColdSession(ctx, sessionID, use, cwd, meta, mcpConfig, additionalDirs)
+	if coldErr != nil {
+		return nil, nil, false, nil, coldErr
+	}
+
+	keepUse = true
+
+	return session, transcript, true, use, nil
+}
+
+// validateLoadRequest runs before active/cold selection so an installed session
+// cannot bypass the strict request shape applied to a stored one.
+func (a *Agent) validateLoadRequest(cwd string, mcpServers []acp.McpServer, additionalDirs []string, rawMeta map[string]any) (parsedSessionMeta, string, error) {
+	meta, err := parseSessionMeta(rawMeta)
+	if err != nil {
+		return parsedSessionMeta{}, "", err
+	}
+
+	if optErr := a.validateSessionStartOptions(meta.options); optErr != nil {
+		return parsedSessionMeta{}, "", optErr
+	}
+
+	if pathErr := validateSessionPaths(cwd, additionalDirs); pathErr != nil {
+		return parsedSessionMeta{}, "", pathErr
+	}
+
+	mcpConfig, err := mcpConfigJSON(mcpServers)
+	if err != nil {
+		return parsedSessionMeta{}, "", err
+	}
+
+	return meta, mcpConfig, nil
+}
+
+func (a *Agent) loadActiveSession(ctx context.Context, id acp.SessionId, use *agentSessionUse, session *agentSession, meta parsedSessionMeta, cwd, mcpConfig string, additionalDirs []string) ([]SessionStoreEntry, error) {
+	if err := session.applyActiveRequest(meta, cwd, mcpConfig, additionalDirs); err != nil {
+		return nil, err
+	}
+
+	if err := session.ensureMirrorSynced(ctx); err != nil {
+		return nil, err
+	}
+
+	if err := a.validateSessionUse(id, use, session); err != nil {
+		return nil, err
+	}
+
+	if err := session.verifyContinuable(ctx); err != nil {
+		return nil, err
+	}
+
+	if err := a.validateSessionUse(id, use, session); err != nil {
+		return nil, err
+	}
+
+	transcript, err := session.loadTranscript(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := a.validateSessionUse(id, use, session); err != nil {
+		return nil, err
+	}
+
+	session.setTranscriptFrameCount(len(transcript))
+
+	return transcript, nil
+}
+
+func (a *Agent) loadColdSession(ctx context.Context, sessionID acp.SessionId, use *agentSessionUse, cwd string, meta parsedSessionMeta, mcpConfig string, additionalDirs []string) (*agentSession, []SessionStoreEntry, error) {
 	manifest, err := a.loadManifest(ctx, sessionID)
 	if err != nil {
-		return nil, nil, false, err
+		return nil, nil, err
+	}
+
+	if useErr := a.validateSessionUse(sessionID, use, nil); useErr != nil {
+		return nil, nil, useErr
 	}
 
 	if meta.options.Mode == "" {
@@ -630,7 +960,7 @@ func (a *Agent) loadOrResume(ctx context.Context, sessionID acp.SessionId, cwd s
 
 	session, err := newLifecycleAgentSession(ctx, a, sessionID, cwd, meta, mcpConfig, additionalDirs)
 	if err != nil {
-		return nil, nil, false, err
+		return nil, nil, err
 	}
 
 	session.nativeID = manifest.NativeSessionID
@@ -639,22 +969,32 @@ func (a *Agent) loadOrResume(ctx context.Context, sessionID acp.SessionId, cwd s
 
 	session.updatedUnix = manifest.UpdatedAtUnixMilli
 
+	if !a.bindSessionUse(sessionID, use, session) {
+		return nil, nil, a.failPreparedLoad(sessionID, use, session, unknownSessionError())
+	}
+
+	if prepared := a.options.runtime.afterColdSessionPrepared; prepared != nil {
+		prepared(session)
+	}
+
 	transcript, err := session.loadTranscript(ctx)
 	if err != nil {
-		closeErr := session.Close(context.Background())
+		return nil, nil, a.failPreparedLoad(sessionID, use, session, err)
+	}
 
-		return nil, nil, false, errors.Join(err, closeErr)
+	if useErr := a.validateSessionUse(sessionID, use, session); useErr != nil {
+		return nil, nil, a.failPreparedLoad(sessionID, use, session, useErr)
 	}
 
 	session.setTranscriptFrameCount(len(transcript))
 
-	if err = session.verifyContinuable(ctx); err != nil {
-		closeErr := session.Close(context.Background())
-
-		return nil, nil, false, errors.Join(err, closeErr)
+	if err := session.verifyContinuable(ctx); err != nil {
+		return nil, nil, a.failPreparedLoad(sessionID, use, session, err)
 	}
 
-	a.mu.Lock()
+	if useErr := a.validateSessionUse(sessionID, use, session); useErr != nil {
+		return nil, nil, a.failPreparedLoad(sessionID, use, session, useErr)
+	}
 
 	// The entry check is not the last word. Preparation reads the store, starts
 	// the runtime and builds a settings and scratch home, and a delete can land
@@ -664,57 +1004,475 @@ func (a *Agent) loadOrResume(ctx context.Context, sessionID acp.SessionId, cwd s
 	// it would name a live session with an id every door already answers unknown
 	// for — unreachable, never torn down, holding its slot and its directories
 	// for the rest of the agent's life.
-	if a.isDeletedLocked(sessionID) {
-		a.mu.Unlock()
-
-		closeErr := session.Close(context.Background())
-
-		return nil, nil, false, errors.Join(unknownSessionError(), closeErr)
+	if publishErr := a.publishColdSession(sessionID, use, session); publishErr != nil {
+		return nil, nil, a.failPreparedLoad(sessionID, use, session, publishErr)
 	}
 
-	if len(a.sessions) >= a.maxActiveSessions() {
-		a.mu.Unlock()
-
-		closeErr := session.Close(context.Background())
-
-		return nil, nil, false, errors.Join(backpressureError("active_sessions"), closeErr)
-	}
-
-	a.sessions[sessionID] = session
-	a.mu.Unlock()
 	a.reopenProviderAuth(sessionID)
 	a.observe.AddActiveSession(ctx, 1)
 
-	return session, transcript, true, nil
+	return session, transcript, nil
 }
 
-// takeSession evicts sessionID from the active map and returns the session it
-// evicted, or nil when it evicted nothing. Looking up and deleting under one
-// lock hold keeps the returned pointer identical to the evicted one, so the
-// active-session gauge only ever counts a session this caller now owns.
-//
-// A non-nil expect makes the eviction identity-conditional: teardown runs
-// unlocked and a fresh session may be installed on the same id while it runs,
-// so a caller holding a pointer the map has already replaced must evict
-// nothing. Otherwise a stale or retried caller would drop the live owner from
-// the map — leaking its amp process, scratch dir and pipes past agent
-// shutdown, which snapshots only what the map still holds — and decrement the
-// gauge a second time.
-func (a *Agent) takeSession(ctx context.Context, sessionID acp.SessionId, expect *agentSession) *agentSession {
+func (a *Agent) publishColdSession(sessionID acp.SessionId, use *agentSessionUse, session *agentSession) error {
 	a.mu.Lock()
+	defer a.mu.Unlock()
 
-	session := a.sessions[sessionID]
-	if session == nil || (expect != nil && session != expect) {
+	currentUse := a.sessionUses[sessionID]
+	flight := a.sessionFlights[sessionID]
+
+	if currentUse != use || currentUse.generation != use.generation || a.isDeletedLocked(sessionID) || flight != nil {
+		if flight != nil && flight.use == use {
+			if flight.session == nil {
+				flight.session = session
+			} else if flight.session != session {
+				return acp.NewInternalError(map[string]any{jsonFieldError: wrapperOwnershipChanged})
+			}
+		}
+
+		return unknownSessionError()
+	}
+
+	if len(a.sessions) >= a.maxActiveSessions() {
+		return backpressureError("active_sessions")
+	}
+
+	a.activateSessionLocked(session)
+
+	return nil
+}
+
+func (a *Agent) failPreparedLoad(id acp.SessionId, use *agentSessionUse, session *agentSession, cause error) error {
+	return errors.Join(cause, a.cleanupUninstalledSession(id, use, session))
+}
+
+func (a *Agent) beginSessionUse(ctx context.Context, id acp.SessionId) (context.Context, *agentSessionUse, error) {
+	for {
+		a.mu.Lock()
+		if _, deleted := a.deleted[id]; deleted {
+			a.mu.Unlock()
+
+			return nil, nil, unknownSessionError()
+		}
+
+		if flight := a.sessionFlights[id]; flight != nil {
+			a.mu.Unlock()
+
+			if contextOwnsCallbackGeneration(ctx, a, flight) {
+				return nil, nil, closedCallbackRefusal()
+			}
+
+			return nil, nil, unknownSessionError()
+		}
+
+		if existing := a.sessionUses[id]; existing != nil {
+			wait := existing.done
+			a.mu.Unlock()
+
+			if contextOwnsCallbackGeneration(ctx, a, existing) {
+				return nil, nil, closedCallbackRefusal()
+			}
+
+			select {
+			case <-wait:
+				continue
+			case <-ctx.Done():
+				return nil, nil, ctx.Err()
+			}
+		}
+
+		if len(a.cleanupOwners[id]) != 0 {
+			if active := a.sessions[id]; active != nil {
+				a.clearCleanupOwnerLocked(id, active)
+			}
+		}
+
+		if len(a.cleanupOwners[id]) != 0 {
+			a.mu.Unlock()
+
+			return nil, nil, acp.NewInternalError(map[string]any{jsonFieldError: "session cleanup pending"})
+		}
+
+		a.nextSessionGeneration++
+		use := &agentSessionUse{
+			generation: a.nextSessionGeneration,
+			session:    a.sessions[id],
+			done:       make(chan struct{}),
+		}
+		a.sessionUses[id] = use
 		a.mu.Unlock()
 
+		useCtx := withCallbackProvenance(ctx, a, use)
+
+		return withCallbackSessionScope(useCtx, a, id), use, nil
+	}
+}
+
+// bindSessionUse publishes the cold wrapper before continuability export. If a
+// teardown flight was published while preparation was in progress, that flight
+// takes the exact pointer and the caller starts no export.
+func (a *Agent) bindSessionUse(id acp.SessionId, use *agentSessionUse, session *agentSession) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if use == nil || a.sessionUses[id] != use || a.sessionUses[id].generation != use.generation {
+		return false
+	}
+
+	use.session = session
+	if flight := a.sessionFlights[id]; flight != nil {
+		if flight.use == use {
+			if flight.session == nil {
+				flight.session = session
+			}
+		}
+
+		return false
+	}
+
+	_, deleted := a.deleted[id]
+
+	return !deleted
+}
+
+func (a *Agent) finishSessionUse(id acp.SessionId, use *agentSessionUse) {
+	if use == nil {
+		return
+	}
+
+	a.mu.Lock()
+	if a.sessionUses[id] == use && a.sessionUses[id].generation == use.generation {
+		delete(a.sessionUses, id)
+		close(use.done)
+	}
+
+	flight, session, reclaim := a.claimAbandonedSessionFlightLocked(id, use)
+	a.mu.Unlock()
+
+	if reclaim {
+		a.reclaimAbandonedSessionFlight(id, flight, session)
+	}
+}
+
+func (a *Agent) validateSessionUse(id acp.SessionId, use *agentSessionUse, expect *agentSession) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	current := a.sessionUses[id]
+	if use == nil || current != use || current.generation != use.generation || current.session != expect {
+		return acp.NewInternalError(map[string]any{jsonFieldError: "session use ownership changed"})
+	}
+
+	if a.isDeletedLocked(id) {
+		return unknownSessionError()
+	}
+
+	if flight := a.sessionFlights[id]; flight != nil {
+		if flight.use != use {
+			return unknownSessionError()
+		}
+
+		if flight.session != nil && expect != nil && flight.session != expect {
+			return acp.NewInternalError(map[string]any{jsonFieldError: wrapperOwnershipChanged})
+		}
+	}
+
+	if active := a.sessions[id]; active != nil && active != expect {
+		return acp.NewInternalError(map[string]any{jsonFieldError: wrapperOwnershipChanged})
+	}
+
+	return nil
+}
+
+func (a *Agent) cleanupUninstalledSession(id acp.SessionId, use *agentSessionUse, session *agentSession) error {
+	a.mu.Lock()
+	flight := a.sessionFlights[id]
+	transferred := flight != nil && flight.use == use && flight.session == session
+	a.mu.Unlock()
+
+	if transferred {
 		return nil
 	}
 
-	delete(a.sessions, sessionID)
-	a.mu.Unlock()
-	a.observe.AddActiveSession(ctx, -1)
+	a.retainCleanupOwner(id, session, agentCleanupPrepared)
 
-	return session
+	cleanupErr := session.Close(context.Background())
+	if cleanupErr == nil {
+		a.clearCleanupOwner(id, session)
+	}
+
+	return cleanupErr
+}
+
+func (a *Agent) beginSessionFlight(ctx context.Context, id acp.SessionId, kind agentSessionFlightKind, expect *agentSession) (context.Context, *agentSessionFlight, error) {
+	for {
+		flightCtx, flight, use, existing, err := a.publishSessionFlight(ctx, id, kind, expect)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		if existing != nil {
+			wait := existing.done
+			if a.contextOwnsSessionFlightDependency(ctx, existing) {
+				a.finishSessionFlightWait(existing)
+
+				return nil, nil, closedCallbackRefusal()
+			}
+
+			select {
+			case <-wait:
+				a.finishSessionFlightWait(existing)
+
+				if existing.panicErr != nil {
+					return nil, nil, existing.panicErr
+				}
+
+				continue
+			case <-ctx.Done():
+				a.finishSessionFlightWait(existing)
+
+				return nil, nil, ctx.Err()
+			}
+		}
+
+		if err := a.joinSessionFlightUse(flightCtx, id, flight, use); err != nil {
+			return nil, nil, err
+		}
+
+		return flightCtx, flight, nil
+	}
+}
+
+func (a *Agent) contextOwnsSessionFlightDependency(ctx context.Context, flight *agentSessionFlight) bool {
+	if contextOwnsCallbackGeneration(ctx, a, flight) {
+		return true
+	}
+
+	a.mu.Lock()
+	use := flight.use
+	session := flight.session
+	a.mu.Unlock()
+
+	if use != nil && contextOwnsCallbackGeneration(ctx, a, use) {
+		return true
+	}
+
+	if session == nil {
+		return false
+	}
+
+	session.teardownMu.Lock()
+	teardown := session.teardownFlight
+	session.teardownMu.Unlock()
+
+	if teardown != nil && session.contextOwnsTeardownDependency(ctx, teardown) {
+		return true
+	}
+
+	return false
+}
+
+// publishSessionFlight is the teardown linearization: it installs the exact
+// generation and snapshots the admitted use without waiting on either. Keeping
+// publication separate from the join makes pointer transfer testable with
+// barriers and keeps every external wait outside the agent mutex.
+func (a *Agent) publishSessionFlight(ctx context.Context, id acp.SessionId, kind agentSessionFlightKind, expect *agentSession) (context.Context, *agentSessionFlight, *agentSessionUse, *agentSessionFlight, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if existing := a.sessionFlights[id]; existing != nil {
+		existing.waiters++
+
+		return nil, nil, nil, existing, nil
+	}
+
+	if kind == agentSessionCloseFlight {
+		if _, deleted := a.deleted[id]; deleted {
+			return nil, nil, nil, nil, unknownSessionError()
+		}
+
+		current := a.sessions[id]
+		if current == nil || (expect != nil && current != expect) {
+			return nil, nil, nil, nil, unknownSessionError()
+		}
+	}
+
+	use := a.sessionUses[id]
+	if use != nil && contextOwnsCallbackGeneration(ctx, a, use) {
+		return nil, nil, nil, nil, closedCallbackRefusal()
+	}
+
+	session := a.sessions[id]
+	if session == nil && use != nil {
+		session = use.session
+	}
+
+	if expect != nil {
+		session = expect
+	}
+
+	if session != nil && session.contextOwnsTeardownDependency(ctx, nil) {
+		return nil, nil, nil, nil, closedCallbackRefusal()
+	}
+
+	a.nextSessionGeneration++
+	flight := &agentSessionFlight{
+		generation: a.nextSessionGeneration,
+		kind:       kind,
+		session:    session,
+		use:        use,
+		done:       make(chan struct{}),
+	}
+	a.sessionFlights[id] = flight
+
+	flightCtx := withCallbackProvenance(ctx, a, flight)
+
+	return withCallbackSessionScope(flightCtx, a, id), flight, use, nil, nil
+}
+
+func (a *Agent) finishSessionFlightWait(flight *agentSessionFlight) {
+	a.mu.Lock()
+	if flight != nil && flight.waiters > 0 {
+		flight.waiters--
+	}
+	a.mu.Unlock()
+}
+
+func (a *Agent) joinSessionFlightUse(ctx context.Context, id acp.SessionId, flight *agentSessionFlight, use *agentSessionUse) error {
+	if use == nil {
+		return nil
+	}
+
+	select {
+	case <-use.done:
+	case <-ctx.Done():
+		a.mu.Lock()
+		if a.sessionFlights[id] == flight && flight.generation == a.sessionFlights[id].generation {
+			flight.abandoned = true
+		}
+
+		claimedFlight, session, reclaim := a.claimAbandonedSessionFlightLocked(id, use)
+		a.mu.Unlock()
+
+		if reclaim {
+			a.reclaimAbandonedSessionFlight(id, claimedFlight, session)
+		}
+
+		return ctx.Err()
+	}
+
+	a.mu.Lock()
+	if a.sessionFlights[id] != flight || a.sessionFlights[id].generation != flight.generation {
+		a.mu.Unlock()
+
+		return acp.NewInternalError(map[string]any{jsonFieldError: "session ownership changed"})
+	}
+
+	if flight.session == nil {
+		flight.session = use.session
+	}
+
+	if current := a.sessions[id]; current != nil && flight.session != nil && current != flight.session {
+		a.mu.Unlock()
+		a.finishSessionFlight(id, flight)
+
+		return acp.NewInternalError(map[string]any{jsonFieldError: wrapperOwnershipChanged})
+	}
+
+	if flight.session == nil {
+		flight.session = a.sessions[id]
+	}
+	a.mu.Unlock()
+
+	return nil
+}
+
+func (a *Agent) claimAbandonedSessionFlightLocked(id acp.SessionId, use *agentSessionUse) (*agentSessionFlight, *agentSession, bool) {
+	flight := a.sessionFlights[id]
+	if flight == nil || !flight.abandoned || flight.reclaiming || flight.use != use {
+		return nil, nil, false
+	}
+
+	if current := a.sessionUses[id]; current == use && current.generation == use.generation {
+		return nil, nil, false
+	}
+
+	flight.reclaiming = true
+	if flight.session == nil {
+		flight.session = use.session
+	}
+
+	return flight, flight.session, true
+}
+
+func (a *Agent) reclaimAbandonedSessionFlight(id acp.SessionId, flight *agentSessionFlight, session *agentSession) {
+	panicErr := error(nil)
+
+	defer func() {
+		if recover() != nil {
+			panicErr = errAgentGoroutinePanic
+		}
+
+		if panicErr != nil {
+			a.finishSessionFlightWithPanic(id, flight, panicErr)
+
+			return
+		}
+
+		a.finishSessionFlight(id, flight)
+	}()
+
+	if session != nil {
+		a.mu.Lock()
+		active := a.sessions[id] == session
+		a.mu.Unlock()
+
+		if !active {
+			a.retainCleanupOwner(id, session, agentCleanupPrepared)
+
+			if cleanupErr := session.Close(context.Background()); cleanupErr == nil {
+				a.clearCleanupOwner(id, session)
+			}
+		}
+	}
+}
+
+func (a *Agent) finishSessionFlight(id acp.SessionId, flight *agentSessionFlight) {
+	if flight == nil {
+		return
+	}
+
+	a.mu.Lock()
+	if a.sessionFlights[id] == flight && a.sessionFlights[id].generation == flight.generation {
+		delete(a.sessionFlights, id)
+		close(flight.done)
+	}
+	a.mu.Unlock()
+}
+
+func (a *Agent) finishSessionFlightWithPanic(id acp.SessionId, flight *agentSessionFlight, panicErr error) {
+	if flight == nil {
+		return
+	}
+
+	a.mu.Lock()
+	if a.sessionFlights[id] == flight && a.sessionFlights[id].generation == flight.generation {
+		flight.panicErr = panicErr
+
+		delete(a.sessionFlights, id)
+		close(flight.done)
+	}
+	a.mu.Unlock()
+}
+
+func (a *Agent) finishSessionFlightOnReturn(id acp.SessionId, flight *agentSessionFlight) {
+	if recovered := recover(); recovered != nil {
+		a.finishSessionFlightWithPanic(id, flight, closedCallbackRefusal())
+
+		panic(recovered)
+	}
+
+	a.finishSessionFlight(id, flight)
 }
 
 // removeSession tears down session only while it still owns sessionID, so
@@ -727,27 +1485,85 @@ func (a *Agent) takeSession(ctx context.Context, sessionID acp.SessionId, expect
 // closes the same session again once its store is back. A close whose commit
 // failed evicts nothing.
 func (a *Agent) removeSession(ctx context.Context, sessionID acp.SessionId, session *agentSession) error {
-	settlement := session.settleClose(ctx)
+	ctx, flight, err := a.beginSessionFlight(ctx, sessionID, agentSessionCloseFlight, session)
+	if err != nil {
+		if session.deleteComplete() {
+			return nil
+		}
+
+		a.mu.Lock()
+		current := a.sessions[sessionID]
+		a.mu.Unlock()
+
+		if current != session {
+			return nil
+		}
+
+		return err
+	}
+
+	defer a.finishSessionFlightOnReturn(sessionID, flight)
+
+	ctx, wrapperFlight, err := session.beginTeardown(ctx)
+	if err != nil {
+		return err
+	}
+	defer session.finishTeardownOnReturn(wrapperFlight)
+
+	settlement := session.settleCloseRung(ctx)
+	if fenceErr := session.fencePersistenceForClose(ctx); fenceErr != nil {
+		return errors.Join(settlement.runtimeErr, fenceErr)
+	}
 
 	// Same order a prompt settles in: the containment boundary is proven before
-	// anything durable is written, so a close that ends on an unproven boundary
-	// commits nothing. That close still ends the session — the eviction below is
-	// unconditional — and only the scratch state a surviving tree may still run
-	// against is left where it is.
-	if amp.ProcessContainmentComplete(settlement.boundaryErr) {
-		// The commit is added to what the teardown already found rather than
-		// replacing it: the settlement this close waited out reports its own
-		// failure through the latch, and both are this close's answer.
-		if commitErr := session.commitOnClose(ctx); commitErr != nil {
-			return errors.Join(settlement.runtimeErr, commitErr)
-		}
+	// anything durable is written. An unproven boundary keeps the exact installed
+	// wrapper addressable, including the settings tree and scratch reservation a
+	// surviving descendant may still use.
+	if !amp.ProcessContainmentComplete(settlement.boundaryErr) {
+		return errors.Join(settlement.runtimeErr, settlement.boundaryErr)
+	}
+	// A prompt settlement's failed Replace is an owed rung, not a permanent
+	// teardown failure. The close-owned retry discharges it when the store has
+	// healed; a retry that still fails leaves the same wrapper installed.
+	if commitErr := session.commitCloseRung(ctx); commitErr != nil {
+		return errors.Join(settlement.runtimeErr, commitErr)
 	}
 
-	if a.takeSession(ctx, sessionID, session) == nil {
-		return nil
+	if terminalErr := session.deliverPendingTerminal(ctx); terminalErr != nil {
+		return errors.Join(settlement.runtimeErr, terminalErr)
 	}
 
-	return finalizeSessionScratch(settlement.runtimeErr, settlement.boundaryErr, session.settingsDir, session.scratchRootRelease)
+	// Containment and terminal-delivery failures have no close-owned retry rung.
+	// They fail this attempt and retain ownership so a later close can re-evaluate
+	// the exact wrapper rather than returning an error after eviction.
+	if settlement.runtimeErr != nil {
+		return settlement.runtimeErr
+	}
+
+	// Local cleanup is part of ownership settlement. The active map keeps the
+	// exact pointer and its gauge until directory removal and scratch release have
+	// both succeeded.
+	if cleanupErr := session.finalizeScratch(settlement.runtimeErr, settlement.boundaryErr); cleanupErr != nil {
+		return cleanupErr
+	}
+
+	a.mu.Lock()
+
+	currentFlight := a.sessionFlights[sessionID]
+	if currentFlight != flight || currentFlight.generation != flight.generation || a.sessions[sessionID] != session {
+		a.mu.Unlock()
+
+		return acp.NewInternalError(map[string]any{jsonFieldError: "close ownership changed"})
+	}
+
+	delete(a.sessions, sessionID)
+	a.clearCleanupOwnerLocked(sessionID, session)
+	a.mu.Unlock()
+	a.finishSessionFlight(sessionID, flight)
+
+	a.observe.AddActiveSession(ctx, -1)
+
+	return nil
 }
 
 // sessionStoreLoadTimeout resolves the WithSessionStoreLoadTimeout bound for
@@ -833,7 +1649,7 @@ func (a *Agent) reserveSessionSlot() error {
 	defer a.mu.Unlock()
 
 	if a.closed {
-		return acp.NewInvalidRequest(map[string]any{jsonFieldError: "agent closed"})
+		return acp.NewInvalidRequest(map[string]any{jsonFieldError: agentClosedMessage})
 	}
 
 	if len(a.sessions)+a.pending >= a.maxActiveSessions() {
@@ -855,14 +1671,15 @@ func (a *Agent) releaseSessionSlot(acp.SessionId) {
 }
 
 func (a *Agent) session(id acp.SessionId) (*agentSession, error) {
-	// A tombstoned session is wire-indistinguishable from one that never
-	// existed: both resolve to the uniform unknown-session error.
-	if _, deleted := a.isDeleted(id); deleted {
-		return nil, unknownSessionError()
-	}
-
 	a.mu.Lock()
 	defer a.mu.Unlock()
+
+	// A tombstoned or teardown-owned session is wire-indistinguishable from one
+	// that never existed. The flight check also makes a Store.Delete callback
+	// re-entering CloseSession fail closed instead of waiting on its caller.
+	if _, deleted := a.deleted[id]; deleted || a.sessionFlights[id] != nil {
+		return nil, unknownSessionError()
+	}
 
 	session := a.sessions[id]
 	if session == nil {
@@ -870,6 +1687,21 @@ func (a *Agent) session(id acp.SessionId) (*agentSession, error) {
 	}
 
 	return session, nil
+}
+
+func (a *Agent) sessionForCancel(id acp.SessionId) (*agentSession, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if _, deleted := a.deleted[id]; deleted {
+		return nil, unknownSessionError()
+	}
+
+	if session := a.sessions[id]; session != nil {
+		return session, nil
+	}
+
+	return nil, unknownSessionError()
 }
 
 func (a *Agent) markDeleted(id acp.SessionId) {
@@ -898,50 +1730,124 @@ func (a *Agent) isDeletedLocked(id acp.SessionId) bool {
 	return ok
 }
 
-// markPendingNativeDelete queues a failed native thread delete for retry. The
-// native thread id rides in the queue because the store row is already gone by
-// the time a delete can fail, so it cannot be re-derived later.
-func (a *Agent) markPendingNativeDelete(id acp.SessionId, nativeID string) {
+func (a *Agent) cleanupOwner(id acp.SessionId) (agentCleanupOwner, bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	a.pendingNativeDeletes[id] = nativeID
+	return a.cleanupOwnerLocked(id)
 }
 
-func (a *Agent) clearPendingNativeDelete(id acp.SessionId) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+func (a *Agent) cleanupOwnerLocked(id acp.SessionId) (agentCleanupOwner, bool) {
+	owners := a.cleanupOwners[id]
+	if len(owners) == 0 {
+		return agentCleanupOwner{}, false
+	}
 
-	delete(a.pendingNativeDeletes, id)
+	return owners[0], true
 }
 
-func (a *Agent) isPendingNativeDelete(id acp.SessionId) bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+func (a *Agent) cleanupOwnerOfKindLocked(id acp.SessionId, kind agentCleanupKind) (agentCleanupOwner, bool) {
+	for _, owner := range a.cleanupOwners[id] {
+		if owner.kind == kind {
+			return owner, true
+		}
+	}
 
-	_, ok := a.pendingNativeDeletes[id]
-
-	return ok
+	return agentCleanupOwner{}, false
 }
 
-func (a *Agent) pendingNativeDeleteIDs() []acp.SessionId {
+func (a *Agent) cleanupOwnerForSessionLocked(id acp.SessionId, session *agentSession) (agentCleanupOwner, bool) {
+	for _, owner := range a.cleanupOwners[id] {
+		if owner.session == session {
+			return owner, true
+		}
+	}
+
+	return agentCleanupOwner{}, false
+}
+
+func (a *Agent) retainCleanupOwner(id acp.SessionId, session *agentSession, kind agentCleanupKind) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	ids := make([]acp.SessionId, 0, len(a.pendingNativeDeletes))
-	for id := range a.pendingNativeDeletes {
+	a.retainCleanupOwnerLocked(id, session, kind)
+}
+
+func (a *Agent) retainCleanupOwnerLocked(id acp.SessionId, session *agentSession, kind agentCleanupKind) {
+	owners := a.cleanupOwners[id]
+	for index := range owners {
+		if owners[index].session == session {
+			owners[index].kind = kind
+			a.cleanupOwners[id] = owners
+
+			return
+		}
+	}
+
+	a.cleanupOwners[id] = append(owners, agentCleanupOwner{session: session, kind: kind})
+}
+
+func (a *Agent) clearCleanupOwner(id acp.SessionId, expect *agentSession) {
+	a.mu.Lock()
+	a.clearCleanupOwnerLocked(id, expect)
+	a.mu.Unlock()
+}
+
+func (a *Agent) clearCleanupOwnerLocked(id acp.SessionId, expect *agentSession) {
+	owners := a.cleanupOwners[id]
+	for index := range owners {
+		if owners[index].session != expect {
+			continue
+		}
+
+		owners = append(owners[:index], owners[index+1:]...)
+		if len(owners) == 0 {
+			delete(a.cleanupOwners, id)
+		} else {
+			a.cleanupOwners[id] = owners
+		}
+
+		break
+	}
+}
+
+// activateSessionLocked transfers one fully constructed wrapper from private
+// cleanup ownership to the public active-session map in the same critical
+// section. Callers must hold a.mu and must have completed their own tombstone,
+// flight, and capacity validation first.
+func (a *Agent) activateSessionLocked(session *agentSession) {
+	a.sessions[session.id] = session
+	a.clearCleanupOwnerLocked(session.id, session)
+}
+
+func (a *Agent) cleanupOwnerIDs() []acp.SessionId {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	ids := make([]acp.SessionId, 0, len(a.cleanupOwners))
+	for id := range a.cleanupOwners {
 		ids = append(ids, id)
 	}
+
+	slices.Sort(ids)
 
 	return ids
 }
 
-func (a *Agent) retryPendingNativeDeletes(ctx context.Context) error {
+func (a *Agent) retryCleanupOwners(ctx context.Context) error {
+	return a.retryCleanupOwnersExcept(ctx, "")
+}
+
+func (a *Agent) retryCleanupOwnersExcept(ctx context.Context, except acp.SessionId) error {
 	var boundaryErr error
 
-	for _, id := range a.pendingNativeDeleteIDs() {
-		if err := a.retryPendingNativeDelete(ctx, id); err != nil {
-			a.log.DebugContext(ctx, "retry amp native delete failed", slog.String(jsonFieldSessionID, string(id)), slog.String(jsonFieldError, err.Error()))
+	for _, id := range a.cleanupOwnerIDs() {
+		if id == except {
+			continue
+		}
+
+		if err := a.retryCleanupOwner(ctx, id); err != nil {
+			a.log.DebugContext(ctx, "retry amp session cleanup failed", slog.String(jsonFieldSessionID, string(id)), slog.String("failure", cleanupFailureClass(err)))
 
 			if errors.Is(err, ErrProcessContainmentIncomplete) {
 				boundaryErr = errors.Join(boundaryErr, err)
@@ -952,18 +1858,52 @@ func (a *Agent) retryPendingNativeDeletes(ctx context.Context) error {
 	return boundaryErr
 }
 
-func (a *Agent) retryPendingNativeDelete(ctx context.Context, id acp.SessionId) error {
-	a.mu.Lock()
-	nativeID := a.pendingNativeDeletes[id]
-	a.mu.Unlock()
+func (a *Agent) retryCleanupOwner(ctx context.Context, id acp.SessionId) error {
+	for {
+		owner, ok := a.cleanupOwner(id)
+		if !ok {
+			return nil
+		}
 
-	if err := a.deleteNativeThread(ctx, id, nativeID, nil); err != nil {
-		return err
+		a.mu.Lock()
+		if a.sessions[id] == owner.session {
+			a.clearCleanupOwnerLocked(id, owner.session)
+			a.mu.Unlock()
+
+			continue
+		}
+		a.mu.Unlock()
+
+		flightCtx, flight, err := a.beginSessionFlight(ctx, id, agentSessionDeleteFlight, owner.session)
+		if err != nil {
+			return err
+		}
+
+		a.mu.Lock()
+		owner, ok = a.cleanupOwnerForSessionLocked(id, owner.session)
+		a.mu.Unlock()
+
+		if !ok {
+			a.finishSessionFlight(id, flight)
+
+			continue
+		}
+
+		err = func() error {
+			defer a.finishSessionFlightOnReturn(id, flight)
+
+			if owner.kind == agentCleanupDeleted {
+				return owner.session.Delete(flightCtx)
+			}
+
+			return owner.session.Close(flightCtx)
+		}()
+		if err != nil {
+			return err
+		}
+
+		a.clearCleanupOwner(id, owner.session)
 	}
-
-	a.clearPendingNativeDelete(id)
-
-	return nil
 }
 
 // storedManifest loads the durable main-key row for a session. A stored row
@@ -989,30 +1929,11 @@ func (a *Agent) storedManifest(ctx context.Context, id acp.SessionId) (ampManife
 	}
 
 	manifest, ok := manifestFromStoreEntry(entries[len(entries)-1])
-	if !ok {
+	if !ok || manifest.SessionID != string(id) || !validSessionCwd(manifest.Cwd) {
 		return ampManifest{}, true, nil
 	}
 
 	return manifest, true, nil
-}
-
-func (a *Agent) deleteNativeThread(ctx context.Context, id acp.SessionId, nativeID string, session *agentSession) error {
-	if session != nil {
-		return session.Delete(ctx)
-	}
-
-	if nativeID == "" {
-		return nil
-	}
-
-	tmp, err := newAgentSession(ctx, a, id, "", parsedSessionMeta{}, "", nil)
-	if err != nil {
-		return err
-	}
-
-	tmp.nativeID = nativeID
-
-	return tmp.Delete(ctx)
 }
 
 const missingAPIKeyMessage = "AMP_API_KEY is not set: amp sessions run in an " +
@@ -1142,22 +2063,26 @@ func (s *agentSession) configOptions() []acp.SessionConfigOption {
 // `-m` flag for amp to accept or reject. The mode amp actually ran is read back
 // from the turn's init frame by reconcileNativeConfig.
 func (s *agentSession) setConfig(ctx context.Context, id acp.SessionConfigId, value acp.SessionConfigValueId) error {
-	s.mu.Lock()
 	if id != configMode {
-		s.mu.Unlock()
-
 		return unsupportedField(fieldConfigID)
 	}
 
+	persistCtx, flight, err := s.beginPersistence(ctx, sessionPersistenceOrdinary)
+	if err != nil {
+		return err
+	}
+	defer s.finishPersistence(flight)
+
+	s.mu.Lock()
 	s.mode = string(value)
 	s.updatedUnix = time.Now().UnixMilli()
 	s.mu.Unlock()
 
-	if err := s.persistAfterTurn(ctx, nil); err != nil {
+	if err := s.persistOwned(persistCtx, flight, nil); err != nil {
 		return err
 	}
 
-	return s.emitUpdate(ctx, s.configUpdate())
+	return s.emitUpdate(persistCtx, s.configUpdate())
 }
 
 // reconcileNativeConfig aligns the session's advertised mode with the value

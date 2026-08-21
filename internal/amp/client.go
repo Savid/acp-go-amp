@@ -562,8 +562,24 @@ func (c *Client) startTurn(ctx context.Context, args []string, input any) (*Turn
 	_ = stdoutWriter.Close()
 	_ = stderrWriter.Close()
 
-	processObserver := c.newProcessSnapshotObserver(ctx, tree)
-	observeProcessTreeSnapshot(ctx, processObserver)
+	var processObserver ProcessSnapshotObserver
+
+	func() {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				_ = stdin.Close()
+				_ = stdout.Close()
+				_ = stderr.Close()
+				containmentErr := processTreeTerminateAndWait(tree, defaultCloseWait)
+				finishProcessTreeObservation(context.Background(), processObserver, containmentErr)
+
+				panic(recovered)
+			}
+		}()
+
+		processObserver = c.newProcessSnapshotObserver(ctx, tree)
+		observeProcessTreeSnapshot(ctx, processObserver)
+	}()
 
 	turn := &Turn{
 		log:             c.log,

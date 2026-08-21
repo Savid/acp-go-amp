@@ -204,15 +204,17 @@ func TestRemainingAgentBranches(t *testing.T) {
 	}
 	activeLimited := newTestAgent(WithExecutablePath(path), WithScratchDir(testScratchDir(t)), WithSessionStore(store), WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 0}))
 	activeLimited.options.ConcurrencyLimits.MaxActiveSessions = 0
-	if _, _, _, err := activeLimited.loadOrResume(ctx, "T-file", t.TempDir(), nil, nil, nil); err != nil {
+	if _, _, _, use, err := activeLimited.loadOrResume(ctx, "T-file", t.TempDir(), nil, nil, nil); err != nil {
 		t.Fatalf("loadOrResume direct: %v", err)
+	} else {
+		activeLimited.finishSessionUse("T-file", use)
 	}
 	activeLimited.options.ConcurrencyLimits.MaxActiveSessions = 1
 	manifest2, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, SessionID: "T-file-2", NativeSessionID: "T-file-2", Cwd: t.TempDir()})
 	if err := store.Replace(ctx, SessionKey{SessionID: "T-file-2", Subpath: ""}, []SessionStoreReplacement{{Key: SessionKey{SessionID: "T-file-2", Subpath: ""}, Entries: []SessionStoreEntry{manifest2}}}); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, _, err := activeLimited.loadOrResume(ctx, "T-file-2", t.TempDir(), nil, nil, nil); err == nil {
+	if _, _, _, _, err := activeLimited.loadOrResume(ctx, "T-file-2", t.TempDir(), nil, nil, nil); err == nil {
 		t.Fatal("active load backpressure not enforced")
 	}
 	agent.markDeleted("T-deleted")
@@ -704,9 +706,9 @@ func TestCloseCommitsRetainedFramesOnADetachedContext(t *testing.T) {
 
 // TestCloseCommitsNothingOverADeleteFence pins how the close rung composes with a
 // delete. Replace clears the tombstone of every key it lists, so a session fenced
-// for delete commits nothing on close: the retry is a no-op that neither writes
-// the retained frames nor fails the close, and the frames stay retained so the
-// session cannot report itself clean over writes it was never allowed to make.
+// for delete commits nothing on close: it writes no retained frames and fails
+// the close boundary. The exact wrapper and frames stay retained so the session
+// cannot report itself clean over writes it was never allowed to make.
 func TestCloseCommitsNothingOverADeleteFence(t *testing.T) {
 	ctx := context.Background()
 	path, _ := fakeAgentAmpPath(t, "")
@@ -739,8 +741,8 @@ func TestCloseCommitsNothingOverADeleteFence(t *testing.T) {
 	}
 
 	live.fencePersistence()
-	if _, err = agent.CloseSession(ctx, acp.CloseSessionRequest{SessionId: id}); err != nil {
-		t.Fatalf("close over a delete fence: %v", err)
+	if _, err = agent.CloseSession(ctx, acp.CloseSessionRequest{SessionId: id}); !errors.Is(err, errPersistenceFenced) {
+		t.Fatalf("close over a delete fence = %v, want fenced boundary", err)
 	}
 
 	after, err := store.Load(ctx, SessionKey{SessionID: string(id), Subpath: transcriptSubpath})
@@ -755,6 +757,14 @@ func TestCloseCommitsNothingOverADeleteFence(t *testing.T) {
 	live.mu.Unlock()
 	if retained == 0 {
 		t.Fatal("fenced close reported a clean mirror over frames it never wrote")
+	}
+	stillLive, lookupErr := agent.session(id)
+	if lookupErr != nil || stillLive != live {
+		t.Fatalf("fenced close ownership = %p err=%v, want exact %p", stillLive, lookupErr, live)
+	}
+	live.resumePersistence()
+	if closeErr := agent.Close(); closeErr != nil {
+		t.Fatalf("cleanup Agent.Close: %v", closeErr)
 	}
 }
 
@@ -1433,15 +1443,11 @@ func TestAgentCloseCommitsRetainedUnsyncedFrames(t *testing.T) {
 	}
 }
 
-// TestAgentCloseFailsOverAnUncommittableMirrorAndStillReleases pins the other
-// half of the rung, and the difference between shutdown's rung and a wire
-// close's. The commit is fail-closed either way — the store's refusal is
-// Agent.Close's answer, not something dropped with the wrapper — but shutdown is
-// the last word on every session it holds: there is no later close to reclaim
-// what a failure left behind, so the scratch bookkeeping runs regardless and the
-// process exits owning nothing. Answering a durable defect with a leaked
-// directory and a live amp tree would be a worse failure than the one reported.
-func TestAgentCloseFailsOverAnUncommittableMirrorAndStillReleases(t *testing.T) {
+// TestAgentCloseIsLastWordOverAnUncommittableMirror pins embedded shutdown's
+// single last-word attempt. It reports the refused durability rung, releases
+// local state, removes every callable ownership path, and memoizes that exact
+// result instead of requiring a later Close for safety.
+func TestAgentCloseIsLastWordOverAnUncommittableMirror(t *testing.T) {
 	ctx := context.Background()
 	path, _ := fakeAgentAmpPath(t, "")
 	scratch := testScratchDir(t)
@@ -1473,8 +1479,7 @@ func TestAgentCloseFailsOverAnUncommittableMirrorAndStillReleases(t *testing.T) 
 		t.Fatalf("Agent.Close over an uncommittable mirror = %v, want mirror_unsynced", closeErr)
 	}
 
-	// Reported, and still released: the settings home is gone, the scratch parent
-	// holds no session directory, and the agent holds no session.
+	// Local cleanup succeeds even though the durability rung does not.
 	if _, statErr := os.Stat(live.settingsDir); !os.IsNotExist(statErr) {
 		t.Fatalf("failed shutdown leaked the settings dir: %v", statErr)
 	}
@@ -1484,13 +1489,29 @@ func TestAgentCloseFailsOverAnUncommittableMirrorAndStillReleases(t *testing.T) 
 	}
 	agent.mu.Lock()
 	remaining := len(agent.sessions)
+	owners := len(agent.cleanupOwners)
+	residences := len(agent.cleanupResidences)
 	agent.mu.Unlock()
-	if remaining != 0 {
-		t.Fatalf("failed shutdown left %d sessions behind", remaining)
+	if remaining != 0 || owners != 0 || residences != 0 {
+		t.Fatalf("failed shutdown retained callable ownership: sessions=%d owners=%d residences=%d", remaining, owners, residences)
+	}
+	live.mu.Lock()
+	boundaryDone := live.closeBoundaryDone
+	commitDone := live.closeCommitDone
+	scratchDone := live.scratchDone
+	live.mu.Unlock()
+	if !boundaryDone || commitDone || !scratchDone {
+		t.Fatalf("failed shutdown rungs = boundary %t commit %t scratch %t", boundaryDone, commitDone, scratchDone)
 	}
 
-	// Close is idempotent and keeps answering with the commit it owed.
-	if repeated := agent.Close(); !errors.Is(repeated, closeErr) && repeated.Error() != closeErr.Error() {
-		t.Fatalf("repeated Agent.Close = %v, want the first answer %v", repeated, closeErr)
+	memoized := agent.Close()
+	if memoized == nil || memoized.Error() != closeErr.Error() {
+		t.Fatalf("memoized Agent.Close = %v, want exact first failure %v", memoized, closeErr)
+	}
+	agent.mu.Lock()
+	remaining = len(agent.sessions)
+	agent.mu.Unlock()
+	if remaining != 0 {
+		t.Fatalf("memoized shutdown recreated %d sessions", remaining)
 	}
 }

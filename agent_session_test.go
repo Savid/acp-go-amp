@@ -424,14 +424,10 @@ func TestSessionSlotFilesystemServeAndCloseEdges(t *testing.T) {
 	}
 }
 
-// TestCloseSessionCannotEvictASessionInstalledDuringItsTeardown pins the
-// close-versus-load ownership boundary. Close gives up the id before the
-// unlocked native teardown runs, so a session/load landing on that id while the
-// teardown is still in flight becomes the sole owner: the closer must leave it
-// installed, must not decrement the active-session gauge on its behalf, and
-// must leave it reachable by agent shutdown rather than orphaning its amp
-// process, scratch dir and pipes.
-func TestCloseSessionCannotEvictASessionInstalledDuringItsTeardown(t *testing.T) {
+// TestLoadFailsClosedDuringExactCloseFlight pins the hard ownership boundary:
+// close keeps the installed wrapper until local cleanup settles, while a load
+// arriving behind the published close flight starts no replacement wrapper.
+func TestLoadFailsClosedDuringExactCloseFlight(t *testing.T) {
 	ctx := context.Background()
 	path, _ := fakeAgentAmpPath(t, "")
 	cwd := t.TempDir()
@@ -456,15 +452,12 @@ func TestCloseSessionCannotEvictASessionInstalledDuringItsTeardown(t *testing.T)
 		t.Fatal("first load installed no session")
 	}
 
-	// The scratch-root release runs at the tail of the native teardown, after
-	// the closer has given up the id, so it is the one point where a competing
-	// load can be linearized against a close that is still running.
-	gaveUpID := make(chan struct{})
+	cleanupStarted := make(chan struct{})
 	finishTeardown := make(chan struct{})
 	releaseScratch := closing.scratchRootRelease
 	closing.scratchRootRelease = func() {
-		close(gaveUpID)
-		<-finishTeardown
+		close(cleanupStarted)
+		awaitCorrectionCallback(t, finishTeardown, "session cleanup release")
 
 		if releaseScratch != nil {
 			releaseScratch()
@@ -478,15 +471,13 @@ func TestCloseSessionCannotEvictASessionInstalledDuringItsTeardown(t *testing.T)
 		closed <- closeErr
 	}()
 
-	<-gaveUpID
+	awaitCorrectionSignal(t, cleanupStarted, "session cleanup start")
 
-	if _, err := agent.LoadSession(ctx, LoadSessionRequest("T-own", cwd)); err != nil {
-		t.Fatalf("load during close teardown: %v", err)
+	if _, err := agent.LoadSession(ctx, LoadSessionRequest("T-own", cwd)); err == nil {
+		t.Fatal("load entered behind the published close flight")
 	}
-
-	reloaded := agent.sessions["T-own"]
-	if reloaded == nil || reloaded == closing {
-		t.Fatalf("load during close teardown reused the closing session: %v", reloaded == closing)
+	if agent.sessions["T-own"] != closing {
+		t.Fatal("close flight lost its exact installed wrapper during cleanup")
 	}
 
 	close(finishTeardown)
@@ -495,11 +486,11 @@ func TestCloseSessionCannotEvictASessionInstalledDuringItsTeardown(t *testing.T)
 		t.Fatalf("CloseSession: %v", err)
 	}
 
-	if agent.sessions["T-own"] != reloaded {
-		t.Fatal("the settled closer evicted the session loaded during its teardown")
+	if agent.sessions["T-own"] != nil {
+		t.Fatal("settled close retained its wrapper")
 	}
-	if got := collectActiveSessions(t, reader); got != 1 {
-		t.Fatalf("active sessions = %d, want 1 (the reloaded owner)", got)
+	if got := collectActiveSessions(t, reader); got != 0 {
+		t.Fatalf("active sessions = %d, want 0", got)
 	}
 
 	if err := agent.Close(); err != nil {
@@ -540,6 +531,74 @@ func TestStaleCloserCannotEvictTheReinstalledOwner(t *testing.T) {
 	}
 	if got := collectActiveSessions(t, reader); got != 1 {
 		t.Fatalf("active sessions = %d, want 1 (no double decrement)", got)
+	}
+}
+
+// TestCloseContainmentFailureRetainsTheExactInstalledSession pins the close
+// ownership boundary: an incomplete process proof cannot evict the wrapper or
+// release the settings and scratch state a surviving descendant may still use.
+// Once a later attempt can prove the boundary, that same pointer is reclaimed.
+func TestCloseContainmentFailureRetainsTheExactInstalledSession(t *testing.T) {
+	scratchReleases := 0
+	agent := newTestAgent(
+		WithScratchDir(testScratchDir(t)),
+		WithRuntimeResourceHooks(RuntimeResourceHooks{
+			ReserveScratchRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
+				return func() { scratchReleases++ }, nil
+			},
+		}),
+	)
+
+	session, err := newAgentSession(t.Context(), agent, "T-close-containment", t.TempDir(), parsedSessionMeta{}, "", nil)
+	if err != nil {
+		t.Fatalf("construct session: %v", err)
+	}
+	agent.mu.Lock()
+	agent.activateSessionLocked(session)
+	agent.mu.Unlock()
+	agent.observe.AddActiveSession(t.Context(), 1)
+
+	session.mu.Lock()
+	session.scratchContainmentErr = ErrProcessContainmentIncomplete
+	session.mu.Unlock()
+
+	_, err = agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: session.id})
+	if !errors.Is(err, ErrProcessContainmentIncomplete) {
+		t.Fatalf("CloseSession = %v, want containment sentinel", err)
+	}
+
+	retained, lookupErr := agent.session(session.id)
+	if lookupErr != nil || retained != session {
+		t.Fatalf("retained session = %p err=%v, want exact %p", retained, lookupErr, session)
+	}
+	listed, listErr := agent.ListSessions(t.Context(), ListSessionsRequest())
+	if listErr != nil || len(listed.Sessions) != 1 || listed.Sessions[0].SessionId != session.id {
+		t.Fatalf("list after failed close = %#v err=%v", listed.Sessions, listErr)
+	}
+	if scratchReleases != 0 {
+		t.Fatalf("failed close released scratch %d times", scratchReleases)
+	}
+	if _, statErr := os.Stat(session.settingsDir); statErr != nil {
+		t.Fatalf("failed close removed settings dir: %v", statErr)
+	}
+
+	// Model a later containment pass healing the injected boundary. The retry
+	// must close the same installed wrapper rather than a replacement.
+	session.mu.Lock()
+	session.scratchContainmentErr = nil
+	session.mu.Unlock()
+
+	if _, err := agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: session.id}); err != nil {
+		t.Fatalf("retry CloseSession: %v", err)
+	}
+	if _, lookupErr := agent.session(session.id); lookupErr == nil {
+		t.Fatal("successful retry left the session addressable")
+	}
+	if scratchReleases != 1 {
+		t.Fatalf("successful retry released scratch %d times, want 1", scratchReleases)
+	}
+	if _, statErr := os.Stat(session.settingsDir); !os.IsNotExist(statErr) {
+		t.Fatalf("successful retry retained settings dir: %v", statErr)
 	}
 }
 
@@ -1150,7 +1209,7 @@ func TestLifecycleSessionConstructionErrorsPropagate(t *testing.T) {
 	if err := store.Replace(t.Context(), main, []SessionStoreReplacement{{Key: main, Entries: []SessionStoreEntry{manifest}}}); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, _, err := agent.loadOrResume(t.Context(), sessionID, cwd, nil, nil, nil); !errors.Is(err, want) {
+	if _, _, _, _, err := agent.loadOrResume(t.Context(), sessionID, cwd, nil, nil, nil); !errors.Is(err, want) {
 		t.Fatalf("load-session construction error = %v", err)
 	}
 }

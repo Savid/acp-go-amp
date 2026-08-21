@@ -81,17 +81,14 @@ func TestPromptStreamFailsWhenItCannotMintAnIncarnation(t *testing.T) {
 	require.ErrorContains(t, err, "no entropy")
 }
 
-// TestPromptStreamWithoutAConnectionEmitsNothing pins that an embedded host with
-// no connection still runs the whole ordered stream through the reducer.
-func TestPromptStreamWithoutAConnectionEmitsNothing(t *testing.T) {
+// TestPromptStreamWithoutAConnectionFailsExplicitly pins that negotiated
+// lifecycle state is never treated as delivered when no client owns delivery.
+func TestPromptStreamWithoutAConnectionFailsExplicitly(t *testing.T) {
 	session := lifecycleStreamSession(t, negotiatedAnswer(), nil)
 
 	incarnation, err := session.openPromptStream(t.Context())
-	require.NoError(t, err)
-	require.NoError(t, incarnation.accept(t.Context(), lifecycle.Submission{SubmissionID: "s", ClientNonce: "n"}))
-	require.NoError(t, incarnation.settle(t.Context(),
-		lifecycleOutcome{stopReason: "end_turn", outcome: lifecycle.OutcomeSuccess}, nativeamp.ContainmentProof{}))
-	require.Equal(t, uint64(4), incarnation.stream.State().ReducedThrough)
+	require.Nil(t, incarnation)
+	require.ErrorContains(t, err, "lifecycle delivery unavailable")
 }
 
 // TestPromptStreamFailsThePromptOnAnEmissionFailure pins that a stream this
@@ -150,6 +147,25 @@ func TestPromptStreamRefusesAnEventItCannotSupport(t *testing.T) {
 	require.Len(t, client.envelopes(t), 1, "a refused event is never published")
 }
 
+func TestTerminalPreparationRefusesAnInvalidQuiescenceAfterIdle(t *testing.T) {
+	client := &lifecycleClient{}
+	session := lifecycleStreamSession(t, authoritativeAnswer(), client)
+	incarnation, err := session.openPromptStream(t.Context())
+	require.NoError(t, err)
+	require.NoError(t, incarnation.accept(t.Context(), lifecycle.Submission{SubmissionID: "s", ClientNonce: "n"}))
+
+	// The stream reducer retains the negotiated process-containment authority.
+	// Mutating only the publisher-side source makes the idle valid and the
+	// following quiescence claim invalid, pinning the second preparation seam.
+	incarnation.negotiated.QuiescenceSource = lifecycle.ProofClassNativeSettledBarrier
+	_, err = incarnation.terminalDelivery(
+		lifecycleOutcome{stopReason: "end_turn", outcome: lifecycle.OutcomeSuccess},
+		nativeamp.ContainmentProof{Root: 42, Proven: true},
+	)
+	require.ErrorContains(t, err, string(lifecycle.ViolationUnnegotiatedFact))
+	require.Len(t, client.envelopes(t), 3, "prepared terminal facts are not delivered before the whole pair validates")
+}
+
 // TestFencedIncarnationPublishesNothingFurther pins the end-of-emissions mark a
 // prompt leaves behind. A prompt is one contained amp process, so the incarnation
 // ends with the prompt: an event attempted afterwards is refused at this adapter
@@ -165,10 +181,7 @@ func TestFencedIncarnationPublishesNothingFurther(t *testing.T) {
 	require.NoError(t, incarnation.settle(t.Context(),
 		lifecycleOutcome{stopReason: "end_turn", outcome: lifecycle.OutcomeSuccess},
 		nativeamp.ContainmentProof{Root: 4242, Proven: true}))
-	require.False(t, incarnation.stream.Fenced(), "a settled turn has not yet ended the incarnation")
-
-	incarnation.fence()
-	require.True(t, incarnation.stream.Fenced())
+	require.True(t, incarnation.stream.Fenced(), "terminal delivery ends the incarnation")
 
 	published := len(client.envelopes(t))
 

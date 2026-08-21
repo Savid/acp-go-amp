@@ -370,8 +370,8 @@ func TestDeleteOrderingRetryAndManifestShape(t *testing.T) {
 	if _, deleteErr := failOnce.UnstableDeleteSession(ctx, DeleteSessionRequest(failOnceResp.SessionId)); deleteErr == nil {
 		t.Fatal("first native delete succeeded unexpectedly")
 	}
-	if got := failOnce.pendingNativeDeleteIDs(); len(got) != 1 || got[0] != failOnceResp.SessionId {
-		t.Fatalf("pending native deletes = %#v", got)
+	if got := failOnce.cleanupOwnerIDs(); len(got) != 1 || got[0] != failOnceResp.SessionId {
+		t.Fatalf("pending deletes = %#v", got)
 	}
 	if _, deleteErr := failOnce.UnstableDeleteSession(ctx, DeleteSessionRequest(failOnceResp.SessionId)); deleteErr != nil {
 		t.Fatalf("explicit pending native delete retry: %v", deleteErr)
@@ -379,14 +379,19 @@ func TestDeleteOrderingRetryAndManifestShape(t *testing.T) {
 	if _, listErr := failOnce.ListSessions(ctx, ListSessionsRequest()); listErr != nil {
 		t.Fatalf("ListSessions retry: %v", listErr)
 	}
-	if got := failOnce.pendingNativeDeleteIDs(); len(got) != 0 {
-		t.Fatalf("pending native delete not retried: %#v", got)
+	if got := failOnce.cleanupOwnerIDs(); len(got) != 0 {
+		t.Fatalf("pending delete not retried: %#v", got)
 	}
 
 	pendingFailure := newTestAgent(WithExecutablePath("/does/not/exist"), WithScratchDir(testScratchDir(t)))
-	pendingFailure.markPendingNativeDelete("T-pending-failure", "T-pending-native")
+	pendingWrapper := &agentSession{agent: pendingFailure, id: "T-pending-failure", nativeID: "T-pending-native", turn: make(chan struct{}, 1)}
+	pendingFailure.cleanupOwners[pendingWrapper.id] = []agentCleanupOwner{{session: pendingWrapper, kind: agentCleanupDeleted}}
+	pendingFailure.deleted[pendingWrapper.id] = struct{}{}
 	if _, deleteErr := pendingFailure.UnstableDeleteSession(ctx, DeleteSessionRequest("T-pending-failure")); deleteErr == nil {
-		t.Fatal("pending native delete retry failure was swallowed")
+		t.Fatal("pending delete retry failure was swallowed")
+	}
+	if got, ok := pendingFailure.cleanupOwner(pendingWrapper.id); !ok || got.session != pendingWrapper {
+		t.Fatal("failed pending delete lost exact wrapper ownership")
 	}
 
 	shapeStore := NewInMemorySessionStore()
@@ -408,6 +413,205 @@ func TestDeleteOrderingRetryAndManifestShape(t *testing.T) {
 			t.Fatalf("manifest contains %s: %s", forbidden, entries[0])
 		}
 	}
+}
+
+// TestFailedDeleteRetainsExactWrapperOwnership pins both ownership sources. A
+// no-store live wrapper and a store-backed live wrapper are transferred intact
+// behind the tombstone; explicit retry and Agent.Close respectively finish the
+// same wrapper and release its scratch reservation exactly once.
+func TestFailedDeleteRetainsExactWrapperOwnership(t *testing.T) {
+	t.Run("no-store explicit retry", func(t *testing.T) {
+		path, _ := fakeAgentAmpPath(t, "delete-fail-once")
+		agent := newTestAgent(WithExecutablePath(path), WithScratchDir(testScratchDir(t)))
+
+		wrapper, err := newAgentSession(t.Context(), agent, "T-delete-no-store", t.TempDir(), parsedSessionMeta{}, "", nil)
+		require.NoError(t, err)
+		wrapper.nativeID = "T-agent-thread"
+
+		releases := 0
+		originalRelease := wrapper.scratchRootRelease
+		wrapper.scratchRootRelease = func() {
+			releases++
+			originalRelease()
+		}
+
+		agent.store = nil
+		agent.mu.Lock()
+		agent.activateSessionLocked(wrapper)
+		agent.mu.Unlock()
+		agent.observe.AddActiveSession(t.Context(), 1)
+
+		_, err = agent.UnstableDeleteSession(t.Context(), DeleteSessionRequest(wrapper.id))
+		require.Error(t, err)
+
+		owned, pending := agent.cleanupOwner(wrapper.id)
+		require.True(t, pending)
+		require.Same(t, wrapper, owned.session)
+		require.Equal(t, "T-agent-thread", owned.session.nativeSessionID())
+		require.Zero(t, releases)
+		require.DirExists(t, wrapper.settingsDir)
+		_, lookupErr := agent.session(wrapper.id)
+		require.Error(t, lookupErr, "the tombstone hides the internally owned wrapper")
+
+		_, err = agent.UnstableDeleteSession(t.Context(), DeleteSessionRequest(wrapper.id))
+		require.NoError(t, err)
+		_, pending = agent.cleanupOwner(wrapper.id)
+		require.False(t, pending)
+		require.Equal(t, 1, releases)
+		require.NoDirExists(t, wrapper.settingsDir)
+		require.NoError(t, agent.Close())
+	})
+
+	t.Run("stored row Agent.Close sweep", func(t *testing.T) {
+		path, _ := fakeAgentAmpPath(t, "delete-fail-once")
+		store := NewInMemorySessionStore()
+		agent := newTestAgent(
+			WithExecutablePath(path),
+			WithScratchDir(testScratchDir(t)),
+			WithSessionStore(store),
+		)
+
+		created, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
+		require.NoError(t, err)
+		_, err = agent.Prompt(t.Context(), TextPromptRequest(created.SessionId, "delete-owner", "seed thread"))
+		require.NoError(t, err)
+
+		wrapper, err := agent.session(created.SessionId)
+		require.NoError(t, err)
+		releases := 0
+		originalRelease := wrapper.scratchRootRelease
+		wrapper.scratchRootRelease = func() {
+			releases++
+			originalRelease()
+		}
+
+		_, err = agent.UnstableDeleteSession(t.Context(), DeleteSessionRequest(created.SessionId))
+		require.Error(t, err)
+
+		owned, pending := agent.cleanupOwner(created.SessionId)
+		require.True(t, pending)
+		require.Same(t, wrapper, owned.session)
+		require.Equal(t, wrapper.nativeSessionID(), owned.session.nativeSessionID())
+		require.Zero(t, releases)
+		require.DirExists(t, wrapper.settingsDir)
+
+		main, loadErr := store.Load(t.Context(), SessionKey{SessionID: string(created.SessionId), Subpath: SessionStoreMainSubpath})
+		require.NoError(t, loadErr)
+		require.Empty(t, main, "the failed teardown remains hidden behind its durable tombstone")
+		_, lookupErr := agent.session(created.SessionId)
+		require.Error(t, lookupErr)
+
+		require.NoError(t, agent.Close(), "shutdown retries the exact pending wrapper")
+		require.Equal(t, 1, releases)
+		require.NoDirExists(t, wrapper.settingsDir)
+		_, pending = agent.cleanupOwner(created.SessionId)
+		require.False(t, pending)
+	})
+
+	t.Run("stored-only tombstone failure releases unused wrapper", func(t *testing.T) {
+		path, _ := fakeAgentAmpPath(t, "")
+		baseStore := NewInMemorySessionStore()
+		store := &fencedDeleteStore{SessionStore: baseStore}
+		scratch := testScratchDir(t)
+		reserved := 0
+		released := 0
+		agent := newTestAgent(
+			WithExecutablePath(path),
+			WithScratchDir(scratch),
+			WithSessionStore(store),
+			WithRuntimeResourceHooks(RuntimeResourceHooks{
+				ReserveScratchRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
+					reserved++
+
+					return func() { released++ }, nil
+				},
+			}),
+		)
+
+		created, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
+		require.NoError(t, err)
+		_, err = agent.Prompt(t.Context(), TextPromptRequest(created.SessionId, "stored-only-delete", "seed thread"))
+		require.NoError(t, err)
+		_, err = agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: created.SessionId})
+		require.NoError(t, err)
+		require.Equal(t, reserved, released)
+
+		_, err = agent.UnstableDeleteSession(t.Context(), DeleteSessionRequest(created.SessionId))
+		require.ErrorContains(t, err, "tombstone write refused")
+		require.Equal(t, reserved, released, "the private wrapper is released when no tombstone transfers ownership")
+		_, pending := agent.cleanupOwner(created.SessionId)
+		require.False(t, pending)
+		_, deleted := agent.isDeleted(created.SessionId)
+		require.False(t, deleted)
+		main, loadErr := baseStore.Load(t.Context(), SessionKey{SessionID: string(created.SessionId), Subpath: SessionStoreMainSubpath})
+		require.NoError(t, loadErr)
+		require.NotEmpty(t, main)
+		require.NoError(t, agent.Close())
+	})
+}
+
+type deleteCallGate struct {
+	SessionStore
+	started chan struct{}
+	release chan struct{}
+}
+
+func (g *deleteCallGate) Delete(ctx context.Context, key SessionKey) error {
+	g.started <- struct{}{}
+	select {
+	case <-g.release:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
+	return g.SessionStore.Delete(ctx, key)
+}
+
+// TestConcurrentCloseAndDeleteReleaseExactWrapperOnce pins the adjacent
+// ownership race: delete holds the wrapper's teardown authority while its
+// tombstone is in flight, so an already-resolved CloseSession cannot release
+// the same settings tree or scratch reservation a second time.
+func TestConcurrentCloseAndDeleteReleaseExactWrapperOnce(t *testing.T) {
+	store := &deleteCallGate{
+		SessionStore: NewInMemorySessionStore(),
+		started:      make(chan struct{}, 1),
+		release:      make(chan struct{}),
+	}
+	agent := newTestAgent(WithSessionStore(store), WithScratchDir(testScratchDir(t)))
+
+	created, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
+	require.NoError(t, err)
+	wrapper, err := agent.session(created.SessionId)
+	require.NoError(t, err)
+
+	releases := 0
+	originalRelease := wrapper.scratchRootRelease
+	wrapper.scratchRootRelease = func() {
+		releases++
+		originalRelease()
+	}
+
+	deleteErr := make(chan error, 1)
+	go func() {
+		_, err := agent.UnstableDeleteSession(t.Context(), DeleteSessionRequest(created.SessionId))
+		deleteErr <- err
+	}()
+	awaitCorrectionSignal(t, store.started, "delete store entry")
+
+	closeErr := make(chan error, 1)
+	go func() {
+		closeErr <- agent.removeSession(t.Context(), created.SessionId, wrapper)
+	}()
+
+	close(store.release)
+	require.NoError(t, receiveCorrection(t, deleteErr, "concurrent delete result"))
+	require.NoError(t, receiveCorrection(t, closeErr, "concurrent close result"))
+	require.Equal(t, 1, releases)
+	_, pending := agent.cleanupOwner(created.SessionId)
+	require.False(t, pending)
+	_, lookupErr := agent.session(created.SessionId)
+	require.Error(t, lookupErr)
+	require.NoError(t, agent.Close())
 }
 
 func TestDeleteUsesStoreAsSoleNativeAuthority(t *testing.T) {
@@ -435,8 +639,9 @@ func TestDeleteUsesStoreAsSoleNativeAuthority(t *testing.T) {
 		t.Fatalf("construct store-absent active session: %v", err)
 	}
 	agent.mu.Lock()
-	agent.sessions[active.id] = active
+	agent.activateSessionLocked(active)
 	agent.mu.Unlock()
+	agent.observe.AddActiveSession(ctx, 1)
 	if _, activeDeleteErr := agent.UnstableDeleteSession(ctx, DeleteSessionRequest(active.id)); activeDeleteErr != nil {
 		t.Fatalf("store-absent active delete: %v", activeDeleteErr)
 	}
@@ -567,8 +772,14 @@ func TestRemainingBranches(t *testing.T) {
 	if err := os.WriteFile(fileHome, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := newTestAgent(WithScratchDir(fileHome)).deleteNativeThread(ctx, "T-file-home", "T-file-home", nil); err == nil {
-		t.Fatal("deleteNativeThread ignored session creation error")
+	fileStore := NewInMemorySessionStore()
+	putStoredSession(t, fileStore, "T-file-home", t.TempDir(), nil)
+	fileAgent := newTestAgent(WithScratchDir(fileHome), WithSessionStore(fileStore))
+	if _, err := fileAgent.UnstableDeleteSession(ctx, DeleteSessionRequest("T-file-home")); err == nil {
+		t.Fatal("stored delete ignored wrapper construction error")
+	}
+	if entries, err := fileStore.Load(ctx, SessionKey{SessionID: "T-file-home", Subpath: SessionStoreMainSubpath}); err != nil || len(entries) == 0 {
+		t.Fatalf("wrapper construction failure tombstoned stored row: entries=%d err=%v", len(entries), err)
 	}
 	cancelCtx, cancel := context.WithCancel(ctx)
 	cancel()
@@ -601,7 +812,9 @@ func TestRemainingBranches(t *testing.T) {
 	if !state.isCancelled() {
 		t.Fatal("cancelled turn state not observed")
 	}
+}
 
+func TestRemainingSessionConstructionBranches(t *testing.T) {
 	previousMkdirAll := mkdirAll
 	t.Cleanup(func() { mkdirAll = previousMkdirAll })
 	mkdirAll = func(path string, perm os.FileMode) error {
@@ -620,6 +833,10 @@ func TestRemainingBranches(t *testing.T) {
 	if _, err := newAgentSession(t.Context(), newTestAgent(), "T-temp", t.TempDir(), parsedSessionMeta{}, "", nil); err == nil {
 		t.Fatal("temp dir error ignored")
 	}
+}
+
+func TestRemainingPromptBranches(t *testing.T) {
+	ctx := context.Background()
 
 	if err := (&agentSession{agent: newTestAgent()}).interruptState(ctx, nil); err != nil {
 		t.Fatalf("nil interrupt state: %v", err)
@@ -865,7 +1082,11 @@ func (g *loadGate) Load(ctx context.Context, key SessionKey) ([]SessionStoreEntr
 
 	if armed {
 		g.started <- struct{}{}
-		<-g.release
+		select {
+		case <-g.release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
 	}
 
 	return entries, err
@@ -877,13 +1098,11 @@ func (g *loadGate) arm() {
 	g.mu.Unlock()
 }
 
-// TestLoadRacingADeleteInstallsNothingAndLeaksNothing pins the concurrent
-// tombstone class: a load already past its entry check when a delete completes
-// installs nothing, tears its fully prepared replacement down, and leaves the
-// deletion marker set. The leak this refuses is total — the installed session
-// would be unreachable through every door, holding its active-session slot, its
-// settings directory and its scratch reservation for the rest of the agent's
-// life.
+// TestLoadRacingADeleteInstallsNothingAndLeaksNothing pins the admitted-use
+// transfer class. Delete publishes its exact flight while a cold load is inside
+// Store.Load, then joins that use. The load hands the one prepared wrapper to
+// the flight instead of installing or reclaiming it, and delete settles that
+// exact pointer after the use finishes.
 func TestLoadRacingADeleteInstallsNothingAndLeaksNothing(t *testing.T) {
 	ctx := context.Background()
 	path, _ := fakeAgentAmpPath(t, "")
@@ -933,16 +1152,22 @@ func TestLoadRacingADeleteInstallsNothingAndLeaksNothing(t *testing.T) {
 
 	// The load is parked inside loadManifest now: past its entry check, holding
 	// a manifest the delete is about to invalidate.
-	<-store.started
+	awaitCorrectionSignal(t, store.started, "load manifest entry")
 
-	_, err = agent.UnstableDeleteSession(ctx, DeleteSessionRequest(sessionID))
+	flightCtx, flight, use, existing, err := agent.publishSessionFlight(ctx, sessionID, agentSessionDeleteFlight, nil)
 	require.NoError(t, err)
-
+	require.Nil(t, existing)
+	require.NotNil(t, use)
 	close(store.release)
+	require.NoError(t, agent.joinSessionFlightUse(flightCtx, sessionID, flight, use))
 
 	loadErr := <-loaded
 	require.Error(t, loadErr, "a load that lost the race hands back no session")
 	requireRequestErrorCode(t, loadErr, invalidParamsCode)
+	require.NotNil(t, flight.session)
+
+	require.NoError(t, agent.deleteSession(flightCtx, sessionID, flight))
+	agent.finishSessionFlight(sessionID, flight)
 
 	agent.mu.Lock()
 	_, mapped := agent.sessions[sessionID]

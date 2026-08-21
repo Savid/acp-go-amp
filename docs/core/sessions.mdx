@@ -30,13 +30,22 @@ continuity.
   session, then calls `amp threads delete` when the manifest records a native
   thread; a session with no recorded thread deletes locally only. A native
   delete failure is returned after the local session is already hidden from
-  list/load/resume, and cleanup is retried by later list/load/resume/delete
-  calls.
+  list/load/resume, and native cleanup can be retried while the isolated local
+  operation state is intact. If embedded shutdown retries the native deletion
+  and it still fails, shutdown releases the isolated home and permanently
+  retains the classified deletion failure; a later `Agent.Close` neither
+  reports success nor issues a native command from state already released. If
+  the store refuses the tombstone, an active session remains live and visibly
+  mirror-unsynced; the failed delete cannot report a fenced persistence attempt
+  as success. A successful tombstone discharges that owed commit rather than
+  writing frames back over the deleted row.
 - `session/close` stops accepting new prompts for the local session, commits any
   frames a failed store write left unsynced, and removes its isolated native
-  home. A close that cannot commit those frames fails and reclaims nothing, so
-  the session stays addressable and the close is retried once the store is back.
-  It does not delete the server-side Amp thread.
+  home. Its persistence fence joins writes already admitted before close and
+  rejects later ordinary/config writes; no store write or config notification
+  can outlive the response. A close that cannot commit or remove the home fails,
+  retains the exact local session, and retries only the incomplete rung. It does
+  not delete the server-side Amp thread.
 
 ## Server-side state and the local mirror
 
@@ -62,8 +71,11 @@ from what Amp produced. `session/close` reconciles it too: the close retries the
 retained frames before the session is reclaimed and fails when it cannot, so the
 request that ends a session is never the one that drops a settled turn. A
 session already fenced for `session/delete` writes nothing there — the tombstone
-is the last write to that row, and the frames stay retained. `Agent.Close`
-reconciles it too, for the same reason and with the same failure: an embedded
-host's shutdown must not drop with the wrapper what a wire close would have
-committed. Shutdown still releases every session's isolated home either way,
-because nothing runs after it.
+is the last write to that row, and the frames stay retained until a successful
+tombstone discharges them. `Agent.Close` reconciles the mirror too, for the same
+reason and with the same failure: an embedded host's shutdown must not silently
+drop what a wire close would have committed. Shutdown is the last callable
+boundary, so it boundedly joins and contains every owned wrapper, releases local
+state where containment permits, reports any refused rung, removes every
+callable ownership path, and memoizes that exact result. A later `Agent.Close`
+observes the result; it is not a retry protocol.

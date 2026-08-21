@@ -55,14 +55,150 @@ type promptTurnState struct {
 	mu        sync.Mutex
 	turn      *amp.Turn
 	cancelCtx context.CancelFunc
-	// settlementErr is the settlement boundary's own outcome, which is what close
-	// and delete wait on. It is never the native turn's outcome: what the model
-	// did inside a boundary that completed is the prompt response's business.
-	settlementErr error
-	cancelled     chan struct{}
-	completed     chan struct{}
-	cancelOnce    sync.Once
-	completeOnce  sync.Once
+	// settlement records the boundary rung that failed. Close can discharge an
+	// owed durable rung by retrying it; containment and delivery failures remain
+	// failures until a later teardown proves its own complete boundary.
+	settlement   promptSettlement
+	cancelled    chan struct{}
+	completed    chan struct{}
+	cancelOnce   sync.Once
+	completeOnce sync.Once
+}
+
+// promptSettlement separates the boundary rungs a prompt can leave owed. The
+// native turn's own outcome is deliberately absent: a model failure over a
+// completed boundary is the prompt response's business, not close's.
+type promptSettlement struct {
+	containmentErr error
+	commitErr      error
+	deliveryErr    error
+}
+
+const (
+	promptSettlementPhaseContainment = "containment"
+	promptSettlementPhaseCommit      = "commit"
+	promptSettlementPhaseDelivery    = "delivery"
+)
+
+type promptTerminalDelivery struct {
+	mu            sync.Mutex
+	stream        *promptStream
+	notifications []acp.SessionNotification
+	next          int
+}
+
+func (d *promptTerminalDelivery) deliver(ctx context.Context) error {
+	if d == nil {
+		return nil
+	}
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	for d.next < len(d.notifications) {
+		if beforeDelivery := d.stream.session.agent.options.runtime.beforeTerminalDelivery; beforeDelivery != nil {
+			beforeDelivery(d.notifications[d.next])
+		}
+
+		if err := d.stream.deliver(ctx, d.notifications[d.next]); err != nil {
+			return err
+		}
+
+		d.next++
+	}
+
+	if d.stream != nil {
+		d.stream.fence()
+	}
+
+	return nil
+}
+
+func (s *agentSession) retainPendingTerminal(delivery *promptTerminalDelivery) {
+	if delivery == nil || delivery.stream == nil {
+		return
+	}
+
+	s.mu.Lock()
+	s.pendingTerminal = delivery
+	s.mu.Unlock()
+}
+
+func (s *agentSession) clearPendingTerminal(expect *promptTerminalDelivery) {
+	s.mu.Lock()
+	if s.pendingTerminal == expect {
+		s.pendingTerminal = nil
+		s.promptSettlement.deliveryErr = nil
+	}
+	s.mu.Unlock()
+}
+
+func (s *agentSession) recordPromptSettlement(settlement promptSettlement) {
+	s.mu.Lock()
+	s.promptSettlement = settlement
+	s.mu.Unlock()
+}
+
+func (s *agentSession) retainedPromptSettlement() promptSettlement {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.promptSettlement
+}
+
+func (s *agentSession) hasPendingTerminal() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.pendingTerminal != nil
+}
+
+func (s *agentSession) deliverPendingTerminal(ctx context.Context) error {
+	s.mu.Lock()
+	delivery := s.pendingTerminal
+	s.mu.Unlock()
+
+	if delivery == nil {
+		return nil
+	}
+
+	if err := delivery.deliver(ctx); err != nil {
+		return err
+	}
+
+	s.clearPendingTerminal(delivery)
+
+	return nil
+}
+
+// dischargeDeletedUnsyncedTerminal drops a terminal claim whose preceding
+// commit was fenced by a delete. The tombstone made the retained frames final:
+// publishing idle for that absent durable prefix would invert the settlement
+// order. A terminal whose commit did land remains pending and must still be
+// retransmitted exactly.
+func (s *agentSession) dischargeDeletedUnsyncedTerminal() bool {
+	s.mu.Lock()
+	if s.pendingTerminal == nil || !s.mirrorUnsynced {
+		s.mu.Unlock()
+
+		return false
+	}
+
+	delivery := s.pendingTerminal
+	s.pendingTerminal = nil
+	s.unsyncedFrames = nil
+	s.mirrorUnsynced = false
+	s.promptSettlement.commitErr = nil
+	s.promptSettlement.deliveryErr = nil
+	s.mu.Unlock()
+
+	delivery.stream.fence()
+
+	return true
+}
+
+func (s promptSettlement) err() error {
+	return errors.Join(s.containmentErr, s.commitErr, s.deliveryErr)
 }
 
 func newPromptTurnState() *promptTurnState {
@@ -104,23 +240,40 @@ func (s *promptTurnState) cancel() {
 }
 
 func (s *promptTurnState) complete(settlementErr error) {
+	s.completeSettlement(promptSettlement{containmentErr: settlementErr})
+}
+
+func (s *promptTurnState) completeSettlement(settlement promptSettlement) {
 	s.completeOnce.Do(func() {
 		s.mu.Lock()
-		s.settlementErr = settlementErr
+		s.settlement = settlement
 		s.mu.Unlock()
 		close(s.completed)
 	})
 }
 
+func (s *promptTurnState) settled() bool {
+	select {
+	case <-s.completed:
+		return true
+	default:
+		return false
+	}
+}
+
 func (s *promptTurnState) awaitCompletion(ctx context.Context) error {
+	return s.awaitSettlement(ctx).err()
+}
+
+func (s *promptTurnState) awaitSettlement(ctx context.Context) promptSettlement {
 	select {
 	case <-s.completed:
 		s.mu.Lock()
 		defer s.mu.Unlock()
 
-		return s.settlementErr
+		return s.settlement
 	case <-ctx.Done():
-		return fmt.Errorf("%w: wait for active Amp turn cleanup: %v", amp.ErrProcessContainmentIncomplete, ctx.Err())
+		return promptSettlement{containmentErr: fmt.Errorf("%w: wait for active Amp turn cleanup: %v", amp.ErrProcessContainmentIncomplete, ctx.Err())}
 	}
 }
 
@@ -222,8 +375,35 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (ac
 		return acp.PromptResponse{}, admitErr
 	}
 
-	defer s.clearActivePrompt(state)
-	defer state.complete(nil)
+	var incarnation *promptStream
+
+	defer func() {
+		recovered := recover()
+
+		if recovered != nil && !state.settled() {
+			settlement := s.containPromptPanic(state)
+
+			if incarnation != nil {
+				incarnation.fence()
+			}
+
+			s.recordPromptSettlement(settlement)
+			state.completeSettlement(settlement)
+		}
+
+		if recovered == nil {
+			state.complete(nil)
+		}
+
+		s.clearActivePrompt(state)
+
+		if recovered != nil {
+			panic(recovered)
+		}
+	}()
+
+	ctx = withCallbackProvenance(ctx, s.agent, state)
+	continueCtx = withCallbackProvenance(continueCtx, s.agent, state)
 
 	configurationStarted := time.Now()
 	mcpConfigPath, err := s.writePromptMCPConfig()
@@ -240,7 +420,7 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (ac
 	// One prompt is one contained process, so one prompt is one incarnation: the
 	// snapshot opening it is the first lifecycle-bearing notification inside the
 	// prompt, and it precedes acceptance.
-	incarnation, err := s.openPromptStream(ctx)
+	incarnation, err = s.openPromptStream(ctx)
 	if err != nil {
 		return acp.PromptResponse{}, err
 	}
@@ -269,7 +449,7 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (ac
 		// outranks the cancel guard — a request whose boundary broke did not end
 		// cleanly, whatever the host asked for.
 		if !amp.ProcessContainmentComplete(err) {
-			state.complete(err)
+			state.completeSettlement(promptSettlement{containmentErr: err})
 
 			return acp.PromptResponse{}, unsettled(classifyNativePromptError(err))
 		}
@@ -292,8 +472,11 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (ac
 	var timeoutCh <-chan time.Time
 
 	if d := s.agent.options.TurnTimeout; d > 0 {
-		ch, stop := s.agent.options.runtime.newTurnTimer(d)
-		defer stop()
+		ch, stop := invokeOwnedPair(func() (<-chan time.Time, func()) {
+			return s.agent.options.runtime.newTurnTimer(d)
+		})
+
+		defer func() { invokeOwned(stop) }()
 
 		timeoutCh = ch
 	}
@@ -312,13 +495,19 @@ func (s *agentSession) launchNativeTurn(ctx context.Context, client *amp.Client,
 	spawnStarted := time.Now()
 
 	if nativeID == "" {
-		turn, err := s.agent.options.runtime.executeThread(ctx, client, input)
+		callbackCtx := withExactCallbackGeneration(ctx, "native:execute_thread")
+		turn, err := invokeOwnedPair(func() (*amp.Turn, error) {
+			return s.agent.options.runtime.executeThread(callbackCtx, client, input)
+		})
 		observeRuntimeStartupStage(ctx, s.agent.options.RuntimeResourceHooks, RuntimeResourcePrompt, RuntimeStartupSession, spawnStarted, err)
 
 		return turn, err
 	}
 
-	turn, err := s.agent.options.runtime.continueThread(ctx, client, nativeID, input)
+	callbackCtx := withExactCallbackGeneration(ctx, "native:continue_thread")
+	turn, err := invokeOwnedPair(func() (*amp.Turn, error) {
+		return s.agent.options.runtime.continueThread(callbackCtx, client, nativeID, input)
+	})
 	observeRuntimeStartupStage(ctx, s.agent.options.RuntimeResourceHooks, RuntimeResourcePrompt, RuntimeStartupSpawn, spawnStarted, err)
 
 	return turn, err
@@ -358,59 +547,134 @@ func (s *agentSession) settlePrompt(
 	result promptResult,
 ) (acp.PromptResponse, error) {
 	settleCtx := context.WithoutCancel(ctx)
+	phase := promptSettlementPhaseContainment
+	contained := false
 
-	proof, closeErr := s.agent.options.runtime.settleTurn(turn)
+	var terminal *promptTerminalDelivery
+
+	var settlement promptSettlement
+
+	defer func() {
+		recovered := recover()
+
+		if recovered != nil {
+			panicErr := errAgentGoroutinePanic
+
+			switch phase {
+			case promptSettlementPhaseCommit:
+				settlement.commitErr = errors.Join(settlement.commitErr, panicErr)
+			case promptSettlementPhaseDelivery:
+				settlement.deliveryErr = errors.Join(settlement.deliveryErr, panicErr)
+			default:
+				settlement.containmentErr = errors.Join(settlement.containmentErr, panicErr)
+			}
+
+			if !contained {
+				panicSettlement := s.containPromptPanic(state)
+				settlement.containmentErr = errors.Join(settlement.containmentErr, panicSettlement.containmentErr)
+			}
+
+			if terminal == nil {
+				incarnation.fence()
+			}
+		}
+
+		s.recordPromptSettlement(settlement)
+		state.completeSettlement(settlement)
+
+		if recovered != nil {
+			panic(recovered)
+		}
+	}()
+
+	settleCtx = withExactCallbackGeneration(settleCtx, "native:settle_turn")
+	proof, closeErr := invokeOwnedPair(func() (amp.ContainmentProof, error) {
+		return s.agent.options.runtime.settleTurn(turn)
+	})
 	s.recordScratchContainment(closeErr)
 	// Vacancy is readable only from a boundary that completed. An enumeration
 	// taken after an incomplete containment describes a tree the supervisor lost,
 	// so it proves nothing and the next incarnation opens without a claim.
 	s.recordVacancy(proof.Vacant() && amp.ProcessContainmentComplete(closeErr))
+	contained = amp.ProcessContainmentComplete(closeErr)
 
-	// settlementErr is what the completion latch publishes: the boundary's own
-	// failure, and only that. A native turn that failed over a boundary which
+	// Settlement is what the completion latch publishes: the boundary's own
+	// failures, separated by rung. A native turn that failed over a boundary which
 	// completed, committed, and delivered its terminal facts did settle, so a
 	// concurrent close or delete succeeds while the prompt still answers the host
 	// with the native failure. Conflating the two would both fail a close that
 	// nothing went wrong for and hide a real settlement failure behind the native
 	// error the prompt reports first.
-	var settlementErr error
-
-	// The latch is what close and delete wait on, so it is published only once
-	// the prompt is wholly settled. Publishing it at the native terminal would
-	// let a close response fence a stream this prompt is still writing to, and
-	// let a close return before the frames it was shown are durable.
-	defer func() { state.complete(settlementErr) }()
-
-	// The incarnation ends with the prompt, on every exit: a boundary that did not
-	// complete, a commit that failed, and a terminal fact that could not be
-	// delivered all end it exactly as a settled turn does. The fence runs before
-	// the latch publishes, so a close or delete woken by that latch never observes
-	// a live incarnation for a prompt that has finished with it.
-	defer incarnation.fence()
-
 	if !amp.ProcessContainmentComplete(closeErr) {
-		settlementErr = closeErr
+		settlement.containmentErr = closeErr
+
+		incarnation.fence()
 
 		return acp.PromptResponse{}, unsettled(errors.Join(result.err, closeErr))
 	}
 
+	terminal, closeErr = incarnation.terminalDelivery(lifecycleOutcomeFor(result.response, result.err), proof)
+	if closeErr != nil {
+		settlement.deliveryErr = closeErr
+
+		incarnation.fence()
+
+		return acp.PromptResponse{}, unsettled(firstError(result.err, closeErr))
+	}
+
+	s.retainPendingTerminal(terminal)
+
+	phase = promptSettlementPhaseCommit
+
 	if commitErr := s.persistAfterTurn(settleCtx, result.transcript); commitErr != nil {
-		settlementErr = commitErr
+		settlement.commitErr = commitErr
 
 		return acp.PromptResponse{}, unsettled(firstError(result.err, commitErr))
 	}
 
-	if deliveryErr := incarnation.settle(settleCtx, lifecycleOutcomeFor(result.response, result.err), proof); deliveryErr != nil {
-		settlementErr = deliveryErr
+	phase = promptSettlementPhaseDelivery
+
+	if deliveryErr := terminal.deliver(settleCtx); deliveryErr != nil {
+		settlement.deliveryErr = deliveryErr
 
 		return acp.PromptResponse{}, unsettled(firstError(result.err, deliveryErr))
 	}
+
+	s.clearPendingTerminal(terminal)
 
 	if result.err != nil {
 		return acp.PromptResponse{}, result.err
 	}
 
 	return result.response, nil
+}
+
+func (s *agentSession) containPromptPanic(state *promptTurnState) promptSettlement {
+	turn := state.currentTurn()
+	if turn == nil {
+		boundaryErr := fmt.Errorf("%w: native prompt panicked before publishing its turn handle", amp.ErrProcessContainmentIncomplete)
+		s.recordScratchContainment(boundaryErr)
+		s.recordVacancy(false)
+
+		return promptSettlement{containmentErr: boundaryErr, deliveryErr: errAgentGoroutinePanic}
+	}
+
+	proof, boundaryErr := s.settleTurnAfterPanic(turn)
+	s.recordScratchContainment(boundaryErr)
+	s.recordVacancy(proof.Vacant() && amp.ProcessContainmentComplete(boundaryErr))
+
+	return promptSettlement{containmentErr: boundaryErr, deliveryErr: errAgentGoroutinePanic}
+}
+
+func (s *agentSession) settleTurnAfterPanic(turn *amp.Turn) (proof amp.ContainmentProof, err error) {
+	defer func() {
+		if recover() != nil {
+			proof = amp.ContainmentProof{}
+			err = fmt.Errorf("%w: panic while containing native prompt", amp.ErrProcessContainmentIncomplete)
+		}
+	}()
+
+	return s.agent.options.runtime.settleTurn(turn)
 }
 
 // firstError keeps the first failure's exact wire shape. A store outage behind a
@@ -815,7 +1079,9 @@ func (s *agentSession) emitUpdate(ctx context.Context, update acp.SessionUpdate)
 		return nil
 	}
 
-	return conn.SessionUpdate(ctx, acp.SessionNotification{SessionId: s.id, Update: update})
+	return invokeExternalResult(ctx, func() error {
+		return conn.SessionUpdate(ctx, acp.SessionNotification{SessionId: s.id, Update: update})
+	})
 }
 
 // emitRawEvent emits one non-authoritative raw-event notification for a live
@@ -865,7 +1131,9 @@ func (s *agentSession) emitRawEvent(ctx context.Context, source string, msg amp.
 		return err
 	}
 
-	if err := conn.NotifyExtension(ctx, RawEventMethod, capped); err != nil {
+	if err := invokeExternalResult(ctx, func() error {
+		return conn.NotifyExtension(ctx, RawEventMethod, capped)
+	}); err != nil {
 		return err
 	}
 

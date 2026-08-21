@@ -30,6 +30,7 @@ const (
 // method is a no-op on it, so the prompt path carries no conditional of its own.
 type promptStream struct {
 	session *agentSession
+	client  agentClient
 	stream  *lifecycle.Stream
 	// openCycleID is the idle cycle the snapshot reports; cycleID is the one the
 	// accepted submission runs in. They are distinct because a snapshot's
@@ -59,8 +60,14 @@ func (s *agentSession) openPromptStream(ctx context.Context) (*promptStream, err
 		return nil, err
 	}
 
+	client := s.agent.connection()
+	if client == nil {
+		return nil, acp.NewInternalError(map[string]any{jsonFieldError: "lifecycle delivery unavailable"})
+	}
+
 	incarnation := &promptStream{
 		session:     s,
+		client:      client,
 		stream:      lifecycle.NewStream(id, negotiated),
 		openCycleID: id + lifecycleOpenCycleSuffix,
 		cycleID:     id + lifecycleCycleSuffix,
@@ -113,24 +120,43 @@ func (p *promptStream) accept(ctx context.Context, submission lifecycle.Submissi
 // never by the one the opening snapshot carried. An incarnation that opened
 // unable to state a boundary still states the one it went on to prove.
 func (p *promptStream) settle(ctx context.Context, outcome lifecycleOutcome, proof amp.ContainmentProof) error {
-	if p == nil {
-		return nil
-	}
-
-	if err := p.emit(ctx, lifecycle.IdleEvent(p.cycleID, p.turnID, outcome.stopReason, outcome.outcome)); err != nil {
+	delivery, err := p.terminalDelivery(outcome, proof)
+	if err != nil {
 		return err
 	}
 
-	if !p.negotiated.AuthoritativeQuiescence || !proof.Vacant() {
-		return nil
+	return delivery.deliver(ctx)
+}
+
+func (p *promptStream) terminalDelivery(outcome lifecycleOutcome, proof amp.ContainmentProof) (*promptTerminalDelivery, error) {
+	if p == nil {
+		return &promptTerminalDelivery{}, nil
 	}
 
-	return p.emit(ctx, lifecycle.QuiescenceEvent(lifecycle.QuiescenceFact{
-		Quiescent: true,
-		Source:    p.negotiated.QuiescenceSource,
-		Watermark: p.stream.State().ReducedThrough,
-		Barrier:   lifecycleBarrierPrefix + strconv.Itoa(proof.Root),
-	}))
+	notifications := make([]acp.SessionNotification, 0, 2)
+
+	idle, err := p.prepare(lifecycle.IdleEvent(p.cycleID, p.turnID, outcome.stopReason, outcome.outcome))
+	if err != nil {
+		return nil, err
+	}
+
+	notifications = append(notifications, idle)
+
+	if p.negotiated.AuthoritativeQuiescence && proof.Vacant() {
+		quiescence, emitErr := p.prepare(lifecycle.QuiescenceEvent(lifecycle.QuiescenceFact{
+			Quiescent: true,
+			Source:    p.negotiated.QuiescenceSource,
+			Watermark: p.stream.State().ReducedThrough,
+			Barrier:   lifecycleBarrierPrefix + strconv.Itoa(proof.Root),
+		}))
+		if emitErr != nil {
+			return nil, emitErr
+		}
+
+		notifications = append(notifications, quiescence)
+	}
+
+	return &promptTerminalDelivery{stream: p, notifications: notifications}, nil
 }
 
 // fence ends this incarnation. A prompt is one contained amp process, so a prompt
@@ -155,25 +181,37 @@ func (p *promptStream) fence() {
 // event this adapter cannot state truthfully fails the prompt here rather than
 // reaching a consumer.
 func (p *promptStream) emit(ctx context.Context, event lifecycle.Event) error {
+	notification, err := p.prepare(event)
+	if err != nil {
+		return err
+	}
+
+	return p.deliver(ctx, notification)
+}
+
+func (p *promptStream) prepare(event lifecycle.Event) (acp.SessionNotification, error) {
 	envelope, err := p.stream.Emit(event)
 	if err != nil {
-		return acp.NewInternalError(map[string]any{
+		return acp.SessionNotification{}, acp.NewInternalError(map[string]any{
 			jsonFieldError: "amp_lifecycle_violation",
 			keyDetail:      err.Error(),
 		})
 	}
 
-	conn := p.session.agent.connection()
-	if conn == nil {
-		return nil
+	return acp.SessionNotification{
+		SessionId: p.session.id,
+		Meta:      map[string]any{lifecycle.MetaKey: envelope},
+		Update:    acp.SessionUpdate{SessionInfoUpdate: &acp.SessionSessionInfoUpdate{}},
+	}, nil
+}
+
+func (p *promptStream) deliver(ctx context.Context, notification acp.SessionNotification) error {
+	if p == nil || p.client == nil {
+		return acp.NewInternalError(map[string]any{jsonFieldError: "lifecycle delivery unavailable"})
 	}
 
 	// The envelope rides the notification's own `_meta`, beside sessionId and
 	// update, and the carrier sets neither title nor updatedAt: a carrier mutates
 	// no state, so it can never be coalesced away with the envelope on it.
-	return conn.SessionUpdate(ctx, acp.SessionNotification{
-		SessionId: p.session.id,
-		Meta:      map[string]any{lifecycle.MetaKey: envelope},
-		Update:    acp.SessionUpdate{SessionInfoUpdate: &acp.SessionSessionInfoUpdate{}},
-	})
+	return invokeExternalResult(ctx, func() error { return p.client.SessionUpdate(ctx, notification) })
 }

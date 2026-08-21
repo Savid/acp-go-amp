@@ -264,20 +264,26 @@ and reclaims nothing — the session keeps its identity and its frames, and the
 close is retried once the store is back. A session already fenced for delete
 commits nothing there, because the tombstone is the last write to that row.
 
-`Agent.Close` owes the same rung. An embedded host's shutdown is the last thing
-that will ever run for its sessions, so a commit a wire close would have made is
-made there too, or reported as the store's refusal — never dropped with the
-wrapper. Shutdown differs in one way only: no later close exists to reclaim what
-a failure leaves behind, so every session still releases its isolated home and
-its native tree, and the commit failure is what `Agent.Close` returns.
+`Agent.Close` owes the same rung. A commit a wire close would have made is made
+there too, or reported as the store's refusal — never dropped with the wrapper.
+A shutdown attempt is the last word: it boundedly joins and contains its owned
+wrappers, releases local state where containment permits, removes every callable
+ownership path, and memoizes its exact success or failure. A later `Agent.Close`
+only observes that result and repeats no native, persistence, or cleanup command.
+An unresolved native deletion is retried only while its isolated operation
+state remains intact. If shutdown must release that state after the retry also
+fails, the classified deletion failure is retained permanently; later shutdown
+calls cannot turn it into success or repeat the command from a released home.
 
 Settlement runs on a context detached from the request's, so a cancelled prompt
 still commits the frames it streamed, states its terminal boundary, and fences
 its stream before the response. The one exception is a settlement that cannot
 complete: when the containment boundary or the durable commit itself fails, the
 prompt fails with that error and emits **no** terminal `idle` — a boundary must
-never claim a foreground prefix the store does not hold, so the incarnation ends
-unsettled and the next prompt's snapshot states the truth about it.
+never claim a foreground prefix the store does not hold. The exact terminal
+notifications remain pending; a close may first repair durability and then
+retransmit them with their original stream/sequence identities. No later prompt
+is admitted while that terminal proof is pending.
 
 The outcome a settled turn recorded is the one its ACP response states. A cancel
 landing while a turn is already failing does not turn that failure into a

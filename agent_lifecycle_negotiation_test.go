@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/coder/acp-go-sdk"
 	nativeamp "github.com/savid/acp-go-amp/internal/amp"
@@ -1071,12 +1072,6 @@ func (c *orderingClient) SessionUpdate(ctx context.Context, notification acp.Ses
 		if event, ok := envelope["event"].(map[string]any); ok {
 			if event["type"] == "state_update" && event["state"] == "idle" {
 				c.record("idle")
-				if c.idleStarted != nil {
-					c.idleStarted <- struct{}{}
-				}
-				if c.idleRelease != nil {
-					<-c.idleRelease
-				}
 				if c.idleErr != nil {
 					return c.idleErr
 				}
@@ -1246,11 +1241,12 @@ func TestPromptRetainsAnIncompleteContainmentBoundary(t *testing.T) {
 // after the durable commit can be driven deterministically.
 type idleRefusingClient struct {
 	lifecycleClient
+	refuse bool
 }
 
 func (c *idleRefusingClient) SessionUpdate(ctx context.Context, notification acp.SessionNotification) error {
 	if envelope, ok := notification.Meta[lifecycle.MetaKey].(map[string]any); ok {
-		if event, ok := envelope["event"].(map[string]any); ok && event["state"] == "idle" {
+		if event, ok := envelope["event"].(map[string]any); ok && event["state"] == "idle" && c.refuse {
 			return errors.New("transport refused the terminal idle")
 		}
 	}
@@ -1262,7 +1258,7 @@ func (c *idleRefusingClient) SessionUpdate(ctx context.Context, notification acp
 // transition cannot be published fails the prompt rather than returning a
 // response the host's projection would never reach.
 func TestPromptFailsWhenTheTurnCannotSettle(t *testing.T) {
-	client := &idleRefusingClient{}
+	client := &idleRefusingClient{refuse: true}
 	agent, sessionID := lifecycleAgentWithClient(t, lifecycleOffer(1.0), client)
 
 	_, err := agent.Prompt(t.Context(), lifecyclePrompt(sessionID, "hello", "sub-1", "nonce-1"))
@@ -1271,6 +1267,10 @@ func TestPromptFailsWhenTheTurnCannotSettle(t *testing.T) {
 	stored, storeErr := agent.store.Load(t.Context(), SessionKey{SessionID: string(sessionID), Subpath: transcriptSubpath})
 	require.NoError(t, storeErr)
 	require.NotEmpty(t, stored, "the commit precedes the terminal idle")
+
+	// Agent.Close is the final retry owner. Heal the injected transport outage so
+	// the helper's shutdown proves it retransmits the retained terminal state.
+	client.refuse = false
 }
 
 // cancellingIdleClient cancels the request context from inside the terminal
@@ -1334,7 +1334,7 @@ type fencedDeleteStore struct {
 	fenced func()
 }
 
-func (s *fencedDeleteStore) Delete(_ context.Context, _ SessionKey) error {
+func (s *fencedDeleteStore) Delete(ctx context.Context, _ SessionKey) error {
 	if s.fenced != nil {
 		hook := s.fenced
 		s.fenced = nil
@@ -1352,12 +1352,20 @@ func (s *fencedDeleteStore) Delete(_ context.Context, _ SessionKey) error {
 func TestFailedDeleteRetainsTheSettlingTurnsFrames(t *testing.T) {
 	t.Setenv("AMP_API_KEY", "conformance-key")
 
-	store := &fencedDeleteStore{SessionStore: NewInMemorySessionStore()}
+	deleteEntered := make(chan struct{})
+	deleteRelease := make(chan struct{})
+	store := &fencedDeleteStore{
+		SessionStore: NewInMemorySessionStore(),
+	}
 	agent := NewAgent(testContainmentOptions([]Option{
 		WithExecutablePath(lifecycleHarness(t)),
 		WithScratchDir(testScratchDir(t)),
 		WithSessionStore(store),
 	})...)
+	agent.options.runtime.beforeDeleteTombstone = func() {
+		close(deleteEntered)
+		awaitCorrectionCallback(t, deleteRelease, "failed-delete tombstone release")
+	}
 	t.Cleanup(func() { require.NoError(t, agent.Close()) })
 
 	client := &lifecycleClient{}
@@ -1372,27 +1380,32 @@ func TestFailedDeleteRetainsTheSettlingTurnsFrames(t *testing.T) {
 	streamed := make(chan struct{})
 	client.onAgentChunk = func() { close(streamed) }
 
-	done := make(chan struct{})
-
+	promptResult := make(chan error, 1)
 	go func() {
-		defer close(done)
-
-		resp, promptErr := agent.Prompt(t.Context(), lifecyclePrompt(session.SessionId, "hang", "sub-1", "nonce-1"))
-		require.NoError(t, promptErr)
-		require.Equal(t, acp.StopReasonCancelled, resp.StopReason)
+		_, promptErr := agent.Prompt(t.Context(), lifecyclePrompt(session.SessionId, "hang", "sub-1", "nonce-1"))
+		promptResult <- promptErr
 	}()
 
-	<-streamed
+	awaitCorrectionSignal(t, streamed, "failed-delete prompt chunk")
 
-	// The turn settles inside the delete's fence, so its commit is the one the
-	// fence forbids.
-	store.fenced = func() {
-		require.NoError(t, agent.Cancel(t.Context(), acp.CancelNotification{SessionId: session.SessionId}))
-		<-done
+	deleteResult := make(chan error, 1)
+	go func() {
+		_, deleteErr := agent.UnstableDeleteSession(t.Context(), acp.UnstableDeleteSessionRequest{SessionId: session.SessionId})
+		deleteResult <- deleteErr
+	}()
+
+	// The external caller, not the store callback, settles the turn inside the
+	// published delete fence. The callback remains a pure barrier and cannot
+	// synchronously re-enter its own operation.
+	select {
+	case <-deleteEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("delete did not reach the fenced tombstone write")
 	}
-
-	_, err = agent.UnstableDeleteSession(t.Context(), acp.UnstableDeleteSessionRequest{SessionId: session.SessionId})
-	require.ErrorContains(t, err, "tombstone write refused")
+	require.NoError(t, agent.Cancel(t.Context(), acp.CancelNotification{SessionId: session.SessionId}))
+	require.ErrorIs(t, receiveCorrection(t, promptResult, "fenced prompt result"), errPersistenceFenced)
+	close(deleteRelease)
+	require.ErrorContains(t, receiveCorrection(t, deleteResult, "failed tombstone result"), "tombstone write refused")
 
 	stored, err := agent.store.Load(t.Context(), SessionKey{SessionID: string(session.SessionId), Subpath: transcriptSubpath})
 	require.NoError(t, err)

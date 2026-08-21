@@ -74,19 +74,22 @@ const (
 	envXDGDataHome   = "XDG_DATA_HOME"
 	envXDGStateHome  = "XDG_STATE_HOME"
 
-	valUnsupported       = "unsupported"
-	valNoTransport       = "no_transport"
-	valText              = "text"
-	valImage             = "image"
-	valBase64            = "base64"
-	valHTTP              = "http"
-	valHTTPS             = "https"
-	valUser              = "user"
-	valRequired          = "required"
-	valDuplicate         = "duplicate"
-	valAmbiguous         = "ambiguous"
-	valMismatch          = "mismatch"
-	reasonUnserializable = "unserializable"
+	valUnsupported              = "unsupported"
+	valNoTransport              = "no_transport"
+	valText                     = "text"
+	valImage                    = "image"
+	valBase64                   = "base64"
+	valHTTP                     = "http"
+	valHTTPS                    = "https"
+	valUser                     = "user"
+	valRequired                 = "required"
+	valDuplicate                = "duplicate"
+	valAmbiguous                = "ambiguous"
+	valMismatch                 = "mismatch"
+	reasonUnserializable        = "unserializable"
+	deleteOwnershipChanged      = "delete ownership changed"
+	wrapperOwnershipChanged     = "session wrapper ownership changed"
+	persistenceOwnershipChanged = "persistence ownership changed"
 
 	modeLow    = "low"
 	modeMedium = "medium"
@@ -95,13 +98,29 @@ const (
 )
 
 var (
-	errSessionClosed = errors.New("session closed")
-	writeFile        = os.WriteFile
-	readFile         = os.ReadFile
-	mkdirAll         = os.MkdirAll
-	mkdirTemp        = os.MkdirTemp
-	removeSessionDir = os.RemoveAll
+	errSessionClosed     = errors.New("session closed")
+	errPersistenceFenced = errors.New("session persistence fenced")
+	errNativeDeleteOpen  = errors.New("native session deletion unresolved")
+	writeFile            = os.WriteFile
+	readFile             = os.ReadFile
+	mkdirAll             = os.MkdirAll
+	mkdirTemp            = os.MkdirTemp
+	removeSessionDir     = os.RemoveAll
 )
+
+func closedCallbackRefusal() error {
+	return errors.Join(
+		errSessionClosed,
+		acp.NewInvalidRequest(map[string]any{jsonFieldError: "session_closed"}),
+	)
+}
+
+func persistenceFencedError() error {
+	return errors.Join(
+		errPersistenceFenced,
+		acp.NewInvalidRequest(map[string]any{jsonFieldError: "session_closed"}),
+	)
+}
 
 type ampManifest struct {
 	Format    string `json:"format"`
@@ -147,20 +166,81 @@ type agentSession struct {
 	nativeMissingCause    string
 	scratchContainmentErr error
 	unsyncedFrames        []SessionStoreEntry
+	mirrorUnsynced        bool
 	transcriptFrames      int
+	persistenceCommit     *sessionPersistenceCommit
 	// vacancyUnproven records that a completed prompt boundary failed to
 	// enumerate an empty contained descendant set. A session that has never
 	// prompted started no process at all, so it opens with nothing outstanding.
-	vacancyUnproven bool
-	// persistForbidden fences durable writes once the session's row is being
-	// deleted, so nothing this session still holds is written back over the
-	// tombstone.
-	persistForbidden bool
-	turn             chan struct{}
-	cancelMu         sync.Mutex
-	activePrompt     *promptTurnState
-	persistMu        sync.Mutex
-	mu               sync.Mutex
+	vacancyUnproven    bool
+	persistState       sessionPersistenceState
+	turn               chan struct{}
+	cancelMu           sync.Mutex
+	activePrompt       *promptTurnState
+	persistMu          sync.Mutex
+	persistFlight      *sessionPersistenceFlight
+	persistGeneration  uint64
+	persistFenceGen    uint64
+	teardownMu         sync.Mutex
+	teardownFlight     *sessionTeardownFlight
+	teardownGeneration uint64
+	nativeDeleteDone   bool
+	nativeDeleteErr    error
+	deleteDone         bool
+	scratchDone        bool
+	closeBoundaryDone  bool
+	closeBoundary      closeSettlement
+	closeCommitDone    bool
+	pendingTerminal    *promptTerminalDelivery
+	promptSettlement   promptSettlement
+	mu                 sync.Mutex
+}
+
+type sessionPersistenceFlight struct {
+	generation uint64
+	kind       sessionPersistenceKind
+	done       chan struct{}
+}
+
+// sessionPersistenceCommit is the immutable identity of one Replace attempt.
+// It is published before the callback is invoked and retained across every
+// ambiguous return, including a delegate that commits and then panics. A retry
+// replays these exact replacements instead of rebuilding from a stale local
+// frame count.
+type sessionPersistenceCommit struct {
+	pending      []SessionStoreEntry
+	successor    []SessionStoreEntry
+	replacements []SessionStoreReplacement
+	targetFrames int
+}
+
+type sessionPersistenceState uint8
+
+const (
+	sessionPersistenceOpen sessionPersistenceState = iota
+	sessionPersistenceClosing
+	sessionPersistenceDeleting
+)
+
+type sessionPersistenceKind uint8
+
+const (
+	sessionPersistenceOrdinary sessionPersistenceKind = iota + 1
+	sessionPersistenceCloseRetry
+)
+
+type sessionPersistenceFence struct {
+	previous   sessionPersistenceState
+	installed  sessionPersistenceState
+	generation uint64
+	changed    bool
+}
+
+type sessionTeardownFlight struct {
+	generation uint64
+	done       chan struct{}
+	panicErr   error
+	waiters    int
 }
 
 func newAgentSession(ctx context.Context, agent *Agent, id acp.SessionId, cwd string, meta parsedSessionMeta, mcpConfigJSON string, additionalDirs []string) (_ *agentSession, err error) {
@@ -175,24 +255,26 @@ func newAgentSession(ctx context.Context, agent *Agent, id acp.SessionId, cwd st
 		return nil, err
 	}
 
-	var dir string
+	session := &agentSession{
+		agent:              agent,
+		id:                 id,
+		scratchRootRelease: scratchRelease,
+		turn:               make(chan struct{}, 1),
+	}
+	agent.retainCleanupOwner(id, session, agentCleanupConstructing)
 
-	keepScratch := false
+	constructed := false
 	defer func() {
-		if keepScratch {
+		if constructed {
 			return
 		}
 
-		var removeErr error
-		if dir != "" {
-			removeErr = removeSessionDir(dir)
+		cleanupErr := session.finalizeScratch(nil, nil)
+		if cleanupErr == nil {
+			agent.clearCleanupOwner(id, session)
 		}
 
-		if removeErr == nil {
-			scratchRelease()
-		}
-
-		err = errors.Join(err, removeErr)
+		err = errors.Join(err, cleanupErr)
 	}()
 
 	parent, err := ensureScratchParent(agent.options.ScratchDir)
@@ -200,10 +282,12 @@ func newAgentSession(ctx context.Context, agent *Agent, id acp.SessionId, cwd st
 		return nil, err
 	}
 
-	dir, err = mkdirTemp(parent, "acp-go-amp-session-*")
+	dir, err := mkdirTemp(parent, "acp-go-amp-session-*")
 	if err != nil {
 		return nil, fmt.Errorf("create amp settings dir: %w", err)
 	}
+
+	session.settingsDir = dir
 
 	homeDir := filepath.Join(dir, "home")
 	configDir := filepath.Join(dir, "xdg-config")
@@ -250,24 +334,20 @@ func newAgentSession(ctx context.Context, agent *Agent, id acp.SessionId, cwd st
 	env := composeEnv(agent.options.Env, meta.options.Env, managed)
 	operationEnv := composeEnv(agent.options.Env, operationSessionEnv(meta.options.Env), managed)
 
-	session := &agentSession{
-		agent:                 agent,
-		id:                    id,
-		cwd:                   cwd,
-		mode:                  mode,
-		createdUnix:           now,
-		updatedUnix:           now,
-		additionalDirectories: append([]string(nil), additionalDirs...),
-		mcpConfigJSON:         mcpConfigJSON,
-		env:                   env,
-		operationEnv:          operationEnv,
-		rawEvents:             meta.rawEvent,
-		settingsDir:           dir,
-		settingsFile:          settingsFile,
-		scratchRootRelease:    scratchRelease,
-		turn:                  make(chan struct{}, 1),
-	}
-	keepScratch = true
+	session.cwd = cwd
+	session.mode = mode
+	session.createdUnix = now
+	session.updatedUnix = now
+
+	session.additionalDirectories = append([]string(nil), additionalDirs...)
+	session.mcpConfigJSON = mcpConfigJSON
+	session.env = env
+	session.operationEnv = operationEnv
+	session.rawEvents = meta.rawEvent
+	session.settingsFile = settingsFile
+	agent.retainCleanupOwner(id, session, agentCleanupPrepared)
+
+	constructed = true
 
 	return session, nil
 }
@@ -336,8 +416,6 @@ func (s *agentSession) interrupt(ctx context.Context) error {
 }
 
 func (s *agentSession) interruptState(ctx context.Context, state *promptTurnState) error {
-	_ = ctx
-
 	if state == nil {
 		return nil
 	}
@@ -348,8 +426,10 @@ func (s *agentSession) interruptState(ctx context.Context, state *promptTurnStat
 	}
 
 	timeout := s.agent.options.runtime.nativeCancelTimeout
+	interruptCtx := context.WithoutCancel(ctx)
+	interruptCtx = withCallbackProvenance(interruptCtx, s.agent, state)
 
-	cancelCtx, cancel := context.WithTimeout(context.Background(), timeout+s.agent.options.runtime.nativeCloseTurnWait)
+	cancelCtx, cancel := context.WithTimeout(interruptCtx, timeout+s.agent.options.runtime.nativeCloseTurnWait)
 	defer cancel()
 
 	return turn.Interrupt(cancelCtx, timeout)
@@ -366,10 +446,10 @@ func (s *agentSession) admitPrompt(state *promptTurnState) error {
 
 	s.mu.Lock()
 	closed := s.closed
+	s.mu.Unlock()
 	// A session fenced for delete keeps nothing it writes, so a turn admitted
 	// here would stream frames its own commit is forbidden to take.
-	fenced := s.persistForbidden
-	s.mu.Unlock()
+	fenced := s.persistenceForbidden()
 
 	if closed || fenced {
 		return errSessionClosed
@@ -392,6 +472,18 @@ func (s *agentSession) fenceAdmission() *promptTurnState {
 	s.mu.Unlock()
 
 	return s.activePrompt
+}
+
+// rollbackDeleteAdmission reopens an active wrapper only after a delete failed
+// before its tombstone landed. The agent's per-ID flight still owns the wrapper
+// while this runs, so no close or second delete can race the rollback.
+func (s *agentSession) rollbackDeleteAdmission() {
+	s.cancelMu.Lock()
+	defer s.cancelMu.Unlock()
+
+	s.mu.Lock()
+	s.closed = false
+	s.mu.Unlock()
 }
 
 func (s *agentSession) activePromptState() *promptTurnState {
@@ -443,27 +535,52 @@ func (s *agentSession) settleClose(ctx context.Context) closeSettlement {
 	}
 
 	err := s.interruptState(context.Background(), state)
+	completion := s.retainedPromptSettlement()
 
-	boundaryErr := s.scratchContainmentError()
 	if state != nil {
 		waitCtx, cancelWait := context.WithTimeout(
 			context.WithoutCancel(ctx),
 			s.agent.options.runtime.nativeCancelTimeout+2*s.agent.options.runtime.nativeCloseTurnWait,
 		)
-		completionErr := state.awaitCompletion(waitCtx)
+		completion = state.awaitSettlement(waitCtx)
 
 		cancelWait()
-
-		s.recordScratchContainment(completionErr)
-		err = errors.Join(err, completionErr)
-		// The boundary is re-read after the wait, not before it: a prompt that
-		// lost containment records it while this close is already waiting, and a
-		// close judging the session on the reading it took first would remove
-		// scratch state a surviving tree still runs against.
-		boundaryErr = errors.Join(s.scratchContainmentError(), completionErr)
 	}
 
+	s.recordScratchContainment(completion.containmentErr)
+
+	err = errors.Join(err, completion.containmentErr)
+	if completion.deliveryErr != nil && !s.hasPendingTerminal() {
+		err = errors.Join(err, completion.deliveryErr)
+	}
+	// The boundary is re-read after the wait, not before it: a prompt that lost
+	// containment records it while this close is already waiting, and a close
+	// judging the session on the reading it took first would remove scratch state
+	// a surviving tree still runs against.
+	boundaryErr := errors.Join(s.scratchContainmentError(), completion.containmentErr)
+
 	return closeSettlement{runtimeErr: err, boundaryErr: boundaryErr}
+}
+
+func (s *agentSession) settleCloseRung(ctx context.Context) closeSettlement {
+	s.mu.Lock()
+	if s.closeBoundaryDone {
+		settlement := s.closeBoundary
+		s.mu.Unlock()
+
+		return settlement
+	}
+	s.mu.Unlock()
+
+	settlement := s.settleClose(ctx)
+	if settlement.runtimeErr == nil && amp.ProcessContainmentComplete(settlement.boundaryErr) {
+		s.mu.Lock()
+		s.closeBoundaryDone = true
+		s.closeBoundary = settlement
+		s.mu.Unlock()
+	}
+
+	return settlement
 }
 
 // commitOnClose is the close ladder's durable rung. A settlement whose Replace
@@ -483,17 +600,51 @@ func (s *agentSession) commitOnClose(ctx context.Context) error {
 	)
 	defer cancelCommit()
 
-	return s.ensureMirrorSynced(commitCtx)
+	return s.ensureMirrorSyncedForClose(commitCtx)
+}
+
+func (s *agentSession) commitCloseRung(ctx context.Context) error {
+	s.mu.Lock()
+	done := s.closeCommitDone
+	s.mu.Unlock()
+
+	if done {
+		return nil
+	}
+
+	if err := s.commitOnClose(ctx); err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	s.closeCommitDone = true
+	s.promptSettlement.commitErr = nil
+	s.mu.Unlock()
+
+	return nil
 }
 
 // Close settles the session and removes its scratch state. It carries no durable
 // rung, because every caller of it is a path where nothing durable is owed: a
 // session whose admission was refused never wrote a row, and a delete that found
 // no stored row is fencing writes rather than making them.
-func (s *agentSession) Close(ctx context.Context) error {
-	settlement := s.settleClose(ctx)
+func (s *agentSession) Close(ctx context.Context) (err error) {
+	ctx, flight, err := s.beginTeardown(ctx)
+	if err != nil {
+		return err
+	}
+	defer s.finishTeardownOnReturn(flight)
 
-	return finalizeSessionScratch(settlement.runtimeErr, settlement.boundaryErr, s.settingsDir, s.scratchRootRelease)
+	settlement := s.settleCloseRung(ctx)
+	if fenceErr := s.fencePersistenceForClose(ctx); fenceErr != nil {
+		return errors.Join(settlement.runtimeErr, fenceErr)
+	}
+
+	if terminalErr := s.deliverPendingTerminal(ctx); terminalErr != nil {
+		return errors.Join(settlement.runtimeErr, terminalErr)
+	}
+
+	return s.finalizeScratch(settlement.runtimeErr, settlement.boundaryErr)
 }
 
 // closeAtShutdown is the ladder embedded shutdown runs. It carries the same
@@ -501,30 +652,76 @@ func (s *agentSession) Close(ctx context.Context) error {
 // a commit a wire close would have made makes it, rather than dropping the
 // session's retained frames with the wrapper.
 //
-// The rung is fail-closed on the commit and on nothing else. Shutdown is the last
-// word on this session: no later close exists to release what this one holds, so
-// the scratch bookkeeping runs on every path and the commit's failure is joined
-// to whatever the teardown already found. Reporting a failure and leaking the
-// settings directory that reported it would answer a durable defect with a
-// resource one.
-func (s *agentSession) closeAtShutdown(ctx context.Context) error {
-	settlement := s.settleClose(ctx)
+// Scratch bookkeeping runs even when the commit fails. Agent.Close is the last
+// owner: it reports any rung it cannot complete and then releases every local
+// ownership path rather than depending on a later shutdown call.
+func (s *agentSession) closeAtShutdown(ctx context.Context) (err error) {
+	ctx, flight, err := s.beginTeardown(ctx)
+	if err != nil {
+		return err
+	}
+	defer s.finishTeardownOnReturn(flight)
+
+	settlement := s.settleCloseRung(ctx)
+	if fenceErr := s.fencePersistenceForClose(ctx); fenceErr != nil {
+		return errors.Join(settlement.runtimeErr, fenceErr)
+	}
 
 	// Same order a prompt and a wire close settle in: the containment boundary is
 	// proven before anything durable is written, so a shutdown that ends on an
 	// unproven boundary commits nothing.
 	var commitErr error
 	if amp.ProcessContainmentComplete(settlement.boundaryErr) {
-		commitErr = s.commitOnClose(ctx)
+		commitErr = s.commitCloseRung(ctx)
 	}
 
-	return errors.Join(
-		finalizeSessionScratch(settlement.runtimeErr, settlement.boundaryErr, s.settingsDir, s.scratchRootRelease),
+	var terminalErr error
+	if commitErr == nil && amp.ProcessContainmentComplete(settlement.boundaryErr) {
+		terminalErr = s.deliverPendingTerminal(ctx)
+	}
+
+	closeErr := errors.Join(
+		s.finalizeScratch(settlement.runtimeErr, settlement.boundaryErr),
 		commitErr,
+		terminalErr,
 	)
+
+	return closeErr
 }
 
-func (s *agentSession) Delete(ctx context.Context) error {
+func (s *agentSession) shutdownComplete() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.closeBoundaryDone && s.closeCommitDone && s.scratchDone && s.pendingTerminal == nil
+}
+
+func (s *agentSession) Delete(ctx context.Context) (err error) {
+	ctx, flight, err := s.beginTeardown(ctx)
+	if err != nil {
+		return err
+	}
+	defer s.finishTeardownOnReturn(flight)
+
+	s.mu.Lock()
+	done := s.deleteDone
+	s.mu.Unlock()
+
+	if done {
+		return nil
+	}
+
+	err = s.deleteOwned(ctx)
+	if err == nil {
+		s.mu.Lock()
+		s.deleteDone = true
+		s.mu.Unlock()
+	}
+
+	return err
+}
+
+func (s *agentSession) deleteOwned(ctx context.Context) error {
 	state := s.fenceAdmission()
 
 	s.closeProviderAuth()
@@ -542,46 +739,252 @@ func (s *agentSession) Delete(ctx context.Context) error {
 			context.WithoutCancel(ctx),
 			s.agent.options.runtime.nativeCancelTimeout+2*s.agent.options.runtime.nativeCloseTurnWait,
 		)
-		completionErr := state.awaitCompletion(waitCtx)
+		completion := state.awaitSettlement(waitCtx)
 
 		cancelWait()
 
-		s.recordScratchContainment(completionErr)
-		interruptErr = errors.Join(interruptErr, completionErr)
+		s.recordScratchContainment(completion.containmentErr)
+		interruptErr = errors.Join(interruptErr, completion.containmentErr, completion.deliveryErr)
 		// Re-read after the wait for the same reason a close does: the boundary a
 		// settling prompt lost is recorded while this delete is already waiting.
-		boundaryErr = errors.Join(s.scratchContainmentError(), completionErr)
+		boundaryErr = errors.Join(s.scratchContainmentError(), completion.containmentErr)
 	}
 
 	if !amp.ProcessContainmentComplete(boundaryErr) {
-		return finalizeSessionScratch(interruptErr, boundaryErr, s.settingsDir, s.scratchRootRelease)
+		return errors.Join(interruptErr, boundaryErr)
 	}
 
-	// A session whose first prompt never ran has no server-side thread, so
-	// there is nothing native to delete.
-	nativeID := s.nativeSessionID()
-	if nativeID == "" {
-		return finalizeSessionScratch(interruptErr, boundaryErr, s.settingsDir, s.scratchRootRelease)
+	if !s.dischargeDeletedUnsyncedTerminal() {
+		if terminalErr := s.deliverPendingTerminal(ctx); terminalErr != nil {
+			return errors.Join(interruptErr, terminalErr)
+		}
 	}
 
-	deleteErr := s.client().DeleteThread(ctx, nativeID)
-	s.recordScratchContainment(deleteErr)
+	s.mu.Lock()
+	nativeDeleteDone := s.nativeDeleteDone
+	nativeDeleteErr := s.nativeDeleteErr
+	s.mu.Unlock()
 
-	return finalizeSessionScratch(errors.Join(interruptErr, deleteErr), errors.Join(boundaryErr, deleteErr), s.settingsDir, s.scratchRootRelease)
+	if nativeDeleteErr != nil {
+		return errors.Join(interruptErr, nativeDeleteErr)
+	}
+
+	if !nativeDeleteDone {
+		// A session whose first prompt never ran has no server-side thread, so
+		// there is nothing native to delete.
+		nativeID := s.nativeSessionID()
+		if nativeID != "" {
+			deleteErr := s.client().DeleteThread(ctx, nativeID)
+			s.recordScratchContainment(deleteErr)
+
+			if deleteErr != nil {
+				return errors.Join(interruptErr, deleteErr)
+			}
+		}
+
+		s.mu.Lock()
+		s.nativeDeleteDone = true
+		s.mu.Unlock()
+	}
+
+	// A terminal-delivery or native-interrupt failure keeps the exact wrapper
+	// internally owned even when the server-side thread delete succeeded. A later
+	// retry re-evaluates the boundary and releases these resources once, without
+	// issuing a second native delete.
+	if interruptErr != nil {
+		return interruptErr
+	}
+
+	return s.finalizeScratch(nil, boundaryErr)
 }
 
-func finalizeSessionScratch(runtimeErr, boundaryErr error, settingsDir string, scratchRelease func()) error {
+// deleteAtShutdown gives a tombstoned wrapper its final cleanup attempt. Native
+// deletion may be retried while the isolated operation state is intact. If that
+// retry still fails, shutdown reports the permanent classified failure and
+// releases the local state; no later shutdown can safely issue the command from
+// a home it already released.
+func (s *agentSession) deleteAtShutdown(ctx context.Context) error {
+	deleteErr := s.Delete(ctx)
+	if deleteErr == nil {
+		return nil
+	}
+
+	_, flight, flightErr := s.beginTeardown(ctx)
+	if flightErr != nil {
+		return errors.Join(deleteErr, flightErr)
+	}
+	defer s.finishTeardownOnReturn(flight)
+
+	s.mu.Lock()
+	done := s.deleteDone
+	s.mu.Unlock()
+
+	if done {
+		return deleteErr
+	}
+
+	boundaryErr := s.scratchContainmentError()
+	if !amp.ProcessContainmentComplete(boundaryErr) {
+		return errors.Join(deleteErr, boundaryErr)
+	}
+
+	s.mu.Lock()
+	if !s.nativeDeleteDone && s.nativeID != "" && s.nativeDeleteErr == nil {
+		s.nativeDeleteErr = errors.Join(errNativeDeleteOpen, deleteErr)
+	}
+
+	permanentErr := s.nativeDeleteErr
+	s.mu.Unlock()
+
+	cleanupErr := s.finalizeScratch(nil, boundaryErr)
+	if cleanupErr == nil {
+		s.mu.Lock()
+		if s.nativeDeleteDone {
+			s.deleteDone = true
+		}
+		s.mu.Unlock()
+	}
+
+	return errors.Join(deleteErr, permanentErr, cleanupErr)
+}
+
+func (s *agentSession) deleteComplete() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.deleteDone
+}
+
+// beginTeardown serializes exact-wrapper teardown without carrying teardownMu
+// across native calls, store callbacks, filesystem hooks, or other host code.
+func (s *agentSession) beginTeardown(ctx context.Context) (context.Context, *sessionTeardownFlight, error) {
+	for {
+		s.teardownMu.Lock()
+		if s.teardownFlight == nil {
+			if s.contextOwnsTeardownDependency(ctx, nil) {
+				s.teardownMu.Unlock()
+
+				return nil, nil, closedCallbackRefusal()
+			}
+
+			s.teardownGeneration++
+			flight := &sessionTeardownFlight{generation: s.teardownGeneration, done: make(chan struct{})}
+			s.teardownFlight = flight
+			s.teardownMu.Unlock()
+
+			flightCtx := withCallbackProvenance(ctx, s.agent, flight)
+
+			return withCallbackSessionScope(flightCtx, s.agent, s.id), flight, nil
+		}
+
+		existing := s.teardownFlight
+		wait := existing.done
+		s.teardownMu.Unlock()
+
+		if s.contextOwnsTeardownDependency(ctx, existing) {
+			return nil, nil, closedCallbackRefusal()
+		}
+
+		s.teardownMu.Lock()
+		existing.waiters++
+		s.teardownMu.Unlock()
+
+		select {
+		case <-wait:
+			if existing.panicErr != nil {
+				return nil, nil, existing.panicErr
+			}
+		case <-ctx.Done():
+			return nil, nil, ctx.Err()
+		}
+	}
+}
+
+func (s *agentSession) contextOwnsTeardownDependency(ctx context.Context, flight *sessionTeardownFlight) bool {
+	if flight != nil && contextOwnsCallbackGeneration(ctx, s.agent, flight) {
+		return true
+	}
+
+	s.persistMu.Lock()
+	persistence := s.persistFlight
+	s.persistMu.Unlock()
+
+	if persistence != nil && contextOwnsCallbackGeneration(ctx, s.agent, persistence) {
+		return true
+	}
+
+	s.cancelMu.Lock()
+	prompt := s.activePrompt
+	s.cancelMu.Unlock()
+
+	return prompt != nil && contextOwnsCallbackGeneration(ctx, s.agent, prompt)
+}
+
+func (s *agentSession) finishTeardown(flight *sessionTeardownFlight) {
+	s.teardownMu.Lock()
+	if s.teardownFlight == flight && s.teardownFlight.generation == flight.generation {
+		s.teardownFlight = nil
+
+		close(flight.done)
+	}
+	s.teardownMu.Unlock()
+}
+
+func (s *agentSession) finishTeardownWithPanic(flight *sessionTeardownFlight, panicErr error) {
+	if flight == nil {
+		return
+	}
+
+	s.teardownMu.Lock()
+	if s.teardownFlight == flight && s.teardownFlight.generation == flight.generation {
+		flight.panicErr = panicErr
+		s.teardownFlight = nil
+
+		close(flight.done)
+	}
+	s.teardownMu.Unlock()
+}
+
+func (s *agentSession) finishTeardownOnReturn(flight *sessionTeardownFlight) {
+	if recovered := recover(); recovered != nil {
+		s.finishTeardownWithPanic(flight, closedCallbackRefusal())
+
+		panic(recovered)
+	}
+
+	s.finishTeardown(flight)
+}
+
+// finalizeScratch runs only for the current teardown flight. It is idempotent
+// across retries while leaving a failed removal attached to the exact wrapper.
+func (s *agentSession) finalizeScratch(runtimeErr, boundaryErr error) error {
 	if !amp.ProcessContainmentComplete(boundaryErr) {
 		return errors.Join(runtimeErr, boundaryErr)
 	}
 
-	var removeErr error
-	if settingsDir != "" {
-		removeErr = removeSessionDir(settingsDir)
+	s.mu.Lock()
+	done := s.scratchDone
+	s.mu.Unlock()
+
+	if done {
+		return runtimeErr
 	}
 
-	if removeErr == nil && scratchRelease != nil {
-		scratchRelease()
+	var removeErr error
+	if s.settingsDir != "" {
+		removeErr = removeSessionDir(s.settingsDir)
+	}
+
+	if removeErr == nil {
+		s.mu.Lock()
+		s.scratchDone = true
+		release := s.scratchRootRelease
+		s.scratchRootRelease = nil
+		s.mu.Unlock()
+
+		if release != nil {
+			release()
+		}
 	}
 
 	return errors.Join(runtimeErr, removeErr)
@@ -621,7 +1024,10 @@ func (s *agentSession) verifyContinuable(ctx context.Context) error {
 	probeCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	_, exportErr := s.agent.options.runtime.exportThread(probeCtx, s.client(), nativeID)
+	probeCtx = withExactCallbackGeneration(probeCtx, "native:export_thread")
+	_, exportErr := invokeOwnedPair(func() (json.RawMessage, error) {
+		return s.agent.options.runtime.exportThread(probeCtx, s.client(), nativeID)
+	})
 	s.recordScratchContainment(exportErr)
 
 	if exportErr != nil {
@@ -657,6 +1063,14 @@ func (s *agentSession) ready() error {
 
 	if s.scratchContainmentErr != nil {
 		return s.scratchContainmentErr
+	}
+
+	if s.pendingTerminal != nil {
+		return acp.NewInternalError(map[string]any{jsonFieldError: "terminal lifecycle delivery pending"})
+	}
+
+	if err := errors.Join(s.promptSettlement.containmentErr, s.promptSettlement.deliveryErr); err != nil {
+		return err
 	}
 
 	if s.closed {
@@ -697,38 +1111,79 @@ func (s *agentSession) nativeSessionID() string {
 // (mirror-unsynced) and re-committed on the next attempt so a store outage after
 // a native turn success can never silently drop the turn.
 func (s *agentSession) persistAfterTurn(ctx context.Context, transcript []SessionStoreEntry) error {
-	s.persistMu.Lock()
-	defer s.persistMu.Unlock()
+	return s.persistAfterTurnKind(ctx, transcript, sessionPersistenceOrdinary)
+}
 
-	now := time.Now().UnixMilli()
+func (s *agentSession) persistAfterTurnKind(ctx context.Context, transcript []SessionStoreEntry, kind sessionPersistenceKind) error {
+	persistCtx, flight, err := s.beginPersistence(ctx, kind)
+	if err != nil {
+		if errors.Is(err, errPersistenceFenced) {
+			s.mu.Lock()
+			pending := append(cloneEntries(s.unsyncedFrames), cloneEntries(transcript)...)
+			s.mu.Unlock()
+			s.retainUnsynced(pending)
+		}
+
+		return err
+	}
+	defer s.finishPersistence(flight)
+
+	return s.persistOwned(persistCtx, flight, transcript)
+}
+
+func (s *agentSession) persistOwned(ctx context.Context, flight *sessionPersistenceFlight, transcript []SessionStoreEntry) error {
+	if !s.persistenceFlightCurrent(flight) {
+		return acp.NewInternalError(map[string]any{jsonFieldError: persistenceOwnershipChanged})
+	}
 
 	s.mu.Lock()
-	fenced := s.persistForbidden
-	pending := append(cloneEntries(s.unsyncedFrames), cloneEntries(transcript)...)
+	commit := s.persistenceCommit
 
-	if !fenced {
-		s.updatedUnix = now
+	pending := append(cloneEntries(s.unsyncedFrames), cloneEntries(transcript)...)
+	if commit != nil {
+		if len(transcript) != 0 {
+			commit.successor = append(commit.successor, cloneEntries(transcript)...)
+		}
+
+		pending = append(cloneEntries(commit.pending), cloneEntries(commit.successor)...)
 	}
 	s.mu.Unlock()
 
-	// A fenced session is one whose delete is in flight: nothing it still holds
-	// may be written back, because Replace clears the tombstone of every key it
-	// lists. The frames are retained rather than dropped — a delete whose
-	// tombstone never lands hands the host back a live session, and that session's
-	// mirror must still say the frames it streamed were never committed.
-	if fenced {
-		s.retainUnsynced(pending)
-
-		return nil
-	}
+	committed := false
+	defer func() {
+		if !committed {
+			s.retainUnsynced(pending)
+		}
+	}()
 
 	if s.agent.store == nil {
 		s.mu.Lock()
 		s.transcriptFrames += len(pending)
 		s.unsyncedFrames = nil
+		s.mirrorUnsynced = false
 		s.mu.Unlock()
 
+		committed = true
+
 		return nil
+	}
+
+	if commit != nil {
+		err := s.replacePersistenceCommit(ctx, flight, commit)
+		if err != nil {
+			return err
+		}
+
+		if len(commit.successor) == 0 {
+			committed = true
+
+			return nil
+		}
+
+		// The exact earlier generation is now durable. The current settlement
+		// owns a distinct successor generation containing only its new frames.
+		pending = cloneEntries(commit.successor)
+		commit = nil
 	}
 
 	loadCtx, cancelLoad := s.agent.sessionStoreLoadContext(ctx)
@@ -760,6 +1215,10 @@ func (s *agentSession) persistAfterTurn(ctx context.Context, transcript []Sessio
 		fullTranscript = append(cloneEntries(fullTranscript), pending...)
 	}
 
+	s.mu.Lock()
+	s.updatedUnix = time.Now().UnixMilli()
+	s.mu.Unlock()
+
 	main, _ := json.Marshal(s.manifest())
 
 	artifactReplacements, err := s.imageArtifactReplacements(ctx)
@@ -781,26 +1240,65 @@ func (s *agentSession) persistAfterTurn(ctx context.Context, transcript []Sessio
 		},
 	)
 	replacements = append(replacements, artifactReplacements...)
+	commit = &sessionPersistenceCommit{
+		pending:      cloneEntries(pending),
+		replacements: cloneSessionStoreReplacements(replacements),
+		targetFrames: len(fullTranscript),
+	}
 
+	s.mu.Lock()
+	s.persistenceCommit = commit
+	s.mu.Unlock()
+
+	err = s.replacePersistenceCommit(ctx, flight, commit)
+	committed = err == nil
+
+	return err
+}
+
+func (s *agentSession) replacePersistenceCommit(ctx context.Context, flight *sessionPersistenceFlight, commit *sessionPersistenceCommit) error {
 	replaceCtx, cancelReplace := s.agent.sessionStoreWriteContext(ctx)
 	defer cancelReplace()
+
+	if beforeReplace := s.agent.options.runtime.beforePersistenceReplace; beforeReplace != nil {
+		beforeReplace()
+	}
 
 	if err := s.agent.store.Replace(
 		replaceCtx,
 		SessionKey{SessionID: string(s.id), Subpath: SessionStoreMainSubpath},
-		replacements,
+		cloneSessionStoreReplacements(commit.replacements),
 	); err != nil {
-		s.retainUnsynced(pending)
-
 		return err
 	}
 
+	if !s.persistenceFlightCurrent(flight) {
+		return acp.NewInternalError(map[string]any{jsonFieldError: persistenceOwnershipChanged})
+	}
+
 	s.mu.Lock()
+	if s.persistenceCommit != commit {
+		s.mu.Unlock()
+
+		return acp.NewInternalError(map[string]any{jsonFieldError: persistenceOwnershipChanged})
+	}
+
+	s.persistenceCommit = nil
 	s.unsyncedFrames = nil
-	s.transcriptFrames = len(fullTranscript)
+	s.mirrorUnsynced = false
+	s.transcriptFrames = commit.targetFrames
 	s.mu.Unlock()
 
 	return nil
+}
+
+func cloneSessionStoreReplacements(replacements []SessionStoreReplacement) []SessionStoreReplacement {
+	cloned := make([]SessionStoreReplacement, len(replacements))
+	for index, replacement := range replacements {
+		cloned[index] = SessionStoreReplacement{Key: replacement.Key, Entries: cloneEntries(replacement.Entries)}
+	}
+
+	return cloned
 }
 
 func (s *agentSession) transcriptFrameCount() int {
@@ -835,28 +1333,147 @@ func (s *agentSession) vacancyProven() bool {
 	return !s.vacancyUnproven
 }
 
-// fencePersistence stops this session's durable writes and waits out the one
-// already in flight. A delete tombstones the row, and Replace clears the
-// tombstone of every key it lists, so a commit that landed after the tombstone
-// would durably resurrect a session the host was told is gone. Taking the same
-// lock the commit holds is what makes the tombstone the last write to the row.
-func (s *agentSession) fencePersistence() {
-	s.persistMu.Lock()
-	defer s.persistMu.Unlock()
+func (s *agentSession) fencePersistenceForClose(ctx context.Context) error {
+	_, err := s.installPersistenceFence(ctx, sessionPersistenceClosing)
 
-	s.mu.Lock()
-	s.persistForbidden = true
-	s.mu.Unlock()
+	return err
+}
+
+func (s *agentSession) fencePersistenceForDelete(ctx context.Context) error {
+	_, err := s.installPersistenceFence(ctx, sessionPersistenceDeleting)
+
+	return err
+}
+
+func (s *agentSession) fencePersistenceForDeleteRollback(ctx context.Context) (sessionPersistenceFence, error) {
+	return s.installPersistenceFence(ctx, sessionPersistenceDeleting)
+}
+
+func (s *agentSession) fencePersistence() {
+	_ = s.fencePersistenceForDelete(context.Background())
+}
+
+// fencePersistence publishes an admission fence and joins the exact ordinary
+// write generation that was already admitted. A callback carrying that same
+// generation is refused before publication, so it can never wait on itself.
+func (s *agentSession) installPersistenceFence(ctx context.Context, state sessionPersistenceState) (sessionPersistenceFence, error) {
+	s.persistMu.Lock()
+
+	flight := s.persistFlight
+	if flight != nil && contextOwnsCallbackGeneration(ctx, s.agent, flight) {
+		s.persistMu.Unlock()
+
+		return sessionPersistenceFence{}, closedCallbackRefusal()
+	}
+
+	fence := sessionPersistenceFence{previous: s.persistState, installed: state}
+	if state > s.persistState {
+		s.persistState = state
+		s.persistFenceGen++
+		fence.generation = s.persistFenceGen
+		fence.changed = true
+	}
+	s.persistMu.Unlock()
+
+	if flight == nil {
+		return fence, nil
+	}
+
+	select {
+	case <-flight.done:
+		return fence, nil
+	case <-ctx.Done():
+		return fence, ctx.Err()
+	}
+}
+
+func (s *agentSession) rollbackPersistenceFence(fence sessionPersistenceFence) {
+	if !fence.changed {
+		return
+	}
+
+	s.persistMu.Lock()
+	if s.persistState == fence.installed && s.persistFenceGen == fence.generation {
+		s.persistState = fence.previous
+		s.persistFenceGen++
+	}
+	s.persistMu.Unlock()
 }
 
 // resumePersistence lifts the fence. A delete whose tombstone never landed left
 // the session where it was, and a session the host still owns commits its next
 // turn.
 func (s *agentSession) resumePersistence() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.persistMu.Lock()
+	defer s.persistMu.Unlock()
 
-	s.persistForbidden = false
+	if s.persistState == sessionPersistenceDeleting {
+		s.persistState = sessionPersistenceOpen
+		s.persistFenceGen++
+	}
+}
+
+func (s *agentSession) persistenceForbidden() bool {
+	s.persistMu.Lock()
+	defer s.persistMu.Unlock()
+
+	return s.persistState != sessionPersistenceOpen
+}
+
+// beginPersistence grants one exact write generation. The mutex protects only
+// publication and validation; SessionStore callbacks run after it is released.
+func (s *agentSession) beginPersistence(ctx context.Context, kind sessionPersistenceKind) (context.Context, *sessionPersistenceFlight, error) {
+	for {
+		s.persistMu.Lock()
+		if s.persistState == sessionPersistenceDeleting ||
+			(s.persistState == sessionPersistenceClosing && kind != sessionPersistenceCloseRetry) {
+			s.persistMu.Unlock()
+
+			return nil, nil, persistenceFencedError()
+		}
+
+		if s.persistFlight == nil {
+			s.persistGeneration++
+			flight := &sessionPersistenceFlight{generation: s.persistGeneration, kind: kind, done: make(chan struct{})}
+			s.persistFlight = flight
+			s.persistMu.Unlock()
+
+			flightCtx := withCallbackProvenance(ctx, s.agent, flight)
+
+			return withCallbackSessionScope(flightCtx, s.agent, s.id), flight, nil
+		}
+
+		existing := s.persistFlight
+		wait := existing.done
+		s.persistMu.Unlock()
+
+		if contextOwnsCallbackGeneration(ctx, s.agent, existing) {
+			return nil, nil, closedCallbackRefusal()
+		}
+
+		select {
+		case <-wait:
+		case <-ctx.Done():
+			return nil, nil, ctx.Err()
+		}
+	}
+}
+
+func (s *agentSession) finishPersistence(flight *sessionPersistenceFlight) {
+	s.persistMu.Lock()
+	if s.persistFlight == flight && s.persistFlight.generation == flight.generation {
+		s.persistFlight = nil
+
+		close(flight.done)
+	}
+	s.persistMu.Unlock()
+}
+
+func (s *agentSession) persistenceFlightCurrent(flight *sessionPersistenceFlight) bool {
+	s.persistMu.Lock()
+	defer s.persistMu.Unlock()
+
+	return flight != nil && s.persistFlight == flight && s.persistFlight.generation == flight.generation
 }
 
 // retainUnsynced marks the mirror as unsynced by keeping the exact frames that
@@ -864,6 +1481,7 @@ func (s *agentSession) resumePersistence() {
 func (s *agentSession) retainUnsynced(pending []SessionStoreEntry) {
 	s.mu.Lock()
 	s.unsyncedFrames = pending
+	s.mirrorUnsynced = true
 	s.mu.Unlock()
 }
 
@@ -872,16 +1490,27 @@ func (s *agentSession) retainUnsynced(pending []SessionStoreEntry) {
 // retries the durable Replace of the exact frames on each call and only unblocks
 // once that retry succeeds (X2).
 func (s *agentSession) ensureMirrorSynced(ctx context.Context) error {
+	return s.ensureMirrorSyncedKind(ctx, sessionPersistenceOrdinary)
+}
+
+func (s *agentSession) ensureMirrorSyncedForClose(ctx context.Context) error {
+	return s.ensureMirrorSyncedKind(ctx, sessionPersistenceCloseRetry)
+}
+
+func (s *agentSession) ensureMirrorSyncedKind(ctx context.Context, kind sessionPersistenceKind) error {
 	s.mu.Lock()
-	unsynced := len(s.unsyncedFrames) > 0
+	unsynced := s.mirrorUnsynced
 	s.mu.Unlock()
 
 	if !unsynced {
 		return nil
 	}
 
-	if err := s.persistAfterTurn(ctx, nil); err != nil {
-		return acp.NewInternalError(map[string]any{jsonFieldError: "mirror_unsynced", keyDetail: err.Error()})
+	if err := s.persistAfterTurnKind(ctx, nil, kind); err != nil {
+		return errors.Join(
+			acp.NewInternalError(map[string]any{jsonFieldError: "mirror_unsynced", keyDetail: err.Error()}),
+			err,
+		)
 	}
 
 	return nil

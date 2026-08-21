@@ -632,8 +632,9 @@ func TestManualAPIKeyRestartProofAndDisconnectFence(t *testing.T) {
 		t.Fatalf("restart session: %v", err)
 	}
 	restartedAgent.mu.Lock()
-	restartedAgent.sessions[restartedSession.id] = restartedSession
+	restartedAgent.activateSessionLocked(restartedSession)
 	restartedAgent.mu.Unlock()
+	restartedAgent.observe.AddActiveSession(t.Context(), 1)
 	restarted := &authFixture{t: t, agent: restartedAgent, broker: restartedAgent.providerAuth, session: restartedSession, root: first.root}
 
 	var inventory authInventoryResult

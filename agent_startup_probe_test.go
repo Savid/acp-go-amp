@@ -1,8 +1,10 @@
 package ampacp
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -187,6 +189,15 @@ func TestStartupProbeResidenceCleanupRequiresContainmentProof(t *testing.T) {
 	require.NoError(t, readErr)
 	require.Len(t, entries, 1)
 	require.Contains(t, entries[0].Name(), "acp-go-amp-startup-")
+	closeErr := agent.Close()
+	require.ErrorIs(t, closeErr, nativeamp.ErrProcessContainmentIncomplete)
+	require.ErrorIs(t, agent.Close(), nativeamp.ErrProcessContainmentIncomplete, "last-word shutdown memoizes its exact result")
+	require.Equal(t, 1, releases)
+	agent.mu.Lock()
+	require.Empty(t, agent.cleanupResidences, "last-word shutdown retains no callable ownership path")
+	require.Empty(t, agent.cleanupOwners)
+	require.Empty(t, agent.sessions)
+	agent.mu.Unlock()
 }
 
 func TestStartupProbeResidenceMaterializationAndRemovalFailures(t *testing.T) {
@@ -208,24 +219,48 @@ func TestStartupProbeResidenceMaterializationAndRemovalFailures(t *testing.T) {
 		original := mkdirTemp
 		t.Cleanup(func() { mkdirTemp = original })
 		mkdirTemp = func(string, string) (string, error) { return "", errors.New("mkdir temp") }
-		err := newTestAgent(WithScratchDir(testScratchDir(t))).runStartupWithProbe(t.Context(), t.TempDir(), nil, func(context.Context, *nativeamp.Client) (string, error) { return testHarnessPath(t), nil })
+		releases := 0
+		agent := newTestAgent(WithScratchDir(testScratchDir(t)), WithRuntimeResourceHooks(RuntimeResourceHooks{
+			ReserveScratchRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
+				return func() { releases++ }, nil
+			},
+		}))
+		err := agent.runStartupWithProbe(t.Context(), t.TempDir(), nil, func(context.Context, *nativeamp.Client) (string, error) { return testHarnessPath(t), nil })
 		require.ErrorContains(t, err, "create Amp startup probe residence")
+		require.Equal(t, 1, releases)
+		require.Empty(t, agent.cleanupResidences)
 	})
 
 	t.Run("mkdir isolated home", func(t *testing.T) {
 		original := mkdirAll
 		t.Cleanup(func() { mkdirAll = original })
 		mkdirAll = func(string, os.FileMode) error { return errors.New("mkdir home") }
-		err := newTestAgent(WithScratchDir(testScratchDir(t))).runStartupWithProbe(t.Context(), t.TempDir(), nil, func(context.Context, *nativeamp.Client) (string, error) { return testHarnessPath(t), nil })
+		releases := 0
+		agent := newTestAgent(WithScratchDir(testScratchDir(t)), WithRuntimeResourceHooks(RuntimeResourceHooks{
+			ReserveScratchRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
+				return func() { releases++ }, nil
+			},
+		}))
+		err := agent.runStartupWithProbe(t.Context(), t.TempDir(), nil, func(context.Context, *nativeamp.Client) (string, error) { return testHarnessPath(t), nil })
 		require.ErrorContains(t, err, "create Amp startup probe isolated home")
+		require.Equal(t, 1, releases)
+		require.Empty(t, agent.cleanupResidences)
 	})
 
 	t.Run("write settings", func(t *testing.T) {
 		original := writeFile
 		t.Cleanup(func() { writeFile = original })
 		writeFile = func(string, []byte, os.FileMode) error { return errors.New("write settings") }
-		err := newTestAgent(WithScratchDir(testScratchDir(t))).runStartupWithProbe(t.Context(), t.TempDir(), nil, func(context.Context, *nativeamp.Client) (string, error) { return testHarnessPath(t), nil })
+		releases := 0
+		agent := newTestAgent(WithScratchDir(testScratchDir(t)), WithRuntimeResourceHooks(RuntimeResourceHooks{
+			ReserveScratchRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
+				return func() { releases++ }, nil
+			},
+		}))
+		err := agent.runStartupWithProbe(t.Context(), t.TempDir(), nil, func(context.Context, *nativeamp.Client) (string, error) { return testHarnessPath(t), nil })
 		require.ErrorContains(t, err, "write Amp startup probe settings")
+		require.Equal(t, 1, releases)
+		require.Empty(t, agent.cleanupResidences)
 	})
 
 	t.Run("write MCP", func(t *testing.T) {
@@ -238,8 +273,16 @@ func TestStartupProbeResidenceMaterializationAndRemovalFailures(t *testing.T) {
 
 			return original(path, data, mode)
 		}
-		err := newTestAgent(WithScratchDir(testScratchDir(t))).runStartupWithProbe(t.Context(), t.TempDir(), nil, func(context.Context, *nativeamp.Client) (string, error) { return testHarnessPath(t), nil })
+		releases := 0
+		agent := newTestAgent(WithScratchDir(testScratchDir(t)), WithRuntimeResourceHooks(RuntimeResourceHooks{
+			ReserveScratchRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
+				return func() { releases++ }, nil
+			},
+		}))
+		err := agent.runStartupWithProbe(t.Context(), t.TempDir(), nil, func(context.Context, *nativeamp.Client) (string, error) { return testHarnessPath(t), nil })
 		require.ErrorContains(t, err, "write Amp startup probe MCP config")
+		require.Equal(t, 1, releases)
+		require.Empty(t, agent.cleanupResidences)
 	})
 
 	t.Run("remove", func(t *testing.T) {
@@ -255,6 +298,24 @@ func TestStartupProbeResidenceMaterializationAndRemovalFailures(t *testing.T) {
 		err := agent.runStartupWithProbe(t.Context(), t.TempDir(), nil, func(context.Context, *nativeamp.Client) (string, error) { return testHarnessPath(t), nil })
 		require.ErrorContains(t, err, "remove residence")
 		require.Zero(t, releases)
+		agent.mu.Lock()
+		require.Len(t, agent.cleanupResidences, 1)
+		var exact *agentCleanupResidence
+		for _, residence := range agent.cleanupResidences {
+			exact = residence
+		}
+		exactRoot := exact.root
+		agent.mu.Unlock()
+		require.NotEmpty(t, exactRoot)
+
+		removeSessionDir = original
+		require.NoError(t, agent.Close())
+		require.Equal(t, 1, releases)
+		_, statErr := os.Stat(exactRoot)
+		require.True(t, os.IsNotExist(statErr))
+		agent.mu.Lock()
+		require.Empty(t, agent.cleanupResidences)
+		agent.mu.Unlock()
 	})
 }
 
@@ -275,4 +336,70 @@ func TestStartupProbeResidenceReservationAndOwnershipFailures(t *testing.T) {
 	)
 	err = isolationAgent.runStartupWithProbe(t.Context(), t.TempDir(), nil, func(context.Context, *nativeamp.Client) (string, error) { return testHarnessPath(t), nil })
 	require.ErrorContains(t, err, "handoff Amp startup probe residence")
+
+	closedAgent := newTestAgent()
+	closedAgent.closed = true
+	_, err = closedAgent.reserveCleanupResidence()
+	require.ErrorContains(t, err, "agent closed")
+
+	staleAgent := newTestAgent()
+	stale, err := staleAgent.reserveCleanupResidence()
+	require.NoError(t, err)
+	staleAgent.clearCleanupResidence(stale)
+	require.NoError(t, stale.finalize())
+}
+
+func TestStartupResidencesRetryDuringNormalOperationAndRemainBounded(t *testing.T) {
+	t.Run("healed cleanup is retried before the next probe", func(t *testing.T) {
+		original := removeSessionDir
+		t.Cleanup(func() { removeSessionDir = original })
+		removeSessionDir = func(string) error { return errors.New("temporary removal refusal") }
+		var releases int
+		agent := newTestAgent(
+			WithScratchDir(testScratchDir(t)),
+			WithRuntimeResourceHooks(RuntimeResourceHooks{ReserveScratchRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
+				return func() { releases++ }, nil
+			}}),
+		)
+		probe := func(context.Context, *nativeamp.Client) (string, error) { return testHarnessPath(t), nil }
+		require.ErrorContains(t, agent.runStartupWithProbe(t.Context(), t.TempDir(), nil, probe), "temporary removal refusal")
+		require.Zero(t, releases)
+		require.Len(t, agent.cleanupResidences, 1)
+
+		removeSessionDir = original
+		require.NoError(t, agent.runStartupWithProbe(t.Context(), t.TempDir(), nil, probe))
+		require.Equal(t, 2, releases)
+		require.Empty(t, agent.cleanupResidences)
+		require.NoError(t, agent.Close())
+	})
+
+	t.Run("incomplete roots quarantine at the configured capacity", func(t *testing.T) {
+		var logs bytes.Buffer
+		secret := "startup-cleanup-secret"
+		var acquisitions int
+		agent := newTestAgent(
+			WithScratchDir(testScratchDir(t)),
+			WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1}),
+			WithLogger(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))),
+			WithRuntimeResourceHooks(RuntimeResourceHooks{ReserveScratchRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
+				acquisitions++
+
+				return func() {}, nil
+			}}),
+		)
+		probe := func(context.Context, *nativeamp.Client) (string, error) {
+			return "", errors.Join(nativeamp.ErrProcessContainmentIncomplete, errors.New(secret))
+		}
+		require.ErrorIs(t, agent.runStartupWithProbe(t.Context(), t.TempDir(), nil, probe), nativeamp.ErrProcessContainmentIncomplete)
+		require.Len(t, agent.cleanupResidences, 1)
+
+		err := agent.runStartupWithProbe(t.Context(), t.TempDir(), nil, probe)
+		require.ErrorContains(t, err, "backpressure")
+		require.Equal(t, 1, acquisitions)
+		require.Len(t, agent.cleanupResidences, 1)
+		require.Contains(t, logs.String(), "containment_incomplete")
+		require.NotContains(t, logs.String(), secret)
+		require.ErrorIs(t, agent.Close(), nativeamp.ErrProcessContainmentIncomplete)
+		require.Empty(t, agent.cleanupResidences)
+	})
 }
