@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+
+	"go.uber.org/goleak"
 )
 
 func TestRecoverAgentGoroutineLogsPanic(t *testing.T) {
@@ -52,4 +54,8 @@ func TestOnNativeGoroutinePanicLogs(t *testing.T) {
 	if !strings.Contains(buf.String(), "native goroutine") || strings.Contains(buf.String(), secret) {
 		t.Fatalf("panic log = %q", buf.String())
 	}
+}
+
+func TestMain(m *testing.M) {
+	goleak.VerifyTestMain(m)
 }
