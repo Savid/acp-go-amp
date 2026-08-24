@@ -1142,6 +1142,12 @@ func TestConcurrentCloseDischargesAHealedSettlementCommitFailure(t *testing.T) {
 		_, err := agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: sessionID})
 		closeErr <- err
 	}()
+	require.Eventually(t, func() bool {
+		agent.mu.Lock()
+		defer agent.mu.Unlock()
+
+		return agent.sessionFlights[sessionID] != nil
+	}, correctionBarrierTimeout, time.Millisecond)
 
 	// The in-flight Replace retains its captured failure, but the close-owned
 	// retry starts after this heal and sees a healthy store.
