@@ -1750,11 +1750,18 @@ func invokeBackgroundSessionAPI(agent *Agent, id acp.SessionId, action string, c
 }
 
 func TestCallbacksDiscardingContextRefuseEveryReentrantSessionAPI(t *testing.T) {
+	t.Setenv("AMP_API_KEY", "ownership-test")
+	path, _ := fakeAgentAmpPath(t, "")
+
 	for _, callback := range []string{"replace", "load", "resume"} {
 		for _, action := range []string{"close", "load", "resume"} {
 			t.Run(callback+"/"+action, func(t *testing.T) {
 				store := &backgroundReentryStore{SessionStore: NewInMemorySessionStore()}
-				agent := newTestAgent(WithSessionStore(store), WithScratchDir(testScratchDir(t)))
+				agent := newTestAgent(
+					WithExecutablePath(path),
+					WithSessionStore(store),
+					WithScratchDir(testScratchDir(t)),
+				)
 				id := acp.SessionId("T-background-reentry-" + callback + "-" + action)
 				session := installActiveTestSession(t, agent, id)
 				cwd := session.cwd

@@ -572,12 +572,18 @@ func (g *deleteCallGate) Delete(ctx context.Context, key SessionKey) error {
 // tombstone is in flight, so an already-resolved CloseSession cannot release
 // the same settings tree or scratch reservation a second time.
 func TestConcurrentCloseAndDeleteReleaseExactWrapperOnce(t *testing.T) {
+	t.Setenv("AMP_API_KEY", "ownership-test")
+	path, _ := fakeAgentAmpPath(t, "")
 	store := &deleteCallGate{
 		SessionStore: NewInMemorySessionStore(),
 		started:      make(chan struct{}, 1),
 		release:      make(chan struct{}),
 	}
-	agent := newTestAgent(WithSessionStore(store), WithScratchDir(testScratchDir(t)))
+	agent := newTestAgent(
+		WithExecutablePath(path),
+		WithSessionStore(store),
+		WithScratchDir(testScratchDir(t)),
+	)
 
 	created, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
 	require.NoError(t, err)
