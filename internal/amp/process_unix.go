@@ -45,8 +45,6 @@ type processTree struct {
 	cleanupErr    error
 }
 
-func (*processTree) descendantCount() (int, bool) { return 0, false }
-
 func startProcessTree(launch *processTreeCommand) (*processTree, error) {
 	releaseNative, err := launch.acquire()
 	if err != nil {

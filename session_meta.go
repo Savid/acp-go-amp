@@ -51,6 +51,13 @@ func parseSessionMeta(meta map[string]any) (parsedSessionMeta, error) {
 			}
 		case "traceparent", "tracestate", "baggage":
 		default:
+			// A session lifecycle request never carries the lifecycle extension:
+			// the extension is a different thing and rides none of them, so the
+			// family literal is rejected here rather than ignored as another
+			// namespace's business.
+			if refusal := rejectLifecycleMeta(map[string]any{key: value}); refusal != nil {
+				return result, refusal
+			}
 		}
 	}
 
@@ -101,6 +108,19 @@ func parseAmpOptionsWithPresence(value any) (AmpOptions, ampOptionFields, error)
 
 			mode, ok := value.(string)
 			if !ok {
+				return options, fields, unsupportedField("_meta.amp.options.mode")
+			}
+
+			// An absent mode and a present-but-empty one are different requests,
+			// and this is the only place that can tell them apart. Absence never
+			// reaches this arm: it states no selection, the session takes its
+			// advertised default, and that is the ordinary way to establish one.
+			// A key that did arrive states a selection and names none, which is
+			// the same shape defect as a mode that is not a string — refused on
+			// the member, not measured against a list this adapter no longer
+			// keeps. Accepting it would file a request the host did make under
+			// the answer for one it did not.
+			if mode == "" {
 				return options, fields, unsupportedField("_meta.amp.options.mode")
 			}
 

@@ -7,12 +7,17 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 )
 
-const installedLinuxAmpEnv = "ACP_GO_AMP_TEST_INSTALLED_LINUX_AMP"
+// installedAmpEnv is the private carrier the pinned-binary fixture uses to hand
+// this probe the path of the real Amp it must drive. Only the Linux container
+// fixture plants that binary and sets the carrier, so the name says so; an
+// ordinary run anywhere else leaves it unset and the probe skips.
+const installedAmpEnv = "ACP_GO_AMP_TEST_INSTALLED_LINUX_AMP"
 
 // browserProbeDir plants an executable for every name a launcher might exec,
 // each of which records the invocation instead of opening anything. A recorded
@@ -34,8 +39,9 @@ func browserProbeDir(t *testing.T, marker string) string {
 
 // TestLoginNeverExecsABrowserLauncher runs the adapter's login path with a
 // deterministic harness and a recording launcher ahead of every other PATH
-// entry. It proves the PATH interception used on Linux; installed-binary
-// compatibility is checked separately before this boundary is built.
+// entry. It proves the PATH interception used on Darwin and Linux;
+// installed-binary compatibility is checked separately before this boundary
+// is built.
 func TestLoginNeverExecsABrowserLauncher(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "launched")
 	probe := browserProbeDir(t, marker)
@@ -86,7 +92,7 @@ func TestLoginNeverExecsABrowserLauncher(t *testing.T) {
 		// The shim is generated under the scratch parent and handed to the
 		// isolated identity, so the parent has to be one that identity can
 		// traverse rather than a t.TempDir leaf nested under a 0700 directory.
-		ScratchParent: makeInstalledLinuxAmpScratchParent(t),
+		ScratchParent: makeInstalledAmpScratchParent(t),
 		Env:           map[string]string{dataHomeEnv: t.TempDir()},
 	})
 
@@ -125,14 +131,21 @@ func TestLoginNeverExecsABrowserLauncher(t *testing.T) {
 	}
 }
 
-// TestInstalledLinuxAmpLoginExecsOnlyShimLauncher is the real-native proof for
-// Linux brokered login. Its integration caller runs this test in a networkless,
-// no-GUI container and supplies the installed Linux Amp binary. AMP_URL points
-// at unreachable loopback, so no provider authorization can be initiated.
-func TestInstalledLinuxAmpLoginExecsOnlyShimLauncher(t *testing.T) {
-	path := os.Getenv(installedLinuxAmpEnv)
+// TestInstalledAmpLoginExecsOnlyShimLauncher is the real-native proof for
+// brokered login: the installed Amp binary's account login must exec only the
+// PATH-shadowed launcher its platform's audited branch names. The Linux
+// integration caller runs it in a networkless, no-GUI container; on Darwin it
+// runs natively against the supplied binary. AMP_URL points at unreachable
+// loopback, so no provider authorization can be initiated.
+func TestInstalledAmpLoginExecsOnlyShimLauncher(t *testing.T) {
+	path := os.Getenv(installedAmpEnv)
 	if path == "" {
-		t.Skipf("set %s to a real installed Linux Amp binary", installedLinuxAmpEnv)
+		t.Skipf("set %s to a real installed Amp binary", installedAmpEnv)
+	}
+
+	launcher := "xdg-open"
+	if runtime.GOOS == darwinPlatform {
+		launcher = "open"
 	}
 
 	originalScript := browserShimScript
@@ -144,7 +157,7 @@ func TestInstalledLinuxAmpLoginExecsOnlyShimLauncher(t *testing.T) {
 	if writeErr := os.WriteFile(settingsFile, AuthSettingsDocument(), 0o600); writeErr != nil {
 		t.Fatal(writeErr)
 	}
-	scratchParent := makeInstalledLinuxAmpScratchParent(t)
+	scratchParent := makeInstalledAmpScratchParent(t)
 
 	client := newTestClient(t, nil, Options{
 		CLIPath:       path,
@@ -164,7 +177,7 @@ func TestInstalledLinuxAmpLoginExecsOnlyShimLauncher(t *testing.T) {
 
 	login, err := client.StartAuthLogin(t.Context())
 	if err != nil {
-		t.Fatalf("start installed Linux Amp login: %v", err)
+		t.Fatalf("start installed Amp login: %v", err)
 	}
 	t.Cleanup(func() { _ = login.Close() })
 
@@ -172,8 +185,8 @@ func TestInstalledLinuxAmpLoginExecsOnlyShimLauncher(t *testing.T) {
 	for {
 		launched, readErr := os.ReadFile(marker)
 		if readErr == nil {
-			if got := strings.TrimSpace(string(launched)); got != "xdg-open" {
-				t.Fatalf("installed Amp executed shim %q, want xdg-open", got)
+			if got := strings.TrimSpace(string(launched)); got != launcher {
+				t.Fatalf("installed Amp executed shim %q, want %s", got, launcher)
 			}
 
 			break
@@ -182,7 +195,7 @@ func TestInstalledLinuxAmpLoginExecsOnlyShimLauncher(t *testing.T) {
 			t.Fatalf("read installed Amp browser marker: %v", readErr)
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("installed Amp never executed the PATH-shadowed xdg-open shim")
+			t.Fatalf("installed Amp never executed the PATH-shadowed %s shim", launcher)
 		}
 
 		select {
@@ -193,11 +206,11 @@ func TestInstalledLinuxAmpLoginExecsOnlyShimLauncher(t *testing.T) {
 	}
 
 	if closeErr := login.Close(); closeErr != nil {
-		t.Fatalf("close installed Linux Amp login: %v", closeErr)
+		t.Fatalf("close installed Amp login: %v", closeErr)
 	}
 }
 
-func makeInstalledLinuxAmpScratchParent(t *testing.T) string {
+func makeInstalledAmpScratchParent(t *testing.T) string {
 	t.Helper()
 
 	path, err := os.MkdirTemp("/tmp", "acp-go-amp-browser-scratch-") //nolint:usetesting // The isolated native identity must traverse the fixture root.

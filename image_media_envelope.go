@@ -14,16 +14,42 @@ const (
 	keyVersions        = "versions"
 )
 
-// effectiveInputBytesPerImage resolves the tightest per-image decoded byte bound
-// the prompt gates actually enforce. Amp's native envelope is unconditional, so
-// it is the ceiling even when the configured policy limit is zero (disabled) —
-// which is also why a disabled policy limit can never leave a read unbounded. A
-// configured limit below the envelope wins. This is the bound the media envelope
-// advertises and the bound a handoff read is capped at.
+// perImageByteTerm is one term of the per-image decoded byte gate: a bound and
+// the verdict a payload above it reports. The two terms answer differently
+// because a host fixes them differently — a configured policy limit is the
+// host's own number, and Amp's native envelope is not negotiable.
+type perImageByteTerm struct {
+	maxBytes int64
+	value    string
+}
+
+// perImageByteTerms is the per-image decoded byte gate, in the order it is
+// applied. The configured policy limit is judged first so it keeps its own
+// verdict, and Amp's unconditional native envelope always follows it — which is
+// why a zero-disabled policy limit can never leave a read unbounded.
+//
+// This is the single resolution both the gates and the media-envelope
+// advertisement call, so an advertised bound and the verdict a send actually
+// gets are structurally unable to disagree.
+func perImageByteTerms(limits ImageLimits) []perImageByteTerm {
+	terms := make([]perImageByteTerm, 0, 2)
+	if configured := limits.MaxInputBytesPerImage; configured > 0 {
+		terms = append(terms, perImageByteTerm{maxBytes: configured, value: imageErrorTooLarge})
+	}
+
+	return append(terms, perImageByteTerm{maxBytes: ampNativeMaxImageBytes, value: imageErrorNativeEnvelope})
+}
+
+// effectiveInputBytesPerImage folds the gate's own terms into the one bound the
+// media envelope advertises and a handoff read is capped at: the tightest of
+// them, because a payload has to pass every term.
 func effectiveInputBytesPerImage(limits ImageLimits) int64 {
-	bound := ampNativeMaxImageBytes
-	if configured := limits.MaxInputBytesPerImage; configured > 0 && configured < bound {
-		bound = configured
+	bound := int64(0)
+
+	for index, term := range perImageByteTerms(limits) {
+		if index == 0 || term.maxBytes < bound {
+			bound = term.maxBytes
+		}
 	}
 
 	return bound

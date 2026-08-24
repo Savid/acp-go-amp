@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -133,32 +134,52 @@ func TestAuthorizeRefusesANonDefaultDeployment(t *testing.T) {
 }
 
 func TestAuthorizeRefusesUnsupportedLoginPlatformsBeforeNativeMint(t *testing.T) {
-	for _, platform := range []string{platformDarwin, platformWindows} {
-		t.Run(platform, func(t *testing.T) {
-			fixture := newAuthFixture(t, "login", func(options *Options) {
-				options.testOnlyAuthLoginPlatform = platform
-			})
+	fixture := newAuthFixture(t, "login", func(options *Options) {
+		options.testOnlyAuthLoginPlatform = platformWindows
+	})
 
-			original := authStartLogin
-			calls := 0
-			authStartLogin = func(*nativeamp.Client, context.Context) (*nativeamp.AuthLogin, error) {
-				calls++
+	original := authStartLogin
+	calls := 0
+	authStartLogin = func(*nativeamp.Client, context.Context) (*nativeamp.AuthLogin, error) {
+		calls++
 
-				return nil, errors.New("native login must not start")
-			}
-			t.Cleanup(func() { authStartLogin = original })
+		return nil, errors.New("native login must not start")
+	}
+	t.Cleanup(func() { authStartLogin = original })
 
-			_, err := fixture.authorize("connection-1", "request-1")
-			requireAuthCause(t, err, authCauseUnsupportedVariant)
-			if calls != 0 {
-				t.Fatalf("native login calls = %d, want 0", calls)
-			}
+	_, err := fixture.authorize("connection-1", "request-1")
+	requireAuthCause(t, err, authCauseUnsupportedVariant)
+	if calls != 0 {
+		t.Fatalf("native login calls = %d, want 0", calls)
+	}
 
-			flowID, _ := authFailure(t, err)[authFieldFlowID].(string)
-			if status := fixture.status(flowID); status.State != authStateFailed || status.Reason != authReasonNativeVeto {
-				t.Fatalf("state/reason = %q/%q, want failed/native_veto", status.State, status.Reason)
-			}
-		})
+	flowID, _ := authFailure(t, err)[authFieldFlowID].(string)
+	if status := fixture.status(flowID); status.State != authStateFailed || status.Reason != authReasonNativeVeto {
+		t.Fatalf("state/reason = %q/%q, want failed/native_veto", status.State, status.Reason)
+	}
+}
+
+// TestAuthorizeRefusesAnUnauditedBuildAsAVariant pins the cause an audit
+// refusal carries: a build whose account-login shape the adapter cannot prove
+// is a variant it does not broker, not a native process failure — no login
+// child ever existed to fail.
+func TestAuthorizeRefusesAnUnauditedBuildAsAVariant(t *testing.T) {
+	fixture := newAuthFixture(t, "login", func(options *Options) {
+		options.testOnlyAuthLoginPlatform = platformDarwin
+	})
+
+	original := authStartLogin
+	authStartLogin = func(*nativeamp.Client, context.Context) (*nativeamp.AuthLogin, error) {
+		return nil, fmt.Errorf("amp login: %w", nativeamp.ErrBrowserLaunchUnsupported)
+	}
+	t.Cleanup(func() { authStartLogin = original })
+
+	_, err := fixture.authorize("connection-1", "request-1")
+	requireAuthCause(t, err, authCauseUnsupportedVariant)
+
+	flowID, _ := authFailure(t, err)[authFieldFlowID].(string)
+	if status := fixture.status(flowID); status.State != authStateFailed || status.Reason != authReasonNativeVeto {
+		t.Fatalf("state/reason = %q/%q, want failed/native_veto", status.State, status.Reason)
 	}
 }
 

@@ -60,8 +60,9 @@ func (f *authFixture) newSession(id acp.SessionId) *agentSession {
 	}
 
 	f.agent.mu.Lock()
-	f.agent.sessions[session.id] = session
+	f.agent.activateSessionLocked(session)
 	f.agent.mu.Unlock()
+	f.agent.observe.AddActiveSession(f.t.Context(), 1)
 
 	f.t.Cleanup(func() { _ = session.Close(context.Background()) })
 

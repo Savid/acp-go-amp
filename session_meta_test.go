@@ -126,6 +126,12 @@ func TestColdLoadOmittedEnvBuildsDefaultEnv(t *testing.T) {
 	}
 }
 
+// TestPromptErrorAfterCallerContextCancelInterrupts pins that a caller
+// cancellation still answers cancelled when a native error follows it. The
+// request context is the one the agent derives its operation context from, so
+// the cancel is observed by the turn loop itself and the outcome is decided
+// before settlement records one — never rewritten over a turn that already
+// settled as failed.
 func TestPromptErrorAfterCallerContextCancelInterrupts(t *testing.T) {
 	path, state := fakeAgentAmpPath(t, "delayed-error")
 	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(testScratchDir(t)))
@@ -134,7 +140,9 @@ func TestPromptErrorAfterCallerContextCancelInterrupts(t *testing.T) {
 		t.Fatalf("NewSession: %v", err)
 	}
 
-	promptCtx := &manualErrContext{}
+	promptCtx, cancelPrompt := context.WithCancel(context.Background())
+	defer cancelPrompt()
+
 	resultCh := make(chan acp.PromptResponse, 1)
 	errCh := make(chan error, 1)
 	go func() {
@@ -144,7 +152,7 @@ func TestPromptErrorAfterCallerContextCancelInterrupts(t *testing.T) {
 	}()
 
 	waitForPath(t, filepath.Join(state, "continue-ready"))
-	promptCtx.cancel()
+	cancelPrompt()
 
 	select {
 	case promptErr := <-errCh:

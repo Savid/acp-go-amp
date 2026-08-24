@@ -6,18 +6,21 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+
+	"go.uber.org/goleak"
 )
 
 func TestRecoverAgentGoroutineLogsPanic(t *testing.T) {
+	const secret = "SECRET_SENTINEL"
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, nil))
 
 	func() {
 		defer recoverAgentGoroutine(context.Background(), logger, "test goroutine")
-		panic("boom")
+		panic(secret)
 	}()
 
-	if !strings.Contains(buf.String(), "test goroutine") || !strings.Contains(buf.String(), "boom") {
+	if !strings.Contains(buf.String(), "test goroutine") || !strings.Contains(buf.String(), "classification=panic") || strings.Contains(buf.String(), secret) {
 		t.Fatalf("panic log = %q", buf.String())
 	}
 }
@@ -29,7 +32,7 @@ func TestHandleAgentGoroutinePanicBranches(t *testing.T) {
 	handleAgentGoroutinePanic(context.Background(), nil, "with shutdown", func(value any) {
 		recovered = value
 	}, "panic value")
-	if recovered != "panic value" {
+	if recovered != errAgentGoroutinePanic {
 		t.Fatalf("shutdown recovered = %#v", recovered)
 	}
 	if agentLogger(nil) != nil {
@@ -42,12 +45,17 @@ func TestHandleAgentGoroutinePanicBranches(t *testing.T) {
 }
 
 func TestOnNativeGoroutinePanicLogs(t *testing.T) {
+	const secret = "SECRET_SENTINEL"
 	var buf bytes.Buffer
 	agent := newTestAgent(WithLogger(slog.New(slog.NewTextHandler(&buf, nil))))
 
-	agent.onNativeGoroutinePanic(context.Background(), "native goroutine", "native boom")
+	agent.onNativeGoroutinePanic(context.Background(), "native goroutine", secret)
 
-	if !strings.Contains(buf.String(), "native goroutine") || !strings.Contains(buf.String(), "native boom") {
+	if !strings.Contains(buf.String(), "native goroutine") || strings.Contains(buf.String(), secret) {
 		t.Fatalf("panic log = %q", buf.String())
 	}
+}
+
+func TestMain(m *testing.M) {
+	goleak.VerifyTestMain(m)
 }

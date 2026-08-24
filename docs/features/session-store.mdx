@@ -34,13 +34,38 @@ under a separate fixed `60s` bound.
 | Subpath | Contents |
 |---|---|
 | main | Manifest: `sessionId` (the adapter-minted ACP session ID), `nativeSessionId` (the Amp thread ID, absent until the first prompt turn creates the thread), `cwd`, `title`, selected `mode`, and Unix-millisecond create/update timestamps. |
-| `transcript` | The full ordered Amp stream-JSON frame mirror for completed prompt turns. |
+| `transcript` | The full ordered Amp stream-JSON frame mirror for every prompt turn, including what a cancelled or failed turn streamed before it ended. |
 | `_artifacts/images/<digest>.json` | Canonical typed image tool-result record containing embedded base64 and media type, or an HTTP(S) resource URI, plus native identity, checksum, and creation time. |
 
-Each completed turn publishes the manifest, full transcript, and current image
-records together in one `Replace` generation. These records back
-`session/load` replay. Auth environment values, settings files, and API keys
-are never written to the store.
+Each turn publishes the manifest, full transcript, and current image records
+together in one `Replace` generation. Every turn does: a cancelled, failed, or
+timed-out turn commits the frames it already streamed, so what the store holds
+never diverges from what the client was shown. A generation states each key
+exactly once — the shipped store refuses a duplicated key by name rather than
+letting slice order decide that row, and a store over another backend owes the
+same refusal. The commit runs after the turn
+process containment boundary completes and before the terminal state the host
+sees, so no settled turn claims a prefix the store does not hold. It also runs
+on a context detached from the prompt request, so cancelling the request ends
+the native turn and never the commit of what that turn already streamed. These
+records back `session/load` replay. Auth environment values, settings files, and
+API keys are never written to the store.
+
+The first turn of a session publishes one additional generation the moment Amp
+reports the thread it just created: the manifest plus the state already
+committed, carrying no frames from the turn in flight. It exists so a crash
+mid-turn can never leave a created server-side thread unrecorded.
+
+`session/delete` stops the session's writes and waits out the commit already in
+flight before its tombstone lands, so a turn settling alongside the delete can
+never write the deleted session back into the store.
+
+A tombstone is final in the store itself, not only in the adapter that wrote
+it. Over a key `Delete` tombstoned, both `Append` and `Replace` write nothing,
+clear nothing, and return success — the deleted state is already the caller's
+answer. A store implemented over another backend owes the same guarantee: a
+write already in flight when a delete lands reaches the backend regardless of
+what the adapter above it believes, so refusing it is the backend's job.
 
 Ordinary transcript frames retain the exact native Amp stream JSON. An
 image-bearing tool-result frame is rewritten to stable artifact references
@@ -78,6 +103,6 @@ Native continuation requires the live server-side Amp thread and AMP_API_KEY, so
 If the thread is deleted or unavailable, session/load can replay the local transcript for display, but a subsequent prompt fails with one terminal `native_state_missing` error — the adapter does not rebuild a thread from transcript text, because that would lose native state.
 </Warning>
 
-If a store write fails after a clean turn, the adapter keeps the frames in
+If a store write fails after a settled turn, the adapter keeps the frames in
 memory and blocks the next prompt with a `mirror_unsynced` error until the write
 succeeds, so the mirror never silently diverges from what Amp produced.

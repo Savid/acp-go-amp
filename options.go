@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	acp "github.com/coder/acp-go-sdk"
 	nativeamp "github.com/savid/acp-go-amp/internal/amp"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
@@ -193,6 +194,25 @@ type runtimeOptions struct {
 	executeThread  func(context.Context, *nativeamp.Client, any) (*nativeamp.Turn, error)
 	continueThread func(context.Context, *nativeamp.Client, string, any) (*nativeamp.Turn, error)
 	exportThread   func(context.Context, *nativeamp.Client, string) (json.RawMessage, error)
+	// settleTurn completes the prompt containment boundary and reports what that
+	// boundary proved about the native tree it owned. It is a seam so tests can
+	// drive an incomplete boundary and a proven vacancy deterministically;
+	// production always closes the real contained process.
+	settleTurn func(*nativeamp.Turn) (nativeamp.ContainmentProof, error)
+	// afterColdSessionPrepared is an internal launch barrier used by deterministic
+	// ownership tests after a cold wrapper has transferred to its use and before
+	// store replay continues. Production leaves it nil.
+	afterColdSessionPrepared func(*agentSession)
+	// afterSessionUseAdmitted is the matching internal barrier for an admitted
+	// active load/resume use. It runs before native export and is nil in
+	// production.
+	afterSessionUseAdmitted func(*agentSessionUse)
+	// beforePersistenceReplace, beforeDeleteTombstone, and
+	// beforeTerminalDelivery are internal ordering barriers for deterministic
+	// lifecycle tests. Production leaves them nil.
+	beforePersistenceReplace func()
+	beforeDeleteTombstone    func()
+	beforeTerminalDelivery   func(acp.SessionNotification)
 	// newTurnTimer builds the per-turn deadline channel. It is a seam so tests
 	// can drive the timeout branch deterministically against a coincident
 	// cancel; production always uses a real time.Timer.
@@ -236,6 +256,11 @@ func applyOptions(opts []Option) Options {
 			},
 			exportThread: func(ctx context.Context, client *nativeamp.Client, threadID string) (json.RawMessage, error) {
 				return client.ExportThread(ctx, threadID)
+			},
+			settleTurn: func(turn *nativeamp.Turn) (nativeamp.ContainmentProof, error) {
+				closeErr := turn.Close()
+
+				return turn.ContainmentProof(), closeErr
 			},
 		},
 	}

@@ -10,11 +10,15 @@ import (
 	"path/filepath"
 	"slices"
 	"sync"
+	"sync/atomic"
 
 	"github.com/coder/acp-go-sdk"
 	nativeamp "github.com/savid/acp-go-amp/internal/amp"
+	"github.com/savid/acp-go-amp/internal/lifecycle"
 	"github.com/savid/acp-go-amp/internal/observer"
 )
+
+const agentClosedMessage = "agent closed"
 
 type Agent struct {
 	options             Options
@@ -23,19 +27,37 @@ type Agent struct {
 	observe             *observer.Observer
 	ordinaryEnvironment map[string]string
 
-	lifecycleDone chan struct{}
-	lifecycleWG   sync.WaitGroup
-	closeOnce     sync.Once
-	closeErr      error
+	callShutdown chan struct{}
+	callWG       sync.WaitGroup
+	shutdownOnce sync.Once
+	callbackMu   sync.Mutex
+	callbacks    map[uint64]*agentCallbackAuthority
+	nextCallback uint64
+	closeMu      sync.Mutex
+	closeFlight  *agentCloseFlight
+	closeDone    bool
+	closeErr     error
 
 	mu       sync.Mutex
 	closed   bool
 	conn     agentClient
 	sessions map[acp.SessionId]*agentSession
 	deleted  map[acp.SessionId]struct{}
-	// pendingNativeDeletes maps a tombstoned session to the native thread id
-	// whose server-side delete still needs to be retried.
-	pendingNativeDeletes    map[acp.SessionId]string
+	// sessionFlights publish close/delete intent before any external work. A
+	// flight owns one generation and, once known, the exact wrapper it settles.
+	sessionFlights map[acp.SessionId]*agentSessionFlight
+	// sessionUses are load/resume leases. Delete publishes its flight first, then
+	// waits for the exact already-admitted use without holding mu.
+	sessionUses map[acp.SessionId]*agentSessionUse
+	// cleanupOwners retain private or tombstoned wrappers whose local/native
+	// cleanup failed. Wire operations may retry them until Agent.Close takes its
+	// final, last-word ownership pass.
+	cleanupOwners           map[acp.SessionId][]agentCleanupOwner
+	cleanupResidences       map[uint64]*agentCleanupResidence
+	nextSessionGeneration   uint64
+	nextCallGeneration      uint64
+	nextCleanupResidence    uint64
+	nextCallbackGeneration  atomic.Uint64
 	pending                 int
 	clientCalls             chan struct{}
 	providerProcesses       *providerProcessSnapshotTracker
@@ -45,6 +67,10 @@ type Agent struct {
 	containmentMode  RuntimeContainmentMode
 	configurationErr error
 	providerAuth     *providerAuth
+	// lifecycle is the answer this connection negotiated at initialize. It is
+	// the contract for the connection: with no answer present there is no
+	// envelope, no correlation read, and no lifecycle fact at all.
+	lifecycle lifecycle.Negotiated
 
 	// harnessMu guards harnessPath, the exact absolute amp binary the version
 	// and startup probes validated against the static base. Every child this
@@ -52,6 +78,60 @@ type Agent struct {
 	// substitute a different harness later.
 	harnessMu   sync.Mutex
 	harnessPath string
+}
+
+type agentSessionFlightKind uint8
+
+const (
+	agentSessionCloseFlight agentSessionFlightKind = iota + 1
+	agentSessionDeleteFlight
+)
+
+type agentSessionFlight struct {
+	generation uint64
+	kind       agentSessionFlightKind
+	session    *agentSession
+	use        *agentSessionUse
+	done       chan struct{}
+	panicErr   error
+	abandoned  bool
+	reclaiming bool
+	waiters    int
+}
+
+type agentSessionUse struct {
+	generation uint64
+	session    *agentSession
+	done       chan struct{}
+}
+
+type agentCleanupKind uint8
+
+const (
+	agentCleanupConstructing agentCleanupKind = iota + 1
+	agentCleanupPrepared
+	agentCleanupDeleted
+)
+
+type agentCleanupOwner struct {
+	session *agentSession
+	kind    agentCleanupKind
+}
+
+type agentCallGeneration struct {
+	agent      *Agent
+	generation uint64
+}
+
+type agentCallbackGeneration struct {
+	generation uint64
+	kind       string
+}
+
+type agentCloseFlight struct {
+	done    chan struct{}
+	err     error
+	waiters int
 }
 
 // retainHarnessPath records the harness a probe validated. An empty or relative
@@ -98,6 +178,8 @@ func NewAgent(opts ...Option) *Agent {
 		store = NewInMemorySessionStore()
 	}
 
+	store = callbackSessionStore{store: store}
+
 	observe := observer.New(observer.Config{
 		TracerProvider: options.TracerProvider,
 		MeterProvider:  options.MeterProvider,
@@ -119,19 +201,23 @@ func NewAgent(opts ...Option) *Agent {
 	}
 
 	agent := &Agent{
-		options:              options,
-		log:                  log,
-		store:                store,
-		observe:              observe,
-		ordinaryEnvironment:  nativeamp.CaptureOrdinaryEnvironment(),
-		sessions:             make(map[acp.SessionId]*agentSession),
-		deleted:              make(map[acp.SessionId]struct{}),
-		pendingNativeDeletes: make(map[acp.SessionId]string),
-		clientCalls:          make(chan struct{}, maxConcurrentClientCalls(options.ConcurrencyLimits)),
-		providerProcesses:    providerProcesses,
-		lifecycleDone:        make(chan struct{}),
-		activeLimitErr:       validateConcurrencyLimits(options.ConcurrencyLimits),
-		containmentMode:      mode,
+		options:             options,
+		log:                 log,
+		store:               store,
+		observe:             observe,
+		ordinaryEnvironment: nativeamp.CaptureOrdinaryEnvironment(),
+		sessions:            make(map[acp.SessionId]*agentSession),
+		deleted:             make(map[acp.SessionId]struct{}),
+		sessionFlights:      make(map[acp.SessionId]*agentSessionFlight),
+		sessionUses:         make(map[acp.SessionId]*agentSessionUse),
+		cleanupOwners:       make(map[acp.SessionId][]agentCleanupOwner),
+		cleanupResidences:   make(map[uint64]*agentCleanupResidence),
+		clientCalls:         make(chan struct{}, maxConcurrentClientCalls(options.ConcurrencyLimits)),
+		providerProcesses:   providerProcesses,
+		callShutdown:        make(chan struct{}),
+		callbacks:           make(map[uint64]*agentCallbackAuthority),
+		activeLimitErr:      validateConcurrencyLimits(options.ConcurrencyLimits),
+		containmentMode:     mode,
 		configurationErr: errors.Join(
 			validateContainmentOptions(options),
 			validateImageLimits(options.ImageLimits),
@@ -175,45 +261,179 @@ func Serve(ctx context.Context, input io.Reader, output io.Writer, opts ...Optio
 	}
 }
 
-func (a *Agent) Close() error {
-	a.closeOnce.Do(func() {
-		a.mu.Lock()
-		a.closed = true
-		a.conn = nil
-		shutdown := a.lifecycleDone
-		a.mu.Unlock()
+func (a *Agent) Close() (err error) {
+	if a.hasActiveCallbackAuthority() {
+		return closedCallbackRefusal()
+	}
 
+	a.closeMu.Lock()
+	if a.closeDone {
+		closeErr := a.closeErr
+		a.closeMu.Unlock()
+
+		return closeErr
+	}
+
+	if existing := a.closeFlight; existing != nil {
+		existing.waiters++
+		a.closeMu.Unlock()
+		<-existing.done
+
+		return existing.err
+	}
+
+	flight := &agentCloseFlight{done: make(chan struct{})}
+	a.closeFlight = flight
+	a.closeMu.Unlock()
+
+	err = invokeShutdownStep(a.closeAttempt)
+	a.finishCloseFlight(flight, err)
+
+	return err
+}
+
+func (a *Agent) finishCloseFlight(flight *agentCloseFlight, err error) {
+	a.closeMu.Lock()
+	defer a.closeMu.Unlock()
+
+	if a.closeFlight != flight {
+		return
+	}
+
+	flight.err = err
+	a.closeDone = true
+	a.closeErr = err
+
+	a.closeFlight = nil
+
+	close(flight.done)
+}
+
+func (a *Agent) closeAttempt() error {
+	a.mu.Lock()
+	a.closed = true
+	shutdown := a.callShutdown
+	a.mu.Unlock()
+
+	a.shutdownOnce.Do(func() {
 		if shutdown != nil {
 			close(shutdown)
 		}
-
-		// A lifecycle request can own native discovery/session roots before it
-		// installs an active session. Fence those requests before snapshotting
-		// sessions so no root can outlive a settled Close and no late install can
-		// escape this shutdown pass.
-		a.lifecycleWG.Wait()
-
-		a.mu.Lock()
-
-		sessions := make([]*agentSession, 0, len(a.sessions))
-		for _, session := range a.sessions {
-			sessions = append(sessions, session)
-		}
-
-		a.sessions = map[acp.SessionId]*agentSession{}
-		boundaryErr := a.lifecycleContainmentErr
-		a.mu.Unlock()
-
-		closeErr := boundaryErr
-		for _, session := range sessions {
-			closeErr = errors.Join(closeErr, session.Close(context.Background()))
-		}
-
-		a.observe.AddActiveSession(context.Background(), -int64(len(sessions)))
-		a.closeErr = closeErr
 	})
 
-	return a.closeErr
+	// A lifecycle request can own native discovery/session roots before it
+	// installs an active session. Fence those requests before snapshotting
+	// ownership so a construction either publishes its exact residence or fully
+	// unwinds before shutdown evaluates it.
+	a.callWG.Wait()
+
+	a.mu.Lock()
+
+	sessions := make(map[acp.SessionId]*agentSession, len(a.sessions))
+	for id, session := range a.sessions {
+		sessions[id] = session
+	}
+
+	cleanupOwners := make(map[acp.SessionId][]agentCleanupOwner, len(a.cleanupOwners))
+	for id, owners := range a.cleanupOwners {
+		cleanupOwners[id] = append(cleanupOwners[id], owners...)
+	}
+
+	cleanupResidences := make([]*agentCleanupResidence, 0, len(a.cleanupResidences))
+	for _, residence := range a.cleanupResidences {
+		cleanupResidences = append(cleanupResidences, residence)
+	}
+
+	boundaryErr := a.lifecycleContainmentErr
+	a.mu.Unlock()
+
+	closeErr := boundaryErr
+	removed := int64(0)
+
+	for id, session := range sessions {
+		sessionErr := invokeShutdownStep(func() error {
+			return session.closeAtShutdown(context.Background())
+		})
+		if errors.Is(sessionErr, errAgentGoroutinePanic) {
+			sessionErr = errors.Join(sessionErr, invokeShutdownStep(func() error {
+				return session.closeAtShutdown(context.Background())
+			}))
+		}
+
+		closeErr = errors.Join(closeErr, sessionErr)
+
+		a.mu.Lock()
+		if a.sessions[id] == session {
+			delete(a.sessions, id)
+
+			removed++
+		}
+
+		a.clearCleanupOwnerLocked(id, session)
+		a.mu.Unlock()
+	}
+
+	for id, owners := range cleanupOwners {
+		for _, owner := range owners {
+			cleanupErr := invokeShutdownStep(func() error {
+				if owner.kind == agentCleanupDeleted {
+					return owner.session.deleteAtShutdown(context.Background())
+				}
+
+				return owner.session.Close(context.Background())
+			})
+			if errors.Is(cleanupErr, errAgentGoroutinePanic) {
+				cleanupErr = errors.Join(cleanupErr, invokeShutdownStep(func() error {
+					if owner.kind == agentCleanupDeleted {
+						return owner.session.deleteAtShutdown(context.Background())
+					}
+
+					return owner.session.Close(context.Background())
+				}))
+			}
+
+			closeErr = errors.Join(closeErr, cleanupErr)
+
+			a.clearCleanupOwner(id, owner.session)
+		}
+	}
+
+	for _, residence := range cleanupResidences {
+		cleanupErr := invokeShutdownStep(residence.finalize)
+		if errors.Is(cleanupErr, errAgentGoroutinePanic) {
+			cleanupErr = errors.Join(cleanupErr, invokeShutdownStep(residence.finalize))
+		}
+
+		closeErr = errors.Join(closeErr, cleanupErr)
+
+		a.clearCleanupResidence(residence)
+	}
+
+	a.mu.Lock()
+	a.conn = nil
+	clear(a.sessions)
+	clear(a.cleanupOwners)
+	clear(a.cleanupResidences)
+	clear(a.sessionFlights)
+	clear(a.sessionUses)
+	a.pending = 0
+	a.mu.Unlock()
+
+	if removed != 0 {
+		a.observe.AddActiveSession(context.Background(), -removed)
+	}
+
+	return closeErr
+}
+
+func invokeShutdownStep(step func() error) (err error) {
+	defer func() {
+		if recover() != nil {
+			err = errAgentGoroutinePanic
+		}
+	}()
+
+	return step()
 }
 
 // optionsError reports every construction-time option failure as one uniform
@@ -233,6 +453,12 @@ func (a *Agent) optionsError() error {
 }
 
 func (a *Agent) Initialize(ctx context.Context, params acp.InitializeRequest) (resp acp.InitializeResponse, err error) {
+	ctx, finishCall, err := a.beginAgentCall(ctx)
+	if err != nil {
+		return acp.InitializeResponse{}, err
+	}
+	defer func() { finishCall(err) }()
+
 	_, finish := a.observe.StartACPRequest(ctx, acp.AgentMethodInitialize)
 	defer func() { finish(err) }()
 
@@ -244,10 +470,19 @@ func (a *Agent) Initialize(ctx context.Context, params acp.InitializeRequest) (r
 		a.log.WarnContext(ctx, "image artifact sweep failed", slog.String(jsonFieldError, sweepErr.Error()))
 	}
 
+	// The lifecycle answer rides the response's own top-level `_meta`, never
+	// agentCapabilities._meta: later protocol work relocates capability objects
+	// and initialize `_meta` survives that move unchanged.
+	lifecycleMeta, err := a.negotiateLifecycle(params.Meta)
+	if err != nil {
+		return acp.InitializeResponse{}, err
+	}
+
 	title := a.options.AgentTitle
 	position := selectPositionEncoding(params.ClientCapabilities.PositionEncodings)
 
 	return acp.InitializeResponse{
+		Meta:            lifecycleMeta,
 		ProtocolVersion: acp.ProtocolVersionNumber,
 		AgentInfo: &acp.Implementation{
 			Name:    a.options.AgentName,
@@ -311,27 +546,61 @@ func (a *Agent) agentCapabilityMeta() map[string]any {
 }
 
 func (a *Agent) Authenticate(ctx context.Context, params acp.AuthenticateRequest) (resp acp.AuthenticateResponse, err error) {
+	ctx, finishCall, err := a.beginAgentCall(ctx)
+	if err != nil {
+		return acp.AuthenticateResponse{}, err
+	}
+	defer func() { finishCall(err) }()
+
 	_, finish := a.observe.StartACPRequest(ctx, acp.AgentMethodAuthenticate)
 	defer func() { finish(err) }()
+
+	// A family literal is never foreign, so it is rejected by name before the
+	// method's own refusal: this adapter advertises no auth method, but "the
+	// method does not exist" and "the key is not read here" are different
+	// answers and the host is owed the second one.
+	if refusal := rejectLifecycleMeta(params.Meta); refusal != nil {
+		return acp.AuthenticateResponse{}, refusal
+	}
 
 	return acp.AuthenticateResponse{}, acp.NewInvalidParams(map[string]any{"methodId": params.MethodId})
 }
 
 func (a *Agent) Logout(ctx context.Context, params acp.LogoutRequest) (resp acp.LogoutResponse, err error) {
+	ctx, finishCall, err := a.beginAgentCall(ctx)
+	if err != nil {
+		return acp.LogoutResponse{}, err
+	}
+	defer func() { finishCall(err) }()
+
 	_, finish := a.observe.StartACPRequest(ctx, acp.AgentMethodLogout)
 	defer func() { finish(err) }()
+
+	if refusal := rejectLifecycleMeta(params.Meta); refusal != nil {
+		return acp.LogoutResponse{}, refusal
+	}
 
 	return acp.LogoutResponse{}, nil
 }
 
 func (a *Agent) HandleExtensionMethod(ctx context.Context, method string, params json.RawMessage) (result any, err error) {
+	ctx, finishCall, err := a.beginAgentCall(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { finishCall(err) }()
+
 	_, finish := a.observe.StartACPRequest(ctx, method)
 	defer func() { finish(err) }()
 
-	// A closed agent rejects every call before dispatch: -32600 first, then
-	// -32601 for unknown methods, then parameter validation.
-	if err := a.ensureOpen(); err != nil {
-		return nil, err
+	// The reserved key is read before the method name is resolved, so it is
+	// refused on every method this surface dispatches — including one this
+	// adapter does not have. A method name is the caller's guess; the key is a
+	// family literal that means something here, and answering "no such method"
+	// would reply to the guess and leave the key unanswered, as if it had been
+	// another namespace's business all along.
+	if refusal := rejectLifecycleMetaParams(params); refusal != nil {
+		return nil, refusal
 	}
 
 	switch method {
@@ -356,7 +625,7 @@ func (a *Agent) ensureOpen() error {
 	defer a.mu.Unlock()
 
 	if a.closed {
-		return acp.NewInvalidRequest(map[string]any{jsonFieldError: "agent closed"})
+		return acp.NewInvalidRequest(map[string]any{jsonFieldError: agentClosedMessage})
 	}
 
 	return nil

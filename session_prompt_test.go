@@ -5,11 +5,13 @@ import (
 	"errors"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-amp/internal/amp"
+	"github.com/savid/acp-go-amp/internal/lifecycle"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -687,4 +689,731 @@ func TestEmitRawEventNilPayloadSkipsSequence(t *testing.T) {
 	if len(events) != 1 || events[0].Sequence != 1 {
 		t.Fatalf("first emitted sequence = %#v", events)
 	}
+}
+
+// gatedStore observes and holds durable commits. Replace announces itself on
+// started and waits for release, so a test can hold a settlement open and drive
+// a concurrent close or delete against the exact window the races live in.
+type gatedStore struct {
+	SessionStore
+
+	mu       sync.Mutex
+	started  chan struct{}
+	release  chan struct{}
+	gated    bool
+	replaces int
+	failWith error
+	captured []error
+	record   func(string)
+}
+
+func newGatedStore(record func(string)) *gatedStore {
+	return &gatedStore{
+		SessionStore: NewInMemorySessionStore(),
+		started:      make(chan struct{}, 8),
+		release:      make(chan struct{}),
+		record:       record,
+	}
+}
+
+// gate arms the hold. The early adoption commit lands before it, so a test gates
+// only the settlement commit it means to hold.
+func (s *gatedStore) gate() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.gated = true
+}
+
+// heal disarms both the hold and the outage. Agent shutdown carries the same
+// durable rung a wire close does, so a scenario that left the store broken would
+// have its cleanup either park on the gate or answer with the outage — reporting
+// the scenario's own store defect as a shutdown failure. The scenario is over by
+// then; the frames it retained are what shutdown is there to land.
+func (s *gatedStore) heal() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.gated = false
+	s.failWith = nil
+}
+
+func (s *gatedStore) fail(err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.failWith = err
+}
+
+func (s *gatedStore) replaceCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.replaces
+}
+
+func (s *gatedStore) beforeReplace() {
+	s.mu.Lock()
+	gated, failure := s.gated, s.failWith
+	s.mu.Unlock()
+	if !gated {
+		return
+	}
+
+	s.started <- struct{}{}
+	select {
+	case <-s.release:
+	case <-time.After(correctionBarrierTimeout):
+		return
+	}
+
+	s.mu.Lock()
+	s.captured = append(s.captured, failure)
+	s.mu.Unlock()
+}
+
+func (s *gatedStore) Replace(ctx context.Context, key SessionKey, replacements []SessionStoreReplacement) error {
+	s.mu.Lock()
+	failWith := s.failWith
+	if len(s.captured) != 0 {
+		failWith = s.captured[0]
+		s.captured = s.captured[1:]
+	}
+	s.replaces++
+	s.mu.Unlock()
+
+	if s.record != nil {
+		s.record("commit")
+	}
+
+	if failWith != nil {
+		return failWith
+	}
+
+	return s.SessionStore.Replace(ctx, key, replacements)
+}
+
+// settlementLedger records the order settlement steps complete in, so ordering
+// is observed rather than asserted.
+type settlementLedger struct {
+	mu    sync.Mutex
+	steps []string
+}
+
+func (l *settlementLedger) record(step string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	l.steps = append(l.steps, step)
+}
+
+func (l *settlementLedger) snapshot() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	return append([]string(nil), l.steps...)
+}
+
+// settlementAgent opens an agent whose store is gated and whose client records
+// the terminal idle into the same ledger the commits write to.
+func settlementAgent(t *testing.T, ledger *settlementLedger) (*Agent, *gatedStore, *orderingClient, acp.SessionId) {
+	t.Helper()
+	t.Setenv("AMP_API_KEY", "conformance-key")
+
+	store := newGatedStore(ledger.record)
+	client := &orderingClient{record: ledger.record}
+
+	agent := NewAgent(testContainmentOptions([]Option{
+		WithExecutablePath(lifecycleHarness(t)),
+		WithScratchDir(testScratchDir(t)),
+		WithSessionStore(store),
+	})...)
+	agent.options.runtime.beforePersistenceReplace = store.beforeReplace
+	agent.options.runtime.beforeTerminalDelivery = func(notification acp.SessionNotification) {
+		if !isTerminalIdleNotification(notification) {
+			return
+		}
+		if client.idleStarted != nil {
+			client.idleStarted <- struct{}{}
+		}
+		if client.idleRelease != nil {
+			select {
+			case <-client.idleRelease:
+			case <-time.After(correctionBarrierTimeout):
+			}
+		}
+	}
+	t.Cleanup(func() {
+		store.heal()
+		agent.options.runtime.beforeTerminalDelivery = nil
+		client.idleStarted = nil
+		client.idleRelease = nil
+		client.idleErr = nil
+		require.NoError(t, agent.Close())
+	})
+
+	agent.setConnection(client)
+
+	_, err := agent.Initialize(t.Context(), acp.InitializeRequest{Meta: lifecycleOffer(1.0)})
+	require.NoError(t, err)
+
+	session, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
+	require.NoError(t, err)
+
+	// The ledger starts at the prompt: session creation commits its own manifest
+	// generation before any turn exists.
+	ledger.mu.Lock()
+	ledger.steps = nil
+	ledger.mu.Unlock()
+
+	return agent, store, client, session.SessionId
+}
+
+func isTerminalIdleNotification(notification acp.SessionNotification) bool {
+	envelope, ok := notification.Meta[lifecycle.MetaKey].(map[string]any)
+	if !ok {
+		return false
+	}
+	event, ok := envelope["event"].(map[string]any)
+
+	return ok && event["type"] == "state_update" && event["state"] == "idle"
+}
+
+// TestSettlementSurvivesRequestCancellation pins that settlement is detached
+// from the request context. The store fails a cancelled context immediately, so
+// a settlement that reused the request's would lose the commit and the terminal
+// boundary while telling the host the turn ended cleanly.
+func TestSettlementSurvivesRequestCancellation(t *testing.T) {
+	ledger := &settlementLedger{}
+	agent, store, client, sessionID := settlementAgent(t, ledger)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	client.onAgentChunk = cancel
+
+	resp, err := agent.Prompt(ctx, lifecyclePrompt(sessionID, "hang", "sub-1", "nonce-1"))
+	require.NoError(t, err)
+	require.Equal(t, acp.StopReasonCancelled, resp.StopReason)
+
+	stored, err := store.Load(t.Context(), SessionKey{SessionID: string(sessionID), Subpath: transcriptSubpath})
+	require.NoError(t, err)
+	require.NotEmpty(t, stored, "a cancelled request still commits the frames it streamed")
+
+	require.Equal(t, []string{"commit", "commit", "idle"}, ledger.snapshot())
+
+	state := reduceEmittedStream(t, &client.lifecycleClient, negotiatedAnswer()).State()
+	require.Len(t, state.Turns, 1)
+	require.True(t, state.Turns[0].Terminal)
+	require.Equal(t, lifecycle.OutcomeCancelled, state.Turns[0].Outcome)
+}
+
+// TestSettlementFailureIsNotACancelledSuccess pins that the cancelled-success
+// answer is owed only to a prompt that settled. A commit the store refused is
+// the prompt failing, and the host reads that failure rather than a clean cancel
+// over durable state the store never took.
+func TestSettlementFailureIsNotACancelledSuccess(t *testing.T) {
+	ledger := &settlementLedger{}
+	agent, store, client, sessionID := settlementAgent(t, ledger)
+
+	outage := errors.New("session store outage")
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	client.onAgentChunk = func() {
+		store.fail(outage)
+		cancel()
+	}
+
+	_, err := agent.Prompt(ctx, lifecyclePrompt(sessionID, "hang", "sub-2", "nonce-2"))
+	require.ErrorIs(t, err, outage)
+	require.NotContains(t, ledger.snapshot(), "idle",
+		"no terminal boundary claims a foreground prefix the store does not hold")
+
+	// The marker is a marker: it neither renames the failure nor hides it from a
+	// caller matching on the cause.
+	marked := unsettled(outage)
+	require.EqualError(t, marked, outage.Error())
+	require.ErrorIs(t, marked, outage)
+}
+
+// TestCloseSucceedsOverANativeFailureThatSettled pins what the completion latch
+// publishes: the settlement boundary's own outcome, never the native turn's. A
+// prompt whose model failed still completed its containment, its durable commit,
+// its terminal idle, and its quiescence fact — it settled — so a close running
+// concurrently with it has nothing to report and must not borrow the failure the
+// prompt answers its own caller with.
+func TestCloseSucceedsOverANativeFailureThatSettled(t *testing.T) {
+	ledger := &settlementLedger{}
+	agent, store, _, sessionID := settlementAgent(t, ledger)
+
+	store.gate()
+
+	promptErr := make(chan error, 1)
+
+	go func() {
+		_, err := agent.Prompt(t.Context(), lifecyclePrompt(sessionID, "provider-failure", "sub-native-close", "nonce-native-close"))
+		promptErr <- err
+	}()
+
+	// The early adoption commit is the first through the gate; the settlement
+	// commit is the second, and holding it parks the prompt inside a settlement
+	// whose containment boundary already completed.
+	awaitCorrectionSignal(t, store.started, "adoption commit entry")
+	store.release <- struct{}{}
+	awaitCorrectionSignal(t, store.started, "settlement commit entry")
+
+	closeErr := make(chan error, 1)
+
+	go func() {
+		_, err := agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: sessionID})
+		closeErr <- err
+	}()
+
+	select {
+	case resultErr := <-closeErr:
+		t.Fatalf("close returned before the settlement it waits on: %v", resultErr)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	store.release <- struct{}{}
+
+	requireTurnFailure(t, receiveCorrection(t, promptErr, "native prompt failure"), causeProvider, "upstream refused")
+	require.NoError(t, receiveCorrection(t, closeErr, "settled close result"), "a boundary that settled is a successful close, whatever the model did inside it")
+	require.Equal(t, []string{"commit", "commit", "idle"}, ledger.snapshot())
+}
+
+// TestDeleteSucceedsOverANativeFailureThatSettled pins the same fact on delete,
+// including its tombstone: the delete waits out the settlement of a natively
+// failed turn, answers cleanly because that settlement succeeded, and the commit
+// the settlement took before the tombstone landed is not resurrected by it.
+func TestDeleteSucceedsOverANativeFailureThatSettled(t *testing.T) {
+	ledger := &settlementLedger{}
+	agent, store, client, sessionID := settlementAgent(t, ledger)
+
+	// The terminal idle is emitted after the durable commit and before the
+	// quiescence fact, so holding it parks the prompt inside a settlement whose
+	// containment and commit are already done and whose latch is unpublished.
+	idleStarted := make(chan struct{}, 2)
+	idleRelease := make(chan struct{}, 2)
+	client.idleStarted = idleStarted
+	client.idleRelease = idleRelease
+
+	promptErr := make(chan error, 1)
+
+	go func() {
+		_, err := agent.Prompt(t.Context(), lifecyclePrompt(sessionID, "provider-failure", "sub-native-delete", "nonce-native-delete"))
+		promptErr <- err
+	}()
+
+	<-idleStarted
+
+	deleted := make(chan error, 1)
+
+	go func() {
+		_, err := agent.UnstableDeleteSession(t.Context(), DeleteSessionRequest(sessionID))
+		deleted <- err
+	}()
+
+	select {
+	case resultErr := <-deleted:
+		t.Fatalf("delete returned before the settlement it waits on: %v", resultErr)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(idleRelease)
+
+	requireTurnFailure(t, <-promptErr, causeProvider, "upstream refused")
+	require.NoError(t, <-deleted, "a boundary that settled is a successful delete, whatever the model did inside it")
+
+	after := store.replaceCount()
+
+	main, err := store.Load(t.Context(), SessionKey{SessionID: string(sessionID), Subpath: SessionStoreMainSubpath})
+	require.NoError(t, err)
+	require.Empty(t, main, "the tombstone is the last word on a deleted session")
+
+	transcript, err := store.Load(t.Context(), SessionKey{SessionID: string(sessionID), Subpath: transcriptSubpath})
+	require.NoError(t, err)
+	require.Empty(t, transcript)
+	require.Equal(t, after, store.replaceCount(), "no write recreates the row after delete succeeds")
+}
+
+// TestCloseReportsACommitOutageBehindANativeFailure pins the other half: when a
+// native failure and a settlement failure coincide, the prompt keeps the native
+// failure as its primary wire shape and the close states the settlement failure.
+// A latch carrying the native error instead would hide the store outage from the
+// only surface that reports it.
+//
+// The close also retries the commit the settlement retained, so the gate sees a
+// second write from it. Both the latch and the retry name the same outage, and
+// the close states it either way.
+func TestCloseReportsACommitOutageBehindANativeFailure(t *testing.T) {
+	ledger := &settlementLedger{}
+	agent, store, _, sessionID := settlementAgent(t, ledger)
+	outage := errors.New("session store outage behind a native failure")
+
+	store.gate()
+
+	promptErr := make(chan error, 1)
+
+	go func() {
+		_, err := agent.Prompt(t.Context(), lifecyclePrompt(sessionID, "provider-failure", "sub-native-commit", "nonce-native-commit"))
+		promptErr <- err
+	}()
+
+	// The adoption commit is already through the gate when the outage is armed,
+	// so the settlement commit is the one and only failing write.
+	awaitCorrectionSignal(t, store.started, "adoption commit entry")
+	store.fail(outage)
+	store.release <- struct{}{}
+	awaitCorrectionSignal(t, store.started, "failed settlement commit entry")
+
+	closeErr := make(chan error, 1)
+
+	go func() {
+		_, err := agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: sessionID})
+		closeErr <- err
+	}()
+
+	select {
+	case resultErr := <-closeErr:
+		t.Fatalf("close returned before the settlement it waits on: %v", resultErr)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	store.release <- struct{}{}
+
+	// The close's own durable rung retries the frames the settlement retained,
+	// and the outage is still armed, so the retry is the second write to arrive.
+	awaitCorrectionSignal(t, store.started, "close retry commit entry")
+	store.release <- struct{}{}
+
+	failure := receiveCorrection(t, promptErr, "native prompt failure")
+	requireTurnFailure(t, failure, causeProvider, "upstream refused")
+	require.NotErrorIs(t, failure, outage, "the native failure is the prompt's primary, unflattened")
+	require.ErrorIs(t, receiveCorrection(t, closeErr, "failed close result"), outage)
+	require.NotContains(t, ledger.snapshot(), "idle",
+		"no terminal boundary claims a foreground prefix the store does not hold")
+
+	// A close that could not commit reclaims nothing, so the session is still the
+	// agent's and the host can close it again once the store is back.
+	_, addressable := agent.session(sessionID)
+	require.NoError(t, addressable, "a failed close left the session unaddressable")
+}
+
+// TestConcurrentCloseDischargesAHealedSettlementCommitFailure pins the owed-rung
+// model. The prompt keeps the outage captured by its settlement Replace, while
+// the close waiting on that latch retries the retained frames after the store
+// heals. That successful close owns a nil result and exactly one eviction.
+func TestConcurrentCloseDischargesAHealedSettlementCommitFailure(t *testing.T) {
+	ledger := &settlementLedger{}
+	agent, store, _, sessionID := settlementAgent(t, ledger)
+	outage := errors.New("captured settlement outage")
+
+	live, err := agent.session(sessionID)
+	require.NoError(t, err)
+
+	scratchReleases := 0
+	originalRelease := live.scratchRootRelease
+	live.scratchRootRelease = func() {
+		scratchReleases++
+		if originalRelease != nil {
+			originalRelease()
+		}
+	}
+
+	store.gate()
+	promptErr := make(chan error, 1)
+	go func() {
+		_, err := agent.Prompt(t.Context(), lifecyclePrompt(sessionID, "hello", "sub-healed-close", "nonce-healed-close"))
+		promptErr <- err
+	}()
+
+	// Let the thread-adoption generation land, then make the settlement Replace
+	// capture the outage before it waits on the gate.
+	awaitCorrectionSignal(t, store.started, "adoption commit entry")
+	store.release <- struct{}{}
+	store.fail(outage)
+	awaitCorrectionSignal(t, store.started, "settlement commit entry")
+
+	closeErr := make(chan error, 1)
+	go func() {
+		_, err := agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: sessionID})
+		closeErr <- err
+	}()
+
+	// The in-flight Replace retains its captured failure, but the close-owned
+	// retry starts after this heal and sees a healthy store.
+	store.heal()
+	store.release <- struct{}{}
+
+	require.ErrorIs(t, receiveCorrection(t, promptErr, "failed prompt commit"), outage)
+	require.NoError(t, receiveCorrection(t, closeErr, "healed close result"))
+	require.Equal(t, 1, scratchReleases, "the successful close evicts exactly once")
+
+	retained, loadErr := store.Load(t.Context(), SessionKey{SessionID: string(sessionID), Subpath: transcriptSubpath})
+	require.NoError(t, loadErr)
+	require.NotEmpty(t, retained, "the close-owned retry made the retained frames durable")
+	_, lookupErr := agent.session(sessionID)
+	require.Error(t, lookupErr)
+	require.Equal(t, 4, store.replaceCount(), "initial, adoption, failed settlement, and close retry are the only writes")
+}
+
+// TestDeleteReportsATerminalDeliveryOutageBehindANativeFailure pins the same
+// split for the last step of the order: the terminal lifecycle delivery. The
+// prompt reports the native failure it was given; the delete reports the delivery
+// outage that stopped the boundary from being stated.
+func TestDeleteReportsATerminalDeliveryOutageBehindANativeFailure(t *testing.T) {
+	ledger := &settlementLedger{}
+	agent, _, client, sessionID := settlementAgent(t, ledger)
+	deliveryFailure := errors.New("terminal lifecycle delivery failed behind a native failure")
+	idleStarted := make(chan struct{})
+	idleRelease := make(chan struct{})
+	client.idleStarted = idleStarted
+	client.idleRelease = idleRelease
+	client.idleErr = deliveryFailure
+
+	promptErr := make(chan error, 1)
+
+	go func() {
+		_, err := agent.Prompt(t.Context(), lifecyclePrompt(sessionID, "provider-failure", "sub-native-delivery", "nonce-native-delivery"))
+		promptErr <- err
+	}()
+
+	// The idle is emitted after the durable commit, so the prompt is held on the
+	// one step of the order that is still outstanding.
+	awaitCorrectionSignal(t, idleStarted, "first terminal delivery")
+	idleRelease <- struct{}{}
+
+	failure := receiveCorrection(t, promptErr, "prompt delivery failure")
+	requireTurnFailure(t, failure, causeProvider, "upstream refused")
+	require.NotErrorIs(t, failure, deliveryFailure, "the native failure is the prompt's primary, unflattened")
+
+	deleted := make(chan error, 1)
+
+	go func() {
+		_, err := agent.UnstableDeleteSession(t.Context(), DeleteSessionRequest(sessionID))
+		deleted <- err
+	}()
+
+	// Delete retransmits the exact retained terminal notification. Its second
+	// callback attempt is the barrier proving it did not mistake the failed
+	// first delivery for a settled boundary.
+	awaitCorrectionSignal(t, idleStarted, "retried terminal delivery")
+	idleRelease <- struct{}{}
+	require.ErrorIs(t, receiveCorrection(t, deleted, "delete delivery failure"), deliveryFailure)
+}
+
+func TestCloseReportsSettlementCommitFailure(t *testing.T) {
+	ledger := &settlementLedger{}
+	agent, store, client, sessionID := settlementAgent(t, ledger)
+	outage := errors.New("session store outage after containment")
+	streamed := make(chan struct{})
+	client.onAgentChunk = func() {
+		store.fail(outage)
+		close(streamed)
+	}
+
+	promptErr := make(chan error, 1)
+	go func() {
+		_, err := agent.Prompt(t.Context(), lifecyclePrompt(sessionID, "hang", "sub-close-failure", "nonce-close-failure"))
+		promptErr <- err
+	}()
+
+	awaitCorrectionSignal(t, streamed, "close-failure prompt chunk")
+
+	closeErr := make(chan error, 1)
+	go func() {
+		_, err := agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: sessionID})
+		closeErr <- err
+	}()
+
+	require.ErrorIs(t, receiveCorrection(t, promptErr, "outage prompt result"), outage)
+	require.ErrorIs(t, receiveCorrection(t, closeErr, "outage close result"), outage)
+	require.NotContains(t, ledger.snapshot(), "idle")
+}
+
+func TestSuccessfulDeleteDischargesFencedSettlementAfterTombstone(t *testing.T) {
+	ledger := &settlementLedger{}
+	agent, store, client, sessionID := settlementAgent(t, ledger)
+	streamed := make(chan struct{})
+	client.onAgentChunk = func() { close(streamed) }
+
+	promptErr := make(chan error, 1)
+	go func() {
+		_, err := agent.Prompt(t.Context(), lifecyclePrompt(sessionID, "hang", "sub-delete-failure", "nonce-delete-failure"))
+		promptErr <- err
+	}()
+
+	awaitCorrectionSignal(t, streamed, "delete-failure prompt chunk")
+
+	deleteErr := make(chan error, 1)
+	go func() {
+		_, err := agent.UnstableDeleteSession(t.Context(), DeleteSessionRequest(sessionID))
+		deleteErr <- err
+	}()
+
+	require.ErrorIs(t, receiveCorrection(t, promptErr, "fenced prompt result"), errPersistenceFenced)
+	require.NoError(t, receiveCorrection(t, deleteErr, "successful delete result"), "the successful tombstone discharges the fenced commit")
+	require.NotContains(t, ledger.snapshot(), "idle")
+
+	after := store.replaceCount()
+	main, err := store.Load(t.Context(), SessionKey{SessionID: string(sessionID), Subpath: SessionStoreMainSubpath})
+	require.NoError(t, err)
+	require.Empty(t, main)
+
+	transcript, err := store.Load(t.Context(), SessionKey{SessionID: string(sessionID), Subpath: transcriptSubpath})
+	require.NoError(t, err)
+	require.Empty(t, transcript)
+	require.Equal(t, after, store.replaceCount())
+}
+
+// TestDeleteFencesALaterSettlementCommit pins the other half of the delete
+// serialization: a settlement that reaches its commit after the tombstone landed
+// writes nothing at all, so the frames it held die with the session rather than
+// recreating it.
+func TestDeleteFencesALaterSettlementCommit(t *testing.T) {
+	ledger := &settlementLedger{}
+	agent, store, client, sessionID := settlementAgent(t, ledger)
+
+	streamed := make(chan struct{})
+	client.onAgentChunk = func() { close(streamed) }
+
+	promptErr := make(chan error, 1)
+
+	go func() {
+		// A delete interrupts the live native process, and the interrupt's own
+		// noise is not what this test is about.
+		_, err := agent.Prompt(t.Context(), lifecyclePrompt(sessionID, "hang", "sub-5", "nonce-5"))
+		promptErr <- err
+	}()
+
+	awaitCorrectionSignal(t, streamed, "later-settlement prompt chunk")
+
+	before := store.replaceCount()
+	_, _ = agent.UnstableDeleteSession(t.Context(), DeleteSessionRequest(sessionID))
+	require.ErrorIs(t, receiveCorrection(t, promptErr, "later fenced prompt result"), errPersistenceFenced)
+
+	require.Equal(t, before, store.replaceCount(), "a fenced session writes nothing back over its tombstone")
+	require.NotContains(t, ledger.snapshot(), "idle", "a fenced commit cannot precede a terminal boundary")
+
+	main, err := store.Load(t.Context(), SessionKey{SessionID: string(sessionID), Subpath: SessionStoreMainSubpath})
+	require.NoError(t, err)
+	require.Empty(t, main)
+}
+
+// TestCloseWaitsForFullSettlement pins the completion latch: close waits on a
+// prompt that is wholly settled, not on one whose native process merely exited.
+// A close that returned at the native terminal would fence a stream the prompt
+// is still writing to and answer before the frames the host was shown are
+// durable.
+func TestCloseWaitsForFullSettlement(t *testing.T) {
+	ledger := &settlementLedger{}
+	agent, store, client, sessionID := settlementAgent(t, ledger)
+
+	streamed := make(chan struct{})
+	client.onAgentChunk = func() { close(streamed) }
+
+	prompt := make(chan struct{})
+
+	go func() {
+		defer close(prompt)
+
+		_, err := agent.Prompt(t.Context(), lifecyclePrompt(sessionID, "hang", "sub-3", "nonce-3"))
+		require.NoError(t, err)
+	}()
+
+	<-streamed
+	live, err := agent.session(sessionID)
+	require.NoError(t, err)
+	admitted := live.activePromptState()
+	require.NotNil(t, admitted)
+	store.gate()
+
+	closed := make(chan struct{})
+
+	go func() {
+		defer close(closed)
+
+		_, err := agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: sessionID})
+		require.NoError(t, err)
+	}()
+
+	// The cancellation signal is the close admission-fence barrier: once it is
+	// closed, this exact CloseSession has observed the already-admitted prompt
+	// and is joining its settlement. The store barrier then proves that settlement
+	// is held inside the durable rung.
+	awaitCorrectionSignal(t, admitted.cancelled, "close admission cancellation")
+	awaitCorrectionSignal(t, store.started, "held close settlement commit")
+
+	select {
+	case <-closed:
+		t.Fatal("close returned while the settlement commit was still held")
+	default:
+	}
+
+	close(store.release)
+	awaitCorrectionSignal(t, closed, "close settlement completion")
+	<-prompt
+
+	ledger.record("closed")
+	steps := ledger.snapshot()
+	require.Equal(t, []string{"commit", "commit", "idle", "closed"}, steps)
+}
+
+// TestDeleteIsNeverResurrectedByALateCommit pins that a delete's tombstone is
+// the last write to its row. Replace clears the tombstone of every key it lists,
+// so a settlement commit still in flight when the delete arrives would durably
+// recreate a session the host was told is gone. The commit is held open across
+// the whole delete, which is the exact window the race lives in.
+func TestDeleteIsNeverResurrectedByALateCommit(t *testing.T) {
+	ledger := &settlementLedger{}
+	agent, store, _, sessionID := settlementAgent(t, ledger)
+
+	store.gate()
+
+	prompt := make(chan struct{})
+
+	go func() {
+		defer close(prompt)
+
+		_, err := agent.Prompt(t.Context(), lifecyclePrompt(sessionID, "hello", "sub-4", "nonce-4"))
+		require.NoError(t, err)
+	}()
+
+	// The early adoption commit is the first through the gate; the settlement
+	// commit is the second, and it is the one the delete must serialize behind.
+	awaitCorrectionSignal(t, store.started, "adoption commit entry")
+	store.release <- struct{}{}
+	awaitCorrectionSignal(t, store.started, "settlement commit entry")
+
+	deleted := make(chan error, 1)
+	go func() {
+		_, err := agent.UnstableDeleteSession(t.Context(), DeleteSessionRequest(sessionID))
+		deleted <- err
+	}()
+
+	select {
+	case err := <-deleted:
+		t.Fatalf("delete tombstoned the row while a commit was in flight: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	store.release <- struct{}{}
+
+	require.NoError(t, <-deleted)
+	<-prompt
+
+	after := store.replaceCount()
+
+	main, err := store.Load(t.Context(), SessionKey{SessionID: string(sessionID), Subpath: SessionStoreMainSubpath})
+	require.NoError(t, err)
+	require.Empty(t, main, "the tombstone is the last word on a deleted session")
+
+	transcript, err := store.Load(t.Context(), SessionKey{SessionID: string(sessionID), Subpath: transcriptSubpath})
+	require.NoError(t, err)
+	require.Empty(t, transcript)
+
+	require.Equal(t, after, store.replaceCount(), "no write recreates the row after delete succeeds")
 }

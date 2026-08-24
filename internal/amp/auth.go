@@ -152,15 +152,17 @@ func AuthSecretPresent(dataHome string) (bool, error) {
 
 // AuthDeploymentSupported reports whether the login child this client would
 // start has both a browser-safe platform boundary and the deployment every
-// pinned fact on this surface was measured against. Unsupported platforms and
-// unmeasured deployments are refused before a login child exists.
+// pinned fact on this surface was measured against. Windows is refused before
+// a login child exists: its system loader opens URLs through images no PATH
+// entry can shadow. Darwin and Linux both intercept through the launcher
+// shim, so their gate is the per-executable audit at login start.
 func (c *Client) AuthDeploymentSupported() bool {
 	platform := runtime.GOOS
 	if c.options.TestOnlyAuthLoginPlatform != "" {
 		platform = c.options.TestOnlyAuthLoginPlatform
 	}
 
-	if platform == darwinPlatform || platform == windowsPlatform {
+	if platform == windowsPlatform {
 		return false
 	}
 
@@ -202,9 +204,10 @@ type AuthLogin struct {
 // data home. AMP_API_KEY is removed: with one set, `amp login` copies the
 // ambient value into the store and exits without starting a flow at all, which
 // would hand an environment-supplied credential back as a brokered one.
-// AMP_HEADLESS_OAUTH affects MCP OAuth, not this account-login path. Linux runs
-// behind a browser-launcher shim; platforms without a provable interception
-// boundary fail before the login child is constructed.
+// AMP_HEADLESS_OAUTH affects MCP OAuth, not this account-login path. Darwin
+// and Linux run behind a browser-launcher shim; platforms and executables
+// without a provable interception boundary fail before the login child is
+// constructed.
 func (c *Client) StartAuthLogin(ctx context.Context) (*AuthLogin, error) {
 	environment, err := authLoginEnv(c.options.Isolation, c.options.OrdinaryEnvironment, c.options.Env, c.options.Cwd)
 	if err != nil {

@@ -214,3 +214,32 @@ func TestLocalAgentConnectionSerializesAnHonoredCancel(t *testing.T) {
 		t.Fatalf("cancelled unknown-session close = %#v", reqErr)
 	}
 }
+
+// TestLocalAgentConnectionAnswersAnHonoredNotification pins the notification
+// handler's own success answer through dispatch. Over the wire a notification is
+// fire-and-forget: the peer's send returns before the handler runs, so nothing a
+// caller observes proves the handler ever finished, and only dispatching one
+// directly settles what an honored notification answers with.
+func TestLocalAgentConnectionAnswersAnHonoredNotification(t *testing.T) {
+	path, _ := fakeAgentAmpPath(t, "")
+	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(testScratchDir(t)))
+	t.Cleanup(func() { _ = agent.Close() })
+
+	conn := &localAgentConnection{agent: agent}
+	conn.initialized.Store(true)
+
+	created, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+
+	params, err := json.Marshal(acp.CancelNotification{SessionId: created.SessionId})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resp, reqErr := conn.handle(t.Context(), acp.AgentMethodSessionCancel, params)
+	if reqErr != nil || resp != nil {
+		t.Fatalf("honored cancel = %#v, %#v", resp, reqErr)
+	}
+}

@@ -116,19 +116,23 @@ pointing into that same directory. The directory is mode `0700`, lives under
 the scratch parent (`WithScratchDir` / `-scratch-dir`), and is removed when the
 login handle closes.
 
-Brokered account login is unavailable on Darwin. Current Amp account login
-invokes the system browser directly, and `AMP_HEADLESS_OAUTH` controls only
-MCP-server OAuth rather than account authentication. The adapter fingerprints
-the resolved executable and refuses it before constructing `amp login`; an
-unknown build is refused until its account-login behavior has an audited
-headless contract. Windows also refuses the login before native minting,
-because the launcher shim above neutralises nothing there: `CreateProcess`
-resolves `cmd.exe`, `explorer.exe`, and `rundll32.exe` out of the system
-directory ahead of every `PATH` entry, and the `start` that opens a URL is a
-`cmd.exe` builtin with no image to shadow. Both platforms report
-`unsupported_variant` from `authorize`. Neither refusal reaches ordinary native
-Amp commands, which open no browser, nor the manual `api-key` method, which
-starts no login child.
+Brokered account login runs on Darwin and Linux and is refused on Windows.
+The adapter fingerprints the resolved executable before constructing
+`amp login`: the embedded account-login path must call the audited platform
+opener whose branch executes a bare PATH-resolved launcher — `open` on
+Darwin, `xdg-open` on Linux — and the bundle must name no direct launcher for
+the platform, a quoted `/usr/bin/open` source literal on Darwin or a known
+absolute launcher path on Linux. A build the audit cannot prove is refused
+until its account-login behavior has an audited contract.
+`AMP_HEADLESS_OAUTH` controls only MCP-server OAuth rather than account
+authentication, so the shim is the containment, not that variable. Windows
+refuses the login before native minting, because the launcher shim above
+neutralises nothing there: `CreateProcess` resolves `cmd.exe`,
+`explorer.exe`, and `rundll32.exe` out of the system directory ahead of every
+`PATH` entry, and the `start` that opens a URL is a `cmd.exe` builtin with no
+image to shadow. Every one of these refusals reports `unsupported_variant`
+from `authorize`. None reaches ordinary native Amp commands, which open no
+browser, nor the manual `api-key` method, which starts no login child.
 
 ## Stream isolation
 
@@ -227,8 +231,10 @@ UID lock exclusively and proves task vacancy; a live UID-lock holder blocks rebi
 and every other owner or `ACTIVE` refuses. A changed boot carries every valid standalone
 owner+`ACTIVE` unchanged and excluded, and ownerless `CLEAN_READY`
 may be carried. A provider never recovers ownerless `ACTIVE`: it performs no
-kill, path deletion, disposition rewrite, or CLEAN publish and fails with
-`Wagie recovery required`. The host authority alone owns that destructive
+kill, path deletion, disposition rewrite, or CLEAN publish, and refuses to
+launch instead. `Host recovery required` is the operator posture that refusal
+leaves behind, not a string the adapter returns — the error names the ownerless
+UID it would not touch. The host authority alone owns that destructive
 recovery grammar and authority. Only the exact standalone owner may roll retained `ACTIVE`
 after publication and two consecutive vacancy scans. Missing domain state plus
 any owner or disposition fails closed. Every authorized cleanup requires exact

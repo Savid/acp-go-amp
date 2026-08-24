@@ -53,7 +53,7 @@ lifecycle ownership remain in effect.
 | `WithProcessIsolation` | Optional Linux-only hardening: a non-root UID/GID and complete replacement environment for native Amp commands. The embedded supervisor must be trusted root and the target identity must be distinct; only Amp receives the target identity, with supplementary groups cleared. Invalid or unsupported explicit policy fails closed with no ordinary fallback. Omitting the option launches native work ordinarily as the current identity, root or non-root. |
 | `WithScratchDir` | Sole parent for all ephemeral on-disk scratch (per-session isolated `HOME`/XDG directories and the startup/discovery probes' isolated `HOME`/XDG/settings/MCP residence). Empty falls back to the system temp directory; created `0700` when missing. |
 | `WithInputHandoffRoot` | Absolute read root for the local handoff input form. Read-only, so it is not a materialization root. Unset rejects every handoff-form block. See [Handoff read root](#handoff-read-root). |
-| `WithProviderAuthRoot` | Absolute durable directory holding the values-free provider-auth ledger. Unset, or unusable, leaves every `_amp/auth/*` method unadvertised. Darwin and Windows refuse hosted sign-in with `unsupported_variant` before native login; manual API-key material remains available. See [Authentication](/docs/features/authentication#broker-an-account). |
+| `WithProviderAuthRoot` | Absolute durable directory holding the values-free provider-auth ledger. Unset, or unusable, leaves every `_amp/auth/*` method unadvertised. Hosted sign-in runs on Darwin and Linux behind a per-executable audit; Windows and unaudited builds refuse it with `unsupported_variant` before native login, and manual API-key material remains available everywhere. See [Authentication](/docs/features/authentication#broker-an-account). |
 | `WithProviderAuthDirectHome` | Unsupported: `disconnect` releases only the ledger slot a connection owns and reads no operator home, so there is nothing for an exact-home consent gate to authorize. A non-empty value rejects at session start. |
 | `WithHome` | Unsupported: Amp has no native config/auth root. Kept on the surface for symmetry; a non-empty value rejects at session start. Use `WithScratchDir`. |
 | `WithDefaultModel` | Accepted for symmetry; non-empty values reject at session start. |
@@ -141,7 +141,7 @@ wire shape and verdicts.
 | Field | Behavior |
 |---|---|
 | `Env` | Per-session environment overrides. |
-| `Mode` | `low`, `medium`, or `high`. |
+| `Mode` | Amp's mode, which selects its model. `low`, `medium`, `high`, and `ultra` are advertised; any mode is accepted and forwarded to Amp. Left empty it states no selection and the session takes the advertised default; a wire request that sends `mode` as an empty string names no mode and is rejected. |
 | `Model`, `OutputSchema` | Present for API symmetry; rejected when supplied. |
 
 ## Request builders

@@ -7,11 +7,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/coder/acp-go-sdk"
+	"github.com/savid/acp-go-amp/internal/amp"
 	"github.com/stretchr/testify/require"
 )
 
@@ -85,7 +89,10 @@ func TestStrictMetaAndConfigResponse(t *testing.T) {
 		{name: "rawEvent enabled not bool", meta: map[string]any{"amp": map[string]any{"rawEvent": map[string]any{"enabled": "yes"}}}, field: "_meta.amp.rawEvent.enabled"},
 		{name: "rawEvent unknown", meta: map[string]any{"amp": map[string]any{"rawEvent": map[string]any{"extra": true}}}, field: "_meta.amp.rawEvent.extra"},
 		{name: "model not string", meta: map[string]any{"amp": map[string]any{"options": map[string]any{"model": 1}}}, field: "_meta.amp.options.model"},
-		{name: "removed effort", meta: map[string]any{"amp": map[string]any{"options": map[string]any{"effort": "high"}}}, field: "_meta.amp.options.effort"},
+		// A mode key that arrived carrying nothing is the same shape defect as
+		// one carrying a non-string: it states a selection and names none.
+		{name: "mode empty", meta: map[string]any{"amp": map[string]any{"options": map[string]any{"mode": ""}}}, field: "_meta.amp.options.mode"},
+		{name: "options unknown", meta: map[string]any{"amp": map[string]any{"options": map[string]any{"unknown": "x"}}}, field: "_meta.amp.options.unknown"},
 		{name: "outputSchema empty", meta: map[string]any{"amp": map[string]any{"options": map[string]any{"outputSchema": map[string]any{}}}}, field: "_meta.amp.options.outputSchema"},
 		{name: "own namespace unknown", meta: map[string]any{"amp": map[string]any{"unknown": true}}, field: "_meta.amp.unknown"},
 	} {
@@ -110,6 +117,183 @@ func TestStrictMetaAndConfigResponse(t *testing.T) {
 	if len(resp.ConfigOptions) != 1 {
 		t.Fatalf("config response options = %#v", resp.ConfigOptions)
 	}
+}
+
+// TestModeTravelsToNativeOnBothRoutes pins full mode passthrough on the
+// mode-only config surface. Amp's mode is its native model selection — it picks
+// the model, the system prompt, and the tool set — so the value namespace
+// belongs to amp and this adapter keeps no list to refuse one against. A mode
+// the advert does not name reaches the native `-m` flag unchanged over both
+// doors a host can push a mode through: the establishment `_meta.amp.options`
+// and a later `session/set_config_option`. `ultra` ships with the CLI, so it is
+// accepted and advertised; `turbo-experimental` is a value no build here knows,
+// and it travels just as far.
+func TestModeTravelsToNativeOnBothRoutes(t *testing.T) {
+	const unknownMode = "turbo-experimental"
+
+	ctx := context.Background()
+	path, state := fakeAgentAmpPath(t, "")
+	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(testScratchDir(t)))
+	_, cleanup := attachRecordingClient(t, agent)
+	defer cleanup()
+
+	newResp, err := agent.NewSession(ctx, NewSessionRequest(t.TempDir(),
+		WithSessionAmpOptions(NewAmpOptions(WithAmpMode(modeUltra))),
+	))
+	if err != nil {
+		t.Fatalf("NewSession %q: %v", modeUltra, err)
+	}
+	requireConfigMode(t, newResp.ConfigOptions, modeUltra)
+	requireAdvertisedModes(t, newResp.ConfigOptions)
+
+	if _, promptErr := agent.Prompt(ctx, TextPromptRequest(newResp.SessionId, "turn-1", "x")); promptErr != nil {
+		t.Fatalf("Prompt %q: %v", modeUltra, promptErr)
+	}
+	// The first prompt is the thread-less execute, so it is the argv carrying
+	// `-x` without a `threads` subcommand.
+	requireNativeModeFlag(t, state, modeUltra, func(args []string) bool {
+		return slices.Contains(args, "-x") && !slices.Contains(args, "threads")
+	})
+
+	setResp, err := agent.SetSessionConfigOption(ctx, SetConfigOptionRequest(newResp.SessionId, configMode, unknownMode))
+	if err != nil {
+		t.Fatalf("SetSessionConfigOption %q: %v", unknownMode, err)
+	}
+	// A current value the advertised list does not contain is the accepted
+	// shape: the list is a menu a host renders, and amp is the authority on what
+	// it will actually run.
+	requireConfigMode(t, setResp.ConfigOptions, unknownMode)
+	requireAdvertisedModes(t, setResp.ConfigOptions)
+
+	if _, promptErr := agent.Prompt(ctx, TextPromptRequest(newResp.SessionId, "turn-2", "x")); promptErr != nil {
+		t.Fatalf("Prompt %q: %v", unknownMode, promptErr)
+	}
+	// Every prompt after the first continues the adopted server-side thread, so
+	// the argv naming that thread is the one to read.
+	requireNativeModeFlag(t, state, unknownMode, func(args []string) bool {
+		return slices.Contains(args, "continue") && slices.Contains(args, "T-agent-thread")
+	})
+}
+
+// requireNativeModeFlag reads the recorded native argv, selects the most recent
+// child the predicate accepts, and requires `-m` to be followed by exactly the
+// requested mode. Presence of the token is not enough: the pin is that the value
+// arrives unrewritten, in the flag's own position.
+func requireNativeModeFlag(t *testing.T, state string, want string, match func([]string) bool) {
+	t.Helper()
+
+	var selected []string
+	for _, args := range readHelperJSON[[]string](t, filepath.Join(state, "args.jsonl")) {
+		if match(args) {
+			selected = args
+		}
+	}
+	if selected == nil {
+		t.Fatalf("no recorded native child matched for mode %q", want)
+	}
+
+	flag := slices.Index(selected, "-m")
+	if flag < 0 || flag+1 >= len(selected) {
+		t.Fatalf("native argv carries no -m value: %#v", selected)
+	}
+	if selected[flag+1] != want {
+		t.Fatalf("native -m value = %q, want %q: %#v", selected[flag+1], want, selected)
+	}
+}
+
+// requireAdvertisedModes pins the advertised menu itself, so the list a host
+// renders stays the shipping CLI's documented set even as the current value
+// ranges outside it.
+func requireAdvertisedModes(t *testing.T, options []acp.SessionConfigOption) {
+	t.Helper()
+
+	for _, option := range options {
+		if option.Select == nil || option.Select.Id != configMode {
+			continue
+		}
+		if option.Select.Options.Ungrouped == nil {
+			t.Fatalf("mode option advertises no ungrouped values: %#v", option.Select.Options)
+		}
+
+		got := make([]string, 0, len(*option.Select.Options.Ungrouped))
+		for _, value := range *option.Select.Options.Ungrouped {
+			got = append(got, string(value.Value))
+		}
+		if !slices.Equal(got, []string{modeLow, modeMedium, modeHigh, modeUltra}) {
+			t.Fatalf("advertised modes = %#v", got)
+		}
+
+		return
+	}
+
+	t.Fatalf("no mode config option: %#v", options)
+}
+
+// TestEmptyModeIsRefusedWhileAbsenceIsNot pins the one mode value this adapter
+// still judges, at both doors a host can push a mode through. Deleting the enum
+// gates handed amp the whole namespace, but the empty string is not a member of
+// it: it names no mode, and the argv builder would answer it by omitting `-m`
+// altogether — the session would run amp's default while the host read back a
+// selection it never got. So it is refused on the member that carried it, the
+// same way a mode that is not a string is, and for the same reason: request
+// shape, not a value gate. Absence is the other request entirely and stays
+// legal — a session established with no mode key names no selection, builds no
+// `-m`, and lets amp's own default stand.
+func TestEmptyModeIsRefusedWhileAbsenceIsNot(t *testing.T) {
+	ctx := context.Background()
+	path, state := fakeAgentAmpPath(t, "")
+	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(testScratchDir(t)))
+	_, cleanup := attachRecordingClient(t, agent)
+	defer cleanup()
+
+	// Door one, establishment. The Go request builder cannot even express this
+	// request — an empty Mode is omitted from the payload — so the refusal is
+	// pinned on the wire shape a host can actually send.
+	emptyMode := WithSessionMeta(map[string]any{
+		ampMetaKey: map[string]any{ampOptionsKey: map[string]any{optionModeKey: ""}},
+	})
+	_, err := agent.NewSession(ctx, NewSessionRequest(t.TempDir(), emptyMode))
+	requireUnsupportedField(t, err, "_meta.amp.options.mode")
+
+	// The same door on the load and resume routes, which validate the request
+	// identically before an active session may be reused.
+	_, err = agent.LoadSession(ctx, LoadSessionRequest("T-empty-mode", t.TempDir(), emptyMode))
+	requireUnsupportedField(t, err, "_meta.amp.options.mode")
+	_, err = agent.ResumeSession(ctx, ResumeSessionRequest("T-empty-mode", t.TempDir(), emptyMode))
+	requireUnsupportedField(t, err, "_meta.amp.options.mode")
+
+	// Absence is the accepted request: it states no selection, so the session
+	// takes the default it advertises and carries that real value to the native
+	// child. What absence never produces is a turn with no `-m` at all.
+	newResp, err := agent.NewSession(ctx, NewSessionRequest(t.TempDir()))
+	if err != nil {
+		t.Fatalf("NewSession without a mode: %v", err)
+	}
+	requireConfigMode(t, newResp.ConfigOptions, modeMedium)
+	if _, promptErr := agent.Prompt(ctx, TextPromptRequest(newResp.SessionId, "turn-1", "x")); promptErr != nil {
+		t.Fatalf("Prompt without a mode: %v", promptErr)
+	}
+	requireNativeModeFlag(t, state, modeMedium, func(args []string) bool {
+		return slices.Contains(args, "-x") && !slices.Contains(args, "threads")
+	})
+
+	// Door two, session/set_config_option. The refusal names `value`, and the
+	// session keeps the mode it had rather than recording a selection nothing
+	// would carry to the native child.
+	setResp, err := agent.SetSessionConfigOption(ctx, SetConfigOptionRequest(newResp.SessionId, configMode, modeHigh))
+	if err != nil {
+		t.Fatalf("SetSessionConfigOption %q: %v", modeHigh, err)
+	}
+	requireConfigMode(t, setResp.ConfigOptions, modeHigh)
+
+	_, err = agent.SetSessionConfigOption(ctx, SetConfigOptionRequest(newResp.SessionId, configMode, ""))
+	requireUnsupportedField(t, err, fieldValue)
+
+	session, err := agent.session(newResp.SessionId)
+	if err != nil {
+		t.Fatalf("session after the refusal: %v", err)
+	}
+	requireConfigMode(t, session.configOptions(), modeHigh)
 }
 
 func TestClientBackpressureAndSessionIDDrift(t *testing.T) {
@@ -186,8 +370,8 @@ func TestDeleteOrderingRetryAndManifestShape(t *testing.T) {
 	if _, deleteErr := failOnce.UnstableDeleteSession(ctx, DeleteSessionRequest(failOnceResp.SessionId)); deleteErr == nil {
 		t.Fatal("first native delete succeeded unexpectedly")
 	}
-	if got := failOnce.pendingNativeDeleteIDs(); len(got) != 1 || got[0] != failOnceResp.SessionId {
-		t.Fatalf("pending native deletes = %#v", got)
+	if got := failOnce.cleanupOwnerIDs(); len(got) != 1 || got[0] != failOnceResp.SessionId {
+		t.Fatalf("pending deletes = %#v", got)
 	}
 	if _, deleteErr := failOnce.UnstableDeleteSession(ctx, DeleteSessionRequest(failOnceResp.SessionId)); deleteErr != nil {
 		t.Fatalf("explicit pending native delete retry: %v", deleteErr)
@@ -195,14 +379,19 @@ func TestDeleteOrderingRetryAndManifestShape(t *testing.T) {
 	if _, listErr := failOnce.ListSessions(ctx, ListSessionsRequest()); listErr != nil {
 		t.Fatalf("ListSessions retry: %v", listErr)
 	}
-	if got := failOnce.pendingNativeDeleteIDs(); len(got) != 0 {
-		t.Fatalf("pending native delete not retried: %#v", got)
+	if got := failOnce.cleanupOwnerIDs(); len(got) != 0 {
+		t.Fatalf("pending delete not retried: %#v", got)
 	}
 
 	pendingFailure := newTestAgent(WithExecutablePath("/does/not/exist"), WithScratchDir(testScratchDir(t)))
-	pendingFailure.markPendingNativeDelete("T-pending-failure", "T-pending-native")
+	pendingWrapper := &agentSession{agent: pendingFailure, id: "T-pending-failure", nativeID: "T-pending-native", turn: make(chan struct{}, 1)}
+	pendingFailure.cleanupOwners[pendingWrapper.id] = []agentCleanupOwner{{session: pendingWrapper, kind: agentCleanupDeleted}}
+	pendingFailure.deleted[pendingWrapper.id] = struct{}{}
 	if _, deleteErr := pendingFailure.UnstableDeleteSession(ctx, DeleteSessionRequest("T-pending-failure")); deleteErr == nil {
-		t.Fatal("pending native delete retry failure was swallowed")
+		t.Fatal("pending delete retry failure was swallowed")
+	}
+	if got, ok := pendingFailure.cleanupOwner(pendingWrapper.id); !ok || got.session != pendingWrapper {
+		t.Fatal("failed pending delete lost exact wrapper ownership")
 	}
 
 	shapeStore := NewInMemorySessionStore()
@@ -224,6 +413,211 @@ func TestDeleteOrderingRetryAndManifestShape(t *testing.T) {
 			t.Fatalf("manifest contains %s: %s", forbidden, entries[0])
 		}
 	}
+}
+
+// TestFailedDeleteRetainsExactWrapperOwnership pins both ownership sources. A
+// no-store live wrapper and a store-backed live wrapper are transferred intact
+// behind the tombstone; explicit retry and Agent.Close respectively finish the
+// same wrapper and release its scratch reservation exactly once.
+func TestFailedDeleteRetainsExactWrapperOwnership(t *testing.T) {
+	t.Run("no-store explicit retry", func(t *testing.T) {
+		path, _ := fakeAgentAmpPath(t, "delete-fail-once")
+		agent := newTestAgent(WithExecutablePath(path), WithScratchDir(testScratchDir(t)))
+
+		wrapper, err := newAgentSession(t.Context(), agent, "T-delete-no-store", t.TempDir(), parsedSessionMeta{}, "", nil)
+		require.NoError(t, err)
+		wrapper.nativeID = "T-agent-thread"
+
+		releases := 0
+		originalRelease := wrapper.scratchRootRelease
+		wrapper.scratchRootRelease = func() {
+			releases++
+			originalRelease()
+		}
+
+		agent.store = nil
+		agent.mu.Lock()
+		agent.activateSessionLocked(wrapper)
+		agent.mu.Unlock()
+		agent.observe.AddActiveSession(t.Context(), 1)
+
+		_, err = agent.UnstableDeleteSession(t.Context(), DeleteSessionRequest(wrapper.id))
+		require.Error(t, err)
+
+		owned, pending := agent.cleanupOwner(wrapper.id)
+		require.True(t, pending)
+		require.Same(t, wrapper, owned.session)
+		require.Equal(t, "T-agent-thread", owned.session.nativeSessionID())
+		require.Zero(t, releases)
+		require.DirExists(t, wrapper.settingsDir)
+		_, lookupErr := agent.session(wrapper.id)
+		require.Error(t, lookupErr, "the tombstone hides the internally owned wrapper")
+
+		_, err = agent.UnstableDeleteSession(t.Context(), DeleteSessionRequest(wrapper.id))
+		require.NoError(t, err)
+		_, pending = agent.cleanupOwner(wrapper.id)
+		require.False(t, pending)
+		require.Equal(t, 1, releases)
+		require.NoDirExists(t, wrapper.settingsDir)
+		require.NoError(t, agent.Close())
+	})
+
+	t.Run("stored row Agent.Close sweep", func(t *testing.T) {
+		path, _ := fakeAgentAmpPath(t, "delete-fail-once")
+		store := NewInMemorySessionStore()
+		agent := newTestAgent(
+			WithExecutablePath(path),
+			WithScratchDir(testScratchDir(t)),
+			WithSessionStore(store),
+		)
+
+		created, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
+		require.NoError(t, err)
+		_, err = agent.Prompt(t.Context(), TextPromptRequest(created.SessionId, "delete-owner", "seed thread"))
+		require.NoError(t, err)
+
+		wrapper, err := agent.session(created.SessionId)
+		require.NoError(t, err)
+		releases := 0
+		originalRelease := wrapper.scratchRootRelease
+		wrapper.scratchRootRelease = func() {
+			releases++
+			originalRelease()
+		}
+
+		_, err = agent.UnstableDeleteSession(t.Context(), DeleteSessionRequest(created.SessionId))
+		require.Error(t, err)
+
+		owned, pending := agent.cleanupOwner(created.SessionId)
+		require.True(t, pending)
+		require.Same(t, wrapper, owned.session)
+		require.Equal(t, wrapper.nativeSessionID(), owned.session.nativeSessionID())
+		require.Zero(t, releases)
+		require.DirExists(t, wrapper.settingsDir)
+
+		main, loadErr := store.Load(t.Context(), SessionKey{SessionID: string(created.SessionId), Subpath: SessionStoreMainSubpath})
+		require.NoError(t, loadErr)
+		require.Empty(t, main, "the failed teardown remains hidden behind its durable tombstone")
+		_, lookupErr := agent.session(created.SessionId)
+		require.Error(t, lookupErr)
+
+		require.NoError(t, agent.Close(), "shutdown retries the exact pending wrapper")
+		require.Equal(t, 1, releases)
+		require.NoDirExists(t, wrapper.settingsDir)
+		_, pending = agent.cleanupOwner(created.SessionId)
+		require.False(t, pending)
+	})
+
+	t.Run("stored-only tombstone failure releases unused wrapper", func(t *testing.T) {
+		path, _ := fakeAgentAmpPath(t, "")
+		baseStore := NewInMemorySessionStore()
+		store := &fencedDeleteStore{SessionStore: baseStore}
+		scratch := testScratchDir(t)
+		reserved := 0
+		released := 0
+		agent := newTestAgent(
+			WithExecutablePath(path),
+			WithScratchDir(scratch),
+			WithSessionStore(store),
+			WithRuntimeResourceHooks(RuntimeResourceHooks{
+				ReserveScratchRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
+					reserved++
+
+					return func() { released++ }, nil
+				},
+			}),
+		)
+
+		created, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
+		require.NoError(t, err)
+		_, err = agent.Prompt(t.Context(), TextPromptRequest(created.SessionId, "stored-only-delete", "seed thread"))
+		require.NoError(t, err)
+		_, err = agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: created.SessionId})
+		require.NoError(t, err)
+		require.Equal(t, reserved, released)
+
+		_, err = agent.UnstableDeleteSession(t.Context(), DeleteSessionRequest(created.SessionId))
+		require.ErrorContains(t, err, "tombstone write refused")
+		require.Equal(t, reserved, released, "the private wrapper is released when no tombstone transfers ownership")
+		_, pending := agent.cleanupOwner(created.SessionId)
+		require.False(t, pending)
+		_, deleted := agent.isDeleted(created.SessionId)
+		require.False(t, deleted)
+		main, loadErr := baseStore.Load(t.Context(), SessionKey{SessionID: string(created.SessionId), Subpath: SessionStoreMainSubpath})
+		require.NoError(t, loadErr)
+		require.NotEmpty(t, main)
+		require.NoError(t, agent.Close())
+	})
+}
+
+type deleteCallGate struct {
+	SessionStore
+	started chan struct{}
+	release chan struct{}
+}
+
+func (g *deleteCallGate) Delete(ctx context.Context, key SessionKey) error {
+	g.started <- struct{}{}
+	select {
+	case <-g.release:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
+	return g.SessionStore.Delete(ctx, key)
+}
+
+// TestConcurrentCloseAndDeleteReleaseExactWrapperOnce pins the adjacent
+// ownership race: delete holds the wrapper's teardown authority while its
+// tombstone is in flight, so an already-resolved CloseSession cannot release
+// the same settings tree or scratch reservation a second time.
+func TestConcurrentCloseAndDeleteReleaseExactWrapperOnce(t *testing.T) {
+	t.Setenv("AMP_API_KEY", "ownership-test")
+	path, _ := fakeAgentAmpPath(t, "")
+	store := &deleteCallGate{
+		SessionStore: NewInMemorySessionStore(),
+		started:      make(chan struct{}, 1),
+		release:      make(chan struct{}),
+	}
+	agent := newTestAgent(
+		WithExecutablePath(path),
+		WithSessionStore(store),
+		WithScratchDir(testScratchDir(t)),
+	)
+
+	created, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
+	require.NoError(t, err)
+	wrapper, err := agent.session(created.SessionId)
+	require.NoError(t, err)
+
+	releases := 0
+	originalRelease := wrapper.scratchRootRelease
+	wrapper.scratchRootRelease = func() {
+		releases++
+		originalRelease()
+	}
+
+	deleteErr := make(chan error, 1)
+	go func() {
+		_, err := agent.UnstableDeleteSession(t.Context(), DeleteSessionRequest(created.SessionId))
+		deleteErr <- err
+	}()
+	awaitCorrectionSignal(t, store.started, "delete store entry")
+
+	closeErr := make(chan error, 1)
+	go func() {
+		closeErr <- agent.removeSession(t.Context(), created.SessionId, wrapper)
+	}()
+
+	close(store.release)
+	require.NoError(t, receiveCorrection(t, deleteErr, "concurrent delete result"))
+	require.NoError(t, receiveCorrection(t, closeErr, "concurrent close result"))
+	require.Equal(t, 1, releases)
+	_, pending := agent.cleanupOwner(created.SessionId)
+	require.False(t, pending)
+	_, lookupErr := agent.session(created.SessionId)
+	require.Error(t, lookupErr)
+	require.NoError(t, agent.Close())
 }
 
 func TestDeleteUsesStoreAsSoleNativeAuthority(t *testing.T) {
@@ -251,8 +645,9 @@ func TestDeleteUsesStoreAsSoleNativeAuthority(t *testing.T) {
 		t.Fatalf("construct store-absent active session: %v", err)
 	}
 	agent.mu.Lock()
-	agent.sessions[active.id] = active
+	agent.activateSessionLocked(active)
 	agent.mu.Unlock()
+	agent.observe.AddActiveSession(ctx, 1)
 	if _, activeDeleteErr := agent.UnstableDeleteSession(ctx, DeleteSessionRequest(active.id)); activeDeleteErr != nil {
 		t.Fatalf("store-absent active delete: %v", activeDeleteErr)
 	}
@@ -383,8 +778,14 @@ func TestRemainingBranches(t *testing.T) {
 	if err := os.WriteFile(fileHome, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := newTestAgent(WithScratchDir(fileHome)).deleteNativeThread(ctx, "T-file-home", "T-file-home", nil); err == nil {
-		t.Fatal("deleteNativeThread ignored session creation error")
+	fileStore := NewInMemorySessionStore()
+	putStoredSession(t, fileStore, "T-file-home", t.TempDir(), nil)
+	fileAgent := newTestAgent(WithScratchDir(fileHome), WithSessionStore(fileStore))
+	if _, err := fileAgent.UnstableDeleteSession(ctx, DeleteSessionRequest("T-file-home")); err == nil {
+		t.Fatal("stored delete ignored wrapper construction error")
+	}
+	if entries, err := fileStore.Load(ctx, SessionKey{SessionID: "T-file-home", Subpath: SessionStoreMainSubpath}); err != nil || len(entries) == 0 {
+		t.Fatalf("wrapper construction failure tombstoned stored row: entries=%d err=%v", len(entries), err)
 	}
 	cancelCtx, cancel := context.WithCancel(ctx)
 	cancel()
@@ -403,7 +804,7 @@ func TestRemainingBranches(t *testing.T) {
 	}
 	for _, raw := range []map[string]any{
 		{"mode": 1},
-		{"effort": "low"},
+		{"unknown": "x"},
 	} {
 		if _, _, err := parseAmpOptionsWithPresence(raw); err == nil {
 			t.Fatalf("invalid options accepted: %#v", raw)
@@ -417,7 +818,9 @@ func TestRemainingBranches(t *testing.T) {
 	if !state.isCancelled() {
 		t.Fatal("cancelled turn state not observed")
 	}
+}
 
+func TestRemainingSessionConstructionBranches(t *testing.T) {
 	previousMkdirAll := mkdirAll
 	t.Cleanup(func() { mkdirAll = previousMkdirAll })
 	mkdirAll = func(path string, perm os.FileMode) error {
@@ -436,6 +839,10 @@ func TestRemainingBranches(t *testing.T) {
 	if _, err := newAgentSession(t.Context(), newTestAgent(), "T-temp", t.TempDir(), parsedSessionMeta{}, "", nil); err == nil {
 		t.Fatal("temp dir error ignored")
 	}
+}
+
+func TestRemainingPromptBranches(t *testing.T) {
+	ctx := context.Background()
 
 	if err := (&agentSession{agent: newTestAgent()}).interruptState(ctx, nil); err != nil {
 		t.Fatalf("nil interrupt state: %v", err)
@@ -471,6 +878,13 @@ func TestRemainingBranches(t *testing.T) {
 	cancelled.cancel()
 	if resp, err := streamEndedWithoutTerminal(ctx, cancelled, nil, nil, fakeTurnErrors{errs: make(chan error)}); err != nil || resp.StopReason != acp.StopReasonCancelled {
 		t.Fatalf("cancelled stream end = %#v, %v", resp, err)
+	}
+	// A cancel and a successful terminal frame can both be ready at the same
+	// select. A turn the host already cancelled reports cancelled whichever one
+	// the loop happened to read.
+	success := &amp.ResultMessage{Subtype: "success"}
+	if resp, err := (&agentSession{}).resolveTerminal(ctx, cancelled, success, nil, nil, "", "", fakeTurnErrors{errs: make(chan error)}); err != nil || resp.StopReason != acp.StopReasonCancelled {
+		t.Fatalf("cancelled terminal = %#v, %v", resp, err)
 	}
 
 	rawAgent := newTestAgent(WithConcurrencyLimits(ConcurrencyLimits{MaxConcurrentClientCalls: 1}))
@@ -647,4 +1061,138 @@ func TestHandoffAdvertisementFollowsTheConfiguredReadRoot(t *testing.T) {
 	encoded, err := json.Marshal(meta[metaHandoffKey])
 	require.NoError(t, err)
 	require.JSONEq(t, `{"versions":[1]}`, string(encoded))
+}
+
+// loadGate parks the first main-subpath Load after arming, once the underlying
+// read has already returned. That puts a concurrent load exactly where
+// loadOrResume has passed its entry tombstone check and holds a pre-delete
+// manifest, so a delete completing behind it races the install.
+type loadGate struct {
+	SessionStore
+
+	mu      sync.Mutex
+	armed   bool
+	started chan struct{}
+	release chan struct{}
+}
+
+func (g *loadGate) Load(ctx context.Context, key SessionKey) ([]SessionStoreEntry, error) {
+	entries, err := g.SessionStore.Load(ctx, key)
+
+	g.mu.Lock()
+	armed := g.armed && key.Subpath == SessionStoreMainSubpath
+	if armed {
+		g.armed = false
+	}
+	g.mu.Unlock()
+
+	if armed {
+		g.started <- struct{}{}
+		select {
+		case <-g.release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+
+	return entries, err
+}
+
+func (g *loadGate) arm() {
+	g.mu.Lock()
+	g.armed = true
+	g.mu.Unlock()
+}
+
+// TestLoadRacingADeleteInstallsNothingAndLeaksNothing pins the admitted-use
+// transfer class. Delete publishes its exact flight while a cold load is inside
+// Store.Load, then joins that use. The load hands the one prepared wrapper to
+// the flight instead of installing or reclaiming it, and delete settles that
+// exact pointer after the use finishes.
+func TestLoadRacingADeleteInstallsNothingAndLeaksNothing(t *testing.T) {
+	ctx := context.Background()
+	path, _ := fakeAgentAmpPath(t, "")
+	scratch := testScratchDir(t)
+	store := &loadGate{
+		SessionStore: NewInMemorySessionStore(),
+		started:      make(chan struct{}, 1),
+		release:      make(chan struct{}),
+	}
+
+	var reserved, released atomic.Int64
+
+	agent := newTestAgent(
+		WithExecutablePath(path),
+		WithScratchDir(scratch),
+		WithSessionStore(store),
+		WithRuntimeResourceHooks(RuntimeResourceHooks{
+			ReserveScratchRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
+				reserved.Add(1)
+
+				return func() { released.Add(1) }, nil
+			},
+		}),
+	)
+	t.Cleanup(func() { _ = agent.Close() })
+
+	created, err := agent.NewSession(ctx, NewSessionRequest(t.TempDir()))
+	require.NoError(t, err)
+
+	sessionID := created.SessionId
+	cwd := t.TempDir()
+
+	// Evict the live session so the delete below finds only the store row: with
+	// no session to fence, the tombstone is the sole thing the racing load has
+	// to lose to.
+	_, err = agent.CloseSession(ctx, acp.CloseSessionRequest{SessionId: sessionID})
+	require.NoError(t, err)
+
+	store.arm()
+
+	loaded := make(chan error, 1)
+
+	go func() {
+		_, loadErr := agent.LoadSession(ctx, LoadSessionRequest(sessionID, cwd))
+		loaded <- loadErr
+	}()
+
+	// The load is parked inside loadManifest now: past its entry check, holding
+	// a manifest the delete is about to invalidate.
+	awaitCorrectionSignal(t, store.started, "load manifest entry")
+
+	flightCtx, flight, use, existing, err := agent.publishSessionFlight(ctx, sessionID, agentSessionDeleteFlight, nil)
+	require.NoError(t, err)
+	require.Nil(t, existing)
+	require.NotNil(t, use)
+	close(store.release)
+	require.NoError(t, agent.joinSessionFlightUse(flightCtx, sessionID, flight, use))
+
+	loadErr := <-loaded
+	require.Error(t, loadErr, "a load that lost the race hands back no session")
+	requireRequestErrorCode(t, loadErr, invalidParamsCode)
+	require.NotNil(t, flight.session)
+
+	require.NoError(t, agent.deleteSession(flightCtx, sessionID, flight))
+	agent.finishSessionFlight(sessionID, flight)
+
+	agent.mu.Lock()
+	_, mapped := agent.sessions[sessionID]
+	deleted := agent.isDeletedLocked(sessionID)
+	agent.mu.Unlock()
+
+	require.False(t, mapped, "the replacement that lost the race is never installed")
+	require.True(t, deleted, "installing never clears the deletion marker")
+
+	_, reachable := agent.session(sessionID)
+	require.Error(t, reachable, "the tombstoned id answers unknown at every door")
+
+	main, storeErr := store.Load(ctx, SessionKey{SessionID: string(sessionID), Subpath: SessionStoreMainSubpath})
+	require.NoError(t, storeErr)
+	require.Empty(t, main, "the tombstone is the last word on a deleted session")
+
+	require.Equal(t, reserved.Load(), released.Load(), "the prepared replacement releases its scratch reservation")
+
+	sessionDirs, err := filepath.Glob(filepath.Join(scratch, "acp-go-amp-session-*"))
+	require.NoError(t, err)
+	require.Empty(t, sessionDirs, "the prepared replacement releases its settings directory")
 }

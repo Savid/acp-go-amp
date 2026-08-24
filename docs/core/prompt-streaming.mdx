@@ -71,11 +71,13 @@ against its original process group. It does not wait for or claim absence of a
 `setsid(2)` escapee, so escaped processes or zombies may survive a settled
 prompt. The best-effort opt-in is mutually exclusive with process isolation.
 
-A successful prompt returns exactly one terminal result, and this adapter
-emits only two of the ACP stop reasons: `end_turn` for a completed turn and
-`cancelled` for a cancelled one. The other reasons in the ACP enum
-(`max_tokens`, `max_turn_requests`, `refusal`) exist but this adapter never
-produces them, so a host must not wait for them.
+A successful prompt returns exactly one terminal result, and its stop reason is
+the native harness's own: `end_turn` for a completed turn, `cancelled` for a
+cancelled one, `max_tokens` when the assistant frame reports a token ceiling,
+and `max_turn_requests` when the native result reports a turn-request ceiling. A
+ceiling is reported as the reason it is rather than as a clean end or a provider
+failure. `refusal` exists in the ACP enum but Amp exposes no native signal for
+it, so this adapter never produces it and a host must not wait for it.
 
 ## Turn failures and timeouts
 

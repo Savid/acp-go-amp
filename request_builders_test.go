@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"strings"
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
@@ -118,4 +119,135 @@ func TestConcurrencyValidationAllFields(t *testing.T) {
 			t.Fatalf("valid limits rejected: %#v: %v", limits, err)
 		}
 	}
+}
+
+// TestSessionMetaAccumulatesRegardlessOfOptionOrder pins that the session
+// request options are commutative. Every option but this one writes into
+// `_meta.amp`, so a WithSessionMeta that assigned would silently discard the
+// whole vendor block whenever a host happened to list it last — and a host has
+// no reason to believe option order carries meaning.
+func TestSessionMetaAccumulatesRegardlessOfOptionOrder(t *testing.T) {
+	host := map[string]any{"trace": map[string]any{"id": "t-1"}}
+
+	first := NewSessionRequest("/tmp/cwd",
+		WithSessionMeta(host),
+		WithSessionAmpOptions(AmpOptions{Mode: "low"}),
+		WithSessionRawEvents(true),
+	)
+
+	last := NewSessionRequest("/tmp/cwd",
+		WithSessionAmpOptions(AmpOptions{Mode: "low"}),
+		WithSessionRawEvents(true),
+		WithSessionMeta(host),
+	)
+
+	if !jsonEqual(t, first.Meta, last.Meta) {
+		t.Fatalf("option order changed the request:\nfirst=%s\nlast=%s", mustJSON(t, first.Meta), mustJSON(t, last.Meta))
+	}
+
+	amp, vendorPresent := last.Meta[ampMetaKey].(map[string]any)
+	if !vendorPresent {
+		t.Fatalf("WithSessionMeta discarded the vendor block: %s", mustJSON(t, last.Meta))
+	}
+	if _, optionsPresent := amp[ampOptionsKey]; !optionsPresent {
+		t.Fatalf("vendor options were discarded: %s", mustJSON(t, amp))
+	}
+	if _, rawPresent := amp[metaRawEventKey]; !rawPresent {
+		t.Fatalf("vendor raw-event toggle was discarded: %s", mustJSON(t, amp))
+	}
+	if trace, tracePresent := last.Meta["trace"].(map[string]any); !tracePresent || trace["id"] != "t-1" {
+		t.Fatalf("host metadata was discarded: %s", mustJSON(t, last.Meta))
+	}
+
+	// Two host maps accumulate rather than the later one winning outright, and
+	// nested objects merge member by member.
+	merged := NewSessionRequest("/tmp/cwd",
+		WithSessionMeta(map[string]any{"trace": map[string]any{"id": "t-1"}}),
+		WithSessionMeta(map[string]any{"trace": map[string]any{"span": "s-1"}, "tenant": "acme"}),
+	)
+	trace, ok := merged.Meta["trace"].(map[string]any)
+	if !ok || trace["id"] != "t-1" || trace["span"] != "s-1" || merged.Meta["tenant"] != "acme" {
+		t.Fatalf("host metadata did not accumulate: %s", mustJSON(t, merged.Meta))
+	}
+
+	// The same holds on session/list.
+	listed := ListSessionsRequest(
+		WithListSessionsMeta(map[string]any{"trace": map[string]any{"id": "t-1"}}),
+		WithListSessionsMeta(map[string]any{"trace": map[string]any{"span": "s-1"}}),
+	)
+	listTrace, ok := listed.Meta["trace"].(map[string]any)
+	if !ok || listTrace["id"] != "t-1" || listTrace["span"] != "s-1" {
+		t.Fatalf("list metadata did not accumulate: %s", mustJSON(t, listed.Meta))
+	}
+
+	// The caller's map is never captured: mutating it afterwards changes nothing.
+	host["trace"] = "mutated"
+	if trace, kept := last.Meta["trace"].(map[string]any); !kept || trace["id"] != "t-1" {
+		t.Fatalf("the builder kept the caller's map: %s", mustJSON(t, last.Meta))
+	}
+}
+
+// TestMetaBuildersRefuseAReservedFamilyLiteral pins that the two builders taking
+// host metadata refuse every `acp-go.dev/*` name. The namespace is family-global
+// and closed: a request carrying a host's value under one of these keys would
+// speak for the family with bytes the family did not write, and merging,
+// overwriting, or quietly dropping it are all answers a host cannot see.
+func TestMetaBuildersRefuseAReservedFamilyLiteral(t *testing.T) {
+	literals := []string{
+		metaRouteKey,
+		"acp-go.dev/mediaEnvelope",
+		"acp-go.dev/handoff",
+		"acp-go.dev/lifecycle",
+	}
+
+	if got := reservedFamilyLiterals(); len(got) != len(literals) {
+		t.Fatalf("reserved literal set = %#v, want the closed four %#v", got, literals)
+	}
+
+	for _, literal := range literals {
+		meta := map[string]any{literal: map[string]any{"versions": []any{1}}}
+
+		requirePanics(t, literal, func() { WithSessionMeta(meta) })
+		requirePanics(t, literal, func() { WithListSessionsMeta(meta) })
+	}
+
+	// A foreign namespace is another vendor's business and rides untouched.
+	req := NewSessionRequest("/tmp/cwd", WithSessionMeta(map[string]any{"example.com/thing": true}))
+	if req.Meta["example.com/thing"] != true {
+		t.Fatalf("a foreign namespace was refused or dropped: %s", mustJSON(t, req.Meta))
+	}
+}
+
+func requirePanics(t *testing.T, literal string, call func()) {
+	t.Helper()
+
+	defer func() {
+		recovered := recover()
+		if recovered == nil {
+			t.Fatalf("reserved literal %q was accepted", literal)
+		}
+		message, ok := recovered.(string)
+		if !ok || !strings.Contains(message, literal) {
+			t.Fatalf("refusal for %q did not name it: %v", literal, recovered)
+		}
+	}()
+
+	call()
+}
+
+func mustJSON(t *testing.T, value any) string {
+	t.Helper()
+
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	return string(encoded)
+}
+
+func jsonEqual(t *testing.T, left, right any) bool {
+	t.Helper()
+
+	return mustJSON(t, left) == mustJSON(t, right)
 }

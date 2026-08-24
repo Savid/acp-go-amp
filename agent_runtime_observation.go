@@ -17,6 +17,7 @@ type providerProcessSnapshotTracker struct {
 	hooks      RuntimeResourceHooks
 	enabled    bool
 	nextID     uint64
+	revision   uint64
 	roots      map[uint64]providerProcessRootSnapshot
 	last       int
 	set        bool
@@ -25,12 +26,15 @@ type providerProcessSnapshotTracker struct {
 }
 
 type providerProcessRootSnapshot struct {
-	inventory nativeamp.ProcessInventory
+	generation uint64
+	context    func() context.Context
+	inventory  nativeamp.ProcessInventory
 }
 
 type providerProcessRootObservation struct {
-	tracker *providerProcessSnapshotTracker
-	id      uint64
+	tracker    *providerProcessSnapshotTracker
+	id         uint64
+	generation uint64
 }
 
 func newProviderProcessSnapshotTracker(hooks RuntimeResourceHooks, enabled bool) *providerProcessSnapshotTracker {
@@ -42,6 +46,9 @@ func newProviderProcessSnapshotTracker(hooks RuntimeResourceHooks, enabled bool)
 }
 
 func (a *Agent) newProcessSnapshotObserver(ctx context.Context, inventory nativeamp.ProcessInventory) nativeamp.ProcessSnapshotObserver {
+	leave := enterExternalCallback(ctx)
+	defer leave()
+
 	root := a.providerProcesses.start(ctx, inventory)
 
 	return nativeamp.ProcessSnapshotObserver{
@@ -59,15 +66,52 @@ func (t *providerProcessSnapshotTracker) start(ctx context.Context, inventory na
 	t.mu.Lock()
 	t.nextID++
 	id := t.nextID
-	t.roots[id] = providerProcessRootSnapshot{inventory: inventory}
+	t.revision++
+	generation := t.revision
+	observation := &providerProcessRootObservation{tracker: t, id: id, generation: generation}
+
+	rootCtx := ctx
+	if agent := callbackAgent(ctx); agent != nil {
+		rootCtx = withCallbackProvenance(ctx, agent, observation)
+	}
+
+	t.roots[id] = providerProcessRootSnapshot{
+		generation: generation,
+		context:    func() context.Context { return rootCtx },
+		inventory:  inventory,
+	}
 	publish := t.markDirtyLocked()
 	t.mu.Unlock()
 
 	if publish {
-		t.publishLoop(ctx)
+		defer func() {
+			recovered := recover()
+			if recovered == nil {
+				return
+			}
+
+			t.mu.Lock()
+
+			root, current := t.roots[id]
+			if current && root.generation == generation {
+				delete(t.roots, id)
+				t.revision++
+			}
+
+			republish := t.markDirtyLocked()
+			t.mu.Unlock()
+
+			if republish {
+				go t.publishSuccessor(rootCtx)
+			}
+
+			panic(recovered)
+		}()
+
+		t.publishLoop(rootCtx)
 	}
 
-	return &providerProcessRootObservation{tracker: t, id: id}
+	return observation
 }
 
 func (o *providerProcessRootObservation) refresh(ctx context.Context) {
@@ -78,17 +122,32 @@ func (o *providerProcessRootObservation) refresh(ctx context.Context) {
 	t := o.tracker
 	t.mu.Lock()
 
-	if _, ok := t.roots[o.id]; !ok {
+	root, ok := t.roots[o.id]
+	if !ok || root.generation != o.generation {
 		t.mu.Unlock()
 
 		return
 	}
 
+	rootCtx := root.context()
+	retainedAgent := callbackAgent(rootCtx)
+
+	refreshAgent := callbackAgent(ctx)
+	if retainedAgent == nil && refreshAgent != nil {
+		rootCtx = withCallbackProvenance(ctx, refreshAgent, o)
+	} else if retainedAgent != nil && retainedAgent == refreshAgent {
+		rootCtx = withCallbackProvenance(ctx, retainedAgent, o)
+	}
+
+	root.context = func() context.Context { return rootCtx }
+	t.roots[o.id] = root
+	t.revision++
+
 	publish := t.markDirtyLocked()
 	t.mu.Unlock()
 
 	if publish {
-		t.publishLoop(ctx)
+		t.publishLoop(rootCtx)
 	}
 }
 
@@ -99,18 +158,23 @@ func (o *providerProcessRootObservation) complete(ctx context.Context) {
 
 	t := o.tracker
 	t.mu.Lock()
-	if _, ok := t.roots[o.id]; !ok {
+
+	root, ok := t.roots[o.id]
+	if !ok || root.generation != o.generation {
 		t.mu.Unlock()
 
 		return
 	}
 
+	rootCtx := root.context()
+
 	delete(t.roots, o.id)
+	t.revision++
 	publish := t.markDirtyLocked()
 	t.mu.Unlock()
 
 	if publish {
-		t.publishLoop(ctx)
+		t.publishLoop(rootCtx)
 	}
 }
 
@@ -122,19 +186,22 @@ func (o *providerProcessRootObservation) incomplete() {
 	t := o.tracker
 	t.mu.Lock()
 	publish := false
+	ctx := context.Background()
 
-	if root, ok := t.roots[o.id]; ok {
+	if root, ok := t.roots[o.id]; ok && root.generation == o.generation {
 		// Once authoritative containment is incomplete, a previous count is no
 		// longer an absolute inventory. Retain the root as unknown so later
 		// roots cannot manufacture a lower aggregate or a false zero.
 		root.inventory = nil
 		t.roots[o.id] = root
+		ctx = root.context()
+		t.revision++
 		publish = t.markDirtyLocked()
 	}
 	t.mu.Unlock()
 
 	if publish {
-		t.publishLoop(context.Background())
+		t.publishLoop(ctx)
 	}
 }
 
@@ -151,18 +218,65 @@ func (t *providerProcessSnapshotTracker) markDirtyLocked() bool {
 }
 
 func (t *providerProcessSnapshotTracker) publishLoop(ctx context.Context) {
+	completed := false
+	defer func() {
+		if completed {
+			return
+		}
+
+		recovered := recover()
+
+		t.mu.Lock()
+		pending := t.dirty
+		t.dirty = true
+
+		t.set = false
+		if pending {
+			t.publishing = true
+		} else {
+			t.publishing = false
+		}
+		t.mu.Unlock()
+
+		if pending {
+			go t.publishSuccessor(ctx)
+		}
+
+		if recovered != nil {
+			panic(recovered)
+		}
+	}()
+
 	for {
 		t.mu.Lock()
 		if !t.dirty {
 			t.publishing = false
+			completed = true
 			t.mu.Unlock()
 
 			return
 		}
 
 		t.dirty = false
-		count, available := t.snapshotLocked()
+		revision := t.revision
+
+		roots := make([]providerProcessRootSnapshot, 0, len(t.roots))
+		for _, root := range t.roots {
+			roots = append(roots, root)
+		}
+
 		observe := t.hooks.ObserveProcessSnapshot
+		t.mu.Unlock()
+
+		count, available := snapshotProviderProcessRoots(roots)
+
+		t.mu.Lock()
+		if t.revision != revision {
+			t.dirty = true
+			t.mu.Unlock()
+
+			continue
+		}
 
 		publish := available && observe != nil && (!t.set || t.last != count)
 		if publish {
@@ -172,24 +286,43 @@ func (t *providerProcessSnapshotTracker) publishLoop(ctx context.Context) {
 		t.mu.Unlock()
 
 		if publish {
-			observe(ctx, RuntimeProcessProviderDescendant, count)
+			invokeExternal(ctx, func() {
+				observe(ctx, RuntimeProcessProviderDescendant, count)
+			})
 		}
 	}
 }
 
-func (t *providerProcessSnapshotTracker) snapshotLocked() (int, bool) {
-	if len(t.roots) == 0 {
+func (t *providerProcessSnapshotTracker) publishSuccessor(ctx context.Context) {
+	defer func() {
+		if recover() == nil {
+			return
+		}
+
+		t.mu.Lock()
+		t.publishing = false
+		t.dirty = true
+		t.set = false
+		t.mu.Unlock()
+	}()
+
+	t.publishLoop(ctx)
+}
+
+func snapshotProviderProcessRoots(roots []providerProcessRootSnapshot) (int, bool) {
+	if len(roots) == 0 {
 		return 0, true
 	}
 
 	total := 0
 
-	for _, root := range t.roots {
+	for _, root := range roots {
 		if root.inventory == nil {
 			return 0, false
 		}
 
-		count, available := root.inventory()
+		count, available := invokeExternalPair(root.context(), root.inventory)
+
 		if !available || count < 0 {
 			return 0, false
 		}
@@ -209,6 +342,8 @@ func (t *providerProcessSnapshotTracker) snapshotLocked() (int, bool) {
 func instrumentRuntimeResourceHooks(hooks RuntimeResourceHooks, observe *observer.Observer) RuntimeResourceHooks {
 	wrapAcquire := func(resource string, acquire func(context.Context, RuntimeResourceKind) (func(), error)) func(context.Context, RuntimeResourceKind) (func(), error) {
 		return func(ctx context.Context, lifecycle RuntimeResourceKind) (func(), error) {
+			resourceCtx := withExactCallbackGeneration(ctx, "runtime_resource:"+resource)
+
 			var (
 				release func()
 				err     error
@@ -217,7 +352,9 @@ func instrumentRuntimeResourceHooks(hooks RuntimeResourceHooks, observe *observe
 			if acquire == nil {
 				release = func() {}
 			} else {
-				release, err = acquire(ctx, lifecycle)
+				release, err = invokeExternalPair(resourceCtx, func() (func(), error) {
+					return acquire(resourceCtx, lifecycle)
+				})
 			}
 
 			if err != nil || release == nil {
@@ -229,13 +366,25 @@ func instrumentRuntimeResourceHooks(hooks RuntimeResourceHooks, observe *observe
 			observe.RecordRuntimeResourceAdmission(ctx, resource, string(lifecycle), "admitted")
 			observe.AddRuntimeResource(ctx, resource, 1)
 
-			var once sync.Once
+			var (
+				releaseMu sync.Mutex
+				released  bool
+			)
 
 			return func() {
-				once.Do(func() {
-					release()
-					observe.AddRuntimeResource(context.Background(), resource, -1)
-				})
+				releaseMu.Lock()
+				if released {
+					releaseMu.Unlock()
+
+					return
+				}
+
+				released = true
+				releaseMu.Unlock()
+
+				defer observe.AddRuntimeResource(context.Background(), resource, -1)
+
+				invokeExternal(resourceCtx, release)
 			}, nil
 		}
 	}
@@ -247,7 +396,8 @@ func instrumentRuntimeResourceHooks(hooks RuntimeResourceHooks, observe *observe
 		observe.AddRuntimeProcess(ctx, string(kind), delta)
 
 		if externalProcess != nil {
-			externalProcess(ctx, kind, delta)
+			callbackCtx := withExactCallbackGeneration(ctx, "runtime_observer:process")
+			invokeExternal(callbackCtx, func() { externalProcess(callbackCtx, kind, delta) })
 		}
 	}
 	externalSnapshot := hooks.ObserveProcessSnapshot
@@ -255,7 +405,8 @@ func instrumentRuntimeResourceHooks(hooks RuntimeResourceHooks, observe *observe
 		observe.SetRuntimeProcess(ctx, string(kind), count)
 
 		if externalSnapshot != nil {
-			externalSnapshot(ctx, kind, count)
+			callbackCtx := withExactCallbackGeneration(ctx, "runtime_observer:snapshot")
+			invokeExternal(callbackCtx, func() { externalSnapshot(callbackCtx, kind, count) })
 		}
 	}
 	externalStage := hooks.ObserveStartupStage
@@ -263,7 +414,8 @@ func instrumentRuntimeResourceHooks(hooks RuntimeResourceHooks, observe *observe
 		observe.ObserveRuntimeStartupStage(ctx, string(lifecycle), string(stage), elapsed, err)
 
 		if externalStage != nil {
-			externalStage(ctx, lifecycle, stage, elapsed, err)
+			callbackCtx := withExactCallbackGeneration(ctx, "runtime_observer:startup_stage")
+			invokeExternal(callbackCtx, func() { externalStage(callbackCtx, lifecycle, stage, elapsed, err) })
 		}
 	}
 	externalContainment := hooks.ObserveContainment
@@ -271,7 +423,8 @@ func instrumentRuntimeResourceHooks(hooks RuntimeResourceHooks, observe *observe
 		observe.ObserveRuntimeContainment(ctx, string(mode))
 
 		if externalContainment != nil {
-			externalContainment(ctx, mode)
+			callbackCtx := withExactCallbackGeneration(ctx, "runtime_observer:containment")
+			invokeExternal(callbackCtx, func() { externalContainment(callbackCtx, mode) })
 		}
 	}
 

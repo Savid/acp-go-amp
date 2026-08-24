@@ -101,12 +101,9 @@ func TestLoadResumeManifestAndConfigBranches(t *testing.T) {
 		t.Fatalf("set mode: %v", setErr)
 	}
 
-	// Every refusal on the config surface names the offending member in the
-	// uniform two-key shape.
-	_, err := agent.SetSessionConfigOption(ctx, SetConfigOptionRequest("T-load", "mode", "bad"))
-	requireUnsupportedField(t, err, fieldValue)
-
-	_, err = agent.SetSessionConfigOption(ctx, SetConfigOptionRequest("T-load", "unknown", "x"))
+	// The config id is the only member this surface judges, and its refusal
+	// names the offending member in the uniform two-key shape.
+	_, err := agent.SetSessionConfigOption(ctx, SetConfigOptionRequest("T-load", "unknown", "x"))
 	requireUnsupportedField(t, err, fieldConfigID)
 	if _, err := agent.SetSessionConfigOption(ctx, SetConfigOptionRequest("T-missing", "mode", "low")); err == nil {
 		t.Fatal("unknown config session accepted")
@@ -207,15 +204,17 @@ func TestRemainingAgentBranches(t *testing.T) {
 	}
 	activeLimited := newTestAgent(WithExecutablePath(path), WithScratchDir(testScratchDir(t)), WithSessionStore(store), WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 0}))
 	activeLimited.options.ConcurrencyLimits.MaxActiveSessions = 0
-	if _, _, _, err := activeLimited.loadOrResume(ctx, "T-file", t.TempDir(), nil, nil, nil); err != nil {
+	if _, _, _, use, err := activeLimited.loadOrResume(ctx, "T-file", t.TempDir(), nil, nil, nil); err != nil {
 		t.Fatalf("loadOrResume direct: %v", err)
+	} else {
+		activeLimited.finishSessionUse("T-file", use)
 	}
 	activeLimited.options.ConcurrencyLimits.MaxActiveSessions = 1
 	manifest2, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, SessionID: "T-file-2", NativeSessionID: "T-file-2", Cwd: t.TempDir()})
 	if err := store.Replace(ctx, SessionKey{SessionID: "T-file-2", Subpath: ""}, []SessionStoreReplacement{{Key: SessionKey{SessionID: "T-file-2", Subpath: ""}, Entries: []SessionStoreEntry{manifest2}}}); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, _, err := activeLimited.loadOrResume(ctx, "T-file-2", t.TempDir(), nil, nil, nil); err == nil {
+	if _, _, _, _, err := activeLimited.loadOrResume(ctx, "T-file-2", t.TempDir(), nil, nil, nil); err == nil {
 		t.Fatal("active load backpressure not enforced")
 	}
 	agent.markDeleted("T-deleted")
@@ -520,13 +519,306 @@ func TestMirrorUnsyncedRetention(t *testing.T) {
 	}
 }
 
+// TestCloseCommitsRetainedUnsyncedFrames proves the close ladder's durable rung.
+// A settlement whose Replace failed keeps its frames mirror-unsynced rather than
+// dropping them, and the session that holds them is the only copy: a close that
+// reclaimed it would take a natively completed turn with it. The close retries
+// the exact frames, so a store that healed in the meantime ends up holding both
+// turns and a fresh agent replays both.
+func TestCloseCommitsRetainedUnsyncedFrames(t *testing.T) {
+	ctx := context.Background()
+	path, _ := fakeAgentAmpPath(t, "")
+	cwd := t.TempDir()
+	store := &flakyReplaceStore{InMemorySessionStore: NewInMemorySessionStore()}
+	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(testScratchDir(t)), WithSessionStore(store))
+	resp, err := agent.NewSession(ctx, NewSessionRequest(cwd))
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	id := resp.SessionId
+
+	if _, err = agent.Prompt(ctx, TextPromptRequest(id, "test-turn", "seed thread")); err != nil {
+		t.Fatalf("seed prompt: %v", err)
+	}
+
+	// Fail exactly the settlement commit of the second turn: the prompt fails and
+	// its frames are retained mirror-unsynced.
+	store.failReplaces = 1
+	if _, err = agent.Prompt(ctx, TextPromptRequest(id, "test-turn", "turn two")); err == nil {
+		t.Fatal("prompt with failing persist returned no error")
+	}
+
+	live, err := agent.session(id)
+	if err != nil {
+		t.Fatalf("session lookup: %v", err)
+	}
+	live.mu.Lock()
+	retained := len(live.unsyncedFrames)
+	live.mu.Unlock()
+	if retained == 0 {
+		t.Fatal("failed settlement retained no frames to commit")
+	}
+
+	// The store is healthy again. The close is the request that lands them.
+	if _, err = agent.CloseSession(ctx, acp.CloseSessionRequest{SessionId: id}); err != nil {
+		t.Fatalf("CloseSession: %v", err)
+	}
+
+	entries, err := store.Load(ctx, SessionKey{SessionID: string(id), Subpath: transcriptSubpath})
+	if err != nil {
+		t.Fatalf("load transcript: %v", err)
+	}
+	results := 0
+	for _, entry := range entries {
+		if bytes.Contains(entry, []byte(`"type":"result"`)) {
+			results++
+		}
+	}
+	if results != 2 {
+		t.Fatalf("durable transcript has %d result frames, want both natively completed turns", results)
+	}
+
+	restored := newTestAgent(WithExecutablePath(path), WithScratchDir(testScratchDir(t)), WithSessionStore(store))
+	if _, err := restored.LoadSession(ctx, LoadSessionRequest(id, cwd)); err != nil {
+		t.Fatalf("load replay after close commit: %v", err)
+	}
+}
+
+// TestCloseFailsWhileTheMirrorCannotCommit pins the other half of the same rung.
+// A close that cannot land the retained frames fails and reclaims nothing: the
+// session keeps its identity, its scratch, and its own unsynced frames, so the
+// retry the host makes once its store is back is a retry of this same close.
+func TestCloseFailsWhileTheMirrorCannotCommit(t *testing.T) {
+	ctx := context.Background()
+	path, _ := fakeAgentAmpPath(t, "")
+	cwd := t.TempDir()
+	store := &flakyReplaceStore{InMemorySessionStore: NewInMemorySessionStore()}
+	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(testScratchDir(t)), WithSessionStore(store))
+	resp, err := agent.NewSession(ctx, NewSessionRequest(cwd))
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	id := resp.SessionId
+
+	if _, err = agent.Prompt(ctx, TextPromptRequest(id, "test-turn", "seed thread")); err != nil {
+		t.Fatalf("seed prompt: %v", err)
+	}
+
+	// The settlement commit fails, and so does the close's retry of it.
+	store.failReplaces = 2
+	if _, err = agent.Prompt(ctx, TextPromptRequest(id, "test-turn", "turn two")); err == nil {
+		t.Fatal("prompt with failing persist returned no error")
+	}
+
+	live, err := agent.session(id)
+	if err != nil {
+		t.Fatalf("session lookup: %v", err)
+	}
+
+	if _, err = agent.CloseSession(ctx, acp.CloseSessionRequest{SessionId: id}); err == nil || !strings.Contains(err.Error(), "mirror_unsynced") {
+		t.Fatalf("close over an uncommittable mirror = %v, want mirror_unsynced", err)
+	}
+
+	if _, err = agent.session(id); err != nil {
+		t.Fatalf("session after a failed close is not addressable: %v", err)
+	}
+	if _, statErr := os.Stat(live.settingsDir); statErr != nil {
+		t.Fatalf("failed close reclaimed scratch state: %v", statErr)
+	}
+	live.mu.Lock()
+	retained := len(live.unsyncedFrames)
+	live.mu.Unlock()
+	if retained == 0 {
+		t.Fatal("failed close dropped the frames it could not commit")
+	}
+
+	// The store is back: the retried close is the one that commits and reclaims.
+	if _, err = agent.CloseSession(ctx, acp.CloseSessionRequest{SessionId: id}); err != nil {
+		t.Fatalf("retried CloseSession: %v", err)
+	}
+	if _, err = agent.session(id); err == nil {
+		t.Fatal("settled close left the session addressable")
+	}
+
+	entries, err := store.Load(ctx, SessionKey{SessionID: string(id), Subpath: transcriptSubpath})
+	if err != nil {
+		t.Fatalf("load transcript: %v", err)
+	}
+	results := 0
+	for _, entry := range entries {
+		if bytes.Contains(entry, []byte(`"type":"result"`)) {
+			results++
+		}
+	}
+	if results != 2 {
+		t.Fatalf("durable transcript has %d result frames, want both natively completed turns", results)
+	}
+}
+
+// TestCloseCommitsRetainedFramesOnADetachedContext pins the context the rung runs
+// on. A settlement commits on a context detached from the request's for the same
+// reason a close must: the frames are the only copy of a completed turn, and a
+// host that cancelled the call it made is not a reason to lose them. The store
+// here refuses a cancelled context outright, so a rung reusing the request's
+// would drop the turn and answer the close cleanly.
+func TestCloseCommitsRetainedFramesOnADetachedContext(t *testing.T) {
+	ctx := context.Background()
+	path, _ := fakeAgentAmpPath(t, "")
+	cwd := t.TempDir()
+	store := &flakyReplaceStore{InMemorySessionStore: NewInMemorySessionStore()}
+	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(testScratchDir(t)), WithSessionStore(store))
+	resp, err := agent.NewSession(ctx, NewSessionRequest(cwd))
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	id := resp.SessionId
+
+	if _, err = agent.Prompt(ctx, TextPromptRequest(id, "test-turn", "seed thread")); err != nil {
+		t.Fatalf("seed prompt: %v", err)
+	}
+
+	store.failReplaces = 1
+	if _, err = agent.Prompt(ctx, TextPromptRequest(id, "test-turn", "turn two")); err == nil {
+		t.Fatal("prompt with failing persist returned no error")
+	}
+
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+
+	if _, err = agent.CloseSession(cancelled, acp.CloseSessionRequest{SessionId: id}); err != nil {
+		t.Fatalf("close on a cancelled request context: %v", err)
+	}
+
+	entries, err := store.Load(ctx, SessionKey{SessionID: string(id), Subpath: transcriptSubpath})
+	if err != nil {
+		t.Fatalf("load transcript: %v", err)
+	}
+	results := 0
+	for _, entry := range entries {
+		if bytes.Contains(entry, []byte(`"type":"result"`)) {
+			results++
+		}
+	}
+	if results != 2 {
+		t.Fatalf("durable transcript has %d result frames, want both natively completed turns", results)
+	}
+}
+
+// TestCloseCommitsNothingOverADeleteFence pins how the close rung composes with a
+// delete. Replace clears the tombstone of every key it lists, so a session fenced
+// for delete commits nothing on close: it writes no retained frames and fails
+// the close boundary. The exact wrapper and frames stay retained so the session
+// cannot report itself clean over writes it was never allowed to make.
+func TestCloseCommitsNothingOverADeleteFence(t *testing.T) {
+	ctx := context.Background()
+	path, _ := fakeAgentAmpPath(t, "")
+	cwd := t.TempDir()
+	store := &flakyReplaceStore{InMemorySessionStore: NewInMemorySessionStore()}
+	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(testScratchDir(t)), WithSessionStore(store))
+	resp, err := agent.NewSession(ctx, NewSessionRequest(cwd))
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	id := resp.SessionId
+
+	if _, err = agent.Prompt(ctx, TextPromptRequest(id, "test-turn", "seed thread")); err != nil {
+		t.Fatalf("seed prompt: %v", err)
+	}
+
+	store.failReplaces = 1
+	if _, err = agent.Prompt(ctx, TextPromptRequest(id, "test-turn", "turn two")); err == nil {
+		t.Fatal("prompt with failing persist returned no error")
+	}
+
+	live, err := agent.session(id)
+	if err != nil {
+		t.Fatalf("session lookup: %v", err)
+	}
+
+	before, err := store.Load(ctx, SessionKey{SessionID: string(id), Subpath: transcriptSubpath})
+	if err != nil {
+		t.Fatalf("load transcript before: %v", err)
+	}
+
+	live.fencePersistence()
+	if _, err = agent.CloseSession(ctx, acp.CloseSessionRequest{SessionId: id}); !errors.Is(err, errPersistenceFenced) {
+		t.Fatalf("close over a delete fence = %v, want fenced boundary", err)
+	}
+
+	after, err := store.Load(ctx, SessionKey{SessionID: string(id), Subpath: transcriptSubpath})
+	if err != nil {
+		t.Fatalf("load transcript after: %v", err)
+	}
+	if len(after) != len(before) {
+		t.Fatalf("fenced close wrote %d frames over the row a delete is tombstoning (%d before)", len(after), len(before))
+	}
+	live.mu.Lock()
+	retained := len(live.unsyncedFrames)
+	live.mu.Unlock()
+	if retained == 0 {
+		t.Fatal("fenced close reported a clean mirror over frames it never wrote")
+	}
+	stillLive, lookupErr := agent.session(id)
+	if lookupErr != nil || stillLive != live {
+		t.Fatalf("fenced close ownership = %p err=%v, want exact %p", stillLive, lookupErr, live)
+	}
+	live.resumePersistence()
+	if closeErr := agent.Close(); closeErr != nil {
+		t.Fatalf("cleanup Agent.Close: %v", closeErr)
+	}
+}
+
+// TestDeleteLeavesNoRetainedFramesToResurrect closes the same composition from the
+// wire. A delete whose live session still holds retained frames tombstones the
+// row and nothing writes those frames back over it.
+func TestDeleteLeavesNoRetainedFramesToResurrect(t *testing.T) {
+	ctx := context.Background()
+	path, _ := fakeAgentAmpPath(t, "")
+	cwd := t.TempDir()
+	store := &flakyReplaceStore{InMemorySessionStore: NewInMemorySessionStore()}
+	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(testScratchDir(t)), WithSessionStore(store))
+	resp, err := agent.NewSession(ctx, NewSessionRequest(cwd))
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	id := resp.SessionId
+
+	if _, err = agent.Prompt(ctx, TextPromptRequest(id, "test-turn", "seed thread")); err != nil {
+		t.Fatalf("seed prompt: %v", err)
+	}
+
+	store.failReplaces = 1
+	if _, err = agent.Prompt(ctx, TextPromptRequest(id, "test-turn", "turn two")); err == nil {
+		t.Fatal("prompt with failing persist returned no error")
+	}
+
+	if _, err = agent.UnstableDeleteSession(ctx, DeleteSessionRequest(id)); err != nil {
+		t.Fatalf("UnstableDeleteSession: %v", err)
+	}
+
+	entries, err := store.Load(ctx, SessionKey{SessionID: string(id), Subpath: transcriptSubpath})
+	if err != nil {
+		t.Fatalf("load transcript after delete: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("delete left %d transcript frames behind the tombstone", len(entries))
+	}
+	if _, err = agent.LoadSession(ctx, LoadSessionRequest(id, cwd)); err == nil {
+		t.Fatal("a deleted session loaded again")
+	}
+}
+
 // TestCancelAlreadyCancelledBranch deterministically covers Cancel
 // on an already-cancelled active prompt returning nil without re-interrupting.
 func TestCancelAlreadyCancelledBranch(t *testing.T) {
 	session := &agentSession{agent: newTestAgent()}
 	state := newPromptTurnState()
 	state.cancel()
-	session.setActivePrompt(state)
+
+	if err := session.admitPrompt(state); err != nil {
+		t.Fatalf("admit prompt = %v", err)
+	}
+
 	if err := session.Cancel(context.Background()); err != nil {
 		t.Fatalf("cancel on already-cancelled prompt = %v", err)
 	}
@@ -557,14 +849,19 @@ func TestTombstoneCascade(t *testing.T) {
 		t.Fatalf("tombstoned subkeys listed: %#v err=%v", subkeys, err)
 	}
 
+	// Re-publishing the main key does not lift the tombstone: the cascade holds
+	// over every subpath, and the append that follows it writes nothing either.
 	if err := store.Replace(ctx, main, []SessionStoreReplacement{{Key: main, Entries: []SessionStoreEntry{manifest}}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Append(ctx, future, []SessionStoreEntry{json.RawMessage(`"y"`)}); err != nil {
 		t.Fatal(err)
 	}
-	if entries, err := store.Load(ctx, future); err != nil || len(entries) != 1 {
-		t.Fatalf("append after tombstone clear failed: entries=%d err=%v", len(entries), err)
+	if entries, err := store.Load(ctx, future); err != nil || len(entries) != 0 {
+		t.Fatalf("a replacement resurrected a cascaded subpath: entries=%d err=%v", len(entries), err)
+	}
+	if entries, err := store.Load(ctx, main); err != nil || len(entries) != 0 {
+		t.Fatalf("a replacement resurrected a tombstoned session: entries=%d err=%v", len(entries), err)
 	}
 }
 
@@ -1076,5 +1373,145 @@ func TestConsumerHeldBearerCarriesAcrossAgentRebuild(t *testing.T) {
 	_, err = build("").LoadSession(ctx, LoadSessionRequest(resp.SessionId, cwd))
 	if err == nil || !strings.Contains(err.Error(), "AMP_API_KEY is not set") {
 		t.Fatalf("load without the consumer-held bearer = %v, want the missing-key refusal", err)
+	}
+}
+
+// TestAgentCloseCommitsRetainedUnsyncedFrames proves the shutdown ladder carries
+// the same durable rung a wire close does. The ladder applies identically to
+// `session/close`, `session/delete` and `Agent.Close`, and the retained frames an
+// embedded host holds at shutdown are the only copy of a natively completed turn:
+// dropping them with the wrapper would leave the store silently omitting a turn
+// the server-side thread already advanced past.
+func TestAgentCloseCommitsRetainedUnsyncedFrames(t *testing.T) {
+	ctx := context.Background()
+	path, _ := fakeAgentAmpPath(t, "")
+	cwd := t.TempDir()
+	store := &flakyReplaceStore{InMemorySessionStore: NewInMemorySessionStore()}
+	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(testScratchDir(t)), WithSessionStore(store))
+	resp, err := agent.NewSession(ctx, NewSessionRequest(cwd))
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	id := resp.SessionId
+
+	if _, err = agent.Prompt(ctx, TextPromptRequest(id, "test-turn", "seed thread")); err != nil {
+		t.Fatalf("seed prompt: %v", err)
+	}
+
+	// Fail exactly the settlement commit of the second turn: the prompt fails and
+	// its frames are retained mirror-unsynced on a session no wire close ever
+	// reclaims.
+	store.failReplaces = 1
+	if _, err = agent.Prompt(ctx, TextPromptRequest(id, "test-turn", "turn two")); err == nil {
+		t.Fatal("prompt with failing persist returned no error")
+	}
+
+	live, err := agent.session(id)
+	if err != nil {
+		t.Fatalf("session lookup: %v", err)
+	}
+	live.mu.Lock()
+	retained := len(live.unsyncedFrames)
+	live.mu.Unlock()
+	if retained == 0 {
+		t.Fatal("failed settlement retained no frames for shutdown to commit")
+	}
+
+	// The store is healthy again. Agent.Close is the ladder that lands them.
+	if closeErr := agent.Close(); closeErr != nil {
+		t.Fatalf("Agent.Close: %v", closeErr)
+	}
+
+	entries, err := store.Load(ctx, SessionKey{SessionID: string(id), Subpath: transcriptSubpath})
+	if err != nil {
+		t.Fatalf("load transcript: %v", err)
+	}
+	results := 0
+	for _, entry := range entries {
+		if bytes.Contains(entry, []byte(`"type":"result"`)) {
+			results++
+		}
+	}
+	if results != 2 {
+		t.Fatalf("durable transcript has %d result frames, want both natively completed turns", results)
+	}
+
+	restored := newTestAgent(WithExecutablePath(path), WithScratchDir(testScratchDir(t)), WithSessionStore(store))
+	defer func() { _ = restored.Close() }()
+	if _, err := restored.LoadSession(ctx, LoadSessionRequest(id, cwd)); err != nil {
+		t.Fatalf("load replay after shutdown commit: %v", err)
+	}
+}
+
+// TestAgentCloseIsLastWordOverAnUncommittableMirror pins embedded shutdown's
+// single last-word attempt. It reports the refused durability rung, releases
+// local state, removes every callable ownership path, and memoizes that exact
+// result instead of requiring a later Close for safety.
+func TestAgentCloseIsLastWordOverAnUncommittableMirror(t *testing.T) {
+	ctx := context.Background()
+	path, _ := fakeAgentAmpPath(t, "")
+	scratch := testScratchDir(t)
+	store := &flakyReplaceStore{InMemorySessionStore: NewInMemorySessionStore()}
+	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(scratch), WithSessionStore(store))
+	resp, err := agent.NewSession(ctx, NewSessionRequest(t.TempDir()))
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	id := resp.SessionId
+
+	if _, err = agent.Prompt(ctx, TextPromptRequest(id, "test-turn", "seed thread")); err != nil {
+		t.Fatalf("seed prompt: %v", err)
+	}
+
+	// The settlement commit fails, and so does the shutdown retry of it.
+	store.failReplaces = 2
+	if _, err = agent.Prompt(ctx, TextPromptRequest(id, "test-turn", "turn two")); err == nil {
+		t.Fatal("prompt with failing persist returned no error")
+	}
+
+	live, err := agent.session(id)
+	if err != nil {
+		t.Fatalf("session lookup: %v", err)
+	}
+
+	closeErr := agent.Close()
+	if closeErr == nil || !strings.Contains(closeErr.Error(), "mirror_unsynced") {
+		t.Fatalf("Agent.Close over an uncommittable mirror = %v, want mirror_unsynced", closeErr)
+	}
+
+	// Local cleanup succeeds even though the durability rung does not.
+	if _, statErr := os.Stat(live.settingsDir); !os.IsNotExist(statErr) {
+		t.Fatalf("failed shutdown leaked the settings dir: %v", statErr)
+	}
+	sessionDirs, globErr := filepath.Glob(filepath.Join(scratch, "acp-go-amp-session-*"))
+	if globErr != nil || len(sessionDirs) != 0 {
+		t.Fatalf("failed shutdown leaked scratch state: %#v err=%v", sessionDirs, globErr)
+	}
+	agent.mu.Lock()
+	remaining := len(agent.sessions)
+	owners := len(agent.cleanupOwners)
+	residences := len(agent.cleanupResidences)
+	agent.mu.Unlock()
+	if remaining != 0 || owners != 0 || residences != 0 {
+		t.Fatalf("failed shutdown retained callable ownership: sessions=%d owners=%d residences=%d", remaining, owners, residences)
+	}
+	live.mu.Lock()
+	boundaryDone := live.closeBoundaryDone
+	commitDone := live.closeCommitDone
+	scratchDone := live.scratchDone
+	live.mu.Unlock()
+	if !boundaryDone || commitDone || !scratchDone {
+		t.Fatalf("failed shutdown rungs = boundary %t commit %t scratch %t", boundaryDone, commitDone, scratchDone)
+	}
+
+	memoized := agent.Close()
+	if memoized == nil || memoized.Error() != closeErr.Error() {
+		t.Fatalf("memoized Agent.Close = %v, want exact first failure %v", memoized, closeErr)
+	}
+	agent.mu.Lock()
+	remaining = len(agent.sessions)
+	agent.mu.Unlock()
+	if remaining != 0 {
+		t.Fatalf("memoized shutdown recreated %d sessions", remaining)
 	}
 }

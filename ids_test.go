@@ -58,10 +58,6 @@ func TestSessionIDMintingAndEmptyNativeLifecycle(t *testing.T) {
 		t.Fatalf("corrupt manifest row survived delete: entries=%d err=%v", len(entries), loadErr)
 	}
 
-	if err := corruptAgent.deleteNativeThread(ctx, "s-none", "", nil); err != nil {
-		t.Fatalf("delete without native thread launched a process: %v", err)
-	}
-
 	session := &agentSession{agent: corruptAgent, id: "s-frames"}
 	if err := session.validateFrameSessionID(ctx, fakeAmpMessage{}, nil); err != nil {
 		t.Fatalf("frame without session id rejected: %v", err)

@@ -211,20 +211,15 @@ func (b *imagePromptBudget) handoffBytes(ctx context.Context, block *acp.Content
 	return data, nil
 }
 
-// declaredSizeVerdict applies the per-image byte bounds to a declared size. The
-// two bounds keep their own verdicts: a configured policy limit reports
-// too_large, and Amp's unconditional native envelope reports
-// native_envelope_exceeded, exactly as they do for embedded bytes.
+// declaredSizeVerdict applies the per-image byte gate to a declared size. It
+// reads the same ordered terms embedded bytes are judged by, so a handoff block
+// and an inline one of the same size get the same answer for the same reason: a
+// configured policy limit reports too_large, and Amp's unconditional native
+// envelope reports native_envelope_exceeded.
 func (b *imagePromptBudget) declaredSizeVerdict(sizeBytes int64) *handoffError {
-	if maxBytes := b.limits.MaxInputBytesPerImage; maxBytes > 0 && sizeBytes > maxBytes {
-		return &handoffError{value: imageErrorTooLarge, sizeBytes: sizeBytes, maxBytes: maxBytes}
-	}
-
-	if sizeBytes > ampNativeMaxImageBytes {
-		return &handoffError{
-			value:     imageErrorNativeEnvelope,
-			sizeBytes: sizeBytes,
-			maxBytes:  ampNativeMaxImageBytes,
+	for _, term := range perImageByteTerms(b.limits) {
+		if sizeBytes > term.maxBytes {
+			return &handoffError{value: term.value, sizeBytes: sizeBytes, maxBytes: term.maxBytes}
 		}
 	}
 

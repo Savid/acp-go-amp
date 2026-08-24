@@ -4,7 +4,9 @@ description: The _meta.amp metadata the adapter accepts on requests, emits on up
 ---
 
 Lifecycle requests carry Amp-owned settings under the `_meta.amp` namespace.
-Unknown keys fail closed; foreign namespaces are ignored.
+Unknown keys fail closed; foreign vendor namespaces are ignored. The reserved
+`acp-go.dev/*` literals are never foreign: each one is either read or rejected
+on every surface it can reach.
 
 ## Request metadata
 
@@ -29,7 +31,7 @@ Unknown keys fail closed; foreign namespaces are ignored.
 | Field | Accepted values |
 |---|---|
 | `options.env` | Map of environment overrides, including the session's complete raw `PATH`. |
-| `options.mode` | `low`, `medium`, `high`. |
+| `options.mode` | Any Amp mode; `low`, `medium`, `high`, `ultra` are advertised. No mode is refused here — the value reaches Amp's `-m` flag unchanged. The key may be omitted, which takes the advertised default, but a key present with an empty string names no mode and fails with the uniform unsupported error. |
 | `options.model` | Present for symmetry; any value fails with the uniform unsupported error. |
 | `options.outputSchema` | Present for symmetry; any presence fails with the uniform unsupported error. |
 | `rawEvent.enabled` | `true` to stream `_amp/rawEvent` for the session. |
@@ -158,3 +160,165 @@ Amp does not advertise `_meta["acp-go.dev/route"]`, stamp it on callbacks, or
 validate a turn nonce — and that says nothing about the media envelope, which is
 advertised regardless. Its prompt-builder nonce parameter is intentionally
 ignored; cancellation remains structurally scoped by `sessionId`.
+
+## Session lifecycle
+
+`acp-go.dev/lifecycle` is the fourth reserved literal this adapter handles,
+alongside `acp-go.dev/mediaEnvelope`, `acp-go.dev/handoff`, and
+`acp-go.dev/route` — the one it deliberately does not implement. Unlike a vendor
+namespace, a reserved literal is never ignored: every surface either reads it or
+rejects it.
+
+### Negotiation
+
+The host offers on `InitializeRequest._meta`, carrying exactly one member:
+
+```json
+{"acp-go.dev/lifecycle": {"versions": [1]}}
+```
+
+The adapter places its negotiated `acp-go.dev/lifecycle` answer on
+`InitializeResponse._meta` — the response's own top-level `_meta`, never inside
+`agentCapabilities._meta`. The answer describes the active configuration and is
+resolved from the same code path that enforces containment:
+
+```json
+{
+  "acp-go.dev/lifecycle": {
+    "versions": [1],
+    "updatesOutsidePrompt": false,
+    "authoritativeQuiescence": true,
+    "quiescenceSource": "process-containment",
+    "activityKinds": []
+  }
+}
+```
+
+| Field | Value | Why |
+|---|---|---|
+| `versions` | `[1]` | The intersection of the offer and the versions this adapter implements. An empty intersection omits the whole key rather than answering with an empty array. |
+| `updatesOutsidePrompt` | always `false` | A prompt is one short-lived `amp` process. Nothing survives it, so there is no channel between prompts. |
+| `authoritativeQuiescence` | `true` only under Linux process isolation | Only the isolation boundary enumerates the whole contained descendant set, so only it can prove vacancy. |
+| `quiescenceSource` | `process-containment`, present exactly when the line above is `true` | Ordinary same-identity execution and the Darwin best-effort opt-in prove a weaker boundary, and a weaker boundary is never promoted. |
+| `activityKinds` | always `[]` | This adapter reports no owned background work, so it emits no `activity_update` at all. |
+
+A truthfully degenerate answer is a correct answer, not a gap. A malformed
+offer — a non-object, a missing or non-integer `versions`, or any additional
+member — is rejected with `-32602` naming the exact path, for example
+`{"error": "unsupported", "field": "_meta[\"acp-go.dev/lifecycle\"].versions"}`.
+Only the answer is ordered: an offer may list its versions in any order and is
+intersected rather than refused. With no offer at all, the response carries no
+lifecycle member and the connection has no lifecycle surface: no envelope, no
+correlation read, no lifecycle fact.
+
+### The prompt correlation value
+
+While version 1 is negotiated, every `session/prompt` carries:
+
+```json
+{"version": 1, "submission": {"submissionId": "opaque", "clientNonce": "opaque", "runId": "optional"}}
+```
+
+It is read and validated before dispatch, so a prompt this adapter cannot
+correlate writes no frame to the harness. `submissionId` and `clientNonce` are
+echoed verbatim on the acceptance event. With the extension not negotiated the
+key must be absent, and a present one is rejected the same way.
+
+### One incarnation per prompt
+
+A prompt is one contained process, so a prompt is one whole native lifecycle
+source lifetime. Each prompt opens its own stream with its own `streamId`,
+sequence space, and entities:
+
+1. `lifecycle_snapshot` — the first notification inside the prompt, stating the
+   idle foreground, empty activity and action sets, and the quiescence fact this
+   configuration can prove at stream open.
+2. `prompt_accepted` — emitted once the native dispatcher owns the frame,
+   echoing the submission identity.
+3. `state_update` `running` — the transcript then flows as ordinary
+   `session/update` notifications with **no envelope attached**.
+4. `state_update` `idle` — the recorded outcome (`success`, `cancelled`,
+   `limit`, `failed`) and, on every outcome but `failed`, the truthful stop
+   reason. No ACP v1 stop reason names a failure, so a failed cycle records its
+   outcome and states none; the v1 error carries the cause instead.
+5. `quiescence_update` — only where the containment boundary actually proved an
+   empty descendant set, carrying the watermark that proof covers and a barrier
+   naming the contained native root.
+
+The contained process exit fences the stream; the next prompt opens a new one.
+Sequences are claimed before delivery is attempted, so a lost event leaves a
+detectable gap rather than a silently contiguous stream.
+
+`session/close` therefore always meets a stream that is already fenced, or a
+session whose incarnation never opened, and it emits nothing on either: the
+terminal state was reported by whatever fenced the stream, and a turn recorded
+as `failed` is never restated as cancelled by the close that follows it. The
+containment proof is unconditional and already ran inside the prompt, so a close
+that finds an unproven boundary still fails.
+
+The durable commit ran inside the prompt too, but a settlement whose commit
+failed keeps its frames rather than dropping them, so `session/close` carries the
+same commit as its own rung: it retries the retained frames on a detached context
+before the session stops being addressable. A close that cannot land them fails
+and reclaims nothing — the session keeps its identity and its frames, and the
+close is retried once the store is back. A session already fenced for delete
+commits nothing there, because the tombstone is the last write to that row.
+
+`Agent.Close` owes the same rung. A commit a wire close would have made is made
+there too, or reported as the store's refusal — never dropped with the wrapper.
+A shutdown attempt is the last word: it boundedly joins and contains its owned
+wrappers, releases local state where containment permits, removes every callable
+ownership path, and memoizes its exact success or failure. A later `Agent.Close`
+only observes that result and repeats no native, persistence, or cleanup command.
+An unresolved native deletion is retried only while its isolated operation
+state remains intact. If shutdown must release that state after the retry also
+fails, the classified deletion failure is retained permanently; later shutdown
+calls cannot turn it into success or repeat the command from a released home.
+
+Settlement runs on a context detached from the request's, so a cancelled prompt
+still commits the frames it streamed, states its terminal boundary, and fences
+its stream before the response. The one exception is a settlement that cannot
+complete: when the containment boundary or the durable commit itself fails, the
+prompt fails with that error and emits **no** terminal `idle` — a boundary must
+never claim a foreground prefix the store does not hold. The exact terminal
+notifications remain pending; a close may first repair durability and then
+retransmit them with their original stream/sequence identities. No later prompt
+is admitted while that terminal proof is pending.
+
+The outcome a settled turn recorded is the one its ACP response states. A cancel
+landing while a turn is already failing does not turn that failure into a
+cancelled result: the `idle` the host was just shown recorded `failed`, and the
+response carries the matching turn-failure error.
+
+### Carriers and refusals
+
+Every lifecycle envelope rides its own identity-only `session_info_update`,
+beside `sessionId` and `update` on the notification's `_meta`. No other
+`sessionUpdate` variant carries one: message and tool-call patches have
+per-entity `_meta` reduction semantics a conformant client may coalesce, which
+would make an envelope placed there unrecoverable. The `_meta.amp` tags those
+patches already carry are unaffected.
+
+Amp has no permission or elicitation surface, so no action correlation value is
+ever emitted. Every other inbound surface — `session/new`, `session/load`,
+`session/resume`, `session/close`, `session/delete`, `session/list`,
+`session/set_mode`, `session/set_config_option` in either variant, `logout`,
+`authenticate`, `_amp/auth/*`, and
+`_amp/session/fork` — rejects the key with `-32602` naming
+`_meta["acp-go.dev/lifecycle"]`. A `session/cancel` carrying it
+fails closed before the native interrupt and the cancel is never applied; being
+a notification it carries no response frame, so that refusal is wire-silent.
+
+`session/set_mode` does not exist on this adapter and answers `-32601 method not
+found`. The refusal above is judged first: a reserved literal is never ignored
+because the request was going to be refused anyway, so a `session/set_mode`
+carrying the key answers `-32602` naming it, and so does the boolean
+`session/set_config_option` variant this adapter otherwise rejects on its
+discriminator.
+
+Extension methods are judged the same way and before their names are resolved
+at all. An `_`-prefixed method this adapter does not dispatch answers `-32601
+method not found` on its own, but carrying the key it answers `-32602` naming
+`_meta["acp-go.dev/lifecycle"]`: a method name is the caller's guess, while the
+key is a literal this adapter reserves, and the guess is not the part that is
+owed an answer first.

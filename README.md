@@ -118,6 +118,12 @@ rejects at session start.
   cannot prove escaped descendants absent, and retains a numeric PGID-reuse
   collateral-signalling risk.
 - Prompt streaming for assistant messages, tool calls, and thread results.
+- Ordered session lifecycle through the `acp-go.dev/lifecycle` extension when a
+  host offers it: one incarnation per prompt, opening on a snapshot, echoing the
+  prompt's submission identity, and settling on a terminal state with the
+  harness's own stop reason. The answer states only what the active
+  configuration proves, so authoritative quiescence is advertised under Linux
+  process isolation and nowhere else.
 - Static PNG, JPEG, GIF, and WebP prompt input with structural validation before
   Amp starts, as embedded base64 or — for a co-located host that sets
   `WithInputHandoffRoot` — as a digest-verified local file handed over on disk.
@@ -143,8 +149,10 @@ rejects at session start.
   harvested once and redelivered as `AMP_API_KEY`. The broker
   admits a keyless `session/new` for this flow, while the first prompt and all
   load/resume paths remain credential-gated. `disconnect` releases the ledger
-  slot and promises no Amp-side revocation. Hosted authorization on Darwin and
-  Windows fails with `unsupported_variant` before `amp login` starts; the
+  slot and promises no Amp-side revocation. Hosted authorization runs on
+  Darwin and Linux behind a PATH-shadowing launcher shim after a
+  per-executable audit of the account-login shape; Windows and unaudited
+  builds fail with `unsupported_variant` before `amp login` starts. The
   manual method starts no native login child.
 - Durable mirroring through a host-provided `SessionStore`; ordinary frames are
   retained under `transcript`, while image-bearing tool frames use canonical

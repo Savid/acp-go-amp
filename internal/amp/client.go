@@ -177,9 +177,9 @@ func NewClient(log *slog.Logger, options Options) *Client {
 	checkAuthLoginCompatibility := CheckAuthLoginBrowserCompatibility
 
 	if options.TestOnlyAuthLoginPlatform != "" {
-		if options.TestOnlyAuthLoginPlatform == linuxPlatform {
+		if options.TestOnlyAuthLoginPlatform == linuxPlatform || options.TestOnlyAuthLoginPlatform == darwinPlatform {
 			// Fake Amp binaries used by the login tests model the supported
-			// Linux variant behaviorally; they do not carry Amp's bundled JS.
+			// variants behaviorally; they do not carry Amp's bundled JS.
 			checkAuthLoginCompatibility = func(string) error { return nil }
 		} else {
 			checkAuthLoginCompatibility = func(path string) error {
@@ -562,8 +562,24 @@ func (c *Client) startTurn(ctx context.Context, args []string, input any) (*Turn
 	_ = stdoutWriter.Close()
 	_ = stderrWriter.Close()
 
-	processObserver := c.newProcessSnapshotObserver(ctx, tree)
-	observeProcessTreeSnapshot(ctx, processObserver)
+	var processObserver ProcessSnapshotObserver
+
+	func() {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				_ = stdin.Close()
+				_ = stdout.Close()
+				_ = stderr.Close()
+				containmentErr := processTreeTerminateAndWait(tree, defaultCloseWait)
+				finishProcessTreeObservation(context.Background(), processObserver, containmentErr)
+
+				panic(recovered)
+			}
+		}()
+
+		processObserver = c.newProcessSnapshotObserver(ctx, tree)
+		observeProcessTreeSnapshot(ctx, processObserver)
+	}()
 
 	turn := &Turn{
 		log:             c.log,
@@ -580,16 +596,17 @@ func (c *Client) startTurn(ctx context.Context, args []string, input any) (*Turn
 	}
 	turn.start(ctx)
 
+	// A launch that fails after the process started still owns a contained tree.
+	// The cleanup close's own error travels with the transport failure so the
+	// caller's scratch containment sees an incomplete boundary: a discarded one
+	// would let a surviving native process escape both the prompt boundary and
+	// the session poison latch.
 	if err := turn.Send(ctx, input); err != nil {
-		_ = turn.Close()
-
-		return nil, err
+		return nil, errors.Join(err, turn.Close())
 	}
 
 	if err := closeWriteCloser(stdin); err != nil {
-		_ = turn.Close()
-
-		return nil, fmt.Errorf("close amp stdin: %w", err)
+		return nil, errors.Join(fmt.Errorf("close amp stdin: %w", err), turn.Close())
 	}
 
 	return turn, nil

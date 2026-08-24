@@ -13,6 +13,7 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-amp/internal/amp"
+	"github.com/savid/acp-go-amp/internal/lifecycle"
 	"github.com/savid/acp-go-amp/internal/observer"
 )
 
@@ -51,14 +52,153 @@ func turnFailure(cause, message string) error {
 }
 
 type promptTurnState struct {
-	mu           sync.Mutex
-	turn         *amp.Turn
-	cancelCtx    context.CancelFunc
-	closeErr     error
+	mu        sync.Mutex
+	turn      *amp.Turn
+	cancelCtx context.CancelFunc
+	// settlement records the boundary rung that failed. Close can discharge an
+	// owed durable rung by retrying it; containment and delivery failures remain
+	// failures until a later teardown proves its own complete boundary.
+	settlement   promptSettlement
 	cancelled    chan struct{}
 	completed    chan struct{}
 	cancelOnce   sync.Once
 	completeOnce sync.Once
+}
+
+// promptSettlement separates the boundary rungs a prompt can leave owed. The
+// native turn's own outcome is deliberately absent: a model failure over a
+// completed boundary is the prompt response's business, not close's.
+type promptSettlement struct {
+	containmentErr error
+	commitErr      error
+	deliveryErr    error
+}
+
+const (
+	promptSettlementPhaseContainment = "containment"
+	promptSettlementPhaseCommit      = "commit"
+	promptSettlementPhaseDelivery    = "delivery"
+)
+
+type promptTerminalDelivery struct {
+	mu            sync.Mutex
+	stream        *promptStream
+	notifications []acp.SessionNotification
+	next          int
+}
+
+func (d *promptTerminalDelivery) deliver(ctx context.Context) error {
+	if d == nil {
+		return nil
+	}
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	for d.next < len(d.notifications) {
+		if beforeDelivery := d.stream.session.agent.options.runtime.beforeTerminalDelivery; beforeDelivery != nil {
+			beforeDelivery(d.notifications[d.next])
+		}
+
+		if err := d.stream.deliver(ctx, d.notifications[d.next]); err != nil {
+			return err
+		}
+
+		d.next++
+	}
+
+	if d.stream != nil {
+		d.stream.fence()
+	}
+
+	return nil
+}
+
+func (s *agentSession) retainPendingTerminal(delivery *promptTerminalDelivery) {
+	if delivery == nil || delivery.stream == nil {
+		return
+	}
+
+	s.mu.Lock()
+	s.pendingTerminal = delivery
+	s.mu.Unlock()
+}
+
+func (s *agentSession) clearPendingTerminal(expect *promptTerminalDelivery) {
+	s.mu.Lock()
+	if s.pendingTerminal == expect {
+		s.pendingTerminal = nil
+		s.promptSettlement.deliveryErr = nil
+	}
+	s.mu.Unlock()
+}
+
+func (s *agentSession) recordPromptSettlement(settlement promptSettlement) {
+	s.mu.Lock()
+	s.promptSettlement = settlement
+	s.mu.Unlock()
+}
+
+func (s *agentSession) retainedPromptSettlement() promptSettlement {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.promptSettlement
+}
+
+func (s *agentSession) hasPendingTerminal() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.pendingTerminal != nil
+}
+
+func (s *agentSession) deliverPendingTerminal(ctx context.Context) error {
+	s.mu.Lock()
+	delivery := s.pendingTerminal
+	s.mu.Unlock()
+
+	if delivery == nil {
+		return nil
+	}
+
+	if err := delivery.deliver(ctx); err != nil {
+		return err
+	}
+
+	s.clearPendingTerminal(delivery)
+
+	return nil
+}
+
+// dischargeDeletedUnsyncedTerminal drops a terminal claim whose preceding
+// commit was fenced by a delete. The tombstone made the retained frames final:
+// publishing idle for that absent durable prefix would invert the settlement
+// order. A terminal whose commit did land remains pending and must still be
+// retransmitted exactly.
+func (s *agentSession) dischargeDeletedUnsyncedTerminal() bool {
+	s.mu.Lock()
+	if s.pendingTerminal == nil || !s.mirrorUnsynced {
+		s.mu.Unlock()
+
+		return false
+	}
+
+	delivery := s.pendingTerminal
+	s.pendingTerminal = nil
+	s.unsyncedFrames = nil
+	s.mirrorUnsynced = false
+	s.promptSettlement.commitErr = nil
+	s.promptSettlement.deliveryErr = nil
+	s.mu.Unlock()
+
+	delivery.stream.fence()
+
+	return true
+}
+
+func (s promptSettlement) err() error {
+	return errors.Join(s.containmentErr, s.commitErr, s.deliveryErr)
 }
 
 func newPromptTurnState() *promptTurnState {
@@ -99,24 +239,41 @@ func (s *promptTurnState) cancel() {
 	}
 }
 
-func (s *promptTurnState) complete(closeErr error) {
+func (s *promptTurnState) complete(settlementErr error) {
+	s.completeSettlement(promptSettlement{containmentErr: settlementErr})
+}
+
+func (s *promptTurnState) completeSettlement(settlement promptSettlement) {
 	s.completeOnce.Do(func() {
 		s.mu.Lock()
-		s.closeErr = closeErr
+		s.settlement = settlement
 		s.mu.Unlock()
 		close(s.completed)
 	})
 }
 
+func (s *promptTurnState) settled() bool {
+	select {
+	case <-s.completed:
+		return true
+	default:
+		return false
+	}
+}
+
 func (s *promptTurnState) awaitCompletion(ctx context.Context) error {
+	return s.awaitSettlement(ctx).err()
+}
+
+func (s *promptTurnState) awaitSettlement(ctx context.Context) promptSettlement {
 	select {
 	case <-s.completed:
 		s.mu.Lock()
 		defer s.mu.Unlock()
 
-		return s.closeErr
+		return s.settlement
 	case <-ctx.Done():
-		return fmt.Errorf("%w: wait for active Amp turn cleanup: %v", amp.ErrProcessContainmentIncomplete, ctx.Err())
+		return promptSettlement{containmentErr: fmt.Errorf("%w: wait for active Amp turn cleanup: %v", amp.ErrProcessContainmentIncomplete, ctx.Err())}
 	}
 }
 
@@ -129,7 +286,49 @@ func (s *promptTurnState) isCancelled() bool {
 	}
 }
 
-func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (resp acp.PromptResponse, returnErr error) { //nolint:gocyclo // Prompt owns the complete turn state machine.
+// lifecycleOutcome is the truthful end of one foreground cycle: the ACP v1 stop
+// reason the native harness reported and the outcome recorded on the ending
+// turn. It is read from the pair the turn itself produced, so a post-acceptance
+// failure the v1 response later reports as a cancellation still settles the
+// lifecycle turn as failed.
+type lifecycleOutcome struct {
+	stopReason string
+	outcome    lifecycle.Outcome
+}
+
+// lifecycleOutcomeFor derives one cycle's recorded end from the turn's own
+// result. No ACP v1 stop reason names a failure, so a failed cycle records its
+// outcome and states no stop reason at all rather than borrowing one.
+func lifecycleOutcomeFor(resp acp.PromptResponse, err error) lifecycleOutcome {
+	if err != nil {
+		return lifecycleOutcome{outcome: lifecycle.OutcomeFailed}
+	}
+
+	reason := string(resp.StopReason)
+
+	switch resp.StopReason {
+	case acp.StopReasonCancelled:
+		return lifecycleOutcome{stopReason: reason, outcome: lifecycle.OutcomeCancelled}
+	case acp.StopReasonMaxTokens, acp.StopReasonMaxTurnRequests:
+		return lifecycleOutcome{stopReason: reason, outcome: lifecycle.OutcomeLimit}
+	case acp.StopReasonRefusal:
+		return lifecycleOutcome{stopReason: reason, outcome: lifecycle.OutcomeRefused}
+	default:
+		return lifecycleOutcome{stopReason: reason, outcome: lifecycle.OutcomeSuccess}
+	}
+}
+
+// promptResult is one native turn's complete outcome. Every exit path from the
+// message loop fills it in, including the frames the turn already streamed, so
+// one commit point covers cancel, failure, timeout, and success alike and
+// durable state never diverges from what the client was shown.
+type promptResult struct {
+	response   acp.PromptResponse
+	err        error
+	transcript []SessionStoreEntry
+}
+
+func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (acp.PromptResponse, error) {
 	if err := s.ready(); err != nil {
 		return acp.PromptResponse{}, err
 	}
@@ -140,6 +339,13 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (re
 
 	if err := s.ensureMirrorSynced(ctx); err != nil {
 		return acp.PromptResponse{}, err
+	}
+
+	// The submission identity is read and validated before dispatch: a prompt
+	// this adapter cannot correlate writes no frame to the harness.
+	submission, refusal := lifecycle.DecodePromptCorrelation(params.Meta, s.agent.negotiatedLifecycle())
+	if refusal != nil {
+		return acp.PromptResponse{}, lifecycleParamError(refusal)
 	}
 
 	release, err := s.acquireTurn(ctx)
@@ -160,9 +366,44 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (re
 
 	state.setCancelFunc(cancelContinue)
 
-	s.setActivePrompt(state)
-	defer s.clearActivePrompt(state)
-	defer state.complete(nil)
+	// Admission and closure are one linearization: a prompt published here is a
+	// prompt every later close or delete waits out, and a session already closed
+	// or already fenced for delete admits none. Publishing after the checks that
+	// gate it would let a teardown see no active prompt and complete while this
+	// one went on to launch native work against the session it just tore down.
+	if admitErr := s.admitPrompt(state); admitErr != nil {
+		return acp.PromptResponse{}, admitErr
+	}
+
+	var incarnation *promptStream
+
+	defer func() {
+		recovered := recover()
+
+		if recovered != nil && !state.settled() {
+			settlement := s.containPromptPanic(state)
+
+			if incarnation != nil {
+				incarnation.fence()
+			}
+
+			s.recordPromptSettlement(settlement)
+			state.completeSettlement(settlement)
+		}
+
+		if recovered == nil {
+			state.complete(nil)
+		}
+
+		s.clearActivePrompt(state)
+
+		if recovered != nil {
+			panic(recovered)
+		}
+	}()
+
+	ctx = withCallbackProvenance(ctx, s.agent, state)
+	continueCtx = withCallbackProvenance(continueCtx, s.agent, state)
 
 	configurationStarted := time.Now()
 	mcpConfigPath, err := s.writePromptMCPConfig()
@@ -176,6 +417,14 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (re
 		defer func() { _ = os.Remove(mcpConfigPath) }()
 	}
 
+	// One prompt is one contained process, so one prompt is one incarnation: the
+	// snapshot opening it is the first lifecycle-bearing notification inside the
+	// prompt, and it precedes acceptance.
+	incarnation, err = s.openPromptStream(ctx)
+	if err != nil {
+		return acp.PromptResponse{}, err
+	}
+
 	s.agent.observe.RecordAmpProcessStart(continueCtx)
 	// The trace carrier is the last phase: it composes over the session
 	// environment under the platform key identity, so a caller-supplied
@@ -183,25 +432,27 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (re
 	promptEnv := composeEnv(s.env, s.agent.observe.InjectTraceEnv(continueCtx, nil))
 	promptClient := s.clientWithEnv(promptEnv, mcpConfigPath, RuntimeResourcePrompt)
 
-	// The first prompt runs a thread-less `amp -x` execute: amp creates the
-	// server-side thread only now, so a session that is never prompted never
-	// owns a remote thread. Later prompts continue the adopted thread.
-	nativeID := s.nativeSessionID()
-
-	var turn *amp.Turn
-
-	spawnStarted := time.Now()
-
-	if nativeID == "" {
-		turn, err = s.agent.options.runtime.executeThread(continueCtx, promptClient, input)
-		observeRuntimeStartupStage(continueCtx, s.agent.options.RuntimeResourceHooks, RuntimeResourcePrompt, RuntimeStartupSession, spawnStarted, err)
-	} else {
-		turn, err = s.agent.options.runtime.continueThread(continueCtx, promptClient, nativeID, input)
-		observeRuntimeStartupStage(continueCtx, s.agent.options.RuntimeResourceHooks, RuntimeResourcePrompt, RuntimeStartupSpawn, spawnStarted, err)
-	}
-
+	turn, err := s.launchNativeTurn(continueCtx, promptClient, input)
 	if err != nil {
 		s.recordScratchContainment(err)
+
+		// A launch that failed accepted nothing and will emit nothing more, so
+		// the incarnation ends here rather than at a settlement this prompt never
+		// reaches. It precedes the latch below for the same reason it does there.
+		incarnation.fence()
+
+		// A launch that started a process and could not deliver its input owns a
+		// tree its cleanup did not contain. That boundary is the latch's own
+		// business, so it is published there: a close or delete waiting on this
+		// prompt must not read an incomplete boundary as a settled one and go on
+		// to remove the scratch state a surviving tree still runs against. It
+		// outranks the cancel guard — a request whose boundary broke did not end
+		// cleanly, whatever the host asked for.
+		if !amp.ProcessContainmentComplete(err) {
+			state.completeSettlement(promptSettlement{containmentErr: err})
+
+			return acp.PromptResponse{}, unsettled(classifyNativePromptError(err))
+		}
 
 		if state.isCancelled() {
 			return cancelledPromptResponse(nil, params.MessageId), nil
@@ -210,28 +461,249 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (re
 		return acp.PromptResponse{}, classifyNativePromptError(err)
 	}
 
-	defer func() {
-		closeErr := turn.Close()
-		state.complete(closeErr)
-		s.recordScratchContainment(closeErr)
-		resp, returnErr = finalizeNativePrompt(resp, returnErr, closeErr)
-	}()
-
 	state.setTurn(turn)
+
+	// Acceptance is the dispatch linearization point: the native dispatcher owns
+	// the frame from here, so the turn exists and must be settled.
+	if err := incarnation.accept(ctx, submission); err != nil {
+		return s.settlePrompt(ctx, turn, state, incarnation, promptResult{err: err})
+	}
 
 	var timeoutCh <-chan time.Time
 
 	if d := s.agent.options.TurnTimeout; d > 0 {
-		ch, stop := s.agent.options.runtime.newTurnTimer(d)
-		defer stop()
+		ch, stop := invokeOwnedPair(func() (<-chan time.Time, func()) {
+			return s.agent.options.runtime.newTurnTimer(d)
+		})
+
+		defer func() { invokeOwned(stop) }()
 
 		timeoutCh = ch
 	}
 
+	result := s.runPromptTurn(ctx, turn, state, params.MessageId, timeoutCh)
+
+	return s.settlePrompt(ctx, turn, state, incarnation, result)
+}
+
+// launchNativeTurn starts the one short-lived amp process this prompt runs on.
+// The first prompt runs a thread-less `amp -x` execute: amp creates the
+// server-side thread only now, so a session that is never prompted never owns a
+// remote thread. Later prompts continue the adopted thread.
+func (s *agentSession) launchNativeTurn(ctx context.Context, client *amp.Client, input any) (*amp.Turn, error) {
+	nativeID := s.nativeSessionID()
+	spawnStarted := time.Now()
+
+	if nativeID == "" {
+		callbackCtx := withExactCallbackGeneration(ctx, "native:execute_thread")
+		turn, err := invokeOwnedPair(func() (*amp.Turn, error) {
+			return s.agent.options.runtime.executeThread(callbackCtx, client, input)
+		})
+		observeRuntimeStartupStage(ctx, s.agent.options.RuntimeResourceHooks, RuntimeResourcePrompt, RuntimeStartupSession, spawnStarted, err)
+
+		return turn, err
+	}
+
+	callbackCtx := withExactCallbackGeneration(ctx, "native:continue_thread")
+	turn, err := invokeOwnedPair(func() (*amp.Turn, error) {
+		return s.agent.options.runtime.continueThread(callbackCtx, client, nativeID, input)
+	})
+	observeRuntimeStartupStage(ctx, s.agent.options.RuntimeResourceHooks, RuntimeResourcePrompt, RuntimeStartupSpawn, spawnStarted, err)
+
+	return turn, err
+}
+
+// unsettledPrompt marks a failure that stopped the prompt from settling. The
+// v1 response for a cancelled request is a cancelled success, but only once the
+// prompt actually settled: reporting one over a commit the store never took, or
+// a boundary that was never emitted, would tell the host a turn ended cleanly
+// while its durable state and its lifecycle stream say otherwise.
+type unsettledPromptError struct{ err error }
+
+func (e unsettledPromptError) Error() string { return e.err.Error() }
+func (e unsettledPromptError) Unwrap() error { return e.err }
+
+// unsettled marks a settlement failure, keeping the underlying failure's exact
+// wire shape for the caller that reads it.
+func unsettled(err error) error { return unsettledPromptError{err: err} }
+
+// settlePrompt closes the turn in the one order the close-fenced proof class
+// binds: the native terminal is already past, so the whole-tree containment and
+// vacancy proof completes first, then the durable commit, then the terminal idle,
+// then the quiescence fact the completed proof produced, and only then the v1
+// response. A failed commit or an incomplete boundary fails the prompt and emits
+// no terminal idle, so no boundary claims a foreground prefix the store does not
+// hold and the incarnation ends unsettled for the next snapshot to state.
+//
+// Settlement runs on a context detached from the request's. A cancelled request
+// still gets its durable commit, its terminal boundary, and its fenced stream:
+// the cancellation ends the native turn, never the settlement of what that turn
+// already streamed.
+func (s *agentSession) settlePrompt(
+	ctx context.Context,
+	turn *amp.Turn,
+	state *promptTurnState,
+	incarnation *promptStream,
+	result promptResult,
+) (acp.PromptResponse, error) {
+	settleCtx := context.WithoutCancel(ctx)
+	phase := promptSettlementPhaseContainment
+	contained := false
+
+	var terminal *promptTerminalDelivery
+
+	var settlement promptSettlement
+
+	defer func() {
+		recovered := recover()
+
+		if recovered != nil {
+			panicErr := errAgentGoroutinePanic
+
+			switch phase {
+			case promptSettlementPhaseCommit:
+				settlement.commitErr = errors.Join(settlement.commitErr, panicErr)
+			case promptSettlementPhaseDelivery:
+				settlement.deliveryErr = errors.Join(settlement.deliveryErr, panicErr)
+			default:
+				settlement.containmentErr = errors.Join(settlement.containmentErr, panicErr)
+			}
+
+			if !contained {
+				panicSettlement := s.containPromptPanic(state)
+				settlement.containmentErr = errors.Join(settlement.containmentErr, panicSettlement.containmentErr)
+			}
+
+			if terminal == nil {
+				incarnation.fence()
+			}
+		}
+
+		s.recordPromptSettlement(settlement)
+		state.completeSettlement(settlement)
+
+		if recovered != nil {
+			panic(recovered)
+		}
+	}()
+
+	settleCtx = withExactCallbackGeneration(settleCtx, "native:settle_turn")
+	proof, closeErr := invokeOwnedPair(func() (amp.ContainmentProof, error) {
+		return s.agent.options.runtime.settleTurn(turn)
+	})
+	s.recordScratchContainment(closeErr)
+	// Vacancy is readable only from a boundary that completed. An enumeration
+	// taken after an incomplete containment describes a tree the supervisor lost,
+	// so it proves nothing and the next incarnation opens without a claim.
+	s.recordVacancy(proof.Vacant() && amp.ProcessContainmentComplete(closeErr))
+	contained = amp.ProcessContainmentComplete(closeErr)
+
+	// Settlement is what the completion latch publishes: the boundary's own
+	// failures, separated by rung. A native turn that failed over a boundary which
+	// completed, committed, and delivered its terminal facts did settle, so a
+	// concurrent close or delete succeeds while the prompt still answers the host
+	// with the native failure. Conflating the two would both fail a close that
+	// nothing went wrong for and hide a real settlement failure behind the native
+	// error the prompt reports first.
+	if !amp.ProcessContainmentComplete(closeErr) {
+		settlement.containmentErr = closeErr
+
+		incarnation.fence()
+
+		return acp.PromptResponse{}, unsettled(errors.Join(result.err, closeErr))
+	}
+
+	terminal, closeErr = incarnation.terminalDelivery(lifecycleOutcomeFor(result.response, result.err), proof)
+	if closeErr != nil {
+		settlement.deliveryErr = closeErr
+
+		incarnation.fence()
+
+		return acp.PromptResponse{}, unsettled(firstError(result.err, closeErr))
+	}
+
+	s.retainPendingTerminal(terminal)
+
+	phase = promptSettlementPhaseCommit
+
+	if commitErr := s.persistAfterTurn(settleCtx, result.transcript); commitErr != nil {
+		settlement.commitErr = commitErr
+
+		return acp.PromptResponse{}, unsettled(firstError(result.err, commitErr))
+	}
+
+	phase = promptSettlementPhaseDelivery
+
+	if deliveryErr := terminal.deliver(settleCtx); deliveryErr != nil {
+		settlement.deliveryErr = deliveryErr
+
+		return acp.PromptResponse{}, unsettled(firstError(result.err, deliveryErr))
+	}
+
+	s.clearPendingTerminal(terminal)
+
+	if result.err != nil {
+		return acp.PromptResponse{}, result.err
+	}
+
+	return result.response, nil
+}
+
+func (s *agentSession) containPromptPanic(state *promptTurnState) promptSettlement {
+	turn := state.currentTurn()
+	if turn == nil {
+		boundaryErr := fmt.Errorf("%w: native prompt panicked before publishing its turn handle", amp.ErrProcessContainmentIncomplete)
+		s.recordScratchContainment(boundaryErr)
+		s.recordVacancy(false)
+
+		return promptSettlement{containmentErr: boundaryErr, deliveryErr: errAgentGoroutinePanic}
+	}
+
+	proof, boundaryErr := s.settleTurnAfterPanic(turn)
+	s.recordScratchContainment(boundaryErr)
+	s.recordVacancy(proof.Vacant() && amp.ProcessContainmentComplete(boundaryErr))
+
+	return promptSettlement{containmentErr: boundaryErr, deliveryErr: errAgentGoroutinePanic}
+}
+
+func (s *agentSession) settleTurnAfterPanic(turn *amp.Turn) (proof amp.ContainmentProof, err error) {
+	defer func() {
+		if recover() != nil {
+			proof = amp.ContainmentProof{}
+			err = fmt.Errorf("%w: panic while containing native prompt", amp.ErrProcessContainmentIncomplete)
+		}
+	}()
+
+	return s.agent.options.runtime.settleTurn(turn)
+}
+
+// firstError keeps the first failure's exact wire shape. A store outage behind a
+// native failure is retained for the next prompt to retry loudly rather than
+// flattened into the error the caller is about to read.
+func firstError(errs ...error) error {
+	for _, err := range errs {
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// runPromptTurn consumes the native stream to its end. Every exit reports the
+// frames it accumulated, so the caller's single commit point covers all of them.
+func (s *agentSession) runPromptTurn(
+	ctx context.Context,
+	turn *amp.Turn,
+	state *promptTurnState,
+	messageID *string,
+	timeoutCh <-chan time.Time,
+) promptResult {
 	var (
 		transcript       []SessionStoreEntry
 		promptUsage      *acp.Usage
 		terminal         *amp.ResultMessage
+		stopReason       string
 		finalMessageID   string
 		baseTranscriptAt = s.transcriptFrameCount()
 	)
@@ -240,53 +712,30 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (re
 		select {
 		case msg, ok := <-turn.Messages():
 			if !ok {
-				if terminal == nil {
-					return streamEndedWithoutTerminal(ctx, state, promptUsage, params.MessageId, turn)
-				}
+				response, err := s.resolveTerminal(ctx, state, terminal, promptUsage, messageID, stopReason, finalMessageID, turn)
 
-				if terminal.IsError {
-					// Cancel guard runs before all failure mapping.
-					if state.isCancelled() || isNativeCancelResult(terminal) {
-						return cancelledPromptResponse(promptUsage, params.MessageId), nil
-					}
-					// L1: fall back to result.result when result.error is empty so
-					// the real provider cause is never lost.
-					cause := firstNonEmpty(terminal.Error, terminal.Result)
-
-					return acp.PromptResponse{}, turnFailure(causeProvider, cause)
-				}
-
-				if err := s.persistAfterTurn(ctx, transcript); err != nil {
-					return acp.PromptResponse{}, err
-				}
-
-				return acp.PromptResponse{
-					Meta:          ampMessageMeta(nil, finalMessageID),
-					StopReason:    acp.StopReasonEndTurn,
-					Usage:         promptUsage,
-					UserMessageId: params.MessageId,
-				}, nil
+				return promptResult{response: response, err: err, transcript: transcript}
 			}
 
 			if err := s.validateFrameSessionID(ctx, msg, state); err != nil {
-				return acp.PromptResponse{}, err
+				return promptResult{err: err, transcript: transcript}
 			}
 
-			messageID := ""
+			frameID := ""
 
 			transcriptJSON, err := s.prepareMessageImageArtifacts(ctx, msg)
 			if err != nil {
 				_ = s.interrupt(context.Background())
 
-				return acp.PromptResponse{}, err
+				return promptResult{err: err, transcript: transcript}
 			}
 
 			if transcriptJSON != "" {
 				transcript = append(transcript, SessionStoreEntry(transcriptJSON))
 
-				messageID = assistantMessageIdentity(s.id, baseTranscriptAt+len(transcript), msg)
-				if messageID != "" {
-					finalMessageID = messageID
+				frameID = assistantMessageIdentity(s.id, baseTranscriptAt+len(transcript), msg)
+				if frameID != "" {
+					finalMessageID = frameID
 				}
 			}
 			// Raw events are non-authoritative debug output: an emit failure is
@@ -296,14 +745,18 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (re
 				s.agent.observe.RecordRawEventEmitFailure(ctx, err)
 			}
 
-			if err := s.emitMessage(ctx, msg, true, messageID); err != nil {
+			if err := s.emitMessage(ctx, msg, true, frameID); err != nil {
 				_ = s.interrupt(context.Background())
 
-				return acp.PromptResponse{}, err
+				return promptResult{err: err, transcript: transcript}
 			}
 
 			if usage := messageUsage(msg); usage != nil {
 				promptUsage = usage
+			}
+
+			if reason := assistantStopReason(msg); reason != "" {
+				stopReason = reason
 			}
 
 			if result, ok := msg.(*amp.ResultMessage); ok {
@@ -322,32 +775,96 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (re
 				_ = s.interruptState(context.Background(), state)
 			}
 
-			return promptErrorResponse(ctx, state, promptUsage, params.MessageId, err)
+			response, err := promptErrorResponse(ctx, state, promptUsage, messageID, err)
+
+			return promptResult{response: response, err: err, transcript: transcript}
 		case <-timeoutCh:
-			return s.resolveTurnDeadline(ctx, state, promptUsage, params.MessageId)
+			response, err := s.resolveTurnDeadline(ctx, state, promptUsage, messageID)
+
+			return promptResult{response: response, err: err, transcript: transcript}
 		case <-state.cancelled:
 			_ = s.interruptState(context.Background(), state)
 
-			return cancelledPromptResponse(promptUsage, params.MessageId), nil
+			return promptResult{response: cancelledPromptResponse(promptUsage, messageID), transcript: transcript}
 		case <-ctx.Done():
 			state.cancel()
 			_ = s.interruptState(context.Background(), state)
 
-			return cancelledPromptResponse(promptUsage, params.MessageId), nil
+			return promptResult{response: cancelledPromptResponse(promptUsage, messageID), transcript: transcript}
 		}
 	}
 }
 
-func finalizeNativePrompt(
-	resp acp.PromptResponse,
-	returnErr error,
-	closeErr error,
+// resolveTerminal maps the native stream's end to the v1 pair. The cancel guard
+// runs before every mapping, success included: a cancel and a terminal frame can
+// both be ready at the same select, and a turn the host already cancelled reports
+// cancelled whichever the loop happened to read. The reported stop reason is the
+// native harness's own: a turn stopped by a token ceiling or a turn-request
+// ceiling says so instead of claiming it ended on its own.
+func (s *agentSession) resolveTerminal(
+	ctx context.Context,
+	state *promptTurnState,
+	terminal *amp.ResultMessage,
+	usage *acp.Usage,
+	messageID *string,
+	stopReason string,
+	finalMessageID string,
+	turn turnErrorReader,
 ) (acp.PromptResponse, error) {
-	if !amp.ProcessContainmentComplete(closeErr) {
-		return acp.PromptResponse{}, errors.Join(returnErr, closeErr)
+	if state.isCancelled() || ctx.Err() != nil {
+		//nolint:nilerr // A cancelled turn reports cancelled, not the context's own error.
+		return cancelledPromptResponse(usage, messageID), nil
 	}
 
-	return resp, returnErr
+	if terminal == nil {
+		return streamEndedWithoutTerminal(ctx, state, usage, messageID, turn)
+	}
+
+	if terminal.IsError {
+		if isNativeCancelResult(terminal) {
+			return cancelledPromptResponse(usage, messageID), nil
+		}
+
+		if terminal.Subtype == amp.SubtypeErrorMaxTurns {
+			return acp.PromptResponse{
+				StopReason:    acp.StopReasonMaxTurnRequests,
+				Usage:         usage,
+				UserMessageId: messageID,
+			}, nil
+		}
+		// L1: fall back to result.result when result.error is empty so the real
+		// provider cause is never lost.
+		return acp.PromptResponse{}, turnFailure(causeProvider, firstNonEmpty(terminal.Error, terminal.Result))
+	}
+
+	return acp.PromptResponse{
+		Meta:          ampMessageMeta(nil, finalMessageID),
+		StopReason:    terminalStopReason(stopReason),
+		Usage:         usage,
+		UserMessageId: messageID,
+	}, nil
+}
+
+// terminalStopReason maps the native assistant stop reason onto the ACP v1 enum.
+// Amp reports a token ceiling on the assistant frame that hit it; every other
+// value means the model finished the turn it was given.
+func terminalStopReason(stopReason string) acp.StopReason {
+	if stopReason == amp.StopReasonMaxTokens {
+		return acp.StopReasonMaxTokens
+	}
+
+	return acp.StopReasonEndTurn
+}
+
+// assistantStopReason reads the stop reason off a main-agent assistant frame.
+// Delegated activity reports its own ceilings and never ends the host turn.
+func assistantStopReason(msg amp.Message) string {
+	assistant, ok := msg.(*amp.AssistantMessage)
+	if !ok || assistant.ParentToolUseID != "" {
+		return ""
+	}
+
+	return assistant.StopReason
 }
 
 func (s *agentSession) writePromptMCPConfig() (string, error) {
@@ -562,7 +1079,9 @@ func (s *agentSession) emitUpdate(ctx context.Context, update acp.SessionUpdate)
 		return nil
 	}
 
-	return conn.SessionUpdate(ctx, acp.SessionNotification{SessionId: s.id, Update: update})
+	return invokeExternalResult(ctx, func() error {
+		return conn.SessionUpdate(ctx, acp.SessionNotification{SessionId: s.id, Update: update})
+	})
 }
 
 // emitRawEvent emits one non-authoritative raw-event notification for a live
@@ -612,7 +1131,9 @@ func (s *agentSession) emitRawEvent(ctx context.Context, source string, msg amp.
 		return err
 	}
 
-	if err := conn.NotifyExtension(ctx, RawEventMethod, capped); err != nil {
+	if err := invokeExternalResult(ctx, func() error {
+		return conn.NotifyExtension(ctx, RawEventMethod, capped)
+	}); err != nil {
 		return err
 	}
 
@@ -667,6 +1188,13 @@ func (s *agentSession) adoptNativeSessionID(ctx context.Context, threadID string
 	s.nativeID = threadID
 	s.mu.Unlock()
 
+	// The binding is recorded as soon as it is adopted, so a thread this adapter
+	// created is never orphaned by a crash before the turn settles. It carries no
+	// pending-turn frame — the prompt loop appends the init frame after this
+	// returns, and a prompt never starts with an unsynced mirror — so the
+	// adoption commit adds exactly the adopted binding to the last committed
+	// state and tombstones nothing. A failure here is not fatal: the turn's own
+	// settlement commits the binding again.
 	if err := s.persistAfterTurn(ctx, nil); err != nil {
 		s.agent.log.DebugContext(ctx, "persist adopted amp thread id failed", slog.String(jsonFieldSessionID, string(s.id)), slog.String(jsonFieldError, err.Error()))
 	}

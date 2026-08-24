@@ -78,7 +78,7 @@ func TestCloseSessionCancelsActiveTurnAfterProcessExit(t *testing.T) {
 	case promptErr := <-errCh:
 		result := <-resultCh
 		if promptErr != nil || result.StopReason != acp.StopReasonCancelled {
-			t.Fatalf("prompt after close = %#v, %v", result, promptErr)
+			t.Fatalf("prompt after close = %#v, %v, want settled cancellation", result, promptErr)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("prompt did not return cancelled result")

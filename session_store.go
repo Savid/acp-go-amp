@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sort"
 	"sync"
 	"time"
@@ -131,8 +132,9 @@ func (s *InMemorySessionStore) Load(ctx context.Context, key SessionKey) ([]Sess
 
 // isTombstonedLocked reports whether a key is hidden by a tombstone. A tombstone
 // on the main key cascades to every subpath of that session (including subpaths
-// created after the main delete), and is cleared only by a valid Replace
-// generation that re-publishes the main key.
+// created after the main delete), and nothing clears it: a session a Delete
+// tombstoned stays deleted, and the only tombstones a Replace lifts are the ones
+// an earlier Replace wrote over its own unlisted subpaths.
 func (s *InMemorySessionStore) isTombstonedLocked(key SessionKey) bool {
 	if _, ok := s.deleted[key]; ok {
 		return true
@@ -164,7 +166,7 @@ func (s *InMemorySessionStore) Replace(ctx context.Context, main SessionKey, rep
 		return errors.New("main subpath must be empty")
 	}
 
-	mainCount := 0
+	mainIncluded := false
 
 	next := make(map[SessionKey][]SessionStoreEntry, len(replacements))
 	for _, replacement := range replacements {
@@ -172,14 +174,23 @@ func (s *InMemorySessionStore) Replace(ctx context.Context, main SessionKey, rep
 			return errors.New("replacement session id mismatch")
 		}
 
+		// One generation states each key exactly once. A key stated twice makes
+		// slice position decide what the session holds, so the caller's own
+		// generation does not say what it wants and no reading of it is the
+		// caller's: the whole generation is refused by the duplicated key's name
+		// rather than resolved by last-write-wins.
+		if _, duplicate := next[replacement.Key]; duplicate {
+			return fmt.Errorf("duplicate replacement subpath %q", replacement.Key.Subpath)
+		}
+
 		if replacement.Key == main {
-			mainCount++
+			mainIncluded = true
 		}
 
 		next[replacement.Key] = cloneEntries(replacement.Entries)
 	}
 
-	if mainCount != 1 {
+	if !mainIncluded {
 		return errors.New("replacement must include main exactly once")
 	}
 
@@ -189,6 +200,14 @@ func (s *InMemorySessionStore) Replace(ctx context.Context, main SessionKey, rep
 	defer s.mu.Unlock()
 
 	s.ensure()
+
+	// A tombstone is final in the store itself, not merely in the adapter that
+	// wrote it. A replacement landing after a delete would durably resurrect a
+	// session every wire door already answers unknown for, and an adapter-level
+	// deletion marker cannot prevent it: the write is already on its way here.
+	if s.isTombstonedLocked(main) {
+		return nil
+	}
 
 	for key := range s.entries {
 		if key.SessionID == main.SessionID {

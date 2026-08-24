@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
-	"slices"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -47,10 +46,6 @@ func (a *Agent) validateSessionStartOptions(options AmpOptions) error {
 
 	if options.OutputSchema != nil {
 		return unsupportedField(metaOutputSchemaKey)
-	}
-
-	if options.Mode != "" && !slices.Contains(validModes(), options.Mode) {
-		return unsupportedField("_meta.amp.options.mode")
 	}
 
 	for key := range options.Env {
@@ -191,6 +186,10 @@ func validateSessionPaths(cwd string, additionalDirs []string) error {
 	return nil
 }
 
+func validSessionCwd(cwd string) bool {
+	return validateSessionPaths(cwd, nil) == nil
+}
+
 func mismatchField(field string) error {
 	return acp.NewInvalidParams(map[string]any{jsonFieldError: valMismatch, jsonFieldField: field})
 }
@@ -283,8 +282,4 @@ func mcpConfigJSON(servers []acp.McpServer) (string, error) {
 	data, _ := json.Marshal(payload)
 
 	return string(data), nil
-}
-
-func validModes() []string {
-	return []string{modeLow, modeMedium, modeHigh}
 }

@@ -67,7 +67,7 @@ func TestAgentMetaCarriesNoModelCapabilitiesArray(t *testing.T) {
 		t.Fatalf("amp meta carries a capabilities array: %s", encodedMeta)
 	}
 
-	encodedOptions, err := json.Marshal((&agentSession{mode: validModes()[0]}).configOptions())
+	encodedOptions, err := json.Marshal((&agentSession{mode: advertisedModes()[0]}).configOptions())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -414,9 +414,6 @@ func TestAgentErrorAndConformanceBranches(t *testing.T) {
 	}
 	if err := newTestAgent().validateSessionStartOptions(AmpOptions{OutputSchema: map[string]any{}}); err == nil {
 		t.Fatal("empty output schema accepted")
-	}
-	if err := newTestAgent().validateSessionStartOptions(AmpOptions{Mode: "large"}); err == nil {
-		t.Fatal("hidden mode accepted")
 	}
 	configurationAgent := newTestAgent()
 	configurationAgent.configurationErr = errors.New("configuration")
@@ -843,6 +840,18 @@ func main() {
 		}
 		os.Stdout.WriteString("{\"thread\":\"" + args[len(args)-1] + "\"}\n")
 	case "delete":
+		if mode == "delete-fail-twice" {
+			marker := filepath.Join(state, "delete-failure-count")
+			failures := 0
+			if data, err := os.ReadFile(marker); err == nil {
+				failures, _ = strconv.Atoi(string(data))
+			}
+			if failures < 2 {
+				_ = os.WriteFile(marker, []byte(strconv.Itoa(failures+1)), 0600)
+				os.Stderr.WriteString("delete failed twice\n")
+				os.Exit(1)
+			}
+		}
 		if mode == "delete-fail-once" {
 			marker := filepath.Join(state, "delete-failed-once")
 			if _, err := os.Stat(marker); err != nil {
@@ -858,6 +867,11 @@ func main() {
 		os.Stdout.WriteString("deleted\n")
 	case "continue":
 		if mode == "bad-adopt" {
+			// Drain stdin before answering, exactly as every other mode does. A
+			// child that exits with the prompt still unread races the wrapper's
+			// write: the EPIPE would surface as a transport failure and hide the
+			// identity verdict this fixture exists to produce.
+			_, _ = io.ReadAll(os.Stdin)
 			os.Stdout.WriteString("{\"type\":\"system\",\"subtype\":\"init\",\"cwd\":\"/tmp/project\",\"session_id\":\"not-a-thread\"}\n")
 			os.Stdout.WriteString("{\"type\":\"result\",\"subtype\":\"success\",\"duration_ms\":1,\"is_error\":false,\"num_turns\":1,\"result\":\"late\",\"session_id\":\"not-a-thread\"}\n")
 			return
