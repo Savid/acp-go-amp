@@ -117,7 +117,7 @@ func DecodePromptCorrelation(meta map[string]any, negotiated Negotiated) (Submis
 
 func checkCorrelationVersion(fields map[string]any, negotiated Negotiated) *ParamError {
 	version, ok := integerValue(fields[fieldVersion])
-	if !ok || !negotiated.SupportsVersion(version) {
+	if !ok || !negotiated.Present() || version != Version {
 		return paramError(fieldVersion)
 	}
 

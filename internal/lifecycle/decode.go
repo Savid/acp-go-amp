@@ -154,7 +154,7 @@ func (d *decoder) version(fields map[string]json.RawMessage) {
 		return
 	}
 
-	if !d.negotiated.SupportsVersion(version) {
+	if !d.negotiated.Present() || version != Version {
 		d.fail(ViolationUnsupportedVersion, "version "+strconv.Itoa(version)+" is not the enabled version")
 	}
 }

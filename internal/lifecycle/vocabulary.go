@@ -255,11 +255,6 @@ type Negotiated struct {
 // illegal on the connection.
 func (n Negotiated) Present() bool { return n.Version == Version }
 
-// SupportsVersion reports whether an envelope carries the enabled version.
-func (n Negotiated) SupportsVersion(version int) bool {
-	return n.Present() && version == Version
-}
-
 // NegotiatedVersion is the integer every envelope and correlation value carries.
 func (n Negotiated) NegotiatedVersion() int {
 	if !n.Present() {
