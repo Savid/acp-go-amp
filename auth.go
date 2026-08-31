@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
+	"path/filepath"
 	"sync"
 
 	"github.com/coder/acp-go-sdk"
@@ -70,11 +72,11 @@ const (
 // Native entry points. Every read and every login this surface performs goes
 // through exactly these.
 var (
-	authStartLogin        = (*nativeamp.Client).StartAuthLogin
-	authCloseLogin        = (*nativeamp.AuthLogin).Close
-	authReadSecret        = nativeamp.AuthReadSecret
-	authSecretPresent     = nativeamp.AuthSecretPresent
-	authFileStoreAsserted = nativeamp.AuthFileStoreAsserted
+	authStartLogin    = (*nativeamp.Client).StartAuthLogin
+	authCloseLogin    = (*nativeamp.AuthLogin).Close
+	authReadSecret    = nativeamp.AuthReadSecret
+	authSecretPresent = nativeamp.AuthSecretPresent
+	authStorePolicy   = func() error { return nil }
 )
 
 // authMethodNames lists every advertised leg in the order the capability
@@ -339,6 +341,69 @@ func (s *agentSession) authDataHome() string {
 	return s.operationEnv[envXDGDataHome]
 }
 
+func (s *agentSession) newAuthClient(ctx context.Context) (*nativeamp.Client, func() error, error) {
+	cleanupResidence, err := s.agent.reserveCleanupResidence()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	cleanup := func() error {
+		cleanupResidence.setRetryable()
+
+		cleanupErr := cleanupResidence.finalize()
+		if cleanupErr == nil {
+			s.agent.clearCleanupResidence(cleanupResidence)
+		}
+
+		return cleanupErr
+	}
+	fail := func(cause error) (*nativeamp.Client, func() error, error) {
+		return nil, nil, errors.Join(cause, cleanup())
+	}
+
+	parent, err := s.agent.ensureScratchParent()
+	if err != nil {
+		return fail(err)
+	}
+
+	residence, err := materializeStartupProbeResidence(parent)
+	cleanupResidence.setRoot(residence.root)
+
+	if err != nil {
+		return fail(err)
+	}
+
+	if seedErr := writeSeedFiles(residence.home, s.agent.options.SeedFiles); seedErr != nil {
+		return fail(seedErr)
+	}
+
+	browserShim, err := nativeamp.MaterializeBrowserShim(filepath.Join(residence.root, "browser-shim"))
+	if err != nil {
+		return fail(err)
+	}
+
+	if s.agent.options.hostAuthoritySupplied {
+		cleanupResidence.setPrepared()
+	}
+
+	if err := s.agent.prepareNativeTree(ctx, residence.root); err != nil {
+		return fail(fmt.Errorf("prepare Amp auth residence: %w", err))
+	}
+
+	env := composeEnv(s.operationEnv, managedSessionEnv(residence.home, residence.config, residence.cache, residence.data, residence.state))
+	options := nativeamp.Options{
+		CLIPath: s.agent.options.ExecutablePath, Cwd: s.cwd, SettingsFile: residence.settingsFile,
+		Env: env, ResolutionEnv: composeEnv(s.agent.options.Env), ResolvedExecutable: s.agent.retainedHarnessPath(),
+		MCPConfigPath: residence.mcpFile, MaxLineBytes: s.agent.options.runtime.maxJSONLineBytes,
+		OnGoroutinePanic: s.agent.onNativeGoroutinePanic, WritableRoot: residence.root, BrowserShim: browserShim,
+		AfterNativeWait:  func(context.Context) error { return cleanupResidence.reclaim() },
+		CleanupResidence: cleanup,
+	}
+	s.agent.configureNativeClient(&options)
+
+	return nativeamp.NewClient(s.agent.log, options), cleanup, nil
+}
+
 // lifetimeEnded reports whether this session record has been closed or deleted.
 // It is what distinguishes the session a provider-auth leg is holding from the
 // next one to carry the same id, and it is set before either teardown reaches
@@ -374,21 +439,10 @@ func (a *Agent) reopenProviderAuth(sessionID acp.SessionId) {
 	a.providerAuth.reopenSession(sessionID)
 }
 
-// authFileStore establishes that the file store is still the authoritative one
-// before any leg reads or writes a credential. The wrapper owns the settings
-// file it points amp at and asserts the native-secrets flag false there; a flag
-// that reads back true moves the credential to an item keyed by hostname alone,
-// which every session on the host would share.
-func (s *agentSession) authFileStore() error {
-	asserted, err := authFileStoreAsserted(s.settingsFile)
-	if err != nil || !asserted {
-		return errAuthNativeStore
-	}
-
-	return nil
+// authPolicy is the admission point shared by provider-auth mutations.
+func (s *agentSession) authPolicy() error {
+	return authStorePolicy()
 }
-
-var errAuthNativeStore = errors.New("amp native secrets storage is not asserted off")
 
 // authParamFields walks a leg's params object once, rejecting an unknown field,
 // a duplicate field, and a non-object body with the offending field path. Every

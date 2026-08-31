@@ -25,6 +25,22 @@ import (
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
+func slicesContainCommand(records [][]string, parts ...string) bool {
+	for _, record := range records {
+		cursor := 0
+		for _, arg := range record {
+			if cursor < len(parts) && arg == parts[cursor] {
+				cursor++
+			}
+		}
+		if cursor == len(parts) {
+			return true
+		}
+	}
+
+	return false
+}
+
 func TestConfigOptions(t *testing.T) {
 	session := &agentSession{mode: "medium"}
 	options := session.configOptions()
@@ -296,8 +312,8 @@ func TestKeylessProviderAuthBootstrapPromptFailsBeforeNativeWork(t *testing.T) {
 	if err != nil {
 		t.Fatalf("session: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(session.settingsDir, "mcp.json")); !os.IsNotExist(err) {
-		t.Fatalf("MCP config created before key check: %v", err)
+	if _, err := os.Stat(filepath.Join(session.settingsDir, "mcp.json")); err != nil {
+		t.Fatalf("materialized MCP config: %v", err)
 	}
 	afterPrompt := readHelperJSON[[]string](t, filepath.Join(state, "args.jsonl"))
 	if !slices.EqualFunc(beforePrompt, afterPrompt, func(a, b []string) bool {
@@ -543,14 +559,10 @@ func TestStaleCloserCannotEvictTheReinstalledOwner(t *testing.T) {
 // release the settings and scratch state a surviving descendant may still use.
 // Once a later attempt can prove the boundary, that same pointer is reclaimed.
 func TestCloseContainmentFailureRetainsTheExactInstalledSession(t *testing.T) {
-	scratchReleases := 0
+	authority := newRecordingAuthority()
 	agent := newTestAgent(
+		WithHostAuthority(authority),
 		WithScratchDir(testScratchDir(t)),
-		WithRuntimeResourceHooks(RuntimeResourceHooks{
-			ReserveScratchRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
-				return func() { scratchReleases++ }, nil
-			},
-		}),
 	)
 
 	session, err := newAgentSession(t.Context(), agent, "T-close-containment", t.TempDir(), parsedSessionMeta{}, "", nil)
@@ -562,12 +574,10 @@ func TestCloseContainmentFailureRetainsTheExactInstalledSession(t *testing.T) {
 	agent.mu.Unlock()
 	agent.observe.AddActiveSession(t.Context(), 1)
 
-	session.mu.Lock()
-	session.scratchContainmentErr = ErrProcessContainmentIncomplete
-	session.mu.Unlock()
+	authority.reclaimErr = ErrContainmentIncomplete
 
 	_, err = agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: session.id})
-	if !errors.Is(err, ErrProcessContainmentIncomplete) {
+	if !errors.Is(err, ErrContainmentIncomplete) {
 		t.Fatalf("CloseSession = %v, want containment sentinel", err)
 	}
 
@@ -579,27 +589,19 @@ func TestCloseContainmentFailureRetainsTheExactInstalledSession(t *testing.T) {
 	if listErr != nil || len(listed.Sessions) != 1 || listed.Sessions[0].SessionId != session.id {
 		t.Fatalf("list after failed close = %#v err=%v", listed.Sessions, listErr)
 	}
-	if scratchReleases != 0 {
-		t.Fatalf("failed close released scratch %d times", scratchReleases)
-	}
 	if _, statErr := os.Stat(session.settingsDir); statErr != nil {
 		t.Fatalf("failed close removed settings dir: %v", statErr)
 	}
 
-	// Model a later containment pass healing the injected boundary. The retry
-	// must close the same installed wrapper rather than a replacement.
-	session.mu.Lock()
-	session.scratchContainmentErr = nil
-	session.mu.Unlock()
+	// A later successful reclaim proves that path ownership returned, while the
+	// authority failure remains latched against new native admission.
+	authority.reclaimErr = nil
 
 	if _, err := agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: session.id}); err != nil {
 		t.Fatalf("retry CloseSession: %v", err)
 	}
 	if _, lookupErr := agent.session(session.id); lookupErr == nil {
 		t.Fatal("successful retry left the session addressable")
-	}
-	if scratchReleases != 1 {
-		t.Fatalf("successful retry released scratch %d times, want 1", scratchReleases)
 	}
 	if _, statErr := os.Stat(session.settingsDir); !os.IsNotExist(statErr) {
 		t.Fatalf("successful retry retained settings dir: %v", statErr)
@@ -1430,22 +1432,10 @@ func testCancelledDeleteColdWrapperTransfer(t *testing.T, continuation string) {
 	putStoredSession(t, base, string(id), cwd, nil)
 	prepared := make(chan *agentSession, 1)
 	releasePrepared := make(chan struct{})
-	var acquisitions atomic.Int64
-	var releases atomic.Int64
 	agent := newTestAgent(
 		WithExecutablePath(path),
 		WithSessionStore(base),
 		WithScratchDir(testScratchDir(t)),
-		WithRuntimeResourceHooks(RuntimeResourceHooks{
-			ReserveScratchRoot: func(_ context.Context, kind RuntimeResourceKind) (func(), error) {
-				if kind != RuntimeResourceSession {
-					return func() {}, nil
-				}
-				acquisitions.Add(1)
-
-				return func() { releases.Add(1) }, nil
-			},
-		}),
 	)
 	agent.options.runtime.afterColdSessionPrepared = func(session *agentSession) {
 		prepared <- session
@@ -1517,7 +1507,6 @@ func testCancelledDeleteColdWrapperTransfer(t *testing.T, continuation string) {
 	require.Nil(t, agent.sessions[id])
 	agent.mu.Unlock()
 	require.True(t, wrapper.scratchDone)
-	require.Equal(t, acquisitions.Load(), releases.Load())
 	require.NoDirExists(t, wrapper.settingsDir)
 
 	var continuationErr error
@@ -1534,14 +1523,7 @@ func testCancelledDeleteColdWrapperTransfer(t *testing.T, continuation string) {
 	}
 
 	require.NoError(t, continuationErr, "same-id continuation must not remain cleanup-pending")
-	if continuation == "delete" {
-		require.Equal(t, acquisitions.Load(), releases.Load())
-	} else {
-		require.Equal(t, acquisitions.Load()-1, releases.Load())
-	}
-
 	require.NoError(t, agent.Close())
-	require.Equal(t, acquisitions.Load(), releases.Load())
 }
 
 func (s *synchronousTeardownStore) Replace(ctx context.Context, key SessionKey, replacements []SessionStoreReplacement) error {
@@ -1887,51 +1869,27 @@ func (c *synchronousTeardownClient) SessionUpdate(ctx context.Context, _ acp.Ses
 func (*synchronousTeardownClient) NotifyExtension(context.Context, string, any) error { return nil }
 
 func TestPromptCallbacksRefuseFreshCloseAndDeleteBeforePublication(t *testing.T) {
-	for _, source := range []string{"session_update", "runtime"} {
-		for _, action := range []string{"close", "delete"} {
-			t.Run(source+"/"+action, func(t *testing.T) {
-				var (
-					agent       *Agent
-					callbackErr error
-				)
-				hooks := RuntimeResourceHooks{}
-				if source == "runtime" {
-					hooks.ObserveStartupStage = func(ctx context.Context, _ RuntimeResourceKind, _ RuntimeStartupStage, _ time.Duration, _ error) {
-						callbackErr = invokeSessionTeardown(ctx, agent, acp.SessionId("T-prompt-reentry-"+action), action)
-					}
-				}
-				agent = newTestAgent(
-					WithSessionStore(NewInMemorySessionStore()),
-					WithScratchDir(testScratchDir(t)),
-					WithRuntimeResourceHooks(hooks),
-				)
-				id := acp.SessionId("T-prompt-reentry-" + action)
-				session := installActiveTestSession(t, agent, id)
-				prompt := newPromptTurnState()
-				require.NoError(t, session.admitPrompt(prompt))
-				promptCtx := withCallbackProvenance(t.Context(), agent, prompt)
+	for _, action := range []string{"close", "delete"} {
+		t.Run(action, func(t *testing.T) {
+			agent := newTestAgent(WithSessionStore(NewInMemorySessionStore()), WithScratchDir(testScratchDir(t)))
+			id := acp.SessionId("T-prompt-reentry-" + action)
+			session := installActiveTestSession(t, agent, id)
+			prompt := newPromptTurnState()
+			require.NoError(t, session.admitPrompt(prompt))
+			promptCtx := withCallbackProvenance(t.Context(), agent, prompt)
+			client := &synchronousTeardownClient{agent: agent, sessionID: id, action: action}
+			agent.setConnection(client)
+			require.NoError(t, session.emitUpdate(promptCtx, session.configUpdate()))
 
-				if source == "session_update" {
-					client := &synchronousTeardownClient{agent: agent, sessionID: id, action: action}
-					agent.setConnection(client)
-					require.NoError(t, session.emitUpdate(promptCtx, session.configUpdate()))
-					callbackErr = client.err
-				} else {
-					agent.options.RuntimeResourceHooks.ObserveStartupStage(
-						promptCtx, RuntimeResourcePrompt, RuntimeStartupConfiguration, 0, nil,
-					)
-				}
+			requireClosedCallbackRefusal(t, client.err)
+			requireSessionUnchangedByReentry(t, agent, session, prompt)
+			session.clearActivePrompt(prompt)
+			prompt.complete(nil)
 
-				requireClosedCallbackRefusal(t, callbackErr)
-				requireSessionUnchangedByReentry(t, agent, session, prompt)
-				session.clearActivePrompt(prompt)
-				prompt.complete(nil)
-
-				_, err := agent.SetSessionConfigOption(t.Context(), SetConfigOptionRequest(id, configMode, modeHigh))
-				require.NoError(t, err)
-				require.NoError(t, agent.Close())
-			})
-		}
+			_, err := agent.SetSessionConfigOption(t.Context(), SetConfigOptionRequest(id, configMode, modeHigh))
+			require.NoError(t, err)
+			require.NoError(t, agent.Close())
+		})
 	}
 }
 
@@ -2148,7 +2106,7 @@ func TestPromptPanicsContainBeforeActiveHandleClears(t *testing.T) {
 			containmentRelease := make(chan struct{})
 			var settleCalls atomic.Int64
 			var enteredOnce sync.Once
-			agent.options.runtime.settleTurn = func(turn *amp.Turn) (amp.ContainmentProof, error) {
+			agent.options.runtime.settleTurn = func(turn *amp.Turn) error {
 				if stage == "settle" && settleCalls.Add(1) == 1 {
 					client.state = session.activePromptState()
 					panic("prompt settle panic")
@@ -2196,7 +2154,7 @@ func TestPromptPanicsContainBeforeActiveHandleClears(t *testing.T) {
 			settlement := client.state.awaitSettlement(t.Context())
 			require.ErrorIs(t, settlement.err(), errAgentGoroutinePanic)
 			if stage == "launch" {
-				require.ErrorIs(t, settlement.containmentErr, amp.ErrProcessContainmentIncomplete)
+				require.ErrorIs(t, settlement.containmentErr, amp.ErrContainmentIncomplete)
 			}
 
 			_, closeErr := agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: created.SessionId})
@@ -2268,141 +2226,6 @@ func TestPanickingReplaceSettlesAgentCloseAsOneMemoizedLastWord(t *testing.T) {
 	require.Empty(t, agent.sessions)
 	require.Empty(t, agent.cleanupOwners)
 	agent.mu.Unlock()
-}
-
-func waitForSessionTeardownJoiner(t *testing.T, session *agentSession) {
-	t.Helper()
-	require.Eventually(t, func() bool {
-		session.teardownMu.Lock()
-		flight := session.teardownFlight
-		joined := flight != nil && flight.waiters > 0
-		session.teardownMu.Unlock()
-
-		return joined
-	}, 2*time.Second, time.Millisecond, "second session teardown did not join the published flight")
-}
-
-func TestPanickingScratchReleaseReleasesSessionTeardownForJoinAndRetry(t *testing.T) {
-	panicValue := "scratch release panic"
-	entered := make(chan struct{})
-	release := make(chan struct{})
-	var calls atomic.Int64
-	agent := newTestAgent(
-		WithScratchDir(testScratchDir(t)),
-		WithRuntimeResourceHooks(RuntimeResourceHooks{
-			ReserveScratchRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
-				return func() {
-					if calls.Add(1) == 1 {
-						close(entered)
-						awaitCorrectionCallback(t, release, "scratch-release panic barrier")
-						panic(panicValue)
-					}
-				}, nil
-			},
-		}),
-	)
-	session := installActiveTestSession(t, agent, "T-panic-scratch-release")
-
-	type sessionResult struct {
-		err       error
-		recovered any
-	}
-	closeSession := func(results chan<- sessionResult) {
-		result := sessionResult{}
-		func() {
-			defer func() { result.recovered = recover() }()
-			result.err = session.Close(t.Context())
-		}()
-		results <- result
-	}
-	results := make(chan sessionResult, 2)
-	go closeSession(results)
-	awaitCorrectionSignal(t, entered, "scratch-release callback entry")
-	go closeSession(results)
-	waitForSessionTeardownJoiner(t, session)
-	close(release)
-
-	first := receiveCorrection(t, results, "first session-close result")
-	second := receiveCorrection(t, results, "joined session-close result")
-	if first.recovered == nil {
-		first, second = second, first
-	}
-	require.Equal(t, panicValue, first.recovered)
-	require.Nil(t, second.recovered)
-	requireClosedCallbackRefusal(t, second.err)
-	require.NoError(t, session.Close(t.Context()))
-	require.Equal(t, int64(1), calls.Load())
-
-	agent.mu.Lock()
-	delete(agent.sessions, session.id)
-	agent.mu.Unlock()
-	agent.observe.AddActiveSession(t.Context(), -1)
-	require.NoError(t, agent.Close())
-}
-
-func TestPanickingRuntimeSnapshotCallbacksResetPublisherForRetry(t *testing.T) {
-	t.Run("inventory", func(t *testing.T) {
-		var calls atomic.Int64
-		var snapshots []int
-		tracker := newProviderProcessSnapshotTracker(RuntimeResourceHooks{
-			ObserveProcessSnapshot: func(_ context.Context, _ RuntimeProcessKind, count int) {
-				snapshots = append(snapshots, count)
-			},
-		}, true)
-		root := tracker.start(t.Context(), func() (int, bool) {
-			switch calls.Add(1) {
-			case 1:
-				return 1, true
-			case 2:
-				panic("inventory panic")
-			default:
-				return 2, true
-			}
-		})
-
-		var recovered any
-		func() {
-			defer func() { recovered = recover() }()
-			root.refresh(t.Context())
-		}()
-		require.Equal(t, "inventory panic", recovered)
-		root.refresh(t.Context())
-		require.Equal(t, []int{1, 2}, snapshots)
-		tracker.mu.Lock()
-		require.False(t, tracker.publishing)
-		tracker.mu.Unlock()
-	})
-
-	t.Run("publication", func(t *testing.T) {
-		var count atomic.Int64
-		count.Store(1)
-		armed := false
-		var snapshots []int
-		tracker := newProviderProcessSnapshotTracker(RuntimeResourceHooks{
-			ObserveProcessSnapshot: func(_ context.Context, _ RuntimeProcessKind, current int) {
-				if armed {
-					armed = false
-					panic("snapshot panic")
-				}
-				snapshots = append(snapshots, current)
-			},
-		}, true)
-		root := tracker.start(t.Context(), func() (int, bool) { return int(count.Load()), true })
-		count.Store(2)
-		armed = true
-
-		var recovered any
-		func() {
-			defer func() { recovered = recover() }()
-			root.refresh(t.Context())
-		}()
-		require.Equal(t, "snapshot panic", recovered)
-		root.refresh(t.Context())
-		require.Equal(t, []int{1, 2}, snapshots)
-		tracker.mu.Lock()
-		require.False(t, tracker.publishing)
-		tracker.mu.Unlock()
-	})
 }
 
 func waitForPersistenceState(t *testing.T, session *agentSession, want sessionPersistenceState) {
@@ -3333,65 +3156,6 @@ func TestLoadCallbackDeleteAndLoadReentryAreClosedRefusals(t *testing.T) {
 	require.NoError(t, agent.Close())
 }
 
-func TestRuntimeResourceAndObserverReentryRefuseAgentClose(t *testing.T) {
-	t.Setenv("AMP_API_KEY", "ownership-test")
-	path, _ := fakeAgentAmpPath(t, "")
-	var agent *Agent
-	var mu sync.Mutex
-	var callbackErrs []error
-	recordClose := func() {
-		err := agent.Close()
-		mu.Lock()
-		callbackErrs = append(callbackErrs, err)
-		mu.Unlock()
-	}
-	hooks := RuntimeResourceHooks{
-		ReserveScratchRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
-			recordClose()
-
-			return recordClose, nil
-		},
-		ObserveStartupStage: func(context.Context, RuntimeResourceKind, RuntimeStartupStage, time.Duration, error) {
-			recordClose()
-		},
-	}
-	agent = newTestAgent(
-		WithExecutablePath(path),
-		WithScratchDir(testScratchDir(t)),
-		WithRuntimeResourceHooks(hooks),
-	)
-	agent.options.runtime.startupProbe = func(context.Context, *amp.Client) (string, error) { return path, nil }
-
-	created := make(chan struct {
-		id  acp.SessionId
-		err error
-	}, 1)
-	go func() {
-		resp, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
-		created <- struct {
-			id  acp.SessionId
-			err error
-		}{id: resp.SessionId, err: err}
-	}()
-	select {
-	case result := <-created:
-		require.NoError(t, result.err)
-		_, err := agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: result.id})
-		require.NoError(t, err)
-	case <-time.After(2 * time.Second):
-		t.Fatal("resource or observer callback waited on its own Agent.Close")
-	}
-
-	mu.Lock()
-	errs := append([]error(nil), callbackErrs...)
-	mu.Unlock()
-	require.NotEmpty(t, errs)
-	for _, err := range errs {
-		requireClosedCallbackRefusal(t, err)
-	}
-	require.NoError(t, agent.Close())
-}
-
 func TestCloseJoinsAdmittedConfigPersistenceAndLeavesNoLateWork(t *testing.T) {
 	store := newGatedStore(nil)
 	agent := newTestAgent(WithSessionStore(store), WithScratchDir(testScratchDir(t)))
@@ -3415,11 +3179,13 @@ func TestCloseJoinsAdmittedConfigPersistenceAndLeavesNoLateWork(t *testing.T) {
 		_, err := agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: session.id})
 		closed <- err
 	}()
-	select {
-	case err := <-closed:
-		t.Fatalf("Close returned before admitted config Replace and notification: %v", err)
-	default:
-	}
+	require.Eventually(t, func() bool {
+		agent.mu.Lock()
+		defer agent.mu.Unlock()
+		flight := agent.sessionFlights[session.id]
+
+		return flight != nil && flight.kind == agentSessionCloseFlight && flight.use != nil
+	}, time.Second, time.Millisecond, "close did not publish its join on the admitted config use")
 
 	close(store.release)
 	require.NoError(t, <-configured)
@@ -3458,31 +3224,17 @@ func TestColdLoadDeleteFlightUsesOneExactNativeWrapper(t *testing.T) {
 				store = &refusingDeleteStore{SessionStore: base, err: test.refuse}
 			}
 
-			reserved := make(chan struct{})
-			continueReservation := make(chan struct{})
-			var acquisitions atomic.Int64
-			var releases atomic.Int64
-			hooks := RuntimeResourceHooks{
-				ReserveScratchRoot: func(_ context.Context, kind RuntimeResourceKind) (func(), error) {
-					if kind != RuntimeResourceSession {
-						return func() {}, nil
-					}
-					if acquisitions.Add(1) == 1 {
-						close(reserved)
-						<-continueReservation
-
-						return func() { releases.Add(1) }, nil
-					}
-
-					return func() {}, nil
-				},
-			}
+			prepared := make(chan *agentSession, 1)
+			continuePrepared := make(chan struct{})
 			agent := newTestAgent(
 				WithExecutablePath(path),
 				WithSessionStore(store),
 				WithScratchDir(testScratchDir(t)),
-				WithRuntimeResourceHooks(hooks),
 			)
+			agent.options.runtime.afterColdSessionPrepared = func(session *agentSession) {
+				prepared <- session
+				<-continuePrepared
+			}
 			agent.options.runtime.startupProbe = func(context.Context, *amp.Client) (string, error) { return path, nil }
 			agent.options.runtime.exportThread = func(context.Context, *amp.Client, string) (json.RawMessage, error) {
 				return json.RawMessage(`{}`), nil
@@ -3493,16 +3245,17 @@ func TestColdLoadDeleteFlightUsesOneExactNativeWrapper(t *testing.T) {
 				_, err := agent.LoadSession(t.Context(), LoadSessionRequest(id, cwd))
 				loaded <- err
 			}()
-			<-reserved
+			preparedSession := <-prepared
 
 			flightCtx, flight, use, existing, err := agent.publishSessionFlight(t.Context(), id, agentSessionDeleteFlight, nil)
 			require.NoError(t, err)
 			require.Nil(t, existing)
 			require.NotNil(t, use)
-			close(continueReservation)
+			close(continuePrepared)
 			require.NoError(t, agent.joinSessionFlightUse(flightCtx, id, flight, use))
 			require.Error(t, <-loaded)
 			require.NotNil(t, flight.session)
+			require.Same(t, preparedSession, flight.session)
 			require.Equal(t, string(id), flight.session.nativeSessionID(), "stored manifest must transfer its native id")
 			exact := flight.session
 
@@ -3518,8 +3271,6 @@ func TestColdLoadDeleteFlightUsesOneExactNativeWrapper(t *testing.T) {
 				_, deleted := agent.isDeleted(id)
 				require.True(t, deleted)
 			}
-			require.GreaterOrEqual(t, acquisitions.Load(), int64(1))
-			require.Equal(t, int64(1), releases.Load())
 			require.True(t, exact.scratchDone)
 			require.NoError(t, agent.Close())
 		})
@@ -3717,28 +3468,6 @@ func TestFailedDeleteRestoresClosingPersistenceFence(t *testing.T) {
 	store.fail(nil, nil)
 	_, err = agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: created.SessionId})
 	require.NoError(t, err)
-	require.NoError(t, agent.Close())
-}
-
-func TestRecoveredExternalHookPanicLeavesNoGoroutineProvenance(t *testing.T) {
-	path, _ := fakeAgentAmpPath(t, "")
-	panicValue := "startup observer panic"
-	agent := newTestAgent(
-		WithExecutablePath(path),
-		WithScratchDir(testScratchDir(t)),
-		WithRuntimeResourceHooks(RuntimeResourceHooks{
-			ObserveStartupStage: func(context.Context, RuntimeResourceKind, RuntimeStartupStage, time.Duration, error) {
-				panic(panicValue)
-			},
-		}),
-	)
-
-	var recovered any
-	func() {
-		defer func() { recovered = recover() }()
-		_, _ = agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
-	}()
-	require.Equal(t, panicValue, recovered)
 	require.NoError(t, agent.Close())
 }
 
@@ -4596,9 +4325,9 @@ func TestDeleteAtShutdownBoundaryAndDeliveryRetries(t *testing.T) {
 		agent:                 agent,
 		id:                    "T-delete-incomplete",
 		turn:                  make(chan struct{}, 1),
-		scratchContainmentErr: amp.ErrProcessContainmentIncomplete,
+		scratchContainmentErr: amp.ErrContainmentIncomplete,
 	}
-	require.ErrorIs(t, incomplete.deleteAtShutdown(t.Context()), amp.ErrProcessContainmentIncomplete)
+	require.ErrorIs(t, incomplete.deleteAtShutdown(t.Context()), amp.ErrContainmentIncomplete)
 
 	deliveryErr := errors.New("terminal delivery failed")
 	prompt := newPromptTurnState()
@@ -4768,16 +4497,16 @@ func TestCallbackOwnershipDefensiveBranches(t *testing.T) {
 		agent:                 agent,
 		id:                    "T-load-cleanup-error",
 		turn:                  make(chan struct{}, 1),
-		scratchContainmentErr: amp.ErrProcessContainmentIncomplete,
+		scratchContainmentErr: amp.ErrContainmentIncomplete,
 	}
 	agent.retainCleanupOwner(incomplete.id, incomplete, agentCleanupPrepared)
 	loaded, transcript, started, cleanupUse, err := agent.loadOrResume(t.Context(), incomplete.id, t.TempDir(), nil, nil, nil)
-	require.ErrorIs(t, err, amp.ErrProcessContainmentIncomplete)
+	require.ErrorIs(t, err, amp.ErrContainmentIncomplete)
 	require.Nil(t, loaded)
 	require.Nil(t, transcript)
 	require.False(t, started)
 	require.Nil(t, cleanupUse)
-	require.ErrorIs(t, agent.Close(), amp.ErrProcessContainmentIncomplete)
+	require.ErrorIs(t, agent.Close(), amp.ErrContainmentIncomplete)
 	require.False(t, (*Agent)(nil).hasActiveCallbackForSession(id))
 	require.False(t, (*Agent)(nil).hasActiveCallbackAuthority())
 }
@@ -4809,7 +4538,7 @@ func TestPersistenceCommitOwnershipMutationFailsClosed(t *testing.T) {
 func TestCleanupFailureClassificationAndMissingDeliveryAreFixed(t *testing.T) {
 	require.Equal(t, "none", cleanupFailureClass(nil))
 	require.Equal(t, "callback_panic", cleanupFailureClass(errAgentGoroutinePanic))
-	require.Equal(t, "containment_incomplete", cleanupFailureClass(amp.ErrProcessContainmentIncomplete))
+	require.Equal(t, "containment_incomplete", cleanupFailureClass(amp.ErrContainmentIncomplete))
 	require.Equal(t, "cancelled", cleanupFailureClass(context.Canceled))
 	require.Equal(t, "deadline", cleanupFailureClass(context.DeadlineExceeded))
 	require.Equal(t, "cleanup_failed", cleanupFailureClass(errors.New("secret callback detail")))
@@ -4817,7 +4546,7 @@ func TestCleanupFailureClassificationAndMissingDeliveryAreFixed(t *testing.T) {
 	require.ErrorContains(t, (&promptStream{}).deliver(t.Context(), acp.SessionNotification{}), "lifecycle delivery unavailable")
 }
 
-func TestLastWordShutdownRetriesEveryDetachedPanicSeam(t *testing.T) {
+func TestLastWordShutdownContainsDetachedSessionCleanupPanic(t *testing.T) {
 	for _, test := range []struct {
 		name string
 		kind agentCleanupKind
@@ -4848,25 +4577,6 @@ func TestLastWordShutdownRetriesEveryDetachedPanicSeam(t *testing.T) {
 			agent.mu.Unlock()
 		})
 	}
-
-	t.Run("residence", func(t *testing.T) {
-		agent := newTestAgent()
-		calls := 0
-		residence, err := agent.reserveCleanupResidence()
-		require.NoError(t, err)
-		residence.setRelease(func() {
-			calls++
-			if calls == 1 {
-				panic("residence cleanup panic")
-			}
-		})
-
-		require.ErrorIs(t, agent.Close(), errAgentGoroutinePanic)
-		require.Equal(t, 1, calls)
-		agent.mu.Lock()
-		require.Empty(t, agent.cleanupResidences)
-		agent.mu.Unlock()
-	})
 }
 
 func TestSettlementPreparationAndPanicContainmentDefensiveBranches(t *testing.T) {
@@ -4877,17 +4587,17 @@ func TestSettlementPreparationAndPanicContainmentDefensiveBranches(t *testing.T)
 		stream:  lifecycle.NewStream("stream-defensive", negotiatedAnswer()),
 	}
 	incarnation.stream.Fence()
-	agent.options.runtime.settleTurn = func(*amp.Turn) (amp.ContainmentProof, error) {
-		return amp.ContainmentProof{Root: 1, Proven: true}, nil
+	agent.options.runtime.settleTurn = func(*amp.Turn) error {
+		return nil
 	}
 	state := newPromptTurnState()
 	_, err := session.settlePrompt(t.Context(), &amp.Turn{}, state, incarnation, promptResult{})
 	require.ErrorContains(t, err, "amp_lifecycle_violation")
 	require.Error(t, state.awaitSettlement(t.Context()).deliveryErr)
 
-	agent.options.runtime.settleTurn = func(*amp.Turn) (amp.ContainmentProof, error) {
+	agent.options.runtime.settleTurn = func(*amp.Turn) error {
 		panic("containment retry panic")
 	}
-	_, err = session.settleTurnAfterPanic(&amp.Turn{})
-	require.ErrorIs(t, err, amp.ErrProcessContainmentIncomplete)
+	err = session.settleTurnAfterPanic(&amp.Turn{})
+	require.ErrorIs(t, err, amp.ErrContainmentIncomplete)
 }

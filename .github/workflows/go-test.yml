@@ -27,7 +27,7 @@ jobs:
         run: go build ./...
 
       - name: Test and coverage gate
-        run: .github/scripts/run-privileged-suite.sh coverage-check
+        run: make coverage-check
 
       - name: Coverage summary
         run: go tool cover -func=coverage.out | tee coverage-summary.txt
@@ -51,23 +51,8 @@ jobs:
             coverage.out
             coverage-summary.txt
 
-  trusted-supervisor:
-    runs-on: [self-hosted]
-    steps:
-      - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
-      - name: Setup Go
-        uses: ./.github/workflows/go-setup
-
-      - name: Trusted supervisor security suite
-        run: .github/scripts/run-privileged-suite.sh test-trusted-supervisor
-
-  # The self-hosted fleet is Unix, so it can compile the !unix process backend
-  # but never selects it. Run that backend where it is actually chosen: a
-  # Windows host executes internal/amp/process_unsupported.go for real, which is
-  # the only evidence that ordinary launch, completion, cancel and close work
-  # rather than merely parse.
+  # Environment key identity and child environment behavior need a real
+  # Windows host; cross-compilation alone cannot prove them.
   portable-runtime:
     runs-on: windows-latest
     steps:
@@ -95,4 +80,4 @@ jobs:
         uses: ./.github/workflows/go-setup
 
       - name: Native browser containment canary
-        run: .github/scripts/with-privileged-lock.sh make test-integration-native-browser
+        run: make test-integration-native-browser

@@ -784,9 +784,6 @@ func main() {
 		// observed which environment instead of assuming every child is alike.
 		record(state, "child.jsonl", map[string]any{"args": args, "env": os.Environ()})
 	}
-	if mode == "probe-residence" {
-		recordProbeResidence(state, args)
-	}
 	if len(args) > 0 && args[len(args)-1] == "login" {
 		fakeLogin(mode, state)
 		return
@@ -1046,49 +1043,6 @@ func index(values []string, target string) int {
 	return -1
 }
 
-func recordProbeResidence(state string, args []string) {
-	facts := map[string]string{}
-	paths := map[string]string{
-		"home": os.Getenv("HOME"),
-		"config": os.Getenv("XDG_CONFIG_HOME"),
-		"cache": os.Getenv("XDG_CACHE_HOME"),
-		"data": os.Getenv("XDG_DATA_HOME"),
-		"state": os.Getenv("XDG_STATE_HOME"),
-		"settings": argValue(args, "--settings-file"),
-		"mcp": argValue(args, "--mcp-config"),
-	}
-	for name, path := range paths {
-		facts[name] = path
-		if path == "" {
-			continue
-		}
-		info, err := os.Stat(path)
-		if err != nil {
-			facts[name+"Error"] = err.Error()
-			continue
-		}
-		facts[name+"Mode"] = strconv.FormatUint(uint64(info.Mode().Perm()), 8)
-		if stat, ok := info.Sys().(*syscall.Stat_t); ok {
-			facts[name+"UID"] = strconv.FormatUint(uint64(stat.Uid), 10)
-			facts[name+"GID"] = strconv.FormatUint(uint64(stat.Gid), 10)
-		}
-		if info.IsDir() {
-			if err := os.WriteFile(filepath.Join(path, ".native-probe"), []byte("ok"), 0600); err != nil {
-				facts[name+"WriteError"] = err.Error()
-			}
-		}
-	}
-	record(state, "probe-residence.jsonl", facts)
-}
-
-func argValue(args []string, name string) string {
-	i := index(args, name)
-	if i < 0 || i+1 >= len(args) {
-		return ""
-	}
-	return args[i+1]
-}
-
 func fakeLogin(mode string, state string) {
 	switch mode {
 	case "login-no-url":
@@ -1265,14 +1219,16 @@ func TestServeReturnsOnPreCancelledContext(t *testing.T) {
 }
 
 func TestServeReturnsProcessTreeContainmentErrorFromClose(t *testing.T) {
-	agent := newTestAgent()
-	session := &agentSession{
-		agent: agent,
-		id:    "T-incomplete",
-		turn:  make(chan struct{}, 1),
+	authority := newRecordingAuthority()
+	agent := newTestAgent(WithHostAuthority(authority), WithScratchDir(testScratchDir(t)))
+	session, sessionErr := newAgentSession(t.Context(), agent, "T-incomplete", t.TempDir(), parsedSessionMeta{}, "", nil)
+	if sessionErr != nil {
+		t.Fatal(sessionErr)
 	}
-	session.recordScratchContainment(ErrProcessContainmentIncomplete)
-	agent.sessions[session.id] = session
+	agent.mu.Lock()
+	agent.activateSessionLocked(session)
+	agent.mu.Unlock()
+	authority.reclaimErr = ErrContainmentIncomplete
 
 	started := make(chan struct{})
 	previous := newAgentForServe
@@ -1294,7 +1250,7 @@ func TestServeReturnsProcessTreeContainmentErrorFromClose(t *testing.T) {
 	<-started
 	cancel()
 	err := <-errCh
-	if !errors.Is(err, ErrProcessContainmentIncomplete) {
+	if !errors.Is(err, ErrContainmentIncomplete) {
 		t.Fatalf("Serve close containment error = %v", err)
 	}
 }

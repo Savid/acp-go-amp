@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"log/slog"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -129,214 +128,9 @@ func TestFakeAmpHelper(t *testing.T) {
 	os.Exit(0)
 }
 
-func TestDarwinClientLaunchPreparationAndPipeFailures(t *testing.T) {
-	path, _ := fakeAmpPath(t, "")
-	ctx := context.Background()
-	newGeneration := func(context.Context) (*DarwinGeneration, error) {
-		return &DarwinGeneration{RuntimeID: strings.Repeat("d", 32), ScratchRoot: t.TempDir()}, nil
-	}
-	client := newTestClient(t, nil, Options{
-		CLIPath: path, Cwd: t.TempDir(), DarwinBestEffort: true,
-		NewDarwinGeneration: newGeneration,
-	})
-
-	originalOpenPipe := openPipe
-	t.Cleanup(func() { openPipe = originalOpenPipe })
-	for failAt := 1; failAt <= 3; failAt++ {
-		calls := 0
-		openPipe = func() (*os.File, *os.File, error) {
-			calls++
-			if calls == failAt {
-				return nil, nil, errors.New("pipe")
-			}
-
-			return os.Pipe()
-		}
-		if _, err := client.Continue(ctx, "T-1", map[string]any{"type": "user"}); err == nil || !strings.Contains(err.Error(), "pipe") {
-			t.Fatalf("pipe failure %d = %v", failAt, err)
-		}
-	}
-	openPipe = originalOpenPipe
-
-	canceled, cancel := context.WithCancel(ctx)
-	client.options.NewDarwinGeneration = func(context.Context) (*DarwinGeneration, error) {
-		cancel()
-
-		return &DarwinGeneration{RuntimeID: strings.Repeat("e", 32), ScratchRoot: t.TempDir()}, nil
-	}
-	if _, err := client.Continue(canceled, "T-1", map[string]any{"type": "user"}); !errors.Is(err, context.Canceled) {
-		t.Fatalf("Continue cancellation after preparation = %v", err)
-	}
-
-	want := errors.New("generation")
-	client.options.NewDarwinGeneration = func(context.Context) (*DarwinGeneration, error) { return nil, want }
-	if _, err := client.Continue(ctx, "T-1", map[string]any{"type": "user"}); !errors.Is(err, want) {
-		t.Fatalf("Continue generation failure = %v", err)
-	}
-	if _, err := client.outputWithArgs(ctx, ampArgThreads, "list"); !errors.Is(err, want) {
-		t.Fatalf("output generation failure = %v", err)
-	}
-	initiallyCanceled, cancelInitial := context.WithCancel(ctx)
-	cancelInitial()
-	if _, err := client.outputWithArgs(initiallyCanceled, ampArgThreads, "list"); !errors.Is(err, context.Canceled) {
-		t.Fatalf("output initial cancellation = %v", err)
-	}
-}
-
-// TestPrepareProcessLaunchPublishesTheSettledEnvironment pins the hand-off the
-// login residence depends on. The containment generation rewrites the child's
-// data home while the launch is prepared, so a caller that needs to know where
-// the child will write reads it off the launch — never off the command it
-// handed in, which names the same environment only for as long as nothing
-// between them copies it.
-func TestPrepareProcessLaunchPublishesTheSettledEnvironment(t *testing.T) {
-	requested := t.TempDir()
-	scratch := t.TempDir()
-
-	client := NewClient(nil, Options{DarwinBestEffort: true})
-	client.options.NewDarwinGeneration = func(context.Context) (*DarwinGeneration, error) {
-		return &DarwinGeneration{ScratchRoot: scratch, RecordFinished: func(bool) error { return nil }}, nil
-	}
-
-	cmd := exec.Command("true")
-	cmd.Env = []string{dataHomeEnv + "=" + requested}
-
-	launch, err := client.prepareProcessLaunch(context.Background(), cmd)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	t.Cleanup(func() { _ = launch.close() })
-
-	// The command the caller still holds stops being the source of the answer.
-	cmd.Env = []string{dataHomeEnv + "=" + filepath.Join(requested, "diverged")}
-
-	settled := environmentMap(launch.nativeEnv)[dataHomeEnv]
-	if settled == "" || !pathWithin(scratch, settled) {
-		t.Fatalf("settled data home = %q, want a generation root under %q", settled, scratch)
-	}
-}
-
-func TestDarwinPrepareProcessLaunchHooksAndErrors(t *testing.T) {
-	ctx := context.Background()
-	client := NewClient(nil, Options{DarwinBestEffort: true})
-	if _, err := client.prepareProcessLaunch(ctx, exec.Command("true")); !errors.Is(err, ErrProcessContainmentIncomplete) {
-		t.Fatalf("missing generation factory = %v", err)
-	}
-
-	want := errors.New("factory")
-	client.options.NewDarwinGeneration = func(context.Context) (*DarwinGeneration, error) { return nil, want }
-	if _, err := client.prepareProcessLaunch(ctx, exec.Command("true")); !errors.Is(err, want) {
-		t.Fatalf("generation factory error = %v", err)
-	}
-
-	finished := 0
-	blockedRoot := filepath.Join(t.TempDir(), "root-file")
-	if err := os.WriteFile(blockedRoot, nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	client.options.NewDarwinGeneration = func(context.Context) (*DarwinGeneration, error) {
-		return &DarwinGeneration{ScratchRoot: blockedRoot, RecordFinished: func(bool) error {
-			finished++
-
-			return nil
-		}}, nil
-	}
-	if _, err := client.prepareProcessLaunch(ctx, exec.Command("true")); err == nil || finished != 1 {
-		t.Fatalf("generation preparation error=%v finished=%d", err, finished)
-	}
-
-	originalPrepare := prepareProcessTree
-	t.Cleanup(func() { prepareProcessTree = originalPrepare })
-	client.options.NewDarwinGeneration = func(context.Context) (*DarwinGeneration, error) {
-		return &DarwinGeneration{ScratchRoot: t.TempDir(), RecordFinished: func(bool) error {
-			finished++
-
-			return nil
-		}}, nil
-	}
-	prepareProcessTree = func(*exec.Cmd, processLaunchOptions) (*processTreeCommand, error) { return nil, want }
-	if _, err := client.prepareProcessLaunch(ctx, exec.Command("true")); !errors.Is(err, want) {
-		t.Fatalf("platform prepare error = %v", err)
-	}
-	prepareProcessTree = originalPrepare
-
-	client.options.AcquireNativeRoot = func(context.Context) (func(), error) { return nil, want }
-	launch, err := client.prepareProcessLaunch(ctx, exec.Command("true"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, acquireErr := launch.acquire(); !errors.Is(acquireErr, want) {
-		t.Fatalf("admission error = %v", acquireErr)
-	}
-	_ = launch.close()
-
-	client.options.AcquireNativeRoot = func(context.Context) (func(), error) {
-		//nolint:nilnil // Deliberately exercises rejection of an invalid hook result.
-		return nil, nil
-	}
-	launch, err = client.prepareProcessLaunch(ctx, exec.Command("true"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, acquireErr := launch.acquire(); acquireErr == nil || !strings.Contains(acquireErr.Error(), "nil release") {
-		t.Fatalf("nil release error = %v", acquireErr)
-	}
-	_ = launch.close()
-
-	client.options.AcquireNativeRoot = nil
-	launch, err = client.prepareProcessLaunch(ctx, exec.Command("true"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	release, err := launch.acquire()
-	if err != nil || release == nil {
-		t.Fatalf("default admission release-nil=%v, err=%v", release == nil, err)
-	}
-	release()
-	_ = launch.close()
-
-	client.options.AcquireNativeRoot = func(context.Context) (func(), error) { return func() {}, nil }
-	launch, err = client.prepareProcessLaunch(ctx, exec.Command("true"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	release, err = launch.acquire()
-	if err != nil || release == nil {
-		t.Fatalf("hook admission release-nil=%v, err=%v", release == nil, err)
-	}
-	release()
-	_ = launch.close()
-}
-
-func TestDarwinOutputCancellationCompletesContainment(t *testing.T) {
-	if runtime.GOOS != "darwin" {
-		t.Skip("Darwin output cancellation")
-	}
-
-	path, state := fakeAmpPath(t, "hang-list")
-	client := newTestClient(t, nil, Options{CLIPath: path, Cwd: t.TempDir()})
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() {
-		_, err := client.outputWithArgs(ctx, ampArgThreads, "list")
-		done <- err
-	}()
-	waitForFile(t, filepath.Join(state, "args.jsonl"))
-	cancel()
-	select {
-	case err := <-done:
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("output cancellation = %v", err)
-		}
-	case <-time.After(2 * defaultCloseWait):
-		t.Fatal("canceled output did not finish")
-	}
-}
-
 func TestWithoutPrivateAdapterEnvironment(t *testing.T) {
 	entries := []string{
-		"KEEP=value", "MALFORMED", adapterSupervisorModeEnv + "=mode",
+		"KEEP=value", "MALFORMED", adapterPrivateEnvPrefix + "MODE=mode",
 		strings.ToLower(adapterPrivateEnvPrefix) + "secret=value",
 	}
 	want := []string{"KEEP=value", "MALFORMED"}
@@ -345,29 +139,6 @@ func TestWithoutPrivateAdapterEnvironment(t *testing.T) {
 	}
 }
 
-func TestTurnCloseReportsBoundedWaitFailure(t *testing.T) {
-	originalTimeout := commandWaitTimeout
-	t.Cleanup(func() { commandWaitTimeout = originalTimeout })
-	commandWaitTimeout = time.Millisecond
-	release := make(chan struct{})
-	turn := &Turn{waitFunc: func() error {
-		<-release
-
-		return nil
-	}}
-	err := turn.Close()
-	close(release)
-	if !errors.Is(err, ErrProcessContainmentIncomplete) || !strings.Contains(err.Error(), "command close") {
-		t.Fatalf("bounded close error = %v", err)
-	}
-}
-
-// TestRetainedExecutableLaunchesWithoutResolving pins the retention contract:
-// a client given the harness a probe validated launches that exact file and
-// performs no lookup at all, so a resolution environment that could not find
-// amp — and a session environment that could find a different one — change
-// nothing. A retained path that is not absolute is refused rather than
-// resolved again.
 func TestRetainedExecutableLaunchesWithoutResolving(t *testing.T) {
 	path, _ := fakeAmpPath(t, "")
 	unresolvable := t.TempDir()
@@ -547,39 +318,6 @@ func TestStartupProbeAndVersionBranches(t *testing.T) {
 	}
 }
 
-func TestOneShotProofSentinelOutranksMissingThread(t *testing.T) {
-	joined := errors.Join(errors.New("Thread not found"), ErrProcessContainmentIncomplete)
-	if err := methodProbeError("threads export", joined, false); !errors.Is(err, ErrProcessContainmentIncomplete) {
-		t.Fatalf("method probe swallowed containment sentinel: %v", err)
-	}
-
-	originalTerminate := processTreeTerminateAndWait
-	t.Cleanup(func() { processTreeTerminateAndWait = originalTerminate })
-
-	deletePath, _ := fakeAmpPath(t, "")
-	processTreeTerminateAndWait = func(*processTree, time.Duration) error {
-		return ErrProcessContainmentIncomplete
-	}
-	if err := newTestClient(t, nil, Options{CLIPath: deletePath, Cwd: t.TempDir()}).DeleteThread(t.Context(), "T-missing"); !errors.Is(err, ErrProcessContainmentIncomplete) {
-		t.Fatalf("delete swallowed containment sentinel behind missing-thread result: %v", err)
-	}
-
-	probePath, _ := fakeAmpPath(t, "")
-	terminateCalls := 0
-	processTreeTerminateAndWait = func(*processTree, time.Duration) error {
-		terminateCalls++
-		if terminateCalls == 2 {
-			return ErrProcessContainmentIncomplete
-		}
-
-		return nil
-	}
-	err := newTestProbeClient(t, nil, Options{CLIPath: probePath, Cwd: t.TempDir()}).probeSubcommands(t.Context())
-	if !errors.Is(err, ErrProcessContainmentIncomplete) {
-		t.Fatalf("startup probe swallowed containment sentinel: %v", err)
-	}
-}
-
 func TestContinueFramesMalformedLinesAndStderr(t *testing.T) {
 	path, state := fakeAmpPath(t, "stream")
 	client := newTestClient(t, nil, Options{CLIPath: path, Cwd: t.TempDir(), MaxLineBytes: 1024})
@@ -648,91 +386,6 @@ func TestContinueMissingThreadCarriesStderr(t *testing.T) {
 	}
 }
 
-func TestInterruptSIGINTAndKillFallback(t *testing.T) {
-	if runtime.GOOS == "darwin" {
-		t.Skip("Darwin best-effort cleanup uses the fixed TERM/KILL ladder")
-	}
-	for _, tc := range []struct {
-		name string
-		mode string
-	}{
-		{name: "clean", mode: "sigint-clean"},
-		{name: "kill", mode: "sigint-ignore"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			path, state := fakeAmpPath(t, tc.mode)
-			client := newTestClient(t, nil, Options{CLIPath: path, Cwd: t.TempDir()})
-			turn, err := client.Continue(context.Background(), "T-fake-thread", map[string]any{"type": "user"})
-			if err != nil {
-				t.Fatalf("Continue: %v", err)
-			}
-			waitForFile(t, filepath.Join(state, "stdin.jsonl"))
-			if err := turn.Interrupt(context.Background(), 100*time.Millisecond); err != nil {
-				t.Fatalf("Interrupt: %v", err)
-			}
-			waitForFile(t, filepath.Join(state, "signal"))
-		})
-	}
-}
-
-func TestInterruptWaitsAfterKillFallback(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("sleep process test uses POSIX process handling")
-	}
-
-	t.Run("waits for post-kill wait", func(t *testing.T) {
-		cmd := exec.Command("sleep", "10")
-		configureCommand(cmd)
-		if err := cmd.Start(); err != nil {
-			t.Fatal(err)
-		}
-		waitStarted := make(chan struct{})
-		releaseWait := make(chan struct{})
-		turn := &Turn{cmd: cmd, waitFunc: func() error {
-			close(waitStarted)
-			<-releaseWait
-			return nil
-		}}
-		done := make(chan error, 1)
-		go func() { done <- turn.Interrupt(context.Background(), 20*time.Millisecond) }()
-		<-waitStarted
-		select {
-		case err := <-done:
-			t.Fatalf("interrupt returned before post-kill wait completed: %v", err)
-		case <-time.After(100 * time.Millisecond):
-		}
-		close(releaseWait)
-		if err := <-done; err != nil {
-			t.Fatalf("Interrupt: %v", err)
-		}
-		_, _ = cmd.Process.Wait()
-	})
-
-	t.Run("post-kill wait obeys context", func(t *testing.T) {
-		cmd := exec.Command("sleep", "10")
-		configureCommand(cmd)
-		if err := cmd.Start(); err != nil {
-			t.Fatal(err)
-		}
-		waitStarted := make(chan struct{})
-		releaseWait := make(chan struct{})
-		turn := &Turn{cmd: cmd, waitFunc: func() error {
-			close(waitStarted)
-			<-releaseWait
-			return nil
-		}}
-		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
-		defer cancel()
-		err := turn.Interrupt(ctx, 20*time.Millisecond)
-		close(releaseWait)
-		<-waitStarted
-		_, _ = cmd.Process.Wait()
-		if !errors.Is(err, context.DeadlineExceeded) {
-			t.Fatalf("Interrupt context error = %v", err)
-		}
-	})
-}
-
 func TestClientErrorBranches(t *testing.T) {
 	if _, err := Discover(cancelledContext(), ""); err == nil {
 		t.Fatal("expected canceled Discover error")
@@ -740,13 +393,13 @@ func TestClientErrorBranches(t *testing.T) {
 	if got, err := Discover(context.Background(), "/usr/bin/true", []string{"PATH=/usr/bin"}); err != nil || got != "/usr/bin/true" {
 		t.Fatalf("explicit Discover = %q, %v", got, err)
 	}
-	t.Setenv(adapterSupervisorModeEnv, "secret")
-	t.Setenv(adapterOneShotDeathPathEnv, "secret")
+	privateA := adapterPrivateEnvPrefix + "A"
+	privateB := adapterPrivateEnvPrefix + "B"
+	t.Setenv(privateA, "secret")
 	env := BuildEnv(map[string]string{
-		"Z":                         "1",
-		"A":                         "2",
-		adapterOneShotDeathPhaseEnv: "secret",
-		adapterOneShotDeathStateEnv: "secret",
+		"Z":      "1",
+		"A":      "2",
+		privateB: "secret",
 	}, "/tmp/cwd")
 	if !slices.Contains(env, "A=2") || !slices.Contains(env, "Z=1") || !slices.Contains(env, "PWD=/tmp/cwd") {
 		t.Fatalf("env missing overrides: %#v", env)
@@ -754,12 +407,7 @@ func TestClientErrorBranches(t *testing.T) {
 	if refused := BuildEnv(map[string]string{"": "ignored"}, "/tmp/cwd"); refused != nil {
 		t.Fatalf("empty override key accepted: %#v", refused)
 	}
-	for _, privateKey := range []string{
-		adapterSupervisorModeEnv,
-		adapterOneShotDeathPhaseEnv,
-		adapterOneShotDeathPathEnv,
-		adapterOneShotDeathStateEnv,
-	} {
+	for _, privateKey := range []string{privateA, privateB} {
 		for _, item := range env {
 			if strings.HasPrefix(item, privateKey+"=") {
 				t.Fatalf("private adapter env leaked to native Amp: %q", item)
@@ -844,25 +492,8 @@ func TestClientErrorBranches(t *testing.T) {
 	if err := (&Turn{}).Interrupt(context.Background(), time.Millisecond); err != nil {
 		t.Fatalf("nil interrupt: %v", err)
 	}
-	expectedCmd := exec.Command("/bin/sleep", "10")
-	configureCommand(expectedCmd)
-	if err := expectedCmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	expectedTurn := &Turn{cmd: expectedCmd, waitFunc: func() error { return nil }}
-	if err := expectedTurn.Interrupt(context.Background(), time.Second); err != nil {
-		t.Fatalf("expected-exit interrupt: %v", err)
-	}
-	_ = killProcess(expectedCmd)
-	_ = expectedCmd.Wait()
 	if err := (&Turn{}).Close(); err != nil {
 		t.Fatalf("nil close: %v", err)
-	}
-	if err := interruptProcess(nil); err != nil {
-		t.Fatalf("nil interruptProcess: %v", err)
-	}
-	if err := killProcess(nil); err != nil {
-		t.Fatalf("nil killProcess: %v", err)
 	}
 	drop := &Turn{errs: make(chan error, 1)}
 	drop.errs <- errors.New("full")
@@ -885,145 +516,6 @@ func TestClientErrorBranches(t *testing.T) {
 	}
 	if stripANSI("\x1b[31mred\x1b[0m") != "red" {
 		t.Fatal("stripANSI failed")
-	}
-}
-
-func TestClientProcessSeamsReaderAndInterruptEdges(t *testing.T) {
-	ctx := context.Background()
-	path, _ := fakeAmpPath(t, "")
-
-	if _, err := newTestClient(t, nil, Options{CLIPath: "/does/not/exist", Cwd: t.TempDir()}).ListThreads(ctx); err == nil {
-		t.Fatal("ListThreads output error ignored")
-	}
-
-	clientWithoutPath := newTestClient(t, nil, Options{})
-	clientWithoutPath.options.OrdinaryEnvironment["PATH"] = t.TempDir()
-	if _, err := clientWithoutPath.Version(ctx); err == nil {
-		t.Fatal("Version discover error ignored")
-	}
-	if _, err := clientWithoutPath.Continue(ctx, "T-1", map[string]any{"type": "user"}); err == nil {
-		t.Fatal("Continue discover error ignored")
-	}
-	if _, err := Discover(ctx, "", []string{"PATH=" + t.TempDir()}); err == nil {
-		t.Fatal("Discover lookpath error ignored")
-	}
-
-	oldGetwd := getwd
-	getwd = func() (string, error) { return "", errors.New("getwd failed") }
-	if _, err := newTestClient(t, nil, Options{CLIPath: path}).Continue(ctx, "T-1", map[string]any{"type": "user"}); err == nil {
-		t.Fatal("Continue getwd error ignored")
-	}
-	getwd = oldGetwd
-
-	oldCommandContext := commandContext
-	for _, tc := range []struct {
-		name  string
-		shape func(*exec.Cmd)
-		want  string
-	}{
-		{name: "stdin", shape: func(cmd *exec.Cmd) { cmd.Stdin = strings.NewReader("taken") }, want: "create amp stdin"},
-		{name: "stdout", shape: func(cmd *exec.Cmd) { cmd.Stdout = io.Discard }, want: "create amp stdout"},
-		{name: "stderr", shape: func(cmd *exec.Cmd) { cmd.Stderr = io.Discard }, want: "create amp stderr"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			commandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-				cmd := exec.CommandContext(ctx, name, args...)
-				tc.shape(cmd)
-				return cmd
-			}
-			_, err := newTestClient(t, nil, Options{CLIPath: path, Cwd: t.TempDir()}).Continue(ctx, "T-1", map[string]any{"type": "user"})
-			if err == nil || !strings.Contains(err.Error(), tc.want) {
-				t.Fatalf("Continue pipe error = %v, want %q", err, tc.want)
-			}
-		})
-	}
-	commandContext = oldCommandContext
-
-	if _, err := newTestClient(t, nil, Options{CLIPath: path, Cwd: t.TempDir()}).Continue(ctx, "T-1", make(chan int)); err == nil {
-		t.Fatal("Continue send error ignored")
-	}
-
-	oldCloseWriteCloser := closeWriteCloser
-	closeWriteCloser = func(io.Closer) error { return errors.New("close stdin failed") }
-	if _, err := newTestClient(t, nil, Options{CLIPath: path, Cwd: t.TempDir()}).Continue(ctx, "T-1", map[string]any{"type": "user"}); err == nil || !strings.Contains(err.Error(), "close amp stdin") {
-		t.Fatalf("Continue stdin close error = %v", err)
-	}
-	closeWriteCloser = oldCloseWriteCloser
-
-	cancelled, cancel := context.WithCancel(ctx)
-	cancel()
-	cancelRead := &Turn{
-		stdout:       io.NopCloser(strings.NewReader(`{"type":"assistant","message":{"content":[{"type":"text","text":"x"}]}}` + "\n")),
-		messages:     make(chan Message),
-		errs:         make(chan error, 2),
-		maxLineBytes: 1024,
-	}
-	cancelRead.readStdout(cancelled)
-	if err := <-cancelRead.errs; !errors.Is(err, context.Canceled) {
-		t.Fatalf("readStdout canceled error = %v", err)
-	}
-
-	readErr := &Turn{stdout: failingReadCloser{}, messages: make(chan Message), errs: make(chan error, 2), maxLineBytes: 1024}
-	readErr.readStdout(ctx)
-	if err := <-readErr.errs; err == nil || !strings.Contains(err.Error(), "read amp stdout") {
-		t.Fatalf("readStdout scanner error = %v", err)
-	}
-
-	doneCmd := exec.Command("sh", "-c", "exit 0")
-	configureCommand(doneCmd)
-	if err := doneCmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	_ = doneCmd.Wait()
-	if err := (&Turn{cmd: doneCmd}).Interrupt(ctx, time.Second); err == nil {
-		t.Fatal("interrupt of exited process did not report signal error")
-	}
-
-	zeroPath, zeroState := fakeAmpPath(t, "sigint-ignore")
-	zeroTurn, err := newTestClient(t, nil, Options{CLIPath: zeroPath, Cwd: t.TempDir()}).Continue(ctx, "T-1", map[string]any{"type": "user"})
-	if err != nil {
-		t.Fatalf("Continue zero interrupt: %v", err)
-	}
-	waitForFile(t, filepath.Join(zeroState, "stdin.jsonl"))
-	if interruptErr := zeroTurn.Interrupt(ctx, 0); interruptErr != nil {
-		t.Fatalf("zero-timeout interrupt: %v", interruptErr)
-	}
-	_ = zeroTurn.Close()
-
-	ctxPath, ctxState := fakeAmpPath(t, "sigint-ignore")
-	ctxTurn, err := newTestClient(t, nil, Options{CLIPath: ctxPath, Cwd: t.TempDir()}).Continue(ctx, "T-1", map[string]any{"type": "user"})
-	if err != nil {
-		t.Fatalf("Continue ctx interrupt: %v", err)
-	}
-	waitForFile(t, filepath.Join(ctxState, "stdin.jsonl"))
-	interruptCtx, interruptCancel := context.WithCancel(ctx)
-	interruptCancel()
-	if interruptErr := ctxTurn.Interrupt(interruptCtx, time.Second); !errors.Is(interruptErr, context.Canceled) {
-		if runtime.GOOS != "darwin" {
-			t.Fatalf("interrupt ctx error = %v", interruptErr)
-		}
-	}
-	_ = ctxTurn.Close()
-
-	drop := &Turn{log: slog.Default(), errs: make(chan error, 1)}
-	drop.errs <- errors.New("full")
-	drop.sendErr(errors.New("dropped with logger"))
-
-	tail := &Turn{}
-	tail.captureStderr("first")
-	tail.captureStderr("second")
-	if got := tail.stderrText(); !strings.Contains(got, "first\nsecond") {
-		t.Fatalf("stderr newline capture = %q", got)
-	}
-}
-
-func TestCommandCwdUsesProcessWorkingDirectory(t *testing.T) {
-	original := getwd
-	t.Cleanup(func() { getwd = original })
-
-	getwd = func() (string, error) { return "/working", nil }
-	if got := (&Client{}).commandCwd(); got != "/working" {
-		t.Fatalf("command cwd = %q, want /working", got)
 	}
 }
 
@@ -1147,18 +639,6 @@ func readHelperJSON[T any](t *testing.T, path string) []T {
 	return out
 }
 
-func waitForFile(t *testing.T, path string) {
-	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(path); err == nil {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("%s was not created", path)
-}
-
 func shellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
 }
@@ -1200,120 +680,5 @@ func TestTurnRecoverGoroutine(t *testing.T) {
 	}()
 	if gotName != "" || gotValue != nil {
 		t.Fatal("handler invoked without panic")
-	}
-}
-
-func TestFinishProcessTreeObservationUsesProofBoundary(t *testing.T) {
-	var complete, incomplete int
-	observer := ProcessSnapshotObserver{
-		Complete:   func(context.Context) { complete++ },
-		Incomplete: func() { incomplete++ },
-	}
-
-	finishProcessTreeObservation(t.Context(), observer, nil)
-	if complete != 1 || incomplete != 0 {
-		t.Fatalf("proven lifecycle = complete %d, incomplete %d", complete, incomplete)
-	}
-
-	finishProcessTreeObservation(t.Context(), observer, ErrProcessContainmentIncomplete)
-	if complete != 1 || incomplete != 1 {
-		t.Fatalf("incomplete lifecycle = complete %d, incomplete %d", complete, incomplete)
-	}
-}
-
-func TestProcessTreeSnapshotAvailabilityBoundary(t *testing.T) {
-	if observer := (*Client)(nil).newProcessSnapshotObserver(t.Context(), nil); observer.Refresh != nil || observer.Complete != nil || observer.Incomplete != nil {
-		t.Fatal("nil client created a process observer")
-	}
-	if observer := (&Client{}).newProcessSnapshotObserver(t.Context(), nil); observer.Refresh != nil || observer.Complete != nil || observer.Incomplete != nil {
-		t.Fatal("client without a factory created a process observer")
-	}
-
-	created := false
-	var inventory ProcessInventory
-	client := &Client{options: Options{NewProcessSnapshotObserver: func(_ context.Context, got ProcessInventory) ProcessSnapshotObserver {
-		created = true
-		inventory = got
-		return ProcessSnapshotObserver{}
-	}}}
-	_ = client.newProcessSnapshotObserver(t.Context(), &processTree{})
-	if !created {
-		t.Fatal("process observer factory was not called")
-	}
-	if count, available := inventory(); available || count != 0 {
-		t.Fatalf("Unix inventory = (%d, %t), want unavailable", count, available)
-	}
-
-	original := processTreeDescendantCount
-	t.Cleanup(func() { processTreeDescendantCount = original })
-	processTreeDescendantCount = func(*processTree) (int, bool) { return 7, true }
-	observer := client.newProcessSnapshotObserver(t.Context(), &processTree{})
-	if count, available := inventory(); !available || count != 7 {
-		t.Fatalf("available inventory = (%d, %t), want (7, true)", count, available)
-	}
-
-	observeProcessTreeSnapshot(t.Context(), observer)
-	refreshed := false
-	observeProcessTreeSnapshot(t.Context(), ProcessSnapshotObserver{Refresh: func(context.Context) { refreshed = true }})
-	if !refreshed {
-		t.Fatal("snapshot refresh callback was not called")
-	}
-}
-
-func TestTurnClosePreservesSnapshotOnIncompleteBoundary(t *testing.T) {
-	original := processTreeTerminateAndWait
-	t.Cleanup(func() { processTreeTerminateAndWait = original })
-	processTreeTerminateAndWait = func(*processTree, time.Duration) error {
-		return ErrProcessContainmentIncomplete
-	}
-
-	var complete, incomplete int
-	turn := &Turn{
-		tree: &processTree{},
-		processObserver: ProcessSnapshotObserver{
-			Complete:   func(context.Context) { complete++ },
-			Incomplete: func() { incomplete++ },
-		},
-	}
-	err := turn.Close()
-	if !errors.Is(err, ErrProcessContainmentIncomplete) {
-		t.Fatalf("Close error = %v, want containment sentinel", err)
-	}
-	if complete != 0 || incomplete != 1 {
-		t.Fatalf("Close lifecycle = complete %d, incomplete %d", complete, incomplete)
-	}
-}
-
-// TestNativeCommandsRejectPreOccupiedStandardStreams drives the fail-closed
-// checks a launch wrapper trips when it hands back a command whose standard
-// streams are already bound: the wrapper owns the pipes, so a bound stream
-// means the adapter would read a boundary it does not control.
-func TestNativeCommandsRejectPreOccupiedStandardStreams(t *testing.T) {
-	path, _ := fakeAmpPath(t, "")
-	original := prepareProcessTree
-	t.Cleanup(func() { prepareProcessTree = original })
-
-	occupiers := map[string]func(*exec.Cmd){
-		"stdin":  func(cmd *exec.Cmd) { cmd.Stdin = strings.NewReader("") },
-		"stdout": func(cmd *exec.Cmd) { cmd.Stdout = io.Discard },
-		"stderr": func(cmd *exec.Cmd) { cmd.Stderr = io.Discard },
-	}
-	for name, occupy := range occupiers {
-		prepareProcessTree = func(cmd *exec.Cmd, options processLaunchOptions) (*processTreeCommand, error) {
-			launch, err := original(cmd, options)
-			if err != nil {
-				return nil, err
-			}
-			occupy(launch.cmd)
-			return launch, nil
-		}
-
-		client := newTestClient(t, nil, Options{CLIPath: path, Cwd: t.TempDir()})
-		if _, err := client.ListThreads(context.Background()); err == nil {
-			t.Fatalf("%s: a command ran with a bound stream", name)
-		}
-		if _, err := client.Execute(context.Background(), map[string]any{}); err == nil {
-			t.Fatalf("%s: a turn ran with a bound stream", name)
-		}
 	}
 }

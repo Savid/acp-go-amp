@@ -447,12 +447,9 @@ func (r *Reducer) checkCausalFence(delivery Delivery, update ActivityUpdate) err
 // checkActivityIdentity validates an activity's first sight, when every immutable
 // identity field must be present and the kind must be one the answer proved.
 func (r *Reducer) checkActivityIdentity(delivery Delivery, update ActivityUpdate) error {
-	switch {
-	case update.Kind == "" || update.Cause == "" || update.OriginTurnID == "":
+	if update.Kind == "" || update.Cause == "" || update.OriginTurnID == "" {
 		return r.fail(delivery, ViolationImmutableIdentityChange,
 			"activity "+update.ActivityID+" states an incomplete identity")
-	case !r.negotiated.DeclaresActivityKind(update.Kind):
-		return r.fail(delivery, ViolationUnnegotiatedFact, "activity kind "+string(update.Kind))
 	}
 
 	return nil
@@ -750,10 +747,6 @@ func (r *Reducer) applyQuiescence(delivery Delivery) error {
 		return r.fail(delivery, ViolationMalformedEnvelope, "the quiescence payload is missing")
 	}
 
-	if !r.negotiated.AuthoritativeQuiescence {
-		return r.fail(delivery, ViolationUnnegotiatedFact, "the answer proved no quiescence class")
-	}
-
 	if err := r.checkQuiescence(delivery, *fact, r.state.Vacant()); err != nil {
 		return err
 	}
@@ -773,7 +766,7 @@ func (r *Reducer) checkQuiescence(delivery Delivery, fact QuiescenceFact, vacant
 	switch {
 	case !fact.Quiescent:
 		return nil
-	case fact.Source != r.negotiated.QuiescenceSource:
+	case fact.Source != ProofClassProcessContainment:
 		return r.fail(delivery, ViolationUnnegotiatedFact, "quiescence proof "+string(fact.Source))
 	case !vacant:
 		return r.fail(delivery, ViolationFalseQuiescence, "the stream still holds live work")

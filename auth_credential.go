@@ -210,7 +210,7 @@ func (p *providerAuth) credential(ctx context.Context, params json.RawMessage) (
 		return providerCredentialResult(flow, secret), nil
 	}
 
-	if storeErr := session.authFileStore(); storeErr != nil {
+	if storeErr := session.authPolicy(); storeErr != nil {
 		return nil, p.failHarvest(flow, authCauseNativeVeto)
 	}
 

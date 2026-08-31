@@ -39,17 +39,17 @@ const (
 	pinnedLinuxAmpMaxBytes       = 256 << 20
 )
 
-// TestSmokeInstalledAmpBrokeredLoginCompatibilityCanary inspects the real
+// TestSmokeInstalledAmpBrokeredLoginSafetyCanary inspects the real
 // installed binary without executing `amp login`, so the canary itself cannot
 // open a browser or initiate provider authorization. Darwin and Linux must
 // each prove the account-login call reaches the audited bare PATH-resolved
 // branch — `open` and `xdg-open` respectively — and names no direct launcher
 // for the platform.
-func TestSmokeInstalledAmpBrokeredLoginCompatibilityCanary(t *testing.T) {
+func TestSmokeInstalledAmpBrokeredLoginSafetyCanary(t *testing.T) {
 	path := integrationAmpPath(t)
 
-	if err := amp.CheckAuthLoginBrowserCompatibility(path); err != nil {
-		t.Fatalf("brokered login compatibility = %v", err)
+	if err := amp.CheckAuthLoginBrowserSafety(path); err != nil {
+		t.Fatalf("brokered login safety = %v", err)
 	}
 }
 

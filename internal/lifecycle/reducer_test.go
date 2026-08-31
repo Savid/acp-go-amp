@@ -179,22 +179,6 @@ func TestSnapshotRefusesAnIncompleteEntity(t *testing.T) {
 		}})
 }
 
-// TestReducerRefusesAnUnnegotiatedActivityKind pins that a kind outside the
-// answer's set asserts a fact the configuration never claimed.
-func TestReducerRefusesAnUnnegotiatedActivityKind(t *testing.T) {
-	t.Parallel()
-
-	degenerate := Negotiated{Versions: []int{Version}, ActivityKinds: []ActivityKind{}}
-
-	requireReduceRefusal(t, degenerate, ViolationUnnegotiatedFact,
-		Event{Type: EventSnapshot, Snapshot: &Snapshot{
-			Foreground: Foreground{State: ForegroundIdle, CycleID: "cyc-0"},
-			Activities: []ActivityUpdate{
-				{ActivityID: "act-1", Kind: ActivityTask, State: ActivityRunning, Cause: CauseSession, OriginTurnID: "turn-1"},
-			},
-		}})
-}
-
 // TestTurnNeverReopens pins that a terminal turn is final on every path that
 // names it again.
 func TestTurnNeverReopens(t *testing.T) {
@@ -579,11 +563,6 @@ func TestQuiescenceInvalidationIsExplicit(t *testing.T) {
 func TestQuiescenceRefusesAnUnprovenClass(t *testing.T) {
 	t.Parallel()
 
-	degenerate := Negotiated{Versions: []int{Version}, ActivityKinds: []ActivityKind{}}
-
-	requireReduceRefusal(t, degenerate, ViolationUnnegotiatedFact, openSnapshot(),
-		QuiescenceEvent(QuiescenceFact{Quiescent: true, Source: ProofClassProcessContainment}))
-
 	requireReduceRefusal(t, richConfiguration(), ViolationUnnegotiatedFact, openSnapshot(),
 		QuiescenceEvent(QuiescenceFact{Quiescent: true, Source: ProofClass("quiet-for-a-while")}))
 }
@@ -770,28 +749,20 @@ func TestViolationErrorNamesTheFrameItRefused(t *testing.T) {
 	require.NotErrorIs(t, refusal, errors.New("sequence_gap"))
 }
 
-// TestNegotiatedVersionIsTheHighestCommonMember pins the single integer every
-// envelope on a connection carries.
-func TestNegotiatedVersionIsTheHighestCommonMember(t *testing.T) {
+// TestNegotiatedVersionPinsTheScalarVersion pins the integer every envelope carries.
+func TestNegotiatedVersionPinsTheScalarVersion(t *testing.T) {
 	t.Parallel()
 
 	require.Equal(t, 0, Negotiated{}.NegotiatedVersion())
-	require.Equal(t, 3, Negotiated{Versions: []int{1, 3}}.NegotiatedVersion())
+	require.Equal(t, Version, Negotiated{Version: Version}.NegotiatedVersion())
 }
 
-// TestAdvertisementRendersTheAnswer pins the wire shape of the answer, including
-// the presence rule that binds quiescenceSource to its claim.
+// TestAdvertisementRendersTheAnswer pins the exact scalar wire shape.
 func TestAdvertisementRendersTheAnswer(t *testing.T) {
 	t.Parallel()
 
-	degenerate := Negotiated{Versions: []int{Version}, ActivityKinds: []ActivityKind{}}.Advertisement()
-	require.Equal(t, []string{}, degenerate["activityKinds"])
-	require.NotContains(t, degenerate, "quiescenceSource")
-
-	full := richConfiguration().Advertisement()
-	require.Equal(t, "process-containment", full["quiescenceSource"])
-	require.Equal(t, []string{"task", "subagent"}, full["activityKinds"])
-	require.Equal(t, true, full["updatesOutsidePrompt"])
+	require.Equal(t, map[string]any{"version": Version}, richConfiguration().Advertisement())
+	require.Nil(t, (Negotiated{}).Advertisement())
 }
 
 // TestProofClassIsClosedAtOne pins that nothing outside the sole proof class is
@@ -1021,10 +992,8 @@ func TestSetMembershipPrecedesEntryJudgment(t *testing.T) {
 			},
 		}})
 
-	// The repeated activity names a kind the configuration never negotiated.
-	degenerate := Negotiated{Versions: []int{Version}, ActivityKinds: []ActivityKind{ActivityTask}}
-
-	requireReduceRefusal(t, degenerate, ViolationMalformedEnvelope,
+	// The repeated activity changes its immutable kind.
+	requireReduceRefusal(t, richConfiguration(), ViolationMalformedEnvelope,
 		Event{Type: EventSnapshot, Snapshot: &Snapshot{
 			Foreground: Foreground{State: ForegroundIdle, CycleID: "cyc-0"},
 			Activities: []ActivityUpdate{

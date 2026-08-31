@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -28,56 +27,6 @@ const (
 
 var runtimeGOOS = runtime.GOOS
 
-// RuntimeResourceKind identifies the lifecycle scope consuming a host-managed resource.
-type RuntimeResourceKind string
-
-const (
-	RuntimeResourceRuntime   RuntimeResourceKind = "runtime"
-	RuntimeResourceSession   RuntimeResourceKind = "session"
-	RuntimeResourcePrompt    RuntimeResourceKind = "prompt"
-	RuntimeResourceDiscovery RuntimeResourceKind = "discovery"
-)
-
-type RuntimeProcessKind string
-
-const (
-	RuntimeProcessHomeLockSupervisor RuntimeProcessKind = "home_lock_supervisor"
-	RuntimeProcessProviderDescendant RuntimeProcessKind = "provider_descendant"
-)
-
-type RuntimeContainmentMode string
-
-const (
-	RuntimeContainmentAuthoritative RuntimeContainmentMode = "authoritative"
-	RuntimeContainmentBestEffort    RuntimeContainmentMode = "best_effort"
-	// RuntimeContainmentSharedIdentity reports ordinary current-identity
-	// execution. It makes no whole-tree lifecycle or descendant-inventory claim.
-	RuntimeContainmentSharedIdentity RuntimeContainmentMode = "shared_identity"
-	RuntimeContainmentUnavailable    RuntimeContainmentMode = "unavailable"
-)
-
-type RuntimeStartupStage string
-
-const (
-	RuntimeStartupSpawn         RuntimeStartupStage = "spawn"
-	RuntimeStartupReadiness     RuntimeStartupStage = "readiness"
-	RuntimeStartupConfiguration RuntimeStartupStage = "configuration"
-	// RuntimeStartupSession marks the thread-creating first-prompt spawn: amp
-	// mints the server-side thread lazily on a session's first `-x` turn, and
-	// session/new runs readiness probes but no prompt or thread-creating work.
-	RuntimeStartupSession RuntimeStartupStage = "session"
-)
-
-// RuntimeResourceHooks lets an embedding host enforce native-root and scratch-root limits.
-type RuntimeResourceHooks struct {
-	AcquireNativeRoot      func(context.Context, RuntimeResourceKind) (func(), error)
-	ReserveScratchRoot     func(context.Context, RuntimeResourceKind) (func(), error)
-	ObserveProcess         func(context.Context, RuntimeProcessKind, int64)
-	ObserveProcessSnapshot func(context.Context, RuntimeProcessKind, int)
-	ObserveStartupStage    func(context.Context, RuntimeResourceKind, RuntimeStartupStage, time.Duration, error)
-	ObserveContainment     func(context.Context, RuntimeContainmentMode)
-}
-
 const (
 	defaultAgentName             = "acp-go-amp"
 	defaultAgentTitle            = "acp-go-amp"
@@ -95,25 +44,6 @@ const (
 
 // Option configures an Agent.
 type Option func(*Options)
-
-type ProcessIdentityLockCapability interface {
-	Duplicate() (*os.File, error)
-}
-
-// ProcessIsolation is an explicit Linux operating-system identity and complete
-// base environment for every native Amp process.
-type ProcessIsolation struct {
-	UID             uint32
-	GID             uint32
-	BaseEnvironment map[string]string
-	// IdentityLock is an optional trusted-supervisor descriptor for the
-	// host-global UID lock. Linux supervisors validate it and never expose it to
-	// the native Amp process. Standalone embeddings should leave it nil.
-	IdentityLock        ProcessIdentityLockCapability
-	AuthorityDomain     ProcessIdentityLockCapability
-	StandaloneOwnerID   string
-	StandaloneStateRoot string
-}
 
 // ConcurrencyLimits configures ACP backpressure limits.
 type ConcurrencyLimits struct {
@@ -135,8 +65,9 @@ type Options struct {
 	AgentTitle   string
 	AgentVersion string
 
-	ExecutablePath   string
-	ProcessIsolation *ProcessIsolation
+	ExecutablePath        string
+	HostAuthority         HostAuthority
+	hostAuthoritySupplied bool
 	// Home is unsupported: Amp has no native config/auth root, so a non-empty
 	// value is rejected at every session start. See WithHome and WithScratchDir.
 	Home         string
@@ -167,18 +98,15 @@ type Options struct {
 	MeterProvider     metric.MeterProvider
 	TextMapPropagator propagation.TextMapPropagator
 
-	SessionStore                SessionStore
-	SessionStoreLoadTimeout     time.Duration
-	ConcurrencyLimits           ConcurrencyLimits
-	ImageLimits                 ImageLimits
-	SeedFiles                   map[string]string
-	TurnTimeout                 time.Duration
-	RuntimeResourceHooks        RuntimeResourceHooks
-	DarwinBestEffortContainment bool
-	testOnlyNoCredential        bool
-	testOnlyIdentityLockRoot    string
-	testOnlyAuthLoginPlatform   string
-	runtime                     runtimeOptions
+	SessionStore              SessionStore
+	SessionStoreLoadTimeout   time.Duration
+	ConcurrencyLimits         ConcurrencyLimits
+	ImageLimits               ImageLimits
+	SeedFiles                 map[string]string
+	TurnTimeout               time.Duration
+	testOnlyNoCredential      bool
+	testOnlyAuthLoginPlatform string
+	runtime                   runtimeOptions
 }
 
 type runtimeOptions struct {
@@ -194,11 +122,9 @@ type runtimeOptions struct {
 	executeThread  func(context.Context, *nativeamp.Client, any) (*nativeamp.Turn, error)
 	continueThread func(context.Context, *nativeamp.Client, string, any) (*nativeamp.Turn, error)
 	exportThread   func(context.Context, *nativeamp.Client, string) (json.RawMessage, error)
-	// settleTurn completes the prompt containment boundary and reports what that
-	// boundary proved about the native tree it owned. It is a seam so tests can
-	// drive an incomplete boundary and a proven vacancy deterministically;
-	// production always closes the real contained process.
-	settleTurn func(*nativeamp.Turn) (nativeamp.ContainmentProof, error)
+	// settleTurn completes the prompt's native boundary. Production closes the
+	// real native process and therefore waits through the host authority.
+	settleTurn func(*nativeamp.Turn) error
 	// afterColdSessionPrepared is an internal launch barrier used by deterministic
 	// ownership tests after a cold wrapper has transferred to its use and before
 	// store replay continues. Production leaves it nil.
@@ -257,11 +183,7 @@ func applyOptions(opts []Option) Options {
 			exportThread: func(ctx context.Context, client *nativeamp.Client, threadID string) (json.RawMessage, error) {
 				return client.ExportThread(ctx, threadID)
 			},
-			settleTurn: func(turn *nativeamp.Turn) (nativeamp.ContainmentProof, error) {
-				closeErr := turn.Close()
-
-				return turn.ContainmentProof(), closeErr
-			},
+			settleTurn: func(turn *nativeamp.Turn) error { return turn.Close() },
 		},
 	}
 
@@ -273,12 +195,6 @@ func applyOptions(opts []Option) Options {
 
 	if options.Env == nil {
 		options.Env = map[string]string{}
-	}
-
-	if options.ProcessIsolation != nil {
-		cloned := *options.ProcessIsolation
-		cloned.BaseEnvironment = cloneStringMap(options.ProcessIsolation.BaseEnvironment)
-		options.ProcessIsolation = &cloned
 	}
 
 	return options
@@ -325,17 +241,10 @@ func WithExecutablePath(path string) Option {
 	}
 }
 
-// WithProcessIsolation is explicit hardening: it requires every Amp command,
-// probe, and authentication leg to run as the supplied non-root identity with
-// no supplementary groups. BaseEnvironment replaces the adapter environment;
-// WithEnv and per-session values overlay it. Omitting the option is the
-// ordinary default — native work runs as the current identity, root or not.
-// An invalid explicit policy fails closed before any native spawn.
-func WithProcessIsolation(isolation ProcessIsolation) Option {
+func WithHostAuthority(authority HostAuthority) Option {
 	return func(options *Options) {
-		cloned := isolation
-		cloned.BaseEnvironment = cloneStringMap(isolation.BaseEnvironment)
-		options.ProcessIsolation = &cloned
+		options.hostAuthoritySupplied = true
+		options.HostAuthority = authority
 	}
 }
 
@@ -402,19 +311,6 @@ func WithProviderAuthRoot(path string) Option {
 func WithProviderAuthDirectHome(path string) Option {
 	return func(options *Options) {
 		options.ProviderAuthDirectHome = path
-	}
-}
-
-func WithDarwinBestEffortContainment() Option {
-	return func(options *Options) {
-		options.DarwinBestEffortContainment = true
-	}
-}
-
-// WithRuntimeResourceHooks installs host-facing native-root and scratch-root admission hooks.
-func WithRuntimeResourceHooks(hooks RuntimeResourceHooks) Option {
-	return func(options *Options) {
-		options.RuntimeResourceHooks = hooks
 	}
 }
 
@@ -614,36 +510,12 @@ func cloneAnySlice(in []any) []any {
 	return out
 }
 
-func containmentMode(options Options) RuntimeContainmentMode {
-	if options.DarwinBestEffortContainment && (runtimeGOOS != platformDarwin || options.ProcessIsolation != nil) {
-		return RuntimeContainmentUnavailable
-	}
-
-	if options.ProcessIsolation != nil {
-		if runtimeGOOS != platformLinux {
-			return RuntimeContainmentUnavailable
-		}
-
-		return RuntimeContainmentAuthoritative
-	}
-
-	if options.DarwinBestEffortContainment {
-		return RuntimeContainmentBestEffort
-	}
-
-	return RuntimeContainmentSharedIdentity
+func validateContainmentOptions(options Options) error {
+	return validateEnvironment(options.Env)
 }
 
-func validateContainmentOptions(options Options) error {
-	if options.DarwinBestEffortContainment && runtimeGOOS != platformDarwin {
-		return errors.New("darwin best-effort containment is supported only on darwin")
-	}
-
-	if options.DarwinBestEffortContainment && options.ProcessIsolation != nil {
-		return errors.New("darwin best-effort containment cannot be combined with process isolation")
-	}
-
-	for key := range options.Env {
+func validateEnvironment(environment map[string]string) error {
+	for key := range environment {
 		if invalidEnvName(key) {
 			return fmt.Errorf("environment key %q is not a valid variable name", key)
 		}
@@ -653,7 +525,7 @@ func validateContainmentOptions(options Options) error {
 		}
 	}
 
-	if previous, key := ambiguousEnvKeys(options.Env); key != "" {
+	if previous, key := ambiguousEnvKeys(environment); key != "" {
 		return fmt.Errorf("environment keys %q and %q name the same variable", previous, key)
 	}
 

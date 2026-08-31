@@ -11,13 +11,7 @@ import (
 // richConfiguration answers every fact this package can validate, so a decoder
 // refusal in these vectors is structural rather than a fact the answer withheld.
 func richConfiguration() Negotiated {
-	return Negotiated{
-		Versions:                []int{Version},
-		UpdatesOutsidePrompt:    true,
-		AuthoritativeQuiescence: true,
-		QuiescenceSource:        ProofClassProcessContainment,
-		ActivityKinds:           []ActivityKind{ActivityTask, ActivitySubagent},
-	}
+	return Negotiated{Version: Version}
 }
 
 // notification frames one envelope on the eligible carrier.
@@ -62,6 +56,34 @@ func TestDecodeRefusesAnUnframedNotification(t *testing.T) {
 
 	requireRefusal(t, `{`, richConfiguration(), ViolationMalformedEnvelope)
 	requireRefusal(t, `[1,2]`, richConfiguration(), ViolationMalformedEnvelope)
+}
+
+func TestLifecycleJSONStrictlyRefusesDuplicateTrailingAndFractionalVersion(t *testing.T) {
+	t.Parallel()
+
+	event := `{"type":"prompt_accepted","submissionId":"a","clientNonce":"b","turnId":"c"}`
+	for _, test := range []struct {
+		name   string
+		params string
+	}{
+		{
+			name:   "duplicate version member",
+			params: notification(`{"version":1,"version":1,"streamId":"strm","sequence":1,"event":` + event + `}`),
+		},
+		{
+			name:   "trailing JSON value",
+			params: notification(`{"version":1,"streamId":"strm","sequence":1,"event":`+event+`}`) + ` null`,
+		},
+		{
+			name:   "fractional scalar version",
+			params: notification(`{"version":1.5,"streamId":"strm","sequence":1,"event":` + event + `}`),
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			requireRefusal(t, test.params, richConfiguration(), ViolationMalformedEnvelope)
+		})
+	}
 }
 
 // TestDecodeRefusesEveryEnvelopeWhenTheKeyWasNotAnswered pins that an envelope on

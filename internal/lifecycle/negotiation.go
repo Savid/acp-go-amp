@@ -3,7 +3,6 @@ package lifecycle
 import (
 	"encoding/json"
 	"math"
-	"slices"
 )
 
 // MetaPath is the request path a rejection names. Negotiation and correlation
@@ -32,11 +31,9 @@ func paramError(members ...string) *ParamError {
 	return &ParamError{Field: field}
 }
 
-// Offer is the host's `initialize` offer. It carries exactly one member, so a
-// later version adds its own members inside its own version's shape rather than
-// breaking a version-1 sibling.
+// Offer is the host's exact `initialize` capability value.
 type Offer struct {
-	Versions []int
+	Version int
 }
 
 // DecodeOffer reads the offer from `InitializeRequest._meta`. An absent offer is
@@ -55,64 +52,24 @@ func DecodeOffer(meta map[string]any) (Offer, bool, *ParamError) {
 	}
 
 	for key := range fields {
-		if key != fieldVersions {
+		if key != fieldVersion {
 			return Offer{}, false, paramError(key)
 		}
 	}
 
-	versions, refusal := decodeVersions(fields[fieldVersions])
-	if refusal != nil {
-		return Offer{}, false, refusal
+	version, ok := integerValue(fields[fieldVersion])
+	if !ok || version != Version {
+		return Offer{}, false, paramError(fieldVersion)
 	}
 
-	return Offer{Versions: versions}, true, nil
+	return Offer{Version: version}, true, nil
 }
 
-// Answer intersects the offer with the versions this adapter implements and
-// carries the facts the active configuration proved. The intersection is
-// ascending by construction, because this adapter implements one version. An
-// empty intersection returns no answer at all: the key is omitted rather than
-// answered with an empty array.
-func (o Offer) Answer(proven Negotiated) (Negotiated, bool) {
-	common := make([]int, 0, len(o.Versions))
+// Answer returns the exact capability advertised by this adapter.
+func (o Offer) Answer(proven Negotiated) Negotiated {
+	proven.Version = Version
 
-	for _, version := range o.Versions {
-		if version == Version && !slices.Contains(common, version) {
-			common = append(common, version)
-		}
-	}
-
-	if len(common) == 0 {
-		return Negotiated{}, false
-	}
-
-	proven.Versions = common
-
-	return proven, true
-}
-
-// decodeVersions reads the non-empty integer array every negotiation object
-// carries. It is validated on every offer whatever the version. Only the answer
-// is ordered: a host is free to offer its versions in any order, and refusing an
-// unordered offer would break the forward compatibility the array exists for.
-func decodeVersions(raw any) ([]int, *ParamError) {
-	listed, ok := raw.([]any)
-	if !ok || len(listed) == 0 {
-		return nil, paramError(fieldVersions)
-	}
-
-	versions := make([]int, 0, len(listed))
-
-	for _, entry := range listed {
-		version, ok := integerValue(entry)
-		if !ok {
-			return nil, paramError(fieldVersions)
-		}
-
-		versions = append(versions, version)
-	}
-
-	return versions, nil
+	return proven
 }
 
 // Submission names one accepted client prompt. The client nonce is the host's own

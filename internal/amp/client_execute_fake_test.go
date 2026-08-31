@@ -39,25 +39,3 @@ func TestExecuteLaunchesThreadlessTurnWithNoArchiveFlag(t *testing.T) {
 		}
 	}
 }
-
-func TestExecuteContainsStartedTreeWhenInitialSnapshotObserverPanics(t *testing.T) {
-	path, _ := fakeAmpPath(t, "stream")
-	client := newTestClient(t, nil, Options{
-		CLIPath:      path,
-		Cwd:          t.TempDir(),
-		MaxLineBytes: 1024,
-		Mode:         "low",
-		NewProcessSnapshotObserver: func(context.Context, ProcessInventory) ProcessSnapshotObserver {
-			panic("initial process snapshot panic")
-		},
-	})
-
-	var recovered any
-	func() {
-		defer func() { recovered = recover() }()
-		_, _ = client.Execute(t.Context(), map[string]any{"type": "user", "text": "hello"})
-	}()
-	if recovered != "initial process snapshot panic" {
-		t.Fatalf("recovered = %#v, want initial snapshot panic", recovered)
-	}
-}

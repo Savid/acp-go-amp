@@ -40,7 +40,7 @@ func browserProbeDir(t *testing.T, marker string) string {
 // TestLoginNeverExecsABrowserLauncher runs the adapter's login path with a
 // deterministic harness and a recording launcher ahead of every other PATH
 // entry. It proves the PATH interception used on Darwin and Linux;
-// installed-binary compatibility is checked separately before this boundary
+// installed-binary safety is checked separately before this boundary
 // is built.
 func TestLoginNeverExecsABrowserLauncher(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "launched")
@@ -125,7 +125,7 @@ func TestLoginNeverExecsABrowserLauncher(t *testing.T) {
 	}
 
 	for i, launcher := range resolved {
-		if !strings.Contains(launcher, browserShimPrefix) || filepath.Base(launcher) != browserLauncherNames[i] {
+		if filepath.Dir(launcher) != client.options.BrowserShim || filepath.Base(launcher) != browserLauncherNames[i] {
 			t.Fatalf("the child resolved %s to %q; want a shim launcher", browserLauncherNames[i], launcher)
 		}
 	}
@@ -213,15 +213,12 @@ func TestInstalledAmpLoginExecsOnlyShimLauncher(t *testing.T) {
 func makeInstalledAmpScratchParent(t *testing.T) string {
 	t.Helper()
 
-	path, err := os.MkdirTemp("/tmp", "acp-go-amp-browser-scratch-") //nolint:usetesting // The isolated native identity must traverse the fixture root.
+	path, err := os.MkdirTemp("/tmp", "acp-go-amp-browser-scratch-") //nolint:usetesting // The installed binary runs outside the Go test's temporary root.
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(path) })
 	if err = os.Chmod(path, 0o711); err != nil {
-		t.Fatal(err)
-	}
-	if err = os.Chown(path, os.Geteuid(), os.Getegid()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -259,27 +256,6 @@ func TestBrowserShimLeavesNothingBehind(t *testing.T) {
 
 	if removeErr := (*browserShim)(nil).remove(); removeErr != nil {
 		t.Fatalf("remove on an unbuilt shim = %v", removeErr)
-	}
-}
-
-// TestStartAuthLoginRefusesAnUnbuildableShim keeps the leg fail-closed: a login
-// that cannot prove the browser launch is neutralised never starts a child.
-func TestStartAuthLoginRefusesAnUnbuildableShim(t *testing.T) {
-	want := errors.New("no scratch")
-	original := browserShimMkdirTemp
-	browserShimMkdirTemp = func(string, string) (string, error) { return "", want }
-
-	t.Cleanup(func() { browserShimMkdirTemp = original })
-
-	path, state := fakeAmpPath(t, "login")
-
-	client := newTestClient(t, nil, Options{CLIPath: path, Cwd: t.TempDir(), ScratchParent: t.TempDir()})
-	if _, err := client.StartAuthLogin(t.Context()); !errors.Is(err, want) {
-		t.Fatalf("StartAuthLogin = %v, want %v", err, want)
-	}
-
-	if _, err := os.Stat(filepath.Join(state, "args.jsonl")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("a refused login still launched the harness: %v", err)
 	}
 }
 

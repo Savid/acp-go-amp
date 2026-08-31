@@ -26,3 +26,7 @@ func ensureScratchParent(dir string) (string, error) {
 
 	return parent, nil
 }
+
+func (a *Agent) ensureScratchParent() (string, error) {
+	return ensureScratchParent(a.options.ScratchDir)
+}

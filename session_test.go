@@ -874,17 +874,6 @@ func TestSessionDirectBranches(t *testing.T) {
 	if _, err := newAgentSession(t.Context(), newTestAgent(WithScratchDir(fileScratch)), "T-1", "", parsedSessionMeta{}, "", nil); err == nil {
 		t.Fatal("newAgentSession with file scratch dir succeeded")
 	}
-	handoffAgent := NewAgent(
-		WithScratchDir(t.TempDir()),
-		WithProcessIsolation(ProcessIsolation{
-			UID: uint32(os.Geteuid()) + 1, GID: uint32(os.Getegid()) + 1,
-			BaseEnvironment: map[string]string{},
-		}),
-	)
-	if _, err := newAgentSession(t.Context(), handoffAgent, "T-handoff", "", parsedSessionMeta{}, "", nil); err == nil {
-		t.Fatal("unsupported session ownership handoff succeeded")
-	}
-
 	path, _ := fakeAgentAmpPath(t, "")
 	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(testScratchDir(t)))
 	session, err := newAgentSession(t.Context(), agent, "T-1", t.TempDir(), parsedSessionMeta{rawEvent: true}, "", nil)
@@ -1212,7 +1201,7 @@ func TestAmpSessionCarrierRunsRealMarkersAndRotatesWithoutCrossing(t *testing.T)
 		}
 	}
 
-	// No compatibility behavior survives the rotation: the closed session is
+	// The closed session is
 	// gone rather than retried against the new carrier, and the untouched
 	// session refuses to adopt the rotated one on an active request.
 	if _, err := agent.Prompt(ctx, TextPromptRequest(firstID, "test-turn", "x")); err == nil {

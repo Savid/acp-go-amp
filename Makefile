@@ -1,6 +1,5 @@
 .DEFAULT_GOAL := help
 
-.PHONY: test-trusted-supervisor _privileged-shard-guard _privileged-shard-coverage _privileged-shard-trusted-supervisor _privileged-coverage-gate
 .PHONY: audit build clean coverage-check docs-audit fmt fmt-check help lint modernize-check test test/cover test-cross-compile test-integration-attended test-integration-cover test-integration-keystore test-integration-live test-integration-native-browser test-integration-smoke test-portable-runtime tidy vuln
 
 GOLANGCI_LINT_VERSION ?= v2.12.2
@@ -16,76 +15,15 @@ build:
 fmt-check:
 	@test -z "$$(gofmt -l .)"
 
-# Every isolated native launch claims the standalone agent identity, and that
-# claim proves the identity vacant across every task in the PID namespace. In
-# the initial namespace the suite requires, that is the whole host, so the
-# adapter package runs far past the ten-minute default.
 GO_TEST_TIMEOUT ?= 40m
 
 ## test: run unit tests with race detector and shuffled order
 test:
 	go test -race -shuffle=on -timeout=$(GO_TEST_TIMEOUT) ./...
 
-## test-trusted-supervisor: run Linux root-only native authority tests
-test-trusted-supervisor:
-	@test "$$(uname -s)" = Linux
-	@test "$$(id -u)" -eq 0
-	@for directory in /var/lib/acp-go /var/lib/acp-go/agent-identities; do if [ ! -e "$$directory" ] && [ ! -L "$$directory" ]; then install -d -o root -g root -m 0700 "$$directory"; fi; [ "$$(stat -c '%F %u %g %a' -- "$$directory")" = 'directory 0 0 700' ] || { echo "unsafe trusted-supervisor authority directory $$directory" >&2; exit 1; }; done
-	@selector='^(Test.*(ProcessIsolationActual|TrustedSupervisor|SupervisorGuardianSIGKILL|SupervisorLivenessSIGKILL|GeneratedNative|NativeOwnedDirectory|BorrowedIdentityAdoption|BorrowedDomainAdoption|BorrowedDisposition|AgentIdentityLock|AgentStandalone|AuthorityDomain|IdentityDisposition|PersistentProof|SupervisorConfigIsSealed|CommandCreatorThread|ProviderCreator|SecurityLimits).*)$$'; listing=$$(mktemp); log=$$(mktemp); rc=$$(mktemp); module=$$(go list -mod=readonly -m); status=$$?; \
-	[ "$$status" -eq 0 ] || { rm -f "$$listing" "$$log" "$$rc"; exit "$$status"; }; \
-	go test -list "$$selector" ./... >"$$listing"; status=$$?; \
-	[ "$$status" -eq 0 ] || { rm -f "$$listing" "$$log" "$$rc"; exit "$$status"; }; \
-	required='TrustedSupervisor SupervisorGuardianSIGKILL SupervisorGuardianSIGKILLBeforeNativeLaunchRefusesStartAndCompletesAfterECHILD SupervisorLivenessSIGKILL GeneratedNative BorrowedIdentityAdoption BorrowedDomainAdoption BorrowedDisposition AgentIdentityLock AgentStandalone AuthorityDomain IdentityDisposition CommandCreatorThread SecurityLimits ProcessIsolationActual'; case "$$module" in github.com/savid/acp-go-amp|github.com/savid/acp-go-claude|github.com/savid/acp-go-hermes|github.com/savid/acp-go-pi) ;; github.com/savid/acp-go-codex|github.com/savid/acp-go-opencode) required="$$required PersistentProof SupervisorConfigIsSealed ProviderCreator" ;; *) rm -f "$$listing" "$$log" "$$rc"; echo "unrecognized trusted-supervisor module $$module"; exit 1 ;; esac; \
-	for class in $$required; do grep -Eq "^Test.*$${class}" "$$listing" || { rm -f "$$listing" "$$log" "$$rc"; echo "trusted-supervisor selector discovered no $${class} tests"; exit 1; }; done; \
-	expected=$$(grep -Ec '^Test' "$$listing" || true); rm -f "$$listing"; \
-	[ "$$expected" -gt 0 ] || { rm -f "$$log" "$$rc"; echo 'trusted-supervisor selector discovered no tests'; exit 1; }; \
-	{ go test -race -count=1 -json -run "$$selector" ./...; echo $$? >"$$rc"; } | tee "$$log"; \
-	status=$$(cat "$$rc"); passed=$$(grep -Ec '"Action":"pass","Package":"[^"]+","Test":"Test[^/"]+"' "$$log" || true); skipped=$$(grep -Ec '"Action":"skip","Package":"[^"]+","Test":"Test[^"]+"' "$$log" || true); \
-	rm -f "$$log" "$$rc"; \
-	[ "$$status" -eq 0 ] || exit "$$status"; \
-	[ "$$passed" -eq "$$expected" ] || { echo "trusted-supervisor pass count $$passed, want $$expected"; exit 1; }; \
-	[ "$$skipped" -eq 0 ] || { echo "trusted-supervisor skip count $$skipped, want 0"; exit 1; }
-
 ## coverage-check: require 100% statement coverage with race instrumentation
 coverage-check:
 	go test -race -coverprofile=coverage.out -covermode=atomic -timeout=$(GO_TEST_TIMEOUT) ./...
-	@awk 'NR > 1 && $$(NF - 1) > 0 && $$NF == 0 { print "uncovered statement block: " $$0; missed = 1 } END { if (missed) exit 1 }' coverage.out
-	@go tool cover -func=coverage.out | awk 'BEGIN { found = 0 } /^total:/ { found = 1; if ($$3 != "100.0%") { printf "total coverage %s, want 100.0%%\n", $$3; exit 1 } printf "total coverage %s\n", $$3 } END { if (!found) { print "missing total coverage line"; exit 1 } }'
-
-# Private container-only shard verbs. Public release targets above always cover
-# ./... and enforce their complete gates; only the privileged coordinator calls
-# these explicitly partial targets after validating a six-module package map.
-_privileged-shard-guard:
-	@test '$(ACP_GO_PRIVILEGED_INTERNAL)' = 1
-	@case '$(ACP_GO_PRIVILEGED_SHARD)' in root|provider) ;; *) echo 'invalid privileged shard $(ACP_GO_PRIVILEGED_SHARD)' >&2; exit 1 ;; esac
-	@test -n '$(ACP_GO_PRIVILEGED_MODULE)'
-	@test -n '$(ACP_GO_PRIVILEGED_PACKAGES)'
-	@test -n '$(ACP_GO_PRIVILEGED_REQUIRED_CLASSES)'
-	@test "$$(go list -mod=readonly -m)" = '$(ACP_GO_PRIVILEGED_MODULE)'
-
-_privileged-shard-coverage: _privileged-shard-guard
-	@case '$(ACP_GO_PRIVILEGED_COVERAGE_OUT)' in .tmp/coverage-*.out) ;; *) echo 'invalid privileged coverage output $(ACP_GO_PRIVILEGED_COVERAGE_OUT)' >&2; exit 1 ;; esac
-	go test -race -coverprofile='$(ACP_GO_PRIVILEGED_COVERAGE_OUT)' -covermode=atomic -timeout=$(GO_TEST_TIMEOUT) $(ACP_GO_PRIVILEGED_PACKAGES)
-
-_privileged-shard-trusted-supervisor: _privileged-shard-guard
-	@test "$$(uname -s)" = Linux
-	@test "$$(id -u)" -eq 0
-	@for directory in /var/lib/acp-go /var/lib/acp-go/agent-identities; do if [ ! -e "$$directory" ] && [ ! -L "$$directory" ]; then install -d -o root -g root -m 0700 "$$directory"; fi; [ "$$(stat -c '%F %u %g %a' -- "$$directory")" = 'directory 0 0 700' ] || { echo "unsafe trusted-supervisor authority directory $$directory" >&2; exit 1; }; done
-	@selector='^(Test.*(ProcessIsolationActual|TrustedSupervisor|SupervisorGuardianSIGKILL|SupervisorLivenessSIGKILL|GeneratedNative|NativeOwnedDirectory|BorrowedIdentityAdoption|BorrowedDomainAdoption|BorrowedDisposition|AgentIdentityLock|AgentStandalone|AuthorityDomain|IdentityDisposition|PersistentProof|SupervisorConfigIsSealed|CommandCreatorThread|ProviderCreator|SecurityLimits).*)$$'; listing=$$(mktemp); log=$$(mktemp); rc=$$(mktemp); \
-	go test -list "$$selector" $(ACP_GO_PRIVILEGED_PACKAGES) >"$$listing"; status=$$?; \
-	[ "$$status" -eq 0 ] || { rm -f "$$listing" "$$log" "$$rc"; exit "$$status"; }; \
-	required='$(ACP_GO_PRIVILEGED_REQUIRED_CLASSES)'; \
-	for class in $$required; do grep -Eq "^Test.*$${class}" "$$listing" || { rm -f "$$listing" "$$log" "$$rc"; echo "trusted-supervisor selector discovered no $${class} tests in $(ACP_GO_PRIVILEGED_SHARD) shard"; exit 1; }; done; \
-	expected=$$(grep -Ec '^Test' "$$listing" || true); rm -f "$$listing"; \
-	[ "$$expected" -gt 0 ] || { rm -f "$$log" "$$rc"; echo 'trusted-supervisor shard selector discovered no tests'; exit 1; }; \
-	{ go test -race -count=1 -json -run "$$selector" $(ACP_GO_PRIVILEGED_PACKAGES); echo $$? >"$$rc"; } | tee "$$log"; \
-	status=$$(cat "$$rc"); passed=$$(grep -Ec '"Action":"pass","Package":"[^"]+","Test":"Test[^/"]+"' "$$log" || true); skipped=$$(grep -Ec '"Action":"skip","Package":"[^"]+","Test":"Test[^"]+"' "$$log" || true); \
-	rm -f "$$log" "$$rc"; \
-	[ "$$status" -eq 0 ] || exit "$$status"; \
-	[ "$$passed" -eq "$$expected" ] || { echo "trusted-supervisor pass count $$passed, want $$expected"; exit 1; }; \
-	[ "$$skipped" -eq 0 ] || { echo "trusted-supervisor skip count $$skipped, want 0"; exit 1; }
-
-_privileged-coverage-gate:
 	@awk 'NR > 1 && $$(NF - 1) > 0 && $$NF == 0 { print "uncovered statement block: " $$0; missed = 1 } END { if (missed) exit 1 }' coverage.out
 	@go tool cover -func=coverage.out | awk 'BEGIN { found = 0 } /^total:/ { found = 1; if ($$3 != "100.0%") { printf "total coverage %s, want 100.0%%\n", $$3; exit 1 } printf "total coverage %s\n", $$3 } END { if (!found) { print "missing total coverage line"; exit 1 } }'
 
@@ -220,8 +158,8 @@ docs-audit:
 	@rg -q 'session/load can replay the local transcript for display' docs/features/session-store.mdx
 	@rg -q 'native_state_missing' docs/features/session-store.mdx docs/reference/updates.mdx
 	@rg -q 'one `Replace` generation' docs/features/session-store.mdx
-	@rg -q 'native `HOME` plus `XDG_CONFIG_HOME`' docs/get-started/run-modes.mdx
-	@rg -q 'isolated native HOME/XDG state' README.md docs/reference/cli.mdx
+	@rg -q 'NativeEnvironment' docs/get-started/run-modes.mdx docs/reference/go-api.mdx
+	@rg -q 'WithHostAuthority' README.md docs/reference/go-api.mdx docs/operations/security.mdx
 	@rg -q 'No slash commands are advertised' docs/reference/acp-methods.mdx docs/core/prompt-streaming.mdx
 	@rg -q '_amp/session/fork.*unsupported' README.md docs/reference/acp-methods.mdx
 	@rg -q 'never sends `session/request_permission`' docs/features/permissions.mdx
@@ -242,22 +180,13 @@ docs-audit:
 	@rg -q 'amp_auth_failed' docs/reference/acp-methods.mdx
 	@rg -q 'no Amp-side' docs/features/authentication.mdx
 	@rg -q 'AMP_DISABLE_SECRET_REDACTION' docs/operations/security.mdx
-	@rg -q 'SupervisorGuardianSIGKILL' Makefile
-	@rg -q 'SupervisorLivenessSIGKILL' Makefile
-	@rg -q 'BorrowedIdentityAdoption' Makefile
-	@rg -q 'BorrowedDomainAdoption' Makefile
-	@rg -q 'validateInheritedAgentIdentityFlock' internal/amp/agent_identity_lock_linux.go
-	@rg -q '/proc/self/fdinfo/' docs/operations/security.mdx
 	@rg -q 'acp-go.dev/lifecycle' docs/reference/meta.mdx docs/reference/updates.mdx
 	@rg -q "response's own top-level" docs/reference/meta.mdx
 	@rg -q 'never inside\n?.agentCapabilities._meta' -U docs/reference/meta.mdx
-	@rg -q 'always .\[\]. \| This adapter reports no owned background work' docs/reference/meta.mdx
-	@rg -q 'true. only under Linux process isolation' docs/reference/meta.mdx
-	@rg -q 'process-containment' docs/reference/meta.mdx
+	@rg -q '\{"version": 1\}' docs/reference/meta.mdx
 	@rg -q 'one incarnation per prompt' -i docs/reference/meta.mdx
 	@rg -q 'identity-only .session_info_update' docs/reference/meta.mdx docs/reference/updates.mdx
 	@rg -q 'no envelope attached' docs/reference/meta.mdx docs/reference/updates.mdx
-	@rg -q 'Only the answer is ordered' docs/reference/meta.mdx
 	@rg -q 'authenticate.*_amp/auth/\*.*\n.*_amp/session/fork.*rejects the key' -U docs/reference/meta.mdx
 	@rg -q 'session/set_mode. does not exist on this adapter' docs/reference/meta.mdx
 	@rg -q 'no action correlation value is' docs/reference/meta.mdx

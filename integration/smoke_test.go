@@ -23,7 +23,7 @@ func TestSmokeAmpVersion(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	client := newIntegrationAmpClient(t, slog.Default(), ampacp.RuntimeResourceDiscovery, amp.Options{})
+	client := newIntegrationAmpClient(t, slog.Default(), amp.Options{})
 	version, err := client.Version(ctx)
 	if err != nil {
 		t.Fatalf("amp binary present but version probe failed: %v", err)
@@ -125,7 +125,7 @@ func TestLiveThreadTurn(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	client := newIntegrationAmpClient(
-		t, slog.Default(), ampacp.RuntimeResourcePrompt,
+		t, slog.Default(),
 		amp.Options{SettingsFile: settings, Mode: "medium"},
 	)
 	turn, err := client.Execute(ctx, map[string]any{
@@ -193,7 +193,7 @@ func TestLiveRestoreAfterLocalStateWipe(t *testing.T) {
 	defer func() {
 		if threadID != "" {
 			deleteClient := newIntegrationAmpClient(
-				t, slog.Default(), ampacp.RuntimeResourcePrompt,
+				t, slog.Default(),
 				amp.Options{Env: cleanupEnv, Cwd: cwd},
 			)
 			_ = deleteClient.DeleteThread(context.Background(), threadID)

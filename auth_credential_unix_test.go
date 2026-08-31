@@ -64,17 +64,6 @@ func TestKeystoreResidenceMatrix(t *testing.T) {
 		t.Fatalf("the harvest read %q, want the file store's %q", secret, keystoreFileCanary)
 	}
 
-	// The settings document the wrapper writes is what keeps that true.
-	settings := filepath.Join(t.TempDir(), "settings.json")
-	if writeErr := os.WriteFile(settings, nativeamp.AuthSettingsDocument(), 0o600); writeErr != nil {
-		t.Fatal(writeErr)
-	}
-
-	asserted, err := nativeamp.AuthFileStoreAsserted(settings)
-	if err != nil || !asserted {
-		t.Fatalf("the wrapper's settings do not assert the file store: %v/%v", asserted, err)
-	}
-
 	// Removing the file leaves any keystore item alone and the harvest empty,
 	// which is the fail-closed answer rather than the keystore's value.
 	if err := os.Remove(nativeamp.AuthSecretsPath(dataHome)); err != nil {

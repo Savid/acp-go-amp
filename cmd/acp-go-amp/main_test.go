@@ -14,7 +14,6 @@ import (
 )
 
 func TestRunPassesContractFlags(t *testing.T) {
-	stubProcessIsolationConfig(t)
 	originalServe := serve
 	originalAgentVersion := agentVersion
 	t.Cleanup(func() {
@@ -33,7 +32,6 @@ func TestRunPassesContractFlags(t *testing.T) {
 	agentVersion = func() string { return "v1.2.3" }
 
 	code := run(context.Background(), []string{
-		"-process-isolation-config", testProcessIsolationConfigPath,
 		"-path", "/bin/amp",
 		"-home", "/tmp/amp",
 		"-model", "ignored",
@@ -65,13 +63,9 @@ func TestRunPassesContractFlags(t *testing.T) {
 	if got.TextMapPropagator == nil {
 		t.Fatal("TextMapPropagator is nil")
 	}
-	if got.ProcessIsolation == nil || got.ProcessIsolation.UID != 20001 || got.ProcessIsolation.GID != 20001 {
-		t.Fatalf("ProcessIsolation = %#v", got.ProcessIsolation)
-	}
 }
 
 func TestRunSeedFiles(t *testing.T) {
-	stubProcessIsolationConfig(t)
 	originalServe := serve
 	originalAgentVersion := agentVersion
 	t.Cleanup(func() {
@@ -95,7 +89,6 @@ func TestRunSeedFiles(t *testing.T) {
 	}
 
 	code := run(context.Background(), []string{
-		"-process-isolation-config", testProcessIsolationConfigPath,
 		"-seed-file", "custom/settings.json=" + hostFile,
 		"-seed-file", "custom/settings.json=" + hostFile,
 	}, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil))
@@ -114,8 +107,7 @@ func TestRunSeedFilesErrors(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	stubProcessIsolationConfig(t)
-	code := run(context.Background(), isolatedArgs("-seed-file", "rel="+filepath.Join(t.TempDir(), "missing")), bytes.NewBuffer(nil), bytes.NewBuffer(nil), &stderr)
+	code := run(context.Background(), []string{"-seed-file", "rel=" + filepath.Join(t.TempDir(), "missing")}, bytes.NewBuffer(nil), bytes.NewBuffer(nil), &stderr)
 	if code != 2 {
 		t.Fatalf("missing host file code = %d, want 2", code)
 	}
@@ -154,7 +146,6 @@ func TestRunVersion(t *testing.T) {
 }
 
 func TestRunErrorBranches(t *testing.T) {
-	stubProcessIsolationConfig(t)
 	originalServe := serve
 	originalShutdown := shutdownOpenTelemetry
 	originalAgentVersion := agentVersion
@@ -174,7 +165,7 @@ func TestRunErrorBranches(t *testing.T) {
 	}
 	shutdownOpenTelemetry = func(context.Context, func(context.Context) error) error { return nil }
 	var stderr bytes.Buffer
-	code := run(context.Background(), isolatedArgs(), bytes.NewBuffer(nil), bytes.NewBuffer(nil), &stderr)
+	code := run(context.Background(), nil, bytes.NewBuffer(nil), bytes.NewBuffer(nil), &stderr)
 	if code != 1 {
 		t.Fatalf("serve error code = %d, want 1", code)
 	}
@@ -189,7 +180,7 @@ func TestRunErrorBranches(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	stderr.Reset()
-	code = run(ctx, isolatedArgs(), bytes.NewBuffer(nil), bytes.NewBuffer(nil), &stderr)
+	code = run(ctx, nil, bytes.NewBuffer(nil), bytes.NewBuffer(nil), &stderr)
 	if code != 1 {
 		t.Fatalf("shutdown error code = %d, want 1", code)
 	}
@@ -209,7 +200,6 @@ func TestPendingSignalAndSignalCode(t *testing.T) {
 }
 
 func TestMainExitBranch(t *testing.T) {
-	stubProcessIsolationConfig(t)
 	originalServe := serve
 	originalExit := exit
 	originalArgs := os.Args
@@ -222,7 +212,7 @@ func TestMainExitBranch(t *testing.T) {
 	serve = func(context.Context, io.Reader, io.Writer, ...ampacp.Option) error {
 		return errors.New("serve failed")
 	}
-	os.Args = []string{"acp-go-amp", "-process-isolation-config", testProcessIsolationConfigPath}
+	os.Args = []string{"acp-go-amp"}
 	exitCode := -1
 	exit = func(code int) { exitCode = code }
 

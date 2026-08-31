@@ -1,6 +1,5 @@
 // Package lifecycle implements the `acp-go.dev/lifecycle` extension: the closed
-// event vocabulary, the strict wire decoder, and the reducer that validates one
-// ordered session lifecycle stream.
+// event vocabulary, strict wire decoder, and ordered stream reducer.
 //
 // The reducer is deliberately self-contained rather than shared. Independently
 // written reducers reaching the same verdict on the canonical fixture battery is
@@ -12,8 +11,6 @@
 // emitted stream: a validator that only handles what the harness happens to
 // produce cannot detect the case where the harness produces something else.
 package lifecycle
-
-import "slices"
 
 const (
 	// MetaKey is the family-reserved ACP `_meta` key every lifecycle value rides
@@ -248,67 +245,41 @@ const (
 	EventQuiescenceUpdate EventType = "quiescence_update"
 )
 
-// Negotiated carries the lifecycle facts one configuration proved at
-// `initialize`. Every field is a proven structured fact: an empty activity-kind
-// set and `UpdatesOutsidePrompt` false are truthful answers for a configuration
-// where nothing can outlive a contained prompt.
+// Negotiated records whether lifecycle version 1 is enabled on the connection.
 type Negotiated struct {
-	// Versions is the non-empty intersection of the host's offer and the
-	// versions this configuration implements. The connection speaks the highest
-	// member.
-	Versions                []int          `json:"versions"`
-	UpdatesOutsidePrompt    bool           `json:"updatesOutsidePrompt"`
-	AuthoritativeQuiescence bool           `json:"authoritativeQuiescence"`
-	QuiescenceSource        ProofClass     `json:"quiescenceSource,omitempty"`
-	ActivityKinds           []ActivityKind `json:"activityKinds"`
+	Version int `json:"version"`
 }
 
 // Present reports whether the configuration answered the lifecycle key at all.
 // An absent answer makes every envelope, correlation value, and lifecycle fact
 // illegal on the connection.
-func (n Negotiated) Present() bool { return len(n.Versions) > 0 }
+func (n Negotiated) Present() bool { return n.Version == Version }
 
-// SupportsVersion reports whether an envelope version is inside the negotiated
-// set.
+// SupportsVersion reports whether an envelope carries the enabled version.
 func (n Negotiated) SupportsVersion(version int) bool {
-	return slices.Contains(n.Versions, version)
+	return n.Present() && version == Version
 }
 
-// NegotiatedVersion is the single integer every envelope and correlation value
-// on the connection carries: the highest member of the intersection.
+// NegotiatedVersion is the integer every envelope and correlation value carries.
 func (n Negotiated) NegotiatedVersion() int {
 	if !n.Present() {
 		return 0
 	}
 
-	return slices.Max(n.Versions)
+	return Version
 }
 
 // DeclaresActivityKind reports whether the answer advertised an activity kind. A
 // kind it never advertised is a kind it cannot prove.
 func (n Negotiated) DeclaresActivityKind(kind ActivityKind) bool {
-	return slices.Contains(n.ActivityKinds, kind)
+	return kind.Valid()
 }
 
-// Advertisement renders the answer for `InitializeResponse._meta`. The activity
-// kinds are always an array and never null, and `quiescenceSource` is present
-// exactly when a proof class was proven.
+// Advertisement renders the exact scalar answer for `InitializeResponse._meta`.
 func (n Negotiated) Advertisement() map[string]any {
-	kinds := make([]string, 0, len(n.ActivityKinds))
-	for _, kind := range n.ActivityKinds {
-		kinds = append(kinds, string(kind))
+	if !n.Present() {
+		return nil
 	}
 
-	advertisement := map[string]any{
-		fieldVersions:                slices.Clone(n.Versions),
-		fieldUpdatesOutsidePrompt:    n.UpdatesOutsidePrompt,
-		fieldAuthoritativeQuiescence: n.AuthoritativeQuiescence,
-		fieldActivityKinds:           kinds,
-	}
-
-	if n.AuthoritativeQuiescence {
-		advertisement[fieldQuiescenceSource] = string(n.QuiescenceSource)
-	}
-
-	return advertisement
+	return map[string]any{fieldVersion: Version}
 }

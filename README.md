@@ -107,23 +107,17 @@ rejects at session start.
 - Startup and discovery probes run from target-owned isolated HOME/XDG,
   settings, and MCP paths below `WithScratchDir`; the adapter removes that
   residence only after the selected process boundary settles.
-- Native-process containment: ordinary mode runs Amp directly as the current
-  identity on supported platforms and makes no whole-tree or descendant-count
-  claim. Optional explicit Linux isolation uses a trusted-root subreaper that
-  adopts descendants even after `setsid(2)` and requires kernel-confirmed child
-  absence before success. Explicit isolation is refused elsewhere with no
-  ordinary fallback. Embedded Darwin hosts also have an optional
-  `WithDarwinBestEffortContainment` opt-in for bounded process-group cleanup.
-  That mode cannot contain `setsid` escapes,
-  cannot prove escaped descendants absent, and retains a numeric PGID-reuse
-  collateral-signalling risk.
+- Optional host authority for managed native execution. `WithHostAuthority`
+  delegates environment selection, residence preparation/reclaim, launch,
+  revocation, and whole-tree settlement to the embedding host. Omitting it runs
+  Amp ordinarily as the adapter's current identity.
 - Prompt streaming for assistant messages, tool calls, and thread results.
 - Ordered session lifecycle through the `acp-go.dev/lifecycle` extension when a
   host offers it: one incarnation per prompt, opening on a snapshot, echoing the
   prompt's submission identity, and settling on a terminal state with the
-  harness's own stop reason. The answer states only what the active
-  configuration proves, so authoritative quiescence is advertised under Linux
-  process isolation and nowhere else.
+  harness's own stop reason. Negotiation uses the exact scalar shape
+  `{"version":1}`; managed prompts publish process-containment quiescence only
+  after the host authority has settled the native lease.
 - Static PNG, JPEG, GIF, and WebP prompt input with structural validation before
   Amp starts, as embedded base64 or — for a co-located host that sets
   `WithInputHandoffRoot` — as a digest-verified local file handed over on disk.

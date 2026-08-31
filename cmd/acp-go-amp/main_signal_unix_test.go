@@ -25,7 +25,6 @@ func TestPendingSignalReturnsSignal(t *testing.T) {
 }
 
 func TestRunReturnsSignalCode(t *testing.T) {
-	stubProcessIsolationConfig(t)
 	originalServe := serve
 	originalShutdown := shutdownOpenTelemetry
 	t.Cleanup(func() {
@@ -43,7 +42,7 @@ func TestRunReturnsSignalCode(t *testing.T) {
 	}
 	shutdownOpenTelemetry = func(context.Context, func(context.Context) error) error { return nil }
 
-	code := run(context.Background(), isolatedArgs(), bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil))
+	code := run(context.Background(), nil, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil))
 	if code != 128+int(syscall.SIGTERM) {
 		t.Fatalf("code = %d, want %d", code, 128+int(syscall.SIGTERM))
 	}

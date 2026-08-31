@@ -9,7 +9,7 @@ type ViolationKind string
 
 const (
 	// ViolationUnsupportedVersion refuses an envelope or correlation value whose
-	// version is outside the negotiated set.
+	// version is not the enabled scalar version.
 	ViolationUnsupportedVersion ViolationKind = "unsupported_version"
 	// ViolationUnknownField refuses any unknown member of the negotiation object,
 	// the envelope, an event, or a correlation value.

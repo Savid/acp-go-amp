@@ -11,12 +11,11 @@ stdio or embed the agent directly in Go.
 - Root package `ampacp`: ACP agent methods, request builders, metadata parsing,
   raw events, config options, and session-store API.
 - `internal/amp`: Amp process boundary, stream-json parsing, environment
-  construction, interrupt handling, and the contained-descendant inventory.
+  construction, interrupt handling, and browser mediation.
 - `internal/lifecycle`: the self-contained `acp-go.dev/lifecycle` reducer,
   decoder, negotiation and correlation readers, and ordered emitter.
 - `cmd/acp-go-amp`: stdio ACP command with `-path`, `-home`, `-model`,
-  `-scratch-dir`, `-debug`, `-version`, and repeatable `-seed-file` flags, plus
-  Darwin containment operations.
+  `-scratch-dir`, `-debug`, `-version`, and repeatable `-seed-file` flags.
 - `examples`: embeddable host examples that must stay covered by tests.
 - `integration`: smoke and live tests for installed Amp binaries.
 - `testdata/lifecycle`: the canonical family reducer battery, verbatim.

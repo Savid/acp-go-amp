@@ -9,7 +9,6 @@ import (
 	"io"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -67,7 +66,6 @@ var authSettingsDocument = []byte("{\n  \"" + authNativeSecretsSetting + "\": fa
 
 var (
 	authReadFile  = os.ReadFile
-	authOpenPipe  = os.Pipe
 	errAuthNoURL  = errors.New("amp login printed no authorization URL")
 	errAuthSecret = errors.New("amp account secret is not a non-empty string")
 )
@@ -75,34 +73,6 @@ var (
 // AuthSettingsDocument returns the settings body every session writes.
 func AuthSettingsDocument() []byte {
 	return authSettingsDocument
-}
-
-// AuthFileStoreAsserted reports whether the settings file still resolves the
-// native-secrets flag to false. An absent, malformed, or true value is not an
-// assertion, and the caller fails closed on it rather than reading a store it
-// cannot prove is authoritative.
-func AuthFileStoreAsserted(settingsFile string) (bool, error) {
-	contents, err := authReadFile(settingsFile)
-	if err != nil {
-		return false, fmt.Errorf("read amp settings file: %w", err)
-	}
-
-	var settings map[string]json.RawMessage
-	if err := json.Unmarshal(contents, &settings); err != nil {
-		return false, fmt.Errorf("decode amp settings file: %w", err)
-	}
-
-	raw, ok := settings[authNativeSecretsSetting]
-	if !ok {
-		return false, nil
-	}
-
-	var enabled bool
-	if err := json.Unmarshal(raw, &enabled); err != nil {
-		return false, nil //nolint:nilerr // a non-boolean value is not an assertion, and this reports assertion rather than decode success.
-	}
-
-	return !enabled, nil
 }
 
 // AuthSecretsPath is the exact file the credential leg reads. Nothing else
@@ -166,7 +136,7 @@ func (c *Client) AuthDeploymentSupported() bool {
 		return false
 	}
 
-	environment, err := authLoginEnv(c.options.Isolation, c.options.OrdinaryEnvironment, c.options.Env, c.options.Cwd)
+	environment, err := authLoginEnv(c, c.options.Env, c.options.Cwd)
 	if err != nil {
 		return false
 	}
@@ -184,14 +154,17 @@ func (c *Client) AuthDeploymentSupported() bool {
 // AuthLogin is one running `amp login`. It owns the child's containment
 // boundary, its pipes, and the single authorization URL it printed.
 type AuthLogin struct {
-	tree     *processTree
+	process  NativeProcess
 	stdin    io.WriteCloser
 	stdout   io.ReadCloser
 	stderr   io.ReadCloser
-	wait     *commandWait
+	waitDone chan struct{}
+	waitErr  error
+	result   NativeResult
 	url      chan string
 	dataHome string
-	shim     *browserShim
+	settle   func(context.Context) error
+	cleanup  func() error
 
 	stdinOnce sync.Once
 	stdinErr  error
@@ -209,7 +182,7 @@ type AuthLogin struct {
 // without a provable interception boundary fail before the login child is
 // constructed.
 func (c *Client) StartAuthLogin(ctx context.Context) (*AuthLogin, error) {
-	environment, err := authLoginEnv(c.options.Isolation, c.options.OrdinaryEnvironment, c.options.Env, c.options.Cwd)
+	environment, err := authLoginEnv(c, c.options.Env, c.options.Cwd)
 	if err != nil {
 		return nil, err
 	}
@@ -219,34 +192,31 @@ func (c *Client) StartAuthLogin(ctx context.Context) (*AuthLogin, error) {
 		return nil, err
 	}
 
-	if compatibilityErr := c.checkAuthLoginCompatibility(path); compatibilityErr != nil {
-		return nil, fmt.Errorf("amp login: %w", compatibilityErr)
+	if c.options.StartNative == nil {
+		if safetyErr := c.checkAuthLoginSafety(path); safetyErr != nil {
+			return nil, fmt.Errorf("amp login: %w", safetyErr)
+		}
 	}
 
-	cmd := commandContext(context.Background(), path, c.authLoginArgs()...)
-
-	cmd.Dir = c.options.Cwd
-	if cmd.Dir == "" {
-		cmd.Dir, err = getwd()
+	cwd := c.options.Cwd
+	if cwd == "" {
+		cwd, err = getwd()
 		if err != nil {
 			return nil, fmt.Errorf("get working directory: %w", err)
 		}
 	}
 
-	shim, err := newBrowserShim(c.options.ScratchParent)
+	if c.options.BrowserShim == "" {
+		return nil, fmt.Errorf("amp login: %w", ErrBrowserLaunchUnsupported)
+	}
+
+	environment = browserShimEnviron(environment, c.options.BrowserShim)
+
+	process, err := c.startNative(ctx, NativeRequest{
+		Executable: path, Arguments: c.authLoginArgs(), Environment: environment, WorkingDirectory: cwd,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("amp login: %w", err)
-	}
-
-	if handoffErr := handoffGeneratedNativeTree(shim.dir, c.options.Isolation); handoffErr != nil {
-		return nil, errors.Join(fmt.Errorf("amp login browser shim: %w", handoffErr), shim.remove())
-	}
-
-	cmd.Env = shim.environ(environment)
-
-	launch, err := c.prepareProcessLaunch(ctx, cmd)
-	if err != nil {
-		return nil, errors.Join(fmt.Errorf("amp login: %w", err), shim.remove())
 	}
 
 	// The residence is the data home the containment boundary settled on, not
@@ -254,42 +224,24 @@ func (c *Client) StartAuthLogin(ctx context.Context) (*AuthLogin, error) {
 	// roots rewrites it. The launch publishes that environment, so the harvest
 	// depends on a stated hand-off rather than on cmd still being the object the
 	// boundary mutated.
-	dataHome := environmentMap(launch.nativeEnv)[dataHomeEnv]
-
-	pipes, err := newAuthLoginPipes()
-	if err != nil {
-		return nil, errors.Join(err, launch.close(), shim.remove())
-	}
-
-	cmd = launch.cmd
-	cmd.Stdin = pipes.stdinReader
-	cmd.Stdout = pipes.stdoutWriter
-	cmd.Stderr = pipes.stderrWriter
-	cmd.WaitDelay = defaultCloseKillAfter
-
-	tree, err := startProcessTree(launch)
-	if err != nil {
-		pipes.closeAll()
-
-		return nil, errors.Join(fmt.Errorf("start amp login: %w", err), shim.remove())
-	}
-
-	pipes.closeChildSide()
+	dataHome := environmentMap(environment)[dataHomeEnv]
 
 	login := &AuthLogin{
-		tree:     tree,
-		stdin:    pipes.stdin,
-		stdout:   pipes.stdout,
-		stderr:   pipes.stderr,
-		wait:     tree.commandWait(),
+		process:  process,
+		stdin:    process.Stdin(),
+		stdout:   process.Stdout(),
+		stderr:   process.Stderr(),
+		waitDone: make(chan struct{}),
 		url:      make(chan string, 1),
 		dataHome: dataHome,
-		shim:     shim,
 		onPanic:  c.options.OnGoroutinePanic,
+		settle:   c.options.AfterNativeWait,
+		cleanup:  c.options.CleanupResidence,
 	}
 
 	go login.readStdout(ctx)
 	go login.drainStderr(ctx)
+	go login.waitNative() //nolint:gosec // Wait must outlive cancellation and settle containment.
 
 	return login, nil
 }
@@ -306,20 +258,10 @@ func (c *Client) authLoginArgs() []string {
 // authLoginEnv builds the login child's environment: the session's own values
 // plus the headless override, with the ambient API key removed however it
 // arrived.
-func authLoginEnv(isolation *ProcessIsolation, ordinary, base map[string]string, cwd string) ([]string, error) {
+func authLoginEnv(client *Client, base map[string]string, cwd string) ([]string, error) {
 	managed := map[string]string{authHeadlessOAuthEnv: "1"}
 
-	var (
-		env []string
-		err error
-	)
-
-	if isolation != nil {
-		env, err = buildIsolatedEnvironment(isolation, cwd, base, managed)
-	} else {
-		env, err = buildEnvironment(cwd, ordinary, base, managed)
-	}
-
+	env, err := client.buildEnvironment(composeEnvironmentMaps(base, managed), cwd)
 	if err != nil {
 		return nil, err
 	}
@@ -337,62 +279,16 @@ func authLoginEnv(isolation *ProcessIsolation, ordinary, base map[string]string,
 	return kept, nil
 }
 
-type authLoginPipes struct {
-	stdinReader  *os.File
-	stdin        *os.File
-	stdout       *os.File
-	stdoutWriter *os.File
-	stderr       *os.File
-	stderrWriter *os.File
-}
+func composeEnvironmentMaps(phases ...map[string]string) map[string]string {
+	out := map[string]string{}
 
-func newAuthLoginPipes() (*authLoginPipes, error) {
-	pipes := &authLoginPipes{}
-
-	stdinReader, stdin, err := authOpenPipe()
-	if err != nil {
-		return nil, fmt.Errorf("create amp login stdin: %w", err)
-	}
-
-	pipes.stdinReader, pipes.stdin = stdinReader, stdin
-
-	stdout, stdoutWriter, err := authOpenPipe()
-	if err != nil {
-		pipes.closeAll()
-
-		return nil, fmt.Errorf("create amp login stdout: %w", err)
-	}
-
-	pipes.stdout, pipes.stdoutWriter = stdout, stdoutWriter
-
-	stderr, stderrWriter, err := authOpenPipe()
-	if err != nil {
-		pipes.closeAll()
-
-		return nil, fmt.Errorf("create amp login stderr: %w", err)
-	}
-
-	pipes.stderr, pipes.stderrWriter = stderr, stderrWriter
-
-	return pipes, nil
-}
-
-func (p *authLoginPipes) closeChildSide() {
-	for _, file := range []*os.File{p.stdinReader, p.stdoutWriter, p.stderrWriter} {
-		if file != nil {
-			_ = file.Close()
+	for _, phase := range phases {
+		for key, value := range phase {
+			out[key] = value
 		}
 	}
-}
 
-func (p *authLoginPipes) closeAll() {
-	p.closeChildSide()
-
-	for _, file := range []*os.File{p.stdin, p.stdout, p.stderr} {
-		if file != nil {
-			_ = file.Close()
-		}
-	}
+	return out
 }
 
 func (l *AuthLogin) recoverGoroutine(ctx context.Context, name string) {
@@ -483,13 +379,13 @@ func (l *AuthLogin) Submit(ctx context.Context, input string) error {
 		return err
 	}
 
-	waitErr, completed := l.wait.await(ctx)
-	if !completed {
-		return fmt.Errorf("wait for amp login: %w", waitErr)
-	}
-
-	if waitErr != nil {
-		return fmt.Errorf("amp login: %w", waitErr)
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("wait for amp login: %w", ctx.Err())
+	case <-l.waitDone:
+		if l.waitErr != nil || l.result.ExitCode != 0 || l.result.Signal != 0 || l.result.Revoked {
+			return fmt.Errorf("amp login: %w", l.waitErr)
+		}
 	}
 
 	return nil
@@ -499,15 +395,24 @@ func (l *AuthLogin) Submit(ctx context.Context, input string) error {
 // how a login that completed on its own is discovered.
 func (l *AuthLogin) Settled() (bool, error) {
 	select {
-	case <-l.wait.done:
-		if l.wait.err != nil {
-			return true, fmt.Errorf("amp login: %w", l.wait.err)
+	case <-l.waitDone:
+		if l.waitErr != nil || l.result.ExitCode != 0 || l.result.Signal != 0 || l.result.Revoked {
+			return true, fmt.Errorf("amp login: %w", l.waitErr)
 		}
 
 		return true, nil
 	default:
 		return false, nil
 	}
+}
+
+func (l *AuthLogin) waitNative() {
+	l.result, l.waitErr = l.process.Wait(context.Background())
+	if l.settle != nil {
+		l.waitErr = errors.Join(l.waitErr, l.settle(context.Background()))
+	}
+
+	close(l.waitDone)
 }
 
 func (l *AuthLogin) closeStdin() error {
@@ -525,37 +430,38 @@ func (l *AuthLogin) closeStdin() error {
 // expected outcome and is not reported as a failure.
 func (l *AuthLogin) Close() error {
 	l.closeOnce.Do(func() {
-		killErr := l.tree.kill()
-		containmentErr := processTreeTerminateAndWait(l.tree, defaultCloseWait)
+		_ = l.closeStdin()
+		closeCtx, cancel := context.WithTimeout(context.Background(), defaultCloseWait)
+		revokeErr := l.process.Revoke(closeCtx)
 
-		if ProcessContainmentComplete(containmentErr) {
-			waitCtx, cancel := context.WithTimeout(context.Background(), commandWaitTimeout)
-			if _, completed := l.wait.await(waitCtx); !completed {
-				containmentErr = errors.Join(containmentErr,
-					fmt.Errorf("%w: wait for amp login close", ErrProcessContainmentIncomplete))
-			}
+		var waitErr error
 
-			cancel()
+		select {
+		case <-l.waitDone:
+			waitErr = l.waitErr
+		case <-closeCtx.Done():
+			waitErr = errors.Join(closeCtx.Err(), ErrContainmentIncomplete)
+		}
+
+		cancel()
+
+		if (l.result.Revoked || l.result.Signal != 0) && !errors.Is(waitErr, ErrContainmentIncomplete) {
+			waitErr = nil
+		}
+
+		var cleanupErr error
+		if l.cleanup != nil && !errors.Is(waitErr, ErrContainmentIncomplete) {
+			cleanupErr = l.cleanup()
 		}
 
 		l.closeErr = errors.Join(
-			authExpected(killErr),
-			containmentErr,
-			l.closeStdin(),
+			revokeErr,
+			waitErr,
 			l.stdout.Close(),
 			l.stderr.Close(),
-			l.shim.remove(),
+			cleanupErr,
 		)
 	})
 
 	return l.closeErr
-}
-
-// authExpected drops the error a kill against an already-exited child returns.
-func authExpected(err error) error {
-	if err == nil || errors.Is(err, os.ErrProcessDone) || errors.Is(err, exec.ErrNotFound) {
-		return nil
-	}
-
-	return err
 }

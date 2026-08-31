@@ -330,13 +330,20 @@ func (p *providerAuth) inventory(_ context.Context, params json.RawMessage) (any
 		proof := authProofNotConfirmed
 
 		if record.Method == authMethodLogin {
-			if storeErr := session.authFileStore(); storeErr != nil {
+			if storeErr := session.authPolicy(); storeErr != nil {
 				return nil, authFailed(authCauseNativeVeto, record.ProviderID, record.Method, "")
 			}
 
-			present, presentErr := authSecretPresent(p.authResidence(session, record.ProviderID, record.ConnectionID))
-			if presentErr != nil {
-				return nil, authFailed(authCauseHarvestFailed, record.ProviderID, record.Method, "")
+			residence := p.authResidence(session, record.ProviderID, record.ConnectionID)
+			present := false
+
+			if residence != "" {
+				var presentErr error
+
+				present, presentErr = authSecretPresent(residence)
+				if presentErr != nil {
+					return nil, authFailed(authCauseHarvestFailed, record.ProviderID, record.Method, "")
+				}
 			}
 
 			proof = authProofSource(record.State, present)
@@ -372,7 +379,7 @@ func (p *providerAuth) authResidence(session *agentSession, providerID string, c
 		}
 	}
 
-	return session.authDataHome()
+	return ""
 }
 
 // authProofSource is the total function of ledger state and native probe. A

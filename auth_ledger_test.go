@@ -548,39 +548,23 @@ func TestInventoryRejectsAddressingAndProbeFailures(t *testing.T) {
 	}
 
 	requireAuthCause(t, err, authCauseHarvestFailed)
-
-	// An unasserted native store vetoes the probe rather than answering from a
-	// store the adapter cannot prove is authoritative.
-	if writeErr := os.WriteFile(fixture.session.settingsFile,
-		[]byte(`{"amp.experimental.cli.nativeSecretsStorage.enabled":true}`), 0o600); writeErr != nil {
-		t.Fatal(writeErr)
-	}
-
-	err = fixture.call(AuthInventoryMethod, map[string]any{authFieldSessionID: string(fixture.session.id)}, nil)
-	if err == nil {
-		t.Fatal("inventory answered against an unasserted native store")
-	}
-
-	requireAuthCause(t, err, authCauseNativeVeto)
 }
 
 func TestAuthResidenceFallsBackToTheSessionHome(t *testing.T) {
 	fixture := newAuthFixture(t, "login")
 
-	if residence := fixture.broker.authResidence(fixture.session, authProviderID, "connection-1"); residence != fixture.session.authDataHome() {
+	if residence := fixture.broker.authResidence(fixture.session, authProviderID, "connection-1"); residence != "" {
 		t.Fatalf("residence with no flow = %q", residence)
 	}
 
 	fixture.mustAuthorize("connection-1")
 
-	if residence := fixture.broker.authResidence(fixture.session, "openai", "connection-1"); residence != fixture.session.authDataHome() {
+	if residence := fixture.broker.authResidence(fixture.session, "openai", "connection-1"); residence != "" {
 		t.Fatalf("residence for an unrelated provider = %q", residence)
 	}
 
-	// A connection with no flow of its own here names a slot nothing in this
-	// session established, so it falls back rather than borrowing another
-	// connection's residence.
-	if residence := fixture.broker.authResidence(fixture.session, authProviderID, "connection-2"); residence != fixture.session.authDataHome() {
+	// A connection with no flow never borrows another connection's residence.
+	if residence := fixture.broker.authResidence(fixture.session, authProviderID, "connection-2"); residence != "" {
 		t.Fatalf("residence for an unrelated connection = %q", residence)
 	}
 

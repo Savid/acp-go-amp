@@ -1,11 +1,8 @@
 {
   "name": "unnegotiated-negative-quiescence",
-  "purpose": "The answer is the contract for the connection, not a hint about it. A configuration that proved no quiescence class emits no quiescence_update at all: even a negative one asserts a class it never had, and admitting it would let a host read authoritative absence of background work from a source that cannot observe it.",
+  "purpose": "Version 1 carries negative quiescence without separately negotiated feature facts, so revoking a boundary reduces normally.",
   "negotiated": {
-    "versions": [1],
-    "updatesOutsidePrompt": true,
-    "authoritativeQuiescence": false,
-    "activityKinds": ["task"]
+    "version": 1
   },
   "input": [
     {
@@ -49,12 +46,10 @@
     }
   ],
   "expect": {
-    "verdict": "fail_closed",
-    "violation": "unnegotiated_fact",
-    "atInput": 1,
+    "verdict": "accepted",
     "state": {
       "streamId": "strm-1",
-      "reducedThrough": 1,
+      "reducedThrough": 2,
       "suppressedRetransmissions": 0,
       "foreground": {"state": "idle", "cycleId": "cyc-0"},
       "turns": [],

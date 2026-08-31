@@ -553,19 +553,8 @@ func TestAuthSessionAccessorsAndPanicGuard(t *testing.T) {
 		t.Fatal("the session reports no isolated data home")
 	}
 
-	if err := fixture.session.authFileStore(); err != nil {
+	if err := fixture.session.authPolicy(); err != nil {
 		t.Fatalf("the wrapper's own settings file does not assert the file store: %v", err)
-	}
-
-	// A settings file something else rewrote fails closed rather than reading a
-	// store the adapter cannot prove is authoritative.
-	if err := os.WriteFile(fixture.session.settingsFile,
-		[]byte(`{"amp.experimental.cli.nativeSecretsStorage.enabled":true}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := fixture.session.authFileStore(); !errors.Is(err, errAuthNativeStore) {
-		t.Fatalf("authFileStore = %v, want the native-store sentinel", err)
 	}
 
 	done := make(chan struct{})
@@ -586,7 +575,7 @@ func TestAuthSessionAccessorsAndPanicGuard(t *testing.T) {
 func TestAuthNativeSeamsAreTheOnlyNativeEntryPoints(t *testing.T) {
 	// The package reaches amp's credential state through exactly these, so a
 	// second reader cannot appear without changing one of them.
-	if authReadSecret == nil || authSecretPresent == nil || authFileStoreAsserted == nil || authStartLogin == nil {
+	if authReadSecret == nil || authSecretPresent == nil || authStorePolicy == nil || authStartLogin == nil {
 		t.Fatal("a native provider-auth entry point is unset")
 	}
 
@@ -594,8 +583,8 @@ func TestAuthNativeSeamsAreTheOnlyNativeEntryPoints(t *testing.T) {
 		t.Fatalf("authReadSecret over an empty home: %v", err)
 	}
 
-	if _, err := authFileStoreAsserted(filepath.Join(t.TempDir(), "absent")); err == nil {
-		t.Fatal("an absent settings file asserted the file store")
+	if err := authStorePolicy(); err != nil {
+		t.Fatalf("store policy = %v", err)
 	}
 
 	if path := nativeamp.AuthSecretsPath("/data"); path != filepath.Join("/data", "amp", "secrets.json") {

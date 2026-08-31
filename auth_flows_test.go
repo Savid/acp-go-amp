@@ -75,40 +75,6 @@ func TestAuthorizeRelaysTheHostedPasteBackURL(t *testing.T) {
 	}
 }
 
-func TestHostedStoreVetoPrecedesSupersessionAndLedgerMutation(t *testing.T) {
-	fixture := newAuthFixture(t, "login-hang")
-	existing := fixture.mustAuthorize("connection-existing")
-
-	before, ok, err := fixture.broker.ledger.read(authProviderID, "connection-existing")
-	if err != nil || !ok {
-		t.Fatalf("read existing intent: %#v/%v/%v", before, ok, err)
-	}
-
-	if writeErr := os.WriteFile(fixture.session.settingsFile,
-		[]byte(`{"amp.experimental.cli.nativeSecretsStorage.enabled":true}`), 0o600); writeErr != nil {
-		t.Fatal(writeErr)
-	}
-
-	_, err = fixture.authorize("connection-replacement", "request-replacement")
-	if err == nil {
-		t.Fatal("hosted authorize crossed an unasserted native store")
-	}
-	requireAuthCause(t, err, authCauseNativeVeto)
-
-	if status := fixture.status(existing.FlowID); status.State != authStatePending || status.Reason != "" {
-		t.Fatalf("store veto superseded the existing flow: %#v", status)
-	}
-
-	after, ok, err := fixture.broker.ledger.read(authProviderID, "connection-existing")
-	if err != nil || !ok || after != before {
-		t.Fatalf("store veto changed the existing ledger intent: %#v/%v/%v, before %#v", after, ok, err, before)
-	}
-
-	if _, ok, err := fixture.broker.ledger.read(authProviderID, "connection-replacement"); err != nil || ok {
-		t.Fatalf("store veto recorded replacement intent: ok=%v err=%v", ok, err)
-	}
-}
-
 // TestAuthorizeRefusesANonDefaultDeployment pins the surface closed against an
 // Amp deployment none of its pinned facts describe. The only host a relayed URL
 // may name and the only store key a harvest reads are both the default
@@ -534,22 +500,6 @@ func TestAuthorizeFailsClosedOnANativeRefusal(t *testing.T) {
 	}
 }
 
-func TestAuthorizeFailsClosedOnAnUnassertedNativeStore(t *testing.T) {
-	fixture := newAuthFixture(t, "login")
-
-	if err := os.WriteFile(fixture.session.settingsFile,
-		[]byte(`{"amp.experimental.cli.nativeSecretsStorage.enabled":true}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	_, err := fixture.authorize("connection-1", "request-a")
-	if err == nil {
-		t.Fatal("authorize ran against an unasserted native store")
-	}
-
-	requireAuthCause(t, err, authCauseNativeVeto)
-}
-
 func TestAuthorizeFailsClosedOnALedgerOrTokenFailure(t *testing.T) {
 	fixture := newAuthFixture(t, "login")
 	generation := fixture.generation()
@@ -750,29 +700,14 @@ func TestCallbackFailsClosedOnARefusal(t *testing.T) {
 	}
 }
 
-func TestCallbackFailsClosedOnAnUnassertedStoreOrLedgerFailure(t *testing.T) {
-	veto := newAuthFixture(t, "login-hang")
-	vetoed := veto.mustAuthorize("connection-1")
-
-	if err := os.WriteFile(veto.session.settingsFile,
-		[]byte(`{"amp.experimental.cli.nativeSecretsStorage.enabled":true}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	err := veto.callback(vetoed.FlowID, "pasted")
-	if err == nil {
-		t.Fatal("callback ran against an unasserted native store")
-	}
-
-	requireAuthCause(t, err, authCauseNativeVeto)
-
+func TestCallbackFailsClosedOnLedgerFailure(t *testing.T) {
 	ledgerFailure := newAuthFixture(t, "login")
 	authorized := ledgerFailure.mustAuthorize("connection-1")
 
 	original := ledgerMarshal
 	ledgerMarshal = func(any) ([]byte, error) { return nil, errors.New("no encoder") }
 
-	err = ledgerFailure.callback(authorized.FlowID, "pasted")
+	err := ledgerFailure.callback(authorized.FlowID, "pasted")
 	ledgerMarshal = original
 
 	if err == nil {
@@ -808,7 +743,6 @@ func TestStatusDiscoversAnIndependentCompletion(t *testing.T) {
 	if status := fixture.awaitFlowState(authorized.FlowID); status.State != authStateAuthenticated {
 		t.Fatalf("independently completed flow = %#v", status)
 	}
-
 	var harvest authCredentialResult
 	if err := fixture.call(AuthCredentialMethod, map[string]any{
 		authFieldSessionID: string(fixture.session.id), authFieldProviderID: authProviderID, authFieldFlowID: authorized.FlowID,

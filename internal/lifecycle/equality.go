@@ -16,6 +16,10 @@ import (
 // whose expansion no machine will. Trailing content after the document is not a
 // second value to compare but a frame that was never one value.
 func decodeValue(raw []byte) (any, bool) {
+	if !jsonDocumentHasUniqueMembers(raw) {
+		return nil, false
+	}
+
 	reader := json.NewDecoder(bytes.NewReader(raw))
 	reader.UseNumber()
 
@@ -30,6 +34,84 @@ func decodeValue(raw []byte) (any, bool) {
 	}
 
 	return value, true
+}
+
+func jsonDocumentHasUniqueMembers(raw []byte) bool {
+	reader := json.NewDecoder(bytes.NewReader(raw))
+	reader.UseNumber()
+
+	if !consumeUniqueJSONValue(reader) {
+		return false
+	}
+
+	_, err := reader.Token()
+
+	return errors.Is(err, io.EOF)
+}
+
+func consumeUniqueJSONValue(reader *json.Decoder) bool {
+	token, err := reader.Token()
+	if err != nil {
+		return false
+	}
+
+	delimiter, structured := token.(json.Delim)
+	if !structured {
+		return true
+	}
+
+	switch delimiter {
+	case '{':
+		seen := map[string]struct{}{}
+
+		for reader.More() {
+			name, ok := nextObjectMemberName(reader)
+			if !ok {
+				return false
+			}
+
+			if _, duplicate := seen[name]; duplicate {
+				return false
+			}
+
+			seen[name] = struct{}{}
+
+			if !consumeUniqueJSONValue(reader) {
+				return false
+			}
+		}
+	case '[':
+		for reader.More() {
+			if !consumeUniqueJSONValue(reader) {
+				return false
+			}
+		}
+	default:
+		return false
+	}
+
+	closing, err := reader.Token()
+	if err != nil {
+		return false
+	}
+
+	want := json.Delim('}')
+	if delimiter == '[' {
+		want = ']'
+	}
+
+	return closing == want
+}
+
+func nextObjectMemberName(reader *json.Decoder) (string, bool) {
+	token, err := reader.Token()
+	if err != nil {
+		return "", false
+	}
+
+	name, ok := token.(string)
+
+	return name, ok
 }
 
 // valueOf decodes one document the decoder already proved. Bytes reach a record

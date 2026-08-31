@@ -26,6 +26,7 @@ type Agent struct {
 	store               SessionStore
 	observe             *observer.Observer
 	ordinaryEnvironment map[string]string
+	nativeEnvironment   map[string]string
 
 	callShutdown chan struct{}
 	callWG       sync.WaitGroup
@@ -60,11 +61,9 @@ type Agent struct {
 	nextCallbackGeneration  atomic.Uint64
 	pending                 int
 	clientCalls             chan struct{}
-	providerProcesses       *providerProcessSnapshotTracker
 	lifecycleContainmentErr error
 
 	activeLimitErr   error
-	containmentMode  RuntimeContainmentMode
 	configurationErr error
 	providerAuth     *providerAuth
 	// lifecycle is the answer this connection negotiated at initialize. It is
@@ -137,7 +136,7 @@ type agentCloseFlight struct {
 // retainHarnessPath records the harness a probe validated. An empty or relative
 // answer is a broken probe rather than a reason to resolve again.
 func (a *Agent) retainHarnessPath(path string) error {
-	if !filepath.IsAbs(path) {
+	if a.options.HostAuthority == nil && !filepath.IsAbs(path) {
 		return fmt.Errorf("amp startup probe reported unusable harness path %q", path)
 	}
 
@@ -186,18 +185,13 @@ func NewAgent(opts ...Option) *Agent {
 		Propagator:     options.TextMapPropagator,
 		Version:        options.AgentVersion,
 	})
-	options.RuntimeResourceHooks = instrumentRuntimeResourceHooks(options.RuntimeResourceHooks, observe)
-	mode := containmentMode(options)
 
-	providerProcesses := newProviderProcessSnapshotTracker(options.RuntimeResourceHooks, mode.provesWholeTreeLifecycle())
-	if options.RuntimeResourceHooks.ObserveContainment != nil {
-		options.RuntimeResourceHooks.ObserveContainment(context.Background(), mode)
-	}
-
-	if mode == RuntimeContainmentBestEffort {
-		log.Warn("Darwin best-effort process containment is enabled; escaped descendants may survive, numeric PGID reuse can cause collateral signalling, marker correlation is not ownership, markers can be scrubbed, and native-root permits do not bound escaped provider work",
-			slog.String("containment", string(mode)),
-		)
+	var (
+		nativeEnvironment map[string]string
+		authorityErr      error
+	)
+	if options.hostAuthoritySupplied {
+		nativeEnvironment, authorityErr = readHostEnvironment(options.HostAuthority)
 	}
 
 	agent := &Agent{
@@ -206,6 +200,7 @@ func NewAgent(opts ...Option) *Agent {
 		store:               store,
 		observe:             observe,
 		ordinaryEnvironment: nativeamp.CaptureOrdinaryEnvironment(),
+		nativeEnvironment:   nativeEnvironment,
 		sessions:            make(map[acp.SessionId]*agentSession),
 		deleted:             make(map[acp.SessionId]struct{}),
 		sessionFlights:      make(map[acp.SessionId]*agentSessionFlight),
@@ -213,12 +208,12 @@ func NewAgent(opts ...Option) *Agent {
 		cleanupOwners:       make(map[acp.SessionId][]agentCleanupOwner),
 		cleanupResidences:   make(map[uint64]*agentCleanupResidence),
 		clientCalls:         make(chan struct{}, maxConcurrentClientCalls(options.ConcurrencyLimits)),
-		providerProcesses:   providerProcesses,
 		callShutdown:        make(chan struct{}),
 		callbacks:           make(map[uint64]*agentCallbackAuthority),
 		activeLimitErr:      validateConcurrencyLimits(options.ConcurrencyLimits),
-		containmentMode:     mode,
 		configurationErr: errors.Join(
+			authorityErr,
+			validateEnvironment(nativeEnvironment),
 			validateContainmentOptions(options),
 			validateImageLimits(options.ImageLimits),
 			validateInputHandoffRoot(options.InputHandoffRoot),
@@ -228,14 +223,6 @@ func NewAgent(opts ...Option) *Agent {
 	agent.providerAuth = newProviderAuth(agent)
 
 	return agent
-}
-
-func (a *Agent) ContainmentMode() RuntimeContainmentMode {
-	if a == nil {
-		return RuntimeContainmentUnavailable
-	}
-
-	return a.containmentMode
 }
 
 func Serve(ctx context.Context, input io.Reader, output io.Writer, opts ...Option) (returnErr error) {
@@ -449,7 +436,7 @@ func (a *Agent) optionsError() error {
 		return nil
 	}
 
-	return acp.NewInternalError(map[string]any{jsonFieldError: configurationErr.Error()})
+	return errors.Join(acp.NewInternalError(map[string]any{jsonFieldError: configurationErr.Error()}), configurationErr)
 }
 
 func (a *Agent) Initialize(ctx context.Context, params acp.InitializeRequest) (resp acp.InitializeResponse, err error) {

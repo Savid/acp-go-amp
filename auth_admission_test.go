@@ -26,16 +26,16 @@ func newAuthAdmissionBarrier(t *testing.T) *authAdmissionBarrier {
 	t.Helper()
 
 	barrier := &authAdmissionBarrier{arrived: make(chan struct{}, 4), release: make(chan struct{})}
-	original := authFileStoreAsserted
+	original := authStorePolicy
 
-	t.Cleanup(func() { authFileStoreAsserted = original })
+	t.Cleanup(func() { authStorePolicy = original })
 
-	authFileStoreAsserted = func(settingsFile string) (bool, error) {
+	authStorePolicy = func() error {
 		barrier.admitted.Add(1)
 		barrier.arrived <- struct{}{}
 		<-barrier.release
 
-		return original(settingsFile)
+		return original()
 	}
 
 	return barrier

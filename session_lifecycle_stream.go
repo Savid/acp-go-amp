@@ -2,10 +2,8 @@ package ampacp
 
 import (
 	"context"
-	"strconv"
 
 	"github.com/coder/acp-go-sdk"
-	"github.com/savid/acp-go-amp/internal/amp"
 	"github.com/savid/acp-go-amp/internal/lifecycle"
 )
 
@@ -41,7 +39,8 @@ type promptStream struct {
 	// negotiated is the answer this connection carries. The quiescence fact a
 	// boundary may state is governed by it and by that boundary's own proof,
 	// never by what the opening snapshot happened to claim.
-	negotiated lifecycle.Negotiated
+	negotiated    lifecycle.Negotiated
+	authoritative bool
 	// proof is the quiescence fact this configuration can state at stream open.
 	proof lifecycle.QuiescenceFact
 }
@@ -66,13 +65,14 @@ func (s *agentSession) openPromptStream(ctx context.Context) (*promptStream, err
 	}
 
 	incarnation := &promptStream{
-		session:     s,
-		client:      client,
-		stream:      lifecycle.NewStream(id, negotiated),
-		openCycleID: id + lifecycleOpenCycleSuffix,
-		cycleID:     id + lifecycleCycleSuffix,
-		turnID:      id + lifecycleTurnSuffix,
-		negotiated:  negotiated,
+		session:       s,
+		client:        client,
+		stream:        lifecycle.NewStream(id, negotiated),
+		openCycleID:   id + lifecycleOpenCycleSuffix,
+		cycleID:       id + lifecycleCycleSuffix,
+		turnID:        id + lifecycleTurnSuffix,
+		negotiated:    negotiated,
+		authoritative: s.agent.options.HostAuthority != nil,
 	}
 
 	// The stream opens on a certified boundary only where one was actually
@@ -80,10 +80,10 @@ func (s *agentSession) openPromptStream(ctx context.Context) (*promptStream, err
 	// enumerated empty, or this session never started a process at all. A
 	// configuration that proves no class, and a session whose last boundary could
 	// not state vacancy, both open on a negative fact rather than a guess.
-	if negotiated.AuthoritativeQuiescence && s.vacancyProven() {
+	if incarnation.authoritative && s.vacancyProven() {
 		incarnation.proof = lifecycle.QuiescenceFact{
 			Quiescent: true,
-			Source:    negotiated.QuiescenceSource,
+			Source:    lifecycle.ProofClassProcessContainment,
 		}
 	}
 
@@ -119,8 +119,8 @@ func (p *promptStream) accept(ctx context.Context, submission lifecycle.Submissi
 // The fact is governed by the answer and by the proof this boundary completed,
 // never by the one the opening snapshot carried. An incarnation that opened
 // unable to state a boundary still states the one it went on to prove.
-func (p *promptStream) settle(ctx context.Context, outcome lifecycleOutcome, proof amp.ContainmentProof) error {
-	delivery, err := p.terminalDelivery(outcome, proof)
+func (p *promptStream) settle(ctx context.Context, outcome lifecycleOutcome, vacant bool) error {
+	delivery, err := p.terminalDelivery(outcome, vacant)
 	if err != nil {
 		return err
 	}
@@ -128,7 +128,7 @@ func (p *promptStream) settle(ctx context.Context, outcome lifecycleOutcome, pro
 	return delivery.deliver(ctx)
 }
 
-func (p *promptStream) terminalDelivery(outcome lifecycleOutcome, proof amp.ContainmentProof) (*promptTerminalDelivery, error) {
+func (p *promptStream) terminalDelivery(outcome lifecycleOutcome, vacant bool) (*promptTerminalDelivery, error) {
 	if p == nil {
 		return &promptTerminalDelivery{}, nil
 	}
@@ -142,12 +142,12 @@ func (p *promptStream) terminalDelivery(outcome lifecycleOutcome, proof amp.Cont
 
 	notifications = append(notifications, idle)
 
-	if p.negotiated.AuthoritativeQuiescence && proof.Vacant() {
+	if p.authoritative && vacant {
 		quiescence, emitErr := p.prepare(lifecycle.QuiescenceEvent(lifecycle.QuiescenceFact{
 			Quiescent: true,
-			Source:    p.negotiated.QuiescenceSource,
+			Source:    lifecycle.ProofClassProcessContainment,
 			Watermark: p.stream.State().ReducedThrough,
-			Barrier:   lifecycleBarrierPrefix + strconv.Itoa(proof.Root),
+			Barrier:   lifecycleBarrierPrefix + "authority",
 		}))
 		if emitErr != nil {
 			return nil, emitErr

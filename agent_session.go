@@ -48,10 +48,7 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (r
 		return acp.NewSessionResponse{}, err
 	}
 
-	readinessStarted := time.Now()
 	startErr := a.ensureNewSessionStartup(ctx, params.Cwd, meta)
-	observeRuntimeStartupStage(ctx, a.options.RuntimeResourceHooks, RuntimeResourceDiscovery, RuntimeStartupReadiness, readinessStarted, startErr)
-
 	if startErr != nil {
 		return acp.NewSessionResponse{}, startErr
 	}
@@ -784,9 +781,15 @@ func (a *Agent) SetSessionConfigOption(ctx context.Context, params acp.SetSessio
 		return acp.SetSessionConfigOptionResponse{}, unsupportedField(fieldValue)
 	}
 
-	session, err := a.session(params.ValueId.SessionId)
+	ctx, use, err := a.beginSessionUse(ctx, params.ValueId.SessionId)
 	if err != nil {
 		return acp.SetSessionConfigOptionResponse{}, err
+	}
+	defer a.finishSessionUse(params.ValueId.SessionId, use)
+
+	session := use.session
+	if session == nil {
+		return acp.SetSessionConfigOptionResponse{}, unknownSessionError()
 	}
 
 	if err := session.setConfig(ctx, params.ValueId.ConfigId, params.ValueId.Value); err != nil {
@@ -852,10 +855,7 @@ func (a *Agent) loadOrResume(ctx context.Context, sessionID acp.SessionId, cwd s
 		return nil, nil, false, nil, err
 	}
 
-	readinessStarted := time.Now()
 	startErr := a.ensureStartup(ctx, cwd, meta)
-	observeRuntimeStartupStage(ctx, a.options.RuntimeResourceHooks, RuntimeResourceDiscovery, RuntimeStartupReadiness, readinessStarted, startErr)
-
 	if startErr != nil {
 		return nil, nil, false, nil, startErr
 	}
@@ -1849,7 +1849,7 @@ func (a *Agent) retryCleanupOwnersExcept(ctx context.Context, except acp.Session
 		if err := a.retryCleanupOwner(ctx, id); err != nil {
 			a.log.DebugContext(ctx, "retry amp session cleanup failed", slog.String(jsonFieldSessionID, string(id)), slog.String("failure", cleanupFailureClass(err)))
 
-			if errors.Is(err, ErrProcessContainmentIncomplete) {
+			if errors.Is(err, ErrContainmentIncomplete) {
 				boundaryErr = errors.Join(boundaryErr, err)
 			}
 		}
@@ -1938,7 +1938,7 @@ func (a *Agent) storedManifest(ctx context.Context, id acp.SessionId) (ampManife
 
 const missingAPIKeyMessage = "AMP_API_KEY is not set: amp sessions run in an " +
 	"isolated home where amp login credentials are unavailable; set AMP_API_KEY " +
-	"in the process environment, ProcessIsolation.BaseEnvironment, WithEnv, or " +
+	"in the host native environment, WithEnv, or " +
 	"session env options"
 
 func (a *Agent) ensureNewSessionStartup(ctx context.Context, cwd string, meta parsedSessionMeta) error {
@@ -1967,8 +1967,8 @@ func (a *Agent) ensureStartup(ctx context.Context, cwd string, meta parsedSessio
 }
 
 func (a *Agent) nativeEnvironmentBase() map[string]string {
-	if a.options.ProcessIsolation != nil {
-		return a.options.ProcessIsolation.BaseEnvironment
+	if a.options.HostAuthority != nil {
+		return a.nativeEnvironment
 	}
 
 	return a.ordinaryEnvironment

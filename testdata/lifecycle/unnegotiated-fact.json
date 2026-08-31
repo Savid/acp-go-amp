@@ -1,11 +1,8 @@
 {
   "name": "unnegotiated-fact",
-  "purpose": "The negotiated answer is the contract for the connection, not a hint about it. A quiescence_update from a configuration that answered authoritativeQuiescence false asserts a fact the sibling never claimed it could prove, so it is refused rather than believed.",
+  "purpose": "Version 1 carries process-containment quiescence without separately negotiated feature facts, so a valid certified boundary reduces normally.",
   "negotiated": {
-    "versions": [1],
-    "updatesOutsidePrompt": true,
-    "authoritativeQuiescence": false,
-    "activityKinds": ["task"]
+    "version": 1
   },
   "input": [
     {
@@ -115,18 +112,16 @@
     }
   ],
   "expect": {
-    "verdict": "fail_closed",
-    "violation": "unnegotiated_fact",
-    "atInput": 4,
+    "verdict": "accepted",
     "state": {
       "streamId": "strm-1",
-      "reducedThrough": 4,
+      "reducedThrough": 5,
       "suppressedRetransmissions": 0,
       "foreground": {"state": "idle", "cycleId": "cyc-1"},
       "turns": [{"turnId": "turn-1", "origin": "submission", "terminal": true, "outcome": "success"}],
       "activities": [],
       "actions": [],
-      "quiescence": {"certified": false},
+      "quiescence": {"certified": true, "source": "process-containment", "watermark": 4},
       "closed": false
     }
   }

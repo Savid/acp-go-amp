@@ -160,6 +160,9 @@ type agentSession struct {
 	rawEventSeq           atomic.Int64
 	settingsDir           string
 	settingsFile          string
+	mcpConfigFile         string
+	browserShim           string
+	nativeTreePrepared    bool
 	scratchRootRelease    func()
 	closed                bool
 	poisonCause           string
@@ -250,15 +253,10 @@ func newAgentSession(ctx context.Context, agent *Agent, id acp.SessionId, cwd st
 
 	now := time.Now().UnixMilli()
 
-	scratchRelease, err := reserveScratchRoot(ctx, agent.options.RuntimeResourceHooks, RuntimeResourceSession)
-	if err != nil {
-		return nil, err
-	}
-
 	session := &agentSession{
 		agent:              agent,
 		id:                 id,
-		scratchRootRelease: scratchRelease,
+		scratchRootRelease: func() {},
 		turn:               make(chan struct{}, 1),
 	}
 	agent.retainCleanupOwner(id, session, agentCleanupConstructing)
@@ -277,7 +275,7 @@ func newAgentSession(ctx context.Context, agent *Agent, id acp.SessionId, cwd st
 		err = errors.Join(err, cleanupErr)
 	}()
 
-	parent, err := ensureScratchParent(agent.options.ScratchDir)
+	parent, err := agent.ensureScratchParent()
 	if err != nil {
 		return nil, err
 	}
@@ -296,8 +294,8 @@ func newAgentSession(ctx context.Context, agent *Agent, id acp.SessionId, cwd st
 
 	stateDir := filepath.Join(dir, "xdg-state")
 	for _, path := range []string{homeDir, configDir, cacheDir, dataDir, stateDir, filepath.Join(configDir, "amp")} {
-		if err := mkdirAll(path, 0o700); err != nil {
-			return nil, fmt.Errorf("create amp isolated home: %w", err)
+		if mkdirErr := mkdirAll(path, 0o700); mkdirErr != nil {
+			return nil, fmt.Errorf("create amp isolated home: %w", mkdirErr)
 		}
 	}
 
@@ -307,16 +305,33 @@ func newAgentSession(ctx context.Context, agent *Agent, id acp.SessionId, cwd st
 	// per-session file store, because the keystore item it would otherwise move
 	// to is keyed by hostname alone and shared by every session on the machine.
 	settingsFile := filepath.Join(configDir, "amp", "settings.json")
-	if err := writeFile(settingsFile, amp.AuthSettingsDocument(), 0o600); err != nil {
-		return nil, fmt.Errorf("write amp settings file: %w", err)
+	if writeErr := writeFile(settingsFile, amp.AuthSettingsDocument(), 0o600); writeErr != nil {
+		return nil, fmt.Errorf("write amp settings file: %w", writeErr)
 	}
 
-	if err := writeSeedFiles(homeDir, agent.options.SeedFiles); err != nil {
+	if seedErr := writeSeedFiles(homeDir, agent.options.SeedFiles); seedErr != nil {
+		return nil, seedErr
+	}
+
+	mcpFile := filepath.Join(dir, "mcp.json")
+
+	mcpDocument := mcpConfigJSON
+	if mcpDocument == "" {
+		mcpDocument = "{}\n"
+	}
+
+	if writeErr := writeFile(mcpFile, []byte(mcpDocument), 0o600); writeErr != nil {
+		return nil, fmt.Errorf("write amp MCP config: %w", writeErr)
+	}
+
+	browserShim, err := amp.MaterializeBrowserShim(filepath.Join(dir, "browser-shim"))
+	if err != nil {
 		return nil, err
 	}
 
-	if err := handoffGeneratedNativeTree(dir, agent.options.ProcessIsolation); err != nil {
-		return nil, err
+	session.nativeTreePrepared = agent.options.hostAuthoritySupplied
+	if err := agent.prepareNativeTree(ctx, dir); err != nil {
+		return nil, fmt.Errorf("prepare amp session residence: %w", err)
 	}
 
 	mode := meta.options.Mode
@@ -345,6 +360,8 @@ func newAgentSession(ctx context.Context, agent *Agent, id acp.SessionId, cwd st
 	session.operationEnv = operationEnv
 	session.rawEvents = meta.rawEvent
 	session.settingsFile = settingsFile
+	session.mcpConfigFile = mcpFile
+	session.browserShim = browserShim
 	agent.retainCleanupOwner(id, session, agentCleanupPrepared)
 
 	constructed = true
@@ -355,25 +372,25 @@ func newAgentSession(ctx context.Context, agent *Agent, id acp.SessionId, cwd st
 // client is the session's non-prompt client: thread export, thread delete, and
 // account login run on the static operation environment.
 func (s *agentSession) client() *amp.Client {
-	return s.clientWithEnv(s.operationEnv, "", RuntimeResourceSession)
+	return s.clientWithEnv(s.operationEnv, s.mcpConfigFile)
 }
 
-func (s *agentSession) clientWithEnv(env map[string]string, mcpConfigPath string, kind RuntimeResourceKind) *amp.Client {
+func (s *agentSession) clientWithEnv(env map[string]string, mcpConfigPath string) *amp.Client {
 	options := amp.Options{
-		CLIPath:                    s.agent.options.ExecutablePath,
-		Cwd:                        s.cwd,
-		SettingsFile:               s.settingsFile,
-		Env:                        env,
-		ResolutionEnv:              composeEnv(s.agent.options.Env),
-		ResolvedExecutable:         s.agent.retainedHarnessPath(),
-		Mode:                       s.mode,
-		MCPConfigPath:              mcpConfigPath,
-		MaxLineBytes:               s.agent.options.runtime.maxJSONLineBytes,
-		OnGoroutinePanic:           s.agent.onNativeGoroutinePanic,
-		NewProcessSnapshotObserver: s.agent.newProcessSnapshotObserver,
-		WritableRoot:               s.settingsDir,
+		CLIPath:            s.agent.options.ExecutablePath,
+		Cwd:                s.cwd,
+		SettingsFile:       s.settingsFile,
+		Env:                env,
+		ResolutionEnv:      composeEnv(s.agent.options.Env),
+		ResolvedExecutable: s.agent.retainedHarnessPath(),
+		Mode:               s.mode,
+		MCPConfigPath:      mcpConfigPath,
+		MaxLineBytes:       s.agent.options.runtime.maxJSONLineBytes,
+		OnGoroutinePanic:   s.agent.onNativeGoroutinePanic,
+		WritableRoot:       s.settingsDir,
+		BrowserShim:        s.browserShim,
 	}
-	s.agent.configureNativeClient(&options, kind)
+	s.agent.configureNativeClient(&options)
 
 	return amp.NewClient(s.agent.log, options)
 }
@@ -970,9 +987,29 @@ func (s *agentSession) finalizeScratch(runtimeErr, boundaryErr error) error {
 		return runtimeErr
 	}
 
+	s.mu.Lock()
+	prepared := s.nativeTreePrepared
+	root := s.settingsDir
+	s.mu.Unlock()
+
+	if prepared {
+		reclaimCtx, cancel := context.WithTimeout(context.WithoutCancel(context.Background()), defaultNativeCommandTimeout)
+		reclaimErr := s.agent.reclaimNativeTree(reclaimCtx, root)
+
+		cancel()
+
+		if reclaimErr != nil {
+			return errors.Join(runtimeErr, reclaimErr)
+		}
+
+		s.mu.Lock()
+		s.nativeTreePrepared = false
+		s.mu.Unlock()
+	}
+
 	var removeErr error
-	if s.settingsDir != "" {
-		removeErr = removeSessionDir(s.settingsDir)
+	if root != "" {
+		removeErr = removeSessionDir(root)
 	}
 
 	if removeErr == nil {

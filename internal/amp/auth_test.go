@@ -5,7 +5,6 @@ import (
 	"errors"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -75,51 +74,8 @@ func helperWriteSecret(pasted string) {
 }
 
 func TestAuthSettingsDocumentAssertsTheFlagFalse(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "settings.json")
-
-	if err := os.WriteFile(path, AuthSettingsDocument(), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
 	if !strings.Contains(string(AuthSettingsDocument()), authNativeSecretsSetting) {
 		t.Fatalf("settings document does not name the namespaced key: %q", AuthSettingsDocument())
-	}
-
-	asserted, err := AuthFileStoreAsserted(path)
-	if err != nil || !asserted {
-		t.Fatalf("AuthFileStoreAsserted = %v, %v; want true, nil", asserted, err)
-	}
-}
-
-func TestAuthFileStoreAssertedFailsClosed(t *testing.T) {
-	dir := t.TempDir()
-
-	if _, err := AuthFileStoreAsserted(filepath.Join(dir, "absent.json")); err == nil {
-		t.Fatal("a missing settings file asserted nothing and reported no error")
-	}
-
-	cases := map[string]string{
-		"malformed": "{",
-		"absent":    `{"other":true}`,
-		"nonbool":   `{"` + authNativeSecretsSetting + `":"false"}`,
-		"true":      `{"` + authNativeSecretsSetting + `":true}`,
-	}
-
-	for name, contents := range cases {
-		path := filepath.Join(dir, name+".json")
-		if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
-			t.Fatal(err)
-		}
-
-		asserted, err := AuthFileStoreAsserted(path)
-		if asserted {
-			t.Fatalf("%s: asserted the file store", name)
-		}
-
-		if name == "malformed" && err == nil {
-			t.Fatalf("%s: malformed settings reported no error", name)
-		}
 	}
 }
 
@@ -193,7 +149,8 @@ func TestAuthReadSecretSurfacesAnUnreadableStore(t *testing.T) {
 func TestAuthLoginEnvDropsTheAmbientKey(t *testing.T) {
 	t.Setenv(AuthAPIKeyEnv, "ambient-key")
 
-	env, err := authLoginEnv(testProcessIsolation(), nil, map[string]string{AuthAPIKeyEnv: "override-key", "AMP_URL": "https://amp.example"}, "/work")
+	client := NewClient(nil, Options{OrdinaryEnvironment: map[string]string{"PATH": os.Getenv("PATH")}})
+	env, err := authLoginEnv(client, map[string]string{AuthAPIKeyEnv: "override-key", "AMP_URL": "https://amp.example"}, "/work")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -250,10 +207,6 @@ func TestAuthDeploymentSupported(t *testing.T) {
 
 	if newTestClient(t, nil, Options{TestOnlyAuthLoginPlatform: windowsPlatform}).AuthDeploymentSupported() {
 		t.Fatal("windows account login was reported as supported")
-	}
-
-	if NewClient(nil, Options{TestOnlyAuthLoginPlatform: linuxPlatform, Isolation: &ProcessIsolation{}}).AuthDeploymentSupported() {
-		t.Fatal("an invalid isolation policy was reported as auth-capable")
 	}
 }
 
@@ -488,61 +441,9 @@ func TestAuthLoginSubmitReportsAFailedStdinClose(t *testing.T) {
 	}
 }
 
-func TestAuthLoginCloseReportsAnUnsettledChild(t *testing.T) {
-	login := startTestLogin(t, "login-hang", t.TempDir())
-
-	original := commandWaitTimeout
-	commandWaitTimeout = time.Millisecond
-
-	t.Cleanup(func() { commandWaitTimeout = original })
-
-	// A paused waiter stands in for a child that never settles: Close must
-	// report an incomplete containment rather than block on it. The waiter is
-	// released at cleanup so the fixture's goroutine finishes with the test
-	// instead of parking on its start gate for the rest of the run.
-	waiter, beginWait := startPausedCommandWait(func() error { return nil })
-	login.wait = waiter
-
-	t.Cleanup(func() {
-		beginWait()
-		<-waiter.done
-	})
-
-	if err := login.Close(); !errors.Is(err, ErrProcessContainmentIncomplete) {
-		t.Fatalf("Close = %v, want an incomplete containment sentinel", err)
-	}
-}
-
 func TestStartAuthLoginRejectsAnUnusableLaunch(t *testing.T) {
 	if _, err := newTestClient(t, nil, Options{CLIPath: ""}).StartAuthLogin(cancelledContext()); err == nil {
 		t.Fatal("a cancelled context started a login")
-	}
-
-	path, _ := fakeAmpPath(t, "login")
-
-	client := NewClient(nil, Options{CLIPath: path, DarwinBestEffort: true})
-	client.checkAuthLoginCompatibility = func(string) error { return nil }
-	if _, err := client.StartAuthLogin(t.Context()); err == nil {
-		t.Fatal("a launch with no Darwin generation factory started a login")
-	}
-	if runtime.GOOS != linuxPlatform {
-		return
-	}
-
-	// The scratch parent is a t.TempDir leaf, nested under a 0700 directory the
-	// foreign identity below cannot enter, so the shim generated there cannot be
-	// handed to it on any platform.
-	handoffClient := newTestClient(t, nil, Options{CLIPath: path, Cwd: t.TempDir(), ScratchParent: t.TempDir(), Isolation: testProcessIsolation()})
-	handoffClient.options.Isolation.TestOnlyNoCredential = false
-	// Dropping the credential opt-out puts the policy under the standalone
-	// identity disposition Linux enforces, so it needs the owner fields or it is
-	// rejected before the shim handoff this case is about.
-	handoffClient.options.Isolation.StandaloneOwnerID = "acp-go-amp-tests"
-	handoffClient.options.Isolation.StandaloneStateRoot = "/var/lib/acp-go-amp-tests"
-	handoffClient.options.Isolation.UID = uint32(os.Geteuid() + 1)
-	handoffClient.options.Isolation.GID = uint32(os.Getegid() + 1)
-	if _, err := handoffClient.StartAuthLogin(t.Context()); err == nil || !strings.Contains(err.Error(), "browser shim") {
-		t.Fatalf("unsupported login shim handoff = %v", err)
 	}
 }
 
@@ -559,53 +460,10 @@ func TestStartAuthLoginReportsAWorkingDirectoryFailure(t *testing.T) {
 	}
 }
 
-func TestStartAuthLoginReportsAPipeFailure(t *testing.T) {
-	path, _ := fakeAmpPath(t, "login")
-	original := authOpenPipe
-
-	t.Cleanup(func() { authOpenPipe = original })
-
-	for _, failAt := range []int{1, 2, 3} {
-		calls := 0
-		authOpenPipe = func() (*os.File, *os.File, error) {
-			calls++
-			if calls == failAt {
-				return nil, nil, errors.New("no descriptors")
-			}
-
-			return original()
-		}
-
-		client := newTestClient(t, nil, Options{CLIPath: path, Cwd: t.TempDir()})
-		if _, err := client.StartAuthLogin(t.Context()); err == nil {
-			t.Fatalf("pipe failure %d started a login", failAt)
-		}
-	}
-}
-
 func TestStartAuthLoginReportsAStartFailure(t *testing.T) {
 	client := newTestClient(t, nil, Options{CLIPath: filepath.Join(t.TempDir(), "missing-amp"), Cwd: t.TempDir()})
 	if _, err := client.StartAuthLogin(t.Context()); err == nil {
 		t.Fatal("a missing binary started a login")
-	}
-}
-
-func TestAuthExpectedDropsAnAlreadyExitedKill(t *testing.T) {
-	if err := authExpected(nil); err != nil {
-		t.Fatalf("authExpected(nil) = %v", err)
-	}
-
-	if err := authExpected(os.ErrProcessDone); err != nil {
-		t.Fatalf("authExpected(process done) = %v", err)
-	}
-
-	if err := authExpected(exec.ErrNotFound); err != nil {
-		t.Fatalf("authExpected(not found) = %v", err)
-	}
-
-	want := errors.New("kill refused")
-	if err := authExpected(want); !errors.Is(err, want) {
-		t.Fatalf("authExpected = %v, want %v", err, want)
 	}
 }
 

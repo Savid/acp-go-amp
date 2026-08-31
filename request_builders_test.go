@@ -205,7 +205,7 @@ func TestMetaBuildersRefuseAReservedFamilyLiteral(t *testing.T) {
 	}
 
 	for _, literal := range literals {
-		meta := map[string]any{literal: map[string]any{"versions": []any{1}}}
+		meta := map[string]any{literal: map[string]any{"version": 1}}
 
 		requirePanics(t, literal, func() { WithSessionMeta(meta) })
 		requirePanics(t, literal, func() { WithListSessionsMeta(meta) })

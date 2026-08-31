@@ -11,3 +11,5 @@ package amp
 func newBrowserShim(string) (*browserShim, error) {
 	return nil, ErrBrowserLaunchUnsupported
 }
+
+func MaterializeBrowserShim(string) (string, error) { return "", nil }

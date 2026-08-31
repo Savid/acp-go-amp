@@ -5,7 +5,7 @@
   "vectorShape": {
     "name": "The fixture's name, matching its file name without the extension.",
     "purpose": "Prose stating the invariant this fixture pins and the reasoning that makes the verdict the only one available.",
-    "negotiated": "The extension answer this fixture reduces under: `versions`, `updatesOutsidePrompt`, `authoritativeQuiescence`, `quiescenceSource`, and `activityKinds`.",
+    "negotiated": "The extension answer this fixture reduces under: the exact scalar `version`.",
     "input": "The delivered elements, in order, in the shape `inputShape` fixes.",
     "postRefusal": "Present on `fail_closed` only, and optional: further inputs in the same shape as `input`, delivered after the refusal. Fail closed latches, so a harness MUST feed every one of them and MUST assert that each is refused with the same token at the same `(streamId, sequence)` identity and that `state` still holds afterwards. A harness that stops feeding at the first refusal cannot tell a consumer that stopped reducing from one that kept going past a verdict it had already returned.",
     "expect": "The required verdict, in the shape `expectShape` fixes."
@@ -14,7 +14,7 @@
     "notification": "An element carrying `method` and `params` is one delivered notification. JSON-RPC framing is omitted; `params` is the notification payload verbatim, with the extension envelope at `params._meta[\"acp-go.dev/lifecycle\"]`.",
     "control": "An element carrying only `control` is an out-of-band wire event with no notification of its own. The vocabulary is closed at `session_closed`, meaning `session/close` completed for the addressed session.",
     "comparison": "Notifications are compared as decoded values, never as encoded bytes: key order and insignificant whitespace are never differences. That is the same rule the deep-equality retransmission test uses.",
-    "waiver": "The `updatesOutsidePrompt` in-flight leg of `unnegotiated_fact` — an envelope delivered while no prompt is in flight on a configuration answering `false` — is not expressible here: this shape carries no prompt-boundary marker. It is discharged at the session layer that owns prompt boundaries, and no vector claims it."
+    "scope": "Prompt admission is transport state outside these ordered reducer vectors and is tested at the session layer."
   },
   "expectShape": {
     "verdict": "`accepted` when every input reduces, `fail_closed` when one is refused.",
@@ -118,7 +118,7 @@
     },
     {
       "file": "unsupported-version.json",
-      "invariant": "An envelope whose version is outside the negotiated set is refused."
+      "invariant": "An envelope whose version is is not 1 is refused."
     },
     {
       "file": "unknown-field.json",
@@ -134,7 +134,7 @@
     },
     {
       "file": "unnegotiated-fact.json",
-      "invariant": "An event asserting a fact the negotiated answer did not claim is refused."
+      "invariant": "A valid version-1 process-containment quiescence fact reduces without a separate feature advertisement."
     },
     {
       "file": "stream-cycle.json",
@@ -142,7 +142,7 @@
     },
     {
       "file": "prompt-contained-incarnation-per-prompt.json",
-      "invariant": "A configuration answering updatesOutsidePrompt false opens one incarnation per prompt, each a distinct streamId with its own snapshot, sequence space, and entities."
+      "invariant": "Each prompt opens a distinct streamId with its own snapshot, sequence space, and entities."
     },
     {
       "file": "close-containment-fences-stream.json",
@@ -274,7 +274,7 @@
     },
     {
       "file": "unnegotiated-activity-kind.json",
-      "invariant": "An activity kind outside the answer's activityKinds is refused."
+      "invariant": "A valid version-1 activity kind reduces without a separate feature advertisement."
     },
     {
       "file": "omitted-key-envelope.json",

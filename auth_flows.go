@@ -213,7 +213,7 @@ func (p *providerAuth) authorize(ctx context.Context, params json.RawMessage) (a
 	// a local-policy refusal must leave the owner's existing flow and durable
 	// lineage untouched.
 	if method.Type != authMethodTypeAPI {
-		if storeErr := session.authFileStore(); storeErr != nil {
+		if storeErr := session.authPolicy(); storeErr != nil {
 			return nil, authFailed(authCauseNativeVeto, request.providerID, request.method, "")
 		}
 	}
@@ -416,13 +416,20 @@ func (p *providerAuth) mintPresentation(ctx context.Context, session *agentSessi
 		}, ""
 	}
 
-	client := session.client()
+	client, cleanup, err := session.newAuthClient(ctx)
+	if err != nil {
+		return authAuthorizeResult{}, authCauseProcess
+	}
+
 	if !client.AuthDeploymentSupported() {
+		_ = cleanup()
+
 		return authAuthorizeResult{}, authCauseUnsupportedVariant
 	}
 
 	login, err := authStartLogin(client, ctx)
 	if err != nil {
+		_ = cleanup()
 		// A launch the audit refused is a variant this adapter does not
 		// broker, not a native process failure: no child ever existed.
 		if errors.Is(err, nativeamp.ErrBrowserLaunchUnsupported) {
@@ -642,7 +649,7 @@ func (p *providerAuth) callback(ctx context.Context, params json.RawMessage) (an
 		return nil, p.fail(flow, authCauseTransport, false)
 	}
 
-	if storeErr := session.authFileStore(); storeErr != nil {
+	if storeErr := session.authPolicy(); storeErr != nil {
 		return nil, p.fail(flow, authCauseNativeVeto, false)
 	}
 

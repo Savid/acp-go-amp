@@ -51,25 +51,12 @@ behavior.
 
 ## Cancel and stop reasons
 
-`session/cancel` sends an interrupt to the active prompt boundary. Ordinary
-execution owns and reaps the direct native child without claiming escaped
-descendant absence. With explicit Linux process isolation, every native
-command, including each turn, runs below its own child subreaper.
-It adopts and terminates the whole descendant tree even when a native tool
-escapes the original process group with `setsid(2)`, and reaps until `ECHILD`.
-Non-Linux platforms refuse explicit isolation but support ordinary execution.
-Explicit Linux isolation is the authoritative boundary.
-
-Prompt settlement is fenced by the selected containment result. If it is
-incomplete, the adapter returns an error matching
-`ampacp.ErrProcessContainmentIncomplete` and retains resources the native
-process may still reach. The wait is bounded.
-
-Darwin uses ordinary execution by default. With the explicit best-effort
-opt-in, the adapter reaps the direct child and runs the fixed TERM/KILL ladder
-against its original process group. It does not wait for or claim absence of a
-`setsid(2)` escapee, so escaped processes or zombies may survive a settled
-prompt. The best-effort opt-in is mutually exclusive with process isolation.
+`session/cancel` closes native input, calls `NativeProcess.Revoke`, and then
+waits for `NativeProcess.Wait`. In managed mode the host authority owns the
+complete native lease and its descendants. A wait or reclaim failure matches
+`ampacp.ErrContainmentIncomplete`; the adapter commits no terminal state and
+does not fall back to direct execution. Ordinary mode owns only the direct
+same-identity child and publishes no authoritative quiescence claim.
 
 A successful prompt returns exactly one terminal result, and its stop reason is
 the native harness's own: `end_turn` for a completed turn, `cancelled` for a
