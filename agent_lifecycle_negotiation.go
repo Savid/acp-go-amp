@@ -33,9 +33,21 @@ func (a *Agent) negotiateLifecycle(meta map[string]any) (map[string]any, error) 
 	return map[string]any{lifecycle.MetaKey: answer.Advertisement()}, nil
 }
 
-// provenLifecycleFacts returns the one lifecycle capability this adapter emits.
+// provenLifecycleFacts states the facts this configuration can prove. Amp has
+// no activity channel between prompts. A supplied host authority additionally
+// proves whole-process-tree vacancy after Wait succeeds.
 func (a *Agent) provenLifecycleFacts() lifecycle.Negotiated {
-	return lifecycle.Negotiated{Version: lifecycle.Version}
+	proven := lifecycle.Negotiated{
+		Version:       lifecycle.Version,
+		ActivityKinds: []lifecycle.ActivityKind{},
+	}
+
+	if a.options.hostAuthoritySupplied {
+		proven.AuthoritativeQuiescence = true
+		proven.QuiescenceSource = lifecycle.ProofClassProcessContainment
+	}
+
+	return proven
 }
 
 func (a *Agent) retainNegotiatedLifecycle(answer lifecycle.Negotiated) {

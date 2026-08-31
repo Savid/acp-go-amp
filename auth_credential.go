@@ -174,7 +174,7 @@ type authCredentialResult struct {
 // the key is long-lived and non-rotating, so there is no harvest cycle — and a
 // slot that answers nothing fails closed rather than reporting absence.
 func (p *providerAuth) credential(ctx context.Context, params json.RawMessage) (any, error) {
-	session, flow, err := p.addressedFlowLeg(params)
+	_, flow, err := p.addressedFlowLeg(params)
 	if err != nil {
 		return nil, err
 	}
@@ -208,10 +208,6 @@ func (p *providerAuth) credential(ctx context.Context, params json.RawMessage) (
 		}
 
 		return providerCredentialResult(flow, secret), nil
-	}
-
-	if storeErr := session.authPolicy(); storeErr != nil {
-		return nil, p.failHarvest(flow, authCauseNativeVeto)
 	}
 
 	p.mu.Lock()

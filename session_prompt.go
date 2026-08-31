@@ -437,7 +437,7 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (ac
 		if !amp.ProcessContainmentComplete(err) {
 			state.completeSettlement(promptSettlement{containmentErr: err})
 
-			return acp.PromptResponse{}, unsettled(classifyNativePromptError(err))
+			return acp.PromptResponse{}, unsettled(errors.Join(classifyNativePromptError(err), err))
 		}
 
 		if state.isCancelled() {

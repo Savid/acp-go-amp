@@ -14,7 +14,7 @@ func (a *Agent) configureNativeClient(options *nativeamp.Options) {
 	options.NativeEnvironment = cloneStringMap(a.nativeEnvironment)
 	options.TestOnlyAuthLoginPlatform = a.options.testOnlyAuthLoginPlatform
 
-	if a.options.HostAuthority == nil {
+	if !a.options.hostAuthoritySupplied {
 		return
 	}
 
@@ -32,9 +32,10 @@ func (a *Agent) configureNativeClient(options *nativeamp.Options) {
 			Environment: append([]string(nil), request.Environment...), WorkingDirectory: request.WorkingDirectory,
 		})
 		if err != nil {
-			a.recordAuthorityFailure(err)
+			boundaryErr := authorityBoundaryError(err)
+			a.recordAuthorityFailure(boundaryErr)
 
-			return nil, authorityBoundaryError(err)
+			return nil, boundaryErr
 		}
 
 		if nativeProcessNil(process) {
@@ -51,6 +52,10 @@ func (a *Agent) configureNativeClient(options *nativeamp.Options) {
 func authorityBoundaryError(err error) error {
 	if err == nil {
 		return nil
+	}
+
+	if errors.Is(err, ErrNativeTreeBusy) || detachedContextError(err) {
+		return err
 	}
 
 	return errors.Join(err, ErrContainmentIncomplete, nativeamp.ErrContainmentIncomplete)
@@ -77,16 +82,16 @@ func (p nativeProcessBridge) Stderr() io.ReadCloser { return p.process.Stderr() 
 
 func (p nativeProcessBridge) Wait(ctx context.Context) (nativeamp.NativeResult, error) {
 	result, err := p.process.Wait(ctx)
-	p.agent.recordAuthorityFailure(err)
+	boundaryErr := authorityBoundaryError(err)
+	p.agent.recordAuthorityFailure(boundaryErr)
 
 	return nativeamp.NativeResult{
 		ExitCode: result.ExitCode, Signal: result.Signal, Revoked: result.Revoked,
-	}, authorityBoundaryError(err)
+	}, boundaryErr
 }
 
 func (p nativeProcessBridge) Revoke(ctx context.Context) error {
 	err := p.process.Revoke(ctx)
-	p.agent.recordAuthorityFailure(err)
 
 	return authorityBoundaryError(err)
 }

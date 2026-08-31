@@ -10,7 +10,6 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -60,9 +59,6 @@ type Options struct {
 	CLIPath      string
 	Cwd          string
 	SettingsFile string
-	// ScratchParent is the already-resolved parent for the account-login browser
-	// shim. The embedding package owns temp-directory resolution.
-	ScratchParent string
 	// Env is the complete child environment overlay this client's children
 	// receive. A prompt client carries the logical session's own values
 	// including its raw PATH; a probe or one-shot client carries the static
@@ -181,15 +177,21 @@ func (c *Client) StartupProbe(ctx context.Context) (string, error) {
 	}
 
 	cacheKey := path + "\x00" + version
-	if _, ok := probeCache.Load(cacheKey); ok {
-		return path, nil
+	cacheable := c.options.StartNative == nil
+
+	if cacheable {
+		if _, ok := probeCache.Load(cacheKey); ok {
+			return path, nil
+		}
 	}
 
 	if err := c.pinnedTo(path).probeSubcommands(ctx); err != nil {
 		return "", err
 	}
 
-	probeCache.Store(cacheKey, struct{}{})
+	if cacheable {
+		probeCache.Store(cacheKey, struct{}{})
+	}
 
 	return path, nil
 }
@@ -565,15 +567,13 @@ func (c *Client) startNative(ctx context.Context, request NativeRequest) (Native
 
 	tracked := trackProcess(process)
 	if tracked.Stdin() == nil || tracked.Stdout() == nil || tracked.Stderr() == nil {
-		if process != nil {
-			settleCtx, cancel := context.WithTimeout(context.Background(), defaultCloseWait)
-			revokeErr := tracked.Revoke(settleCtx)
-			_, waitErr := tracked.Wait(settleCtx)
+		settleCtx, cancel := context.WithTimeout(context.Background(), defaultCloseWait)
+		revokeErr := tracked.Revoke(settleCtx)
+		_, waitErr := tracked.Wait(settleCtx)
 
-			cancel()
+		cancel()
 
-			return nil, errors.Join(errors.New("native process returned unusable host stdio"), revokeErr, waitErr)
-		}
+		return nil, errors.Join(errors.New("native process returned unusable host stdio"), revokeErr, waitErr)
 	}
 
 	return tracked, nil
@@ -705,16 +705,11 @@ func buildEnvironment(cwd string, phases ...map[string]string) ([]string, error)
 	}
 
 	values := make(map[string]string, capacity)
-	keys := make([]string, 0, capacity)
 
 	set := func(key, value string) {
 		key = launchEnvironmentKey(key)
 		if isPrivateAdapterEnv(key) || isScrubbedEnv(key) {
 			return
-		}
-
-		if _, ok := values[key]; !ok {
-			keys = append(keys, key)
 		}
 
 		values[key] = value
@@ -733,6 +728,13 @@ func buildEnvironment(cwd string, phases ...map[string]string) ([]string, error)
 	if cwd != "" {
 		set("PWD", cwd)
 	}
+
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+
+	sort.Strings(keys)
 
 	out := make([]string, 0, len(keys))
 	for _, key := range keys {
@@ -769,21 +771,6 @@ func isScrubbedEnv(key string) bool {
 
 func isPrivateAdapterEnv(key string) bool {
 	return strings.HasPrefix(strings.ToUpper(key), adapterPrivateEnvPrefix)
-}
-
-func withoutPrivateAdapterEnv(entries []string) []string {
-	env := make([]string, 0, len(entries))
-
-	for _, entry := range entries {
-		key, _, ok := strings.Cut(entry, "=")
-		if ok && isPrivateAdapterEnv(key) {
-			continue
-		}
-
-		env = append(env, entry)
-	}
-
-	return env
 }
 
 func versionAtLeast(got string, floor string) bool {
@@ -968,9 +955,7 @@ func (t *Turn) drainStderr(ctx context.Context) {
 	}
 }
 
-func (t *Turn) Interrupt(ctx context.Context, killAfter time.Duration) error {
-	_ = killAfter
-
+func (t *Turn) Interrupt(ctx context.Context) error {
 	if t.process == nil {
 		return nil
 	}
@@ -979,8 +964,12 @@ func (t *Turn) Interrupt(ctx context.Context, killAfter time.Duration) error {
 	revokeErr := t.process.Revoke(ctx)
 
 	result, waitErr := t.process.Wait(ctx)
-	if result.Revoked || result.Signal != 0 {
+	if (result.Revoked || result.Signal != 0) && !errors.Is(waitErr, ErrContainmentIncomplete) {
 		waitErr = nil
+	}
+
+	if result.Revoked && waitErr == nil && (errors.Is(revokeErr, context.Canceled) || errors.Is(revokeErr, context.DeadlineExceeded)) {
+		revokeErr = nil
 	}
 
 	return errors.Join(revokeErr, waitErr)
@@ -992,7 +981,7 @@ func (t *Turn) Close() error {
 	t.closeOnce.Do(func() {
 		if t.process != nil {
 			ctx, cancel := context.WithTimeout(context.Background(), defaultCloseWait)
-			err = errors.Join(err, t.Interrupt(ctx, defaultCloseKillAfter))
+			err = errors.Join(err, t.Interrupt(ctx))
 
 			cancel()
 		}
@@ -1069,16 +1058,6 @@ func (t *Turn) exitError(err error) error {
 	}
 
 	return fmt.Errorf("amp process exited: %w: %s", err, detail)
-}
-
-func expectedExit(err error) bool {
-	if err == nil || errors.Is(err, context.Canceled) {
-		return true
-	}
-
-	var exitErr *exec.ExitError
-
-	return errors.As(err, &exitErr)
 }
 
 func stripANSI(s string) string {

@@ -181,6 +181,10 @@ docs-audit:
 	@rg -q "response's own top-level" docs/reference/meta.mdx
 	@rg -q 'never inside\n?.agentCapabilities._meta' -U docs/reference/meta.mdx
 	@rg -q '\{"version": 1\}' docs/reference/meta.mdx
+	@rg -q '"updatesOutsidePrompt": false' docs/reference/meta.mdx
+	@rg -q '"authoritativeQuiescence": false' docs/reference/meta.mdx
+	@rg -q '"quiescenceSource": "process-containment"' docs/reference/meta.mdx
+	@rg -q '"activityKinds": \[\]' docs/reference/meta.mdx
 	@rg -q 'one incarnation per prompt' -i docs/reference/meta.mdx
 	@rg -q 'identity-only .session_info_update' docs/reference/meta.mdx docs/reference/updates.mdx
 	@rg -q 'no envelope attached' docs/reference/meta.mdx docs/reference/updates.mdx

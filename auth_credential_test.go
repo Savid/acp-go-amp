@@ -464,7 +464,7 @@ func TestFailHarvestKeepsARecordACauseCannotTransition(t *testing.T) {
 		t.Fatalf("addressFlow: %v", err)
 	}
 
-	for _, cause := range []string{authCausePolicy, authCauseBindingConflict, authCauseFlowState, authCauseFlowCancelled} {
+	for _, cause := range []string{authCauseBindingConflict, authCauseFlowState, authCauseFlowCancelled} {
 		requireAuthCause(t, fixture.broker.failHarvest(flow, cause), cause)
 
 		status := fixture.status(authorized.FlowID)

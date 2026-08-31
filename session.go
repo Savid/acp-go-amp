@@ -161,8 +161,8 @@ type agentSession struct {
 	settingsDir           string
 	settingsFile          string
 	mcpConfigFile         string
-	browserShim           string
 	nativeTreePrepared    bool
+	nativeTreeOpaque      bool
 	scratchRootRelease    func()
 	closed                bool
 	poisonCause           string
@@ -268,7 +268,7 @@ func newAgentSession(ctx context.Context, agent *Agent, id acp.SessionId, cwd st
 		}
 
 		cleanupErr := session.finalizeScratch(nil, nil)
-		if cleanupErr == nil {
+		if cleanupErr == nil && !session.retainsOpaqueTree() {
 			agent.clearCleanupOwner(id, session)
 		}
 
@@ -324,15 +324,13 @@ func newAgentSession(ctx context.Context, agent *Agent, id acp.SessionId, cwd st
 		return nil, fmt.Errorf("write amp MCP config: %w", writeErr)
 	}
 
-	browserShim, err := amp.MaterializeBrowserShim(filepath.Join(dir, "browser-shim"))
-	if err != nil {
-		return nil, err
-	}
-
-	session.nativeTreePrepared = agent.options.hostAuthoritySupplied
+	session.nativeTreeOpaque = agent.options.hostAuthoritySupplied
 	if err := agent.prepareNativeTree(ctx, dir); err != nil {
 		return nil, fmt.Errorf("prepare amp session residence: %w", err)
 	}
+
+	session.nativeTreePrepared = agent.options.hostAuthoritySupplied
+	session.nativeTreeOpaque = false
 
 	mode := meta.options.Mode
 	if mode == "" {
@@ -361,7 +359,6 @@ func newAgentSession(ctx context.Context, agent *Agent, id acp.SessionId, cwd st
 	session.rawEvents = meta.rawEvent
 	session.settingsFile = settingsFile
 	session.mcpConfigFile = mcpFile
-	session.browserShim = browserShim
 	agent.retainCleanupOwner(id, session, agentCleanupPrepared)
 
 	constructed = true
@@ -369,10 +366,17 @@ func newAgentSession(ctx context.Context, agent *Agent, id acp.SessionId, cwd st
 	return session, nil
 }
 
+func (s *agentSession) retainsOpaqueTree() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.nativeTreeOpaque
+}
+
 // client is the session's non-prompt client: thread export, thread delete, and
 // account login run on the static operation environment.
 func (s *agentSession) client() *amp.Client {
-	return s.clientWithEnv(s.operationEnv, s.mcpConfigFile)
+	return s.clientWithEnv(s.operationEnv, "")
 }
 
 func (s *agentSession) clientWithEnv(env map[string]string, mcpConfigPath string) *amp.Client {
@@ -388,7 +392,6 @@ func (s *agentSession) clientWithEnv(env map[string]string, mcpConfigPath string
 		MaxLineBytes:       s.agent.options.runtime.maxJSONLineBytes,
 		OnGoroutinePanic:   s.agent.onNativeGoroutinePanic,
 		WritableRoot:       s.settingsDir,
-		BrowserShim:        s.browserShim,
 	}
 	s.agent.configureNativeClient(&options)
 
@@ -449,7 +452,7 @@ func (s *agentSession) interruptState(ctx context.Context, state *promptTurnStat
 	cancelCtx, cancel := context.WithTimeout(interruptCtx, timeout+s.agent.options.runtime.nativeCloseTurnWait)
 	defer cancel()
 
-	return turn.Interrupt(cancelCtx, timeout)
+	return turn.Interrupt(cancelCtx)
 }
 
 // admitPrompt publishes one prompt as the session's active turn. Admission takes
@@ -989,8 +992,13 @@ func (s *agentSession) finalizeScratch(runtimeErr, boundaryErr error) error {
 
 	s.mu.Lock()
 	prepared := s.nativeTreePrepared
+	opaque := s.nativeTreeOpaque
 	root := s.settingsDir
 	s.mu.Unlock()
+
+	if opaque {
+		return errors.Join(runtimeErr, boundaryErr, ErrContainmentIncomplete)
+	}
 
 	if prepared {
 		reclaimCtx, cancel := context.WithTimeout(context.WithoutCancel(context.Background()), defaultNativeCommandTimeout)

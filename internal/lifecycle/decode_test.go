@@ -11,7 +11,13 @@ import (
 // richConfiguration answers every fact this package can validate, so a decoder
 // refusal in these vectors is structural rather than a fact the answer withheld.
 func richConfiguration() Negotiated {
-	return Negotiated{Version: Version}
+	return Negotiated{
+		Version:                 Version,
+		UpdatesOutsidePrompt:    true,
+		AuthoritativeQuiescence: true,
+		QuiescenceSource:        ProofClassProcessContainment,
+		ActivityKinds:           []ActivityKind{ActivityTask, ActivitySubagent},
+	}
 }
 
 // notification frames one envelope on the eligible carrier.

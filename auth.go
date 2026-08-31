@@ -65,18 +65,15 @@ const (
 	authCauseFlowExpired        = "flow_expired"
 	authCauseFlowState          = "flow_state"
 	authCauseFlowCancelled      = "flow_cancelled"
-	authCausePolicy             = "policy"
 	authCauseBindingConflict    = "binding_conflict"
 )
 
 // Native entry points. Every read and every login this surface performs goes
 // through exactly these.
 var (
-	authStartLogin    = (*nativeamp.Client).StartAuthLogin
-	authCloseLogin    = (*nativeamp.AuthLogin).Close
-	authReadSecret    = nativeamp.AuthReadSecret
-	authSecretPresent = nativeamp.AuthSecretPresent
-	authStorePolicy   = func() error { return nil }
+	authStartLogin = (*nativeamp.Client).StartAuthLogin
+	authCloseLogin = (*nativeamp.AuthLogin).Close
+	authReadSecret = nativeamp.AuthReadSecret
 )
 
 // authMethodNames lists every advertised leg in the order the capability
@@ -351,7 +348,7 @@ func (s *agentSession) newAuthClient(ctx context.Context) (*nativeamp.Client, fu
 		cleanupResidence.setRetryable()
 
 		cleanupErr := cleanupResidence.finalize()
-		if cleanupErr == nil {
+		if cleanupErr == nil && !cleanupResidence.retainsOpaqueTree() {
 			s.agent.clearCleanupResidence(cleanupResidence)
 		}
 
@@ -383,11 +380,15 @@ func (s *agentSession) newAuthClient(ctx context.Context) (*nativeamp.Client, fu
 	}
 
 	if s.agent.options.hostAuthoritySupplied {
-		cleanupResidence.setPrepared()
+		cleanupResidence.beginPrepare()
 	}
 
 	if err := s.agent.prepareNativeTree(ctx, residence.root); err != nil {
 		return fail(fmt.Errorf("prepare Amp auth residence: %w", err))
+	}
+
+	if s.agent.options.hostAuthoritySupplied {
+		cleanupResidence.setPrepared()
 	}
 
 	env := composeEnv(s.operationEnv, managedSessionEnv(residence.home, residence.config, residence.cache, residence.data, residence.state))
@@ -437,11 +438,6 @@ func (a *Agent) reopenProviderAuth(sessionID acp.SessionId) {
 	}
 
 	a.providerAuth.reopenSession(sessionID)
-}
-
-// authPolicy is the admission point shared by provider-auth mutations.
-func (s *agentSession) authPolicy() error {
-	return authStorePolicy()
 }
 
 // authParamFields walks a leg's params object once, rejecting an unknown field,

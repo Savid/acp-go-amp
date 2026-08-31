@@ -2,7 +2,11 @@
   "name": "exact-retransmission-idempotent",
   "purpose": "A byte-identical retransmission of the whole notification — envelope and carrier — is suppressed wholesale. It advances nothing, duplicates nothing, and is not a violation.",
   "negotiated": {
-    "version": 1
+    "version": 1,
+    "updatesOutsidePrompt": true,
+    "authoritativeQuiescence": true,
+    "quiescenceSource": "process-containment",
+    "activityKinds": ["task", "subagent"]
   },
   "input": [
     {

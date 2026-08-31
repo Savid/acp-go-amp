@@ -23,7 +23,7 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (r
 	if err != nil {
 		return acp.NewSessionResponse{}, err
 	}
-	defer func() { finishCall(err) }()
+	defer finishPublicCall(&err, finishCall)
 
 	ctx, finish := a.observe.StartACPRequest(ctx, acp.AgentMethodSessionNew)
 	defer func() { finish(err) }()
@@ -46,6 +46,10 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (r
 	mcpConfig, err := mcpConfigJSON(params.McpServers)
 	if err != nil {
 		return acp.NewSessionResponse{}, err
+	}
+
+	if retryErr := a.retryCleanupOwners(ctx); retryErr != nil {
+		return acp.NewSessionResponse{}, retryErr
 	}
 
 	startErr := a.ensureNewSessionStartup(ctx, params.Cwd, meta)
@@ -96,7 +100,7 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 	if err != nil {
 		return acp.LoadSessionResponse{}, err
 	}
-	defer func() { finishCall(err) }()
+	defer finishPublicCall(&err, finishCall)
 
 	ctx, finish := a.observe.StartACPRequest(ctx, acp.AgentMethodSessionLoad)
 	defer func() { finish(err) }()
@@ -131,7 +135,7 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 	if err != nil {
 		return acp.ResumeSessionResponse{}, err
 	}
-	defer func() { finishCall(err) }()
+	defer finishPublicCall(&err, finishCall)
 
 	ctx, finish := a.observe.StartACPRequest(ctx, acp.AgentMethodSessionResume)
 	defer func() { finish(err) }()
@@ -179,7 +183,7 @@ func (a *Agent) ListSessions(ctx context.Context, params acp.ListSessionsRequest
 	if err != nil {
 		return acp.ListSessionsResponse{}, err
 	}
-	defer func() { finishCall(err) }()
+	defer finishPublicCall(&err, finishCall)
 
 	ctx, finish := a.observe.StartACPRequest(ctx, acp.AgentMethodSessionList)
 	defer func() { finish(err) }()
@@ -337,7 +341,7 @@ func (a *Agent) Prompt(ctx context.Context, params acp.PromptRequest) (resp acp.
 	if err != nil {
 		return acp.PromptResponse{}, err
 	}
-	defer func() { finishCall(err) }()
+	defer finishPublicCall(&err, finishCall)
 
 	ctx, finishReq := a.observe.StartACPRequest(ctx, acp.AgentMethodSessionPrompt)
 	defer func() { finishReq(err) }()
@@ -373,7 +377,7 @@ func (a *Agent) Cancel(ctx context.Context, params acp.CancelNotification) (err 
 	if err != nil {
 		return err
 	}
-	defer func() { finishCall(err) }()
+	defer finishPublicCall(&err, finishCall)
 
 	ctx, finish := a.observe.StartACPRequest(ctx, acp.AgentMethodSessionCancel)
 	defer func() { finish(err) }()
@@ -398,7 +402,7 @@ func (a *Agent) CloseSession(ctx context.Context, params acp.CloseSessionRequest
 	if err != nil {
 		return acp.CloseSessionResponse{}, err
 	}
-	defer func() { finishCall(err) }()
+	defer finishPublicCall(&err, finishCall)
 
 	ctx, finish := a.observe.StartACPRequest(ctx, acp.AgentMethodSessionClose)
 	defer func() { finish(err) }()
@@ -420,7 +424,7 @@ func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDe
 	if err != nil {
 		return acp.UnstableDeleteSessionResponse{}, err
 	}
-	defer func() { finishCall(err) }()
+	defer finishPublicCall(&err, finishCall)
 
 	ctx, finish := a.observe.StartACPRequest(ctx, acp.AgentMethodSessionDelete)
 	defer func() { finish(err) }()
@@ -747,7 +751,7 @@ func (a *Agent) SetSessionConfigOption(ctx context.Context, params acp.SetSessio
 	if err != nil {
 		return acp.SetSessionConfigOptionResponse{}, err
 	}
-	defer func() { finishCall(err) }()
+	defer finishPublicCall(&err, finishCall)
 
 	ctx, finish := a.observe.StartACPRequest(ctx, acp.AgentMethodSessionSetConfigOption)
 	defer func() { finish(err) }()
@@ -804,7 +808,7 @@ func (a *Agent) SetSessionMode(ctx context.Context, params acp.SetSessionModeReq
 	if err != nil {
 		return acp.SetSessionModeResponse{}, err
 	}
-	defer func() { finishCall(err) }()
+	defer finishPublicCall(&err, finishCall)
 
 	_, finish := a.observe.StartACPRequest(ctx, acp.AgentMethodSessionSetMode)
 	defer func() { finish(err) }()
@@ -1033,7 +1037,12 @@ func (a *Agent) publishColdSession(sessionID acp.SessionId, use *agentSessionUse
 		return unknownSessionError()
 	}
 
-	if len(a.sessions) >= a.maxActiveSessions() {
+	cleanupOwners := a.cleanupOwnerCountLocked()
+	if _, owned := a.cleanupOwnerForSessionLocked(sessionID, session); owned {
+		cleanupOwners--
+	}
+
+	if len(a.sessions)+cleanupOwners >= a.maxActiveSessions() {
 		return backpressureError("active_sessions")
 	}
 
@@ -1652,7 +1661,7 @@ func (a *Agent) reserveSessionSlot() error {
 		return acp.NewInvalidRequest(map[string]any{jsonFieldError: agentClosedMessage})
 	}
 
-	if len(a.sessions)+a.pending >= a.maxActiveSessions() {
+	if len(a.sessions)+a.pending+a.cleanupOwnerCountLocked() >= a.maxActiveSessions() {
 		return backpressureError("active_sessions")
 	}
 
@@ -1834,12 +1843,21 @@ func (a *Agent) cleanupOwnerIDs() []acp.SessionId {
 	return ids
 }
 
+func (a *Agent) cleanupOwnerCountLocked() int {
+	count := 0
+	for _, owners := range a.cleanupOwners {
+		count += len(owners)
+	}
+
+	return count
+}
+
 func (a *Agent) retryCleanupOwners(ctx context.Context) error {
 	return a.retryCleanupOwnersExcept(ctx, "")
 }
 
 func (a *Agent) retryCleanupOwnersExcept(ctx context.Context, except acp.SessionId) error {
-	var boundaryErr error
+	var retryErr error
 
 	for _, id := range a.cleanupOwnerIDs() {
 		if id == except {
@@ -1849,13 +1867,13 @@ func (a *Agent) retryCleanupOwnersExcept(ctx context.Context, except acp.Session
 		if err := a.retryCleanupOwner(ctx, id); err != nil {
 			a.log.DebugContext(ctx, "retry amp session cleanup failed", slog.String(jsonFieldSessionID, string(id)), slog.String("failure", cleanupFailureClass(err)))
 
-			if errors.Is(err, ErrContainmentIncomplete) {
-				boundaryErr = errors.Join(boundaryErr, err)
+			if containmentIncomplete(err) || errors.Is(err, ErrNativeTreeBusy) {
+				retryErr = errors.Join(retryErr, err)
 			}
 		}
 	}
 
-	return boundaryErr
+	return retryErr
 }
 
 func (a *Agent) retryCleanupOwner(ctx context.Context, id acp.SessionId) error {
@@ -1967,7 +1985,7 @@ func (a *Agent) ensureStartup(ctx context.Context, cwd string, meta parsedSessio
 }
 
 func (a *Agent) nativeEnvironmentBase() map[string]string {
-	if a.options.HostAuthority != nil {
+	if a.options.hostAuthoritySupplied {
 		return a.nativeEnvironment
 	}
 

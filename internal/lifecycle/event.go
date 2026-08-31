@@ -48,6 +48,11 @@ const (
 	fieldWatermark = "watermark"
 	fieldBarrier   = "barrier"
 
+	fieldUpdatesOutsidePrompt    = "updatesOutsidePrompt"
+	fieldAuthoritativeQuiescence = "authoritativeQuiescence"
+	fieldQuiescenceSource        = "quiescenceSource"
+	fieldActivityKinds           = "activityKinds"
+
 	fieldSubmission = "submission"
 )
 

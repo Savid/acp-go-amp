@@ -2,7 +2,11 @@
   "name": "child-after-parent-terminal",
   "purpose": "A terminal activity never gains a child. A new activity naming a parent that has already terminalized would attach live work to a subtree already reported finished, so it is refused rather than reparented.",
   "negotiated": {
-    "version": 1
+    "version": 1,
+    "updatesOutsidePrompt": true,
+    "authoritativeQuiescence": true,
+    "quiescenceSource": "process-containment",
+    "activityKinds": ["task", "subagent"]
   },
   "input": [
     {

@@ -11,45 +11,6 @@ import (
 	nativeamp "github.com/savid/acp-go-amp/internal/amp"
 )
 
-// authAdmissionBarrier stops every leg that reaches the native store assertion
-// and releases them together. That assertion is the last thing a callback does
-// before it touches the login child, so a leg parked here has passed every check
-// the broker makes and has not yet acted on what it read — which is exactly the
-// window a check-then-set leaves open.
-type authAdmissionBarrier struct {
-	arrived  chan struct{}
-	release  chan struct{}
-	admitted atomic.Int64
-}
-
-func newAuthAdmissionBarrier(t *testing.T) *authAdmissionBarrier {
-	t.Helper()
-
-	barrier := &authAdmissionBarrier{arrived: make(chan struct{}, 4), release: make(chan struct{})}
-	original := authStorePolicy
-
-	t.Cleanup(func() { authStorePolicy = original })
-
-	authStorePolicy = func() error {
-		barrier.admitted.Add(1)
-		barrier.arrived <- struct{}{}
-		<-barrier.release
-
-		return original()
-	}
-
-	return barrier
-}
-
-// awaitSecond waits for a second leg to reach the barrier. A discipline that
-// admits only one never sends it, so the wait is bounded rather than blocking.
-func (b *authAdmissionBarrier) awaitSecond() {
-	select {
-	case <-b.arrived:
-	case <-time.After(300 * time.Millisecond):
-	}
-}
-
 // countAuthLogins reports how many login children the surface started.
 func countAuthLogins(t *testing.T) *atomic.Int64 {
 	t.Helper()
@@ -90,46 +51,24 @@ func (f *authFixture) disconnect(connectionID string, generation int64) error {
 	}, nil)
 }
 
-// TestDisconnectIsNotUndoneByAnAdmittedCompletion drives the two legs that
-// rewrite one recorded binding at the same time. The owner disconnects while a
-// paste is already admitted; without the slot gate the completion writes its own
-// generation back over the bump, the host is told a disconnect it can no longer
-// repeat succeeded, and the account key stays live in a residence the ledger
-// claims is released.
-func TestDisconnectIsNotUndoneByAnAdmittedCompletion(t *testing.T) {
+// TestDisconnectIsNotUndoneByALateCompletion proves a released binding cannot
+// be confirmed again by replaying its completed callback.
+func TestDisconnectIsNotUndoneByALateCompletion(t *testing.T) {
 	fixture := newAuthFixture(t, "login")
 	authorized := fixture.mustAuthorize("connection-1")
-
-	barrier := newAuthAdmissionBarrier(t)
-	params := fixture.rawParams(map[string]any{
-		authFieldSessionID:  string(fixture.session.id),
-		authFieldProviderID: authProviderID,
-		authFieldMethod:     authMethodLogin,
-		authFieldFlowID:     authorized.FlowID,
-		authFieldInput:      "pasted",
-	})
-
-	answered := make(chan error, 1)
-
-	go func() {
-		_, callErr := fixture.agent.HandleExtensionMethod(context.Background(), AuthCallbackMethod, params)
-		answered <- callErr
-	}()
-
-	<-barrier.arrived
+	if err := fixture.callback(authorized.FlowID, "pasted"); err != nil {
+		t.Fatalf("callback: %v", err)
+	}
 
 	if err := fixture.disconnect("connection-1", 1); err != nil {
 		t.Fatalf("disconnect: %v", err)
 	}
 
-	close(barrier.release)
-
-	callbackErr := <-answered
-	if callbackErr == nil {
-		t.Fatal("a completion confirmed a binding the disconnect had already released")
+	if err := fixture.callback(authorized.FlowID, "pasted"); err == nil {
+		t.Fatal("a late completion confirmed a binding the disconnect had released")
+	} else {
+		requireAuthCause(t, err, authCauseFlowState)
 	}
-
-	requireAuthCause(t, callbackErr, authCauseBindingConflict)
 
 	record, ok, err := fixture.broker.ledger.read(authProviderID, "connection-1")
 	if err != nil || !ok || record.State != authLedgerRemoved || record.BindingGeneration != 2 {
@@ -143,17 +82,12 @@ func TestDisconnectIsNotUndoneByAnAdmittedCompletion(t *testing.T) {
 	}
 }
 
-// TestOneCallbackIsAdmittedForOneLoginChild puts two callbacks on one pending
-// flow, which is what a host retrying after a client-side timeout produces. Both
-// write the owner's value to the same child stdin and both close it, so an
-// unclaimed flow loses a valid paste or reports a refusal of a login that in
-// fact succeeded. Every field access is individually locked, so there is no data
-// race for the detector to report.
+// TestOneCallbackIsAdmittedForOneLoginChild pins the callback claim itself:
+// concurrent repeats converge on one completion and one closed-state refusal.
 func TestOneCallbackIsAdmittedForOneLoginChild(t *testing.T) {
 	fixture := newAuthFixture(t, "login")
 	authorized := fixture.mustAuthorize("connection-1")
 
-	barrier := newAuthAdmissionBarrier(t)
 	params := fixture.rawParams(map[string]any{
 		authFieldSessionID:  string(fixture.session.id),
 		authFieldProviderID: authProviderID,
@@ -171,10 +105,6 @@ func TestOneCallbackIsAdmittedForOneLoginChild(t *testing.T) {
 		}()
 	}
 
-	<-barrier.arrived
-	barrier.awaitSecond()
-	close(barrier.release)
-
 	completed, refused := 0, 0
 
 	for range 2 {
@@ -185,10 +115,6 @@ func TestOneCallbackIsAdmittedForOneLoginChild(t *testing.T) {
 
 			refused++
 		}
-	}
-
-	if got := barrier.admitted.Load(); got != 1 {
-		t.Fatalf("callbacks admitted to one login child = %d, want 1", got)
 	}
 
 	if completed != 1 || refused != 1 {

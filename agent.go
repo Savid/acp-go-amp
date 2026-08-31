@@ -136,7 +136,7 @@ type agentCloseFlight struct {
 // retainHarnessPath records the harness a probe validated. An empty or relative
 // answer is a broken probe rather than a reason to resolve again.
 func (a *Agent) retainHarnessPath(path string) error {
-	if a.options.HostAuthority == nil && !filepath.IsAbs(path) {
+	if !a.options.hostAuthoritySupplied && !filepath.IsAbs(path) {
 		return fmt.Errorf("amp startup probe reported unusable harness path %q", path)
 	}
 
@@ -410,7 +410,7 @@ func (a *Agent) closeAttempt() error {
 		a.observe.AddActiveSession(context.Background(), -removed)
 	}
 
-	return closeErr
+	return publicContainmentError(closeErr)
 }
 
 func invokeShutdownStep(step func() error) (err error) {
@@ -444,7 +444,7 @@ func (a *Agent) Initialize(ctx context.Context, params acp.InitializeRequest) (r
 	if err != nil {
 		return acp.InitializeResponse{}, err
 	}
-	defer func() { finishCall(err) }()
+	defer finishPublicCall(&err, finishCall)
 
 	_, finish := a.observe.StartACPRequest(ctx, acp.AgentMethodInitialize)
 	defer func() { finish(err) }()
@@ -537,7 +537,7 @@ func (a *Agent) Authenticate(ctx context.Context, params acp.AuthenticateRequest
 	if err != nil {
 		return acp.AuthenticateResponse{}, err
 	}
-	defer func() { finishCall(err) }()
+	defer finishPublicCall(&err, finishCall)
 
 	_, finish := a.observe.StartACPRequest(ctx, acp.AgentMethodAuthenticate)
 	defer func() { finish(err) }()
@@ -558,7 +558,7 @@ func (a *Agent) Logout(ctx context.Context, params acp.LogoutRequest) (resp acp.
 	if err != nil {
 		return acp.LogoutResponse{}, err
 	}
-	defer func() { finishCall(err) }()
+	defer finishPublicCall(&err, finishCall)
 
 	_, finish := a.observe.StartACPRequest(ctx, acp.AgentMethodLogout)
 	defer func() { finish(err) }()
@@ -575,7 +575,7 @@ func (a *Agent) HandleExtensionMethod(ctx context.Context, method string, params
 	if err != nil {
 		return nil, err
 	}
-	defer func() { finishCall(err) }()
+	defer finishPublicCall(&err, finishCall)
 
 	_, finish := a.observe.StartACPRequest(ctx, method)
 	defer func() { finish(err) }()

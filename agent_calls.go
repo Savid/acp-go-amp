@@ -6,15 +6,14 @@ import (
 	"sync"
 
 	"github.com/coder/acp-go-sdk"
-	nativeamp "github.com/savid/acp-go-amp/internal/amp"
 )
 
 func nativeInternalError(err error) error {
 	requestErr := acp.NewInternalError(map[string]any{jsonFieldError: err.Error()})
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||
-		errors.Is(err, nativeamp.ErrContainmentIncomplete) || errors.Is(err, ErrContainmentIncomplete) ||
+		containmentIncomplete(err) ||
 		errors.Is(err, ErrHostAuthorityUnavailable) || errors.Is(err, ErrNativeTreeBusy) {
-		return errors.Join(requestErr, err)
+		return errors.Join(requestErr, publicContainmentError(err))
 	}
 
 	return requestErr
@@ -26,7 +25,7 @@ func cleanupFailureClass(err error) string {
 		return "none"
 	case errors.Is(err, errAgentGoroutinePanic):
 		return "callback_panic"
-	case errors.Is(err, nativeamp.ErrContainmentIncomplete):
+	case containmentIncomplete(err):
 		return "containment_incomplete"
 	case errors.Is(err, context.Canceled):
 		return authStateCancelled
@@ -35,6 +34,12 @@ func cleanupFailureClass(err error) string {
 	default:
 		return "cleanup_failed"
 	}
+}
+
+//nolint:gocritic // The deferred call must rewrite the named return error before it reaches the caller.
+func finishPublicCall(err *error, finish func(error)) {
+	*err = publicContainmentError(*err)
+	finish(*err)
 }
 
 // beginAgentCall is the admission gate shared by every embedded ACP entry
@@ -88,7 +93,9 @@ func (a *Agent) beginAgentCall(ctx context.Context, sessionIDs ...acp.SessionId)
 			close(stopShutdown)
 			cancel()
 
-			if errors.Is(err, nativeamp.ErrContainmentIncomplete) || errors.Is(err, ErrContainmentIncomplete) {
+			if containmentIncomplete(err) {
+				err = publicContainmentError(err)
+
 				a.mu.Lock()
 				a.lifecycleContainmentErr = errors.Join(a.lifecycleContainmentErr, err)
 				a.mu.Unlock()

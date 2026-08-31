@@ -5,12 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"reflect"
 	"runtime"
 	"slices"
 	"strings"
@@ -126,17 +125,6 @@ func TestFakeAmpHelper(t *testing.T) {
 		os.Exit(2)
 	}
 	os.Exit(0)
-}
-
-func TestWithoutPrivateAdapterEnvironment(t *testing.T) {
-	entries := []string{
-		"KEEP=value", "MALFORMED", adapterPrivateEnvPrefix + "MODE=mode",
-		strings.ToLower(adapterPrivateEnvPrefix) + "secret=value",
-	}
-	want := []string{"KEEP=value", "MALFORMED"}
-	if got := withoutPrivateAdapterEnv(entries); !reflect.DeepEqual(got, want) {
-		t.Fatalf("filtered environment = %v, want %v", got, want)
-	}
 }
 
 func TestRetainedExecutableLaunchesWithoutResolving(t *testing.T) {
@@ -489,7 +477,7 @@ func TestClientErrorBranches(t *testing.T) {
 		t.Fatalf("blocked send cancel = %v", err)
 	}
 	close(blocking.release)
-	if err := (&Turn{}).Interrupt(context.Background(), time.Millisecond); err != nil {
+	if err := (&Turn{}).Interrupt(context.Background()); err != nil {
 		t.Fatalf("nil interrupt: %v", err)
 	}
 	if err := (&Turn{}).Close(); err != nil {
@@ -508,12 +496,6 @@ func TestClientErrorBranches(t *testing.T) {
 	if err := closeTurn.Close(); err == nil {
 		t.Fatal("expected close errors")
 	}
-	if !expectedExit(nil) || !expectedExit(context.Canceled) || !expectedExit(&exec.ExitError{}) {
-		t.Fatal("expected exit classification failed")
-	}
-	if expectedExit(errors.New("boom")) {
-		t.Fatal("unexpected expectedExit success")
-	}
 	if stripANSI("\x1b[31mred\x1b[0m") != "red" {
 		t.Fatal("stripANSI failed")
 	}
@@ -523,6 +505,44 @@ type failingWriteCloser struct{}
 
 func (failingWriteCloser) Write([]byte) (int, error) { return 0, errors.New("write failed") }
 func (failingWriteCloser) Close() error              { return nil }
+
+type interruptProcess struct {
+	result    NativeResult
+	waitErr   error
+	revokeErr error
+}
+
+func (p *interruptProcess) Stdin() io.WriteCloser { return failingWriteCloser{} }
+func (p *interruptProcess) Stdout() io.ReadCloser { return failingReadCloser{} }
+func (p *interruptProcess) Stderr() io.ReadCloser { return failingReadCloser{} }
+func (p *interruptProcess) Wait(context.Context) (NativeResult, error) {
+	return p.result, p.waitErr
+}
+func (p *interruptProcess) Revoke(context.Context) error { return p.revokeErr }
+
+func TestInterruptPreservesContainmentFailureAfterRevocation(t *testing.T) {
+	process := &interruptProcess{
+		result:  NativeResult{Revoked: true},
+		waitErr: fmt.Errorf("authority could not prove vacancy: %w", ErrContainmentIncomplete),
+	}
+	turn := &Turn{process: process, stdin: failingWriteCloser{}}
+
+	if err := turn.Interrupt(t.Context()); !errors.Is(err, ErrContainmentIncomplete) {
+		t.Fatalf("Interrupt = %v, want containment failure", err)
+	}
+}
+
+func TestInterruptIgnoresDetachedRevokeContextAfterTerminalWait(t *testing.T) {
+	process := &interruptProcess{
+		result:    NativeResult{Revoked: true},
+		revokeErr: context.Canceled,
+	}
+	turn := &Turn{process: process, stdin: failingWriteCloser{}}
+
+	if err := turn.Interrupt(t.Context()); err != nil {
+		t.Fatalf("Interrupt = %v, want terminal Wait result", err)
+	}
+}
 
 type failingReadCloser struct{}
 

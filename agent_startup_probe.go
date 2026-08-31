@@ -27,6 +27,7 @@ type agentCleanupResidence struct {
 	id        uint64
 	root      string
 	prepared  bool
+	opaque    bool
 	retryable bool
 }
 
@@ -57,26 +58,47 @@ func (r *agentCleanupResidence) setRoot(root string) {
 	r.agent.mu.Unlock()
 }
 
+func (r *agentCleanupResidence) beginPrepare() {
+	r.agent.mu.Lock()
+	if r.agent.cleanupResidences[r.id] == r {
+		r.opaque = true
+	}
+	r.agent.mu.Unlock()
+}
+
 func (r *agentCleanupResidence) setPrepared() {
 	r.agent.mu.Lock()
 	if r.agent.cleanupResidences[r.id] == r {
 		r.prepared = true
+		r.opaque = false
 	}
 	r.agent.mu.Unlock()
 }
 
 func (r *agentCleanupResidence) setRetryable() {
 	r.agent.mu.Lock()
-	if r.agent.cleanupResidences[r.id] == r {
+	if r.agent.cleanupResidences[r.id] == r && !r.opaque {
 		r.retryable = true
 	}
 	r.agent.mu.Unlock()
 }
 
+func (r *agentCleanupResidence) retainsOpaqueTree() bool {
+	r.agent.mu.Lock()
+	defer r.agent.mu.Unlock()
+
+	return r.agent.cleanupResidences[r.id] == r && r.opaque
+}
+
 func (r *agentCleanupResidence) finalize() error {
 	r.agent.mu.Lock()
 	root := r.root
+	opaque := r.opaque
 	r.agent.mu.Unlock()
+
+	if opaque {
+		return ErrContainmentIncomplete
+	}
 
 	if reclaimErr := r.reclaim(); reclaimErr != nil {
 		return reclaimErr
@@ -141,7 +163,7 @@ func (a *Agent) retryCleanupResidences(ctx context.Context) {
 
 	for _, residence := range residences {
 		cleanupErr := invokeShutdownStep(residence.finalize)
-		if cleanupErr == nil {
+		if cleanupErr == nil && !residence.retainsOpaqueTree() {
 			a.clearCleanupResidence(residence)
 
 			continue
@@ -211,7 +233,7 @@ func (a *Agent) newPreparedProbeClient(ctx context.Context, cwd string, sessionE
 		cleanupResidence.setRetryable()
 
 		cleanupErr := cleanupResidence.finalize()
-		if cleanupErr == nil {
+		if cleanupErr == nil && !cleanupResidence.retainsOpaqueTree() {
 			a.clearCleanupResidence(cleanupResidence)
 		}
 
@@ -231,11 +253,15 @@ func (a *Agent) newPreparedProbeClient(ctx context.Context, cwd string, sessionE
 	}
 
 	if a.options.hostAuthoritySupplied {
-		cleanupResidence.setPrepared()
+		cleanupResidence.beginPrepare()
 	}
 
 	if err := a.prepareNativeTree(ctx, residence.root); err != nil {
 		return fail(fmt.Errorf("prepare Amp startup probe residence: %w", err))
+	}
+
+	if a.options.hostAuthoritySupplied {
+		cleanupResidence.setPrepared()
 	}
 
 	probeEnv := composeEnv(

@@ -12,6 +12,8 @@
 // produce cannot detect the case where the harness produces something else.
 package lifecycle
 
+import "slices"
+
 const (
 	// MetaKey is the family-reserved ACP `_meta` key every lifecycle value rides
 	// under. It is a family literal, not a vendor namespace.
@@ -245,9 +247,14 @@ const (
 	EventQuiescenceUpdate EventType = "quiescence_update"
 )
 
-// Negotiated records whether lifecycle version 1 is enabled on the connection.
+// Negotiated carries the lifecycle facts one configuration proved at
+// initialize. Every member is part of the connection's exact answer.
 type Negotiated struct {
-	Version int `json:"version"`
+	Version                 int            `json:"version"`
+	UpdatesOutsidePrompt    bool           `json:"updatesOutsidePrompt"`
+	AuthoritativeQuiescence bool           `json:"authoritativeQuiescence"`
+	QuiescenceSource        ProofClass     `json:"quiescenceSource,omitempty"`
+	ActivityKinds           []ActivityKind `json:"activityKinds"`
 }
 
 // Present reports whether the configuration answered the lifecycle key at all.
@@ -267,14 +274,31 @@ func (n Negotiated) NegotiatedVersion() int {
 // DeclaresActivityKind reports whether the answer advertised an activity kind. A
 // kind it never advertised is a kind it cannot prove.
 func (n Negotiated) DeclaresActivityKind(kind ActivityKind) bool {
-	return kind.Valid()
+	return slices.Contains(n.ActivityKinds, kind)
 }
 
-// Advertisement renders the exact scalar answer for `InitializeResponse._meta`.
+// Advertisement renders the exact scalar answer and the configuration's proven
+// facts for `InitializeResponse._meta`.
 func (n Negotiated) Advertisement() map[string]any {
 	if !n.Present() {
 		return nil
 	}
 
-	return map[string]any{fieldVersion: Version}
+	kinds := make([]string, 0, len(n.ActivityKinds))
+	for _, kind := range n.ActivityKinds {
+		kinds = append(kinds, string(kind))
+	}
+
+	advertisement := map[string]any{
+		fieldVersion:                 Version,
+		fieldUpdatesOutsidePrompt:    n.UpdatesOutsidePrompt,
+		fieldAuthoritativeQuiescence: n.AuthoritativeQuiescence,
+		fieldActivityKinds:           kinds,
+	}
+
+	if n.AuthoritativeQuiescence {
+		advertisement[fieldQuiescenceSource] = string(n.QuiescenceSource)
+	}
+
+	return advertisement
 }

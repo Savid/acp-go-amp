@@ -11,7 +11,12 @@ import (
 // containment proves whole-tree vacancy gives: no channel between prompts, no
 // activity kind, and the process-containment proof class.
 func containedConfiguration() Negotiated {
-	return Negotiated{Version: Version}
+	return Negotiated{
+		Version:                 Version,
+		AuthoritativeQuiescence: true,
+		QuiescenceSource:        ProofClassProcessContainment,
+		ActivityKinds:           []ActivityKind{},
+	}
 }
 
 // emitPromptIncarnation drives the exact shape one prompt-contained prompt emits.

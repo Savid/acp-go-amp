@@ -89,11 +89,7 @@ func TestLoginNeverExecsABrowserLauncher(t *testing.T) {
 	client := newTestClient(t, nil, Options{
 		CLIPath: path,
 		Cwd:     t.TempDir(),
-		// The shim is generated under the scratch parent and handed to the
-		// isolated identity, so the parent has to be one that identity can
-		// traverse rather than a t.TempDir leaf nested under a 0700 directory.
-		ScratchParent: makeInstalledAmpScratchParent(t),
-		Env:           map[string]string{dataHomeEnv: t.TempDir()},
+		Env:     map[string]string{dataHomeEnv: t.TempDir()},
 	})
 
 	login, err := client.StartAuthLogin(t.Context())
@@ -157,13 +153,10 @@ func TestInstalledAmpLoginExecsOnlyShimLauncher(t *testing.T) {
 	if writeErr := os.WriteFile(settingsFile, AuthSettingsDocument(), 0o600); writeErr != nil {
 		t.Fatal(writeErr)
 	}
-	scratchParent := makeInstalledAmpScratchParent(t)
-
 	client := newTestClient(t, nil, Options{
-		CLIPath:       path,
-		Cwd:           t.TempDir(),
-		SettingsFile:  settingsFile,
-		ScratchParent: scratchParent,
+		CLIPath:      path,
+		Cwd:          t.TempDir(),
+		SettingsFile: settingsFile,
 		Env: map[string]string{
 			AuthDeploymentEnv:                "http://127.0.0.1:1",
 			"ACP_GO_AMP_TEST_BROWSER_MARKER": marker,
@@ -207,84 +200,5 @@ func TestInstalledAmpLoginExecsOnlyShimLauncher(t *testing.T) {
 
 	if closeErr := login.Close(); closeErr != nil {
 		t.Fatalf("close installed Amp login: %v", closeErr)
-	}
-}
-
-func makeInstalledAmpScratchParent(t *testing.T) string {
-	t.Helper()
-
-	path, err := os.MkdirTemp("/tmp", "acp-go-amp-browser-scratch-") //nolint:usetesting // The installed binary runs outside the Go test's temporary root.
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(path) })
-	if err = os.Chmod(path, 0o711); err != nil {
-		t.Fatal(err)
-	}
-
-	return path
-}
-
-func TestBrowserShimLeavesNothingBehind(t *testing.T) {
-	parent := t.TempDir()
-
-	shim, err := newBrowserShim(parent)
-	if err != nil {
-		t.Fatalf("newBrowserShim: %v", err)
-	}
-
-	info, err := os.Stat(shim.dir)
-	if err != nil || info.Mode().Perm() != 0o700 {
-		t.Fatalf("shim directory mode = %v, %v; want 0700", info, err)
-	}
-
-	for _, name := range browserLauncherNames {
-		launcher, statErr := os.Stat(filepath.Join(shim.dir, name))
-		if statErr != nil || launcher.Mode().Perm()&0o100 == 0 {
-			t.Fatalf("%s launcher = %v, %v; want an executable no-op", name, launcher, statErr)
-		}
-	}
-
-	if removeErr := shim.remove(); removeErr != nil {
-		t.Fatalf("remove: %v", removeErr)
-	}
-
-	entries, err := os.ReadDir(parent)
-	if err != nil || len(entries) != 0 {
-		t.Fatalf("scratch parent after remove = %#v, %v; want empty", entries, err)
-	}
-
-	if removeErr := (*browserShim)(nil).remove(); removeErr != nil {
-		t.Fatalf("remove on an unbuilt shim = %v", removeErr)
-	}
-}
-
-func TestNewBrowserShimReportsAnUnusableScratch(t *testing.T) {
-	want := errors.New("no scratch")
-	originalMkdirTemp := browserShimMkdirTemp
-	browserShimMkdirTemp = func(string, string) (string, error) { return "", want }
-
-	t.Cleanup(func() { browserShimMkdirTemp = originalMkdirTemp })
-
-	if _, err := newBrowserShim(t.TempDir()); !errors.Is(err, want) {
-		t.Fatalf("newBrowserShim = %v, want %v", err, want)
-	}
-
-	browserShimMkdirTemp = originalMkdirTemp
-
-	wantWrite := errors.New("no launcher")
-	originalWriteFile := browserShimWriteFile
-	browserShimWriteFile = func(string, []byte, os.FileMode) error { return wantWrite }
-
-	t.Cleanup(func() { browserShimWriteFile = originalWriteFile })
-
-	parent := t.TempDir()
-	if _, err := newBrowserShim(parent); !errors.Is(err, wantWrite) {
-		t.Fatalf("newBrowserShim = %v, want %v", err, wantWrite)
-	}
-
-	entries, err := os.ReadDir(parent)
-	if err != nil || len(entries) != 0 {
-		t.Fatalf("scratch parent after a failed build = %#v, %v; want empty", entries, err)
 	}
 }

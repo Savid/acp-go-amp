@@ -36,7 +36,7 @@ func TestBrowserShimEnvironOwnsBothMechanisms(t *testing.T) {
 	}
 
 	// An environment with no PATH at all still gets one naming only the shim.
-	bare := (&browserShim{dir: dir}).environ(nil)
+	bare := browserShimEnviron(nil, dir)
 	if !slices.Contains(bare, browserShimPathEnv+"="+dir) {
 		t.Fatalf("environ without a PATH = %v", bare)
 	}

@@ -44,13 +44,19 @@ func lifecycleStreamSession(t *testing.T, answer lifecycle.Negotiated, conn agen
 
 // authoritativeAnswer is the exact lifecycle capability.
 func authoritativeAnswer() lifecycle.Negotiated {
-	return lifecycle.Negotiated{Version: 1}
+	return lifecycle.Negotiated{
+		Version:                 1,
+		AuthoritativeQuiescence: true,
+		QuiescenceSource:        lifecycle.ProofClassProcessContainment,
+		ActivityKinds:           []lifecycle.ActivityKind{},
+	}
 }
 
 func authoritativeLifecycleStreamSession(t *testing.T, conn agentClient) *agentSession {
 	t.Helper()
 	session := lifecycleStreamSession(t, authoritativeAnswer(), conn)
 	session.agent.options.HostAuthority = newRecordingAuthority()
+	session.agent.options.hostAuthoritySupplied = true
 
 	return session
 }

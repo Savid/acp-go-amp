@@ -149,7 +149,7 @@ func reduceEmittedStream(t *testing.T, client *lifecycleClient, negotiated lifec
 // gives. Every test agent here runs the ordinary same-identity mode, which
 // proves no whole-tree vacancy.
 func negotiatedAnswer() lifecycle.Negotiated {
-	return lifecycle.Negotiated{Version: 1}
+	return lifecycle.Negotiated{Version: 1, ActivityKinds: []lifecycle.ActivityKind{}}
 }
 
 // lifecycleHarnessSource is a native harness whose terminal shape is selected by
@@ -265,11 +265,30 @@ func lifecyclePrompt(sessionID acp.SessionId, text, submissionID, nonce string) 
 	return request
 }
 
-// TestLifecycleAnswerIsExact pins the version-1 scalar advertisement.
+// TestLifecycleAnswerIsExact pins the version-1 scalar advertisement and the
+// facts ordinary same-identity execution can prove.
 func TestLifecycleAnswerIsExact(t *testing.T) {
 	resp, err := newTestAgent().Initialize(t.Context(), acp.InitializeRequest{Meta: lifecycleOffer(1.0)})
 	require.NoError(t, err)
-	require.Equal(t, map[string]any{"version": 1}, resp.Meta[lifecycle.MetaKey])
+	require.Equal(t, map[string]any{
+		"version":                 1,
+		"updatesOutsidePrompt":    false,
+		"authoritativeQuiescence": false,
+		"activityKinds":           []string{},
+	}, resp.Meta[lifecycle.MetaKey])
+}
+
+func TestLifecycleAuthorityAnswerIsAuthoritative(t *testing.T) {
+	agent := NewAgent(WithHostAuthority(newRecordingAuthority()))
+	resp, err := agent.Initialize(t.Context(), acp.InitializeRequest{Meta: lifecycleOffer(1.0)})
+	require.NoError(t, err)
+	require.Equal(t, map[string]any{
+		"version":                 1,
+		"updatesOutsidePrompt":    false,
+		"authoritativeQuiescence": true,
+		"quiescenceSource":        "process-containment",
+		"activityKinds":           []string{},
+	}, resp.Meta[lifecycle.MetaKey])
 }
 
 // TestLifecycleAnswerNeverRidesAgentCapabilities pins the placement: the answer
@@ -1188,6 +1207,7 @@ func TestPromptRetainsAnIncompleteContainmentBoundary(t *testing.T) {
 
 	_, err = agent.Prompt(t.Context(), lifecyclePrompt(session.SessionId, "hello", "sub-1", "nonce-1"))
 	require.ErrorIs(t, err, nativeamp.ErrContainmentIncomplete)
+	require.ErrorIs(t, err, ErrContainmentIncomplete)
 	require.Equal(t, []string{"lifecycle_snapshot", "prompt_accepted", "state_update"}, client.eventTypes(t),
 		"no turn settles behind an unproven boundary")
 }
@@ -1479,6 +1499,7 @@ func TestIncompleteLaunchPublishesItsBoundaryOnTheLatch(t *testing.T) {
 
 	_, err = agent.Prompt(t.Context(), lifecyclePrompt(created.SessionId, "hello", "sub-1", "nonce-1"))
 	require.Error(t, err)
+	require.ErrorIs(t, err, ErrContainmentIncomplete)
 	require.Equal(t, []string{"lifecycle_snapshot"}, client.eventTypes(t), "nothing was accepted")
 
 	require.NotNil(t, latch, "the prompt is admitted before it launches native work")

@@ -178,17 +178,30 @@ The host offers on `InitializeRequest._meta`, carrying exactly one member:
 
 The adapter places its `acp-go.dev/lifecycle` answer on
 `InitializeResponse._meta` — the response's own top-level `_meta`, never inside
-`agentCapabilities._meta`:
+`agentCapabilities._meta`. Ordinary same-identity execution answers with no
+authoritative quiescence claim:
 
 ```json
 {
-  "acp-go.dev/lifecycle": {"version": 1}
+  "acp-go.dev/lifecycle": {
+    "version": 1,
+    "updatesOutsidePrompt": false,
+    "authoritativeQuiescence": false,
+    "activityKinds": []
+  }
 }
 ```
 
-The value is strict: `version` must be the integer `1`, with no additional
-member or trailing input. A malformed value is rejected with `-32602` naming
-the exact path, for example
+With `WithHostAuthority`, the same answer sets
+`authoritativeQuiescence` to `true` and includes
+`"quiescenceSource": "process-containment"`. Amp emits no activity kinds in
+either mode.
+
+The offer is strict: `version` must be the integer `1`, with no additional
+member. The answer's proven-fact members are required, its activity array is
+duplicate-free, and its quiescence source is present exactly when the answer is
+authoritative. Malformed or trailing input is rejected with `-32602` naming the
+exact path, for example
 `{"error": "unsupported", "field": "_meta[\"acp-go.dev/lifecycle\"].version"}`.
 With no offer, the response carries no lifecycle member and the connection has
 no lifecycle surface: no envelope, correlation read, or lifecycle event.

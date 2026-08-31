@@ -434,18 +434,25 @@ func (l *AuthLogin) Close() error {
 		closeCtx, cancel := context.WithTimeout(context.Background(), defaultCloseWait)
 		revokeErr := l.process.Revoke(closeCtx)
 
-		var waitErr error
+		var (
+			waitErr error
+			result  NativeResult
+		)
+
+		settled := false
 
 		select {
 		case <-l.waitDone:
 			waitErr = l.waitErr
+			result = l.result
+			settled = true
 		case <-closeCtx.Done():
 			waitErr = errors.Join(closeCtx.Err(), ErrContainmentIncomplete)
 		}
 
 		cancel()
 
-		if (l.result.Revoked || l.result.Signal != 0) && !errors.Is(waitErr, ErrContainmentIncomplete) {
+		if settled && (result.Revoked || result.Signal != 0) && !errors.Is(waitErr, ErrContainmentIncomplete) {
 			waitErr = nil
 		}
 

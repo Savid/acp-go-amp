@@ -1,8 +1,12 @@
 {
   "name": "unnegotiated-activity-kind",
-  "purpose": "Version 1 carries its closed activity-kind vocabulary without separately negotiated feature facts, so a valid subagent activity reduces normally.",
+  "purpose": "An activity kind outside the answer's activityKinds asserts a kind the configuration never proved it emits. The answer names what this configuration can observe, so a kind absent from it is refused rather than reduced as an activity of unknown provenance.",
   "negotiated": {
-    "version": 1
+    "version": 1,
+    "updatesOutsidePrompt": true,
+    "authoritativeQuiescence": true,
+    "quiescenceSource": "process-containment",
+    "activityKinds": ["task"]
   },
   "input": [
     {
@@ -93,14 +97,16 @@
     }
   ],
   "expect": {
-    "verdict": "accepted",
+    "verdict": "fail_closed",
+    "violation": "unnegotiated_fact",
+    "atInput": 3,
     "state": {
       "streamId": "strm-1",
-      "reducedThrough": 4,
+      "reducedThrough": 3,
       "suppressedRetransmissions": 0,
       "foreground": {"state": "running", "cycleId": "cyc-1", "turnId": "turn-1"},
       "turns": [{"turnId": "turn-1", "origin": "submission", "terminal": false}],
-      "activities": [{"activityId": "act-1", "kind": "subagent", "state": "running", "originTurnId": "turn-1"}],
+      "activities": [],
       "actions": [],
       "quiescence": {"certified": false, "invalidatedAt": 2},
       "closed": false

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
@@ -24,8 +25,13 @@ type recordingAuthority struct {
 	lockOnPrepare  bool
 	inspectPrepare func(string) error
 	inspectReclaim func(string) error
+	prepareErr     error
 	startErr       error
+	waitErr        error
 	reclaimErr     error
+	reclaimCalls   int
+	nilProcess     bool
+	unusableStdio  bool
 }
 
 func newRecordingAuthority() *recordingAuthority {
@@ -44,6 +50,11 @@ func (a *recordingAuthority) PrepareNativeTree(_ context.Context, root string) e
 	}
 	a.mu.Lock()
 	a.events = append(a.events, "prepare:"+root)
+	if a.prepareErr != nil {
+		a.mu.Unlock()
+
+		return a.prepareErr
+	}
 	a.prepared[root] = true
 	a.mu.Unlock()
 	if a.lockOnPrepare {
@@ -54,6 +65,9 @@ func (a *recordingAuthority) PrepareNativeTree(_ context.Context, root string) e
 }
 
 func (a *recordingAuthority) ReclaimNativeTree(_ context.Context, root string) error {
+	a.mu.Lock()
+	a.reclaimCalls++
+	a.mu.Unlock()
 	if a.reclaimErr != nil {
 		return a.reclaimErr
 	}
@@ -91,6 +105,9 @@ func (a *recordingAuthority) StartNative(_ context.Context, request NativeReques
 	if a.startErr != nil {
 		return nil, a.startErr
 	}
+	if a.nilProcess {
+		return nil, nil //nolint:nilnil // Deliberately model a contract-violating authority.
+	}
 
 	cmd := exec.Command(request.Executable, request.Arguments...)
 	cmd.Dir = request.WorkingDirectory
@@ -111,7 +128,10 @@ func (a *recordingAuthority) StartNative(_ context.Context, request NativeReques
 		return nil, err
 	}
 
-	return &recordingProcess{authority: a, root: root, cmd: cmd, stdin: stdin, stdout: stdout, stderr: stderr, done: make(chan struct{})}, nil
+	return &recordingProcess{
+		authority: a, root: root, cmd: cmd, stdin: stdin, stdout: stdout, stderr: stderr,
+		done: make(chan struct{}), authorityWaitErr: a.waitErr, unusableStdio: a.unusableStdio,
+	}, nil
 }
 
 func environmentRoot(environment []string) string {
@@ -125,18 +145,27 @@ func environmentRoot(environment []string) string {
 }
 
 type recordingProcess struct {
-	authority      *recordingAuthority
-	root           string
-	cmd            *exec.Cmd
-	stdin          io.WriteCloser
-	stdout, stderr io.ReadCloser
-	once           sync.Once
-	done           chan struct{}
-	result         NativeResult
-	err            error
+	authority        *recordingAuthority
+	root             string
+	cmd              *exec.Cmd
+	stdin            io.WriteCloser
+	stdout, stderr   io.ReadCloser
+	once             sync.Once
+	done             chan struct{}
+	result           NativeResult
+	err              error
+	authorityWaitErr error
+	unusableStdio    bool
+	revoked          atomic.Bool
 }
 
-func (p *recordingProcess) Stdin() io.WriteCloser { return p.stdin }
+func (p *recordingProcess) Stdin() io.WriteCloser {
+	if p.unusableStdio {
+		return nil
+	}
+
+	return p.stdin
+}
 func (p *recordingProcess) Stdout() io.ReadCloser { return p.stdout }
 func (p *recordingProcess) Stderr() io.ReadCloser { return p.stderr }
 func (p *recordingProcess) Wait(ctx context.Context) (NativeResult, error) {
@@ -144,9 +173,13 @@ func (p *recordingProcess) Wait(ctx context.Context) (NativeResult, error) {
 		go func() {
 			p.err = p.cmd.Wait()
 			p.result.ExitCode = p.cmd.ProcessState.ExitCode()
+			p.result.Revoked = p.revoked.Load()
 			var exitErr *exec.ExitError
 			if errors.As(p.err, &exitErr) {
 				p.err = nil
+			}
+			if p.authorityWaitErr != nil {
+				p.err = p.authorityWaitErr
 			}
 			p.authority.mu.Lock()
 			p.authority.events = append(p.authority.events, "wait:"+p.root)
@@ -162,7 +195,7 @@ func (p *recordingProcess) Wait(ctx context.Context) (NativeResult, error) {
 	}
 }
 func (p *recordingProcess) Revoke(context.Context) error {
-	p.result.Revoked = true
+	p.revoked.Store(true)
 	if err := p.cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
 		return err
 	}
@@ -196,7 +229,6 @@ func TestHostAuthorityPreparedTreeExclusivity(t *testing.T) {
 			filepath.Join(root, "xdg-config", "amp", "settings.json"),
 			filepath.Join(root, "mcp.json"),
 			filepath.Join(root, "home", "seed.txt"),
-			filepath.Join(root, "browser-shim"),
 		} {
 			if _, err := os.Stat(path); err != nil {
 				return err
@@ -254,6 +286,19 @@ func TestHostAuthorityManagedLaunchTrace(t *testing.T) {
 	}
 }
 
+func TestManagedStartupProbeCacheIsAuthorityScoped(t *testing.T) {
+	path, _ := fakeAgentAmpPath(t, "")
+	for range 2 {
+		authority := newRecordingAuthority()
+		agent := NewAgent(WithHostAuthority(authority), WithExecutablePath(path), WithScratchDir(t.TempDir()))
+		err := agent.runStartupWithProbe(t.Context(), t.TempDir(), nil, func(ctx context.Context, client *nativeamp.Client) (string, error) {
+			return client.StartupProbe(ctx)
+		})
+		require.NoError(t, err)
+		require.Len(t, authority.events, 20, "each authority runs version plus every startup method probe")
+	}
+}
+
 func TestHostAuthorityNoOrdinaryFallback(t *testing.T) {
 	path, _ := fakeAgentAmpPath(t, "")
 	want := errors.New("managed launch refused")
@@ -264,8 +309,169 @@ func TestHostAuthorityNoOrdinaryFallback(t *testing.T) {
 		return client.StartupProbe(ctx)
 	})
 	require.ErrorIs(t, err, want)
+	require.ErrorIs(t, err, ErrContainmentIncomplete)
 	require.NotEmpty(t, authority.events)
 	for _, event := range authority.events {
 		require.False(t, strings.HasPrefix(event, "wait:"), "refused managed launch must not acquire an ordinary process")
+		require.False(t, strings.HasPrefix(event, "reclaim:"), "an ambiguous managed start cannot authorize reclaim")
 	}
+	root := strings.TrimPrefix(authority.events[0], "prepare:")
+	_, statErr := os.Stat(root)
+	require.NoError(t, statErr, "an ambiguous managed start retains its prepared residence")
+}
+
+func TestHostAuthorityNilProcessRetainsPreparedTree(t *testing.T) {
+	path, _ := fakeAgentAmpPath(t, "")
+	authority := newRecordingAuthority()
+	authority.nilProcess = true
+	agent := NewAgent(WithHostAuthority(authority), WithExecutablePath(path), WithScratchDir(t.TempDir()))
+
+	err := agent.runStartupWithProbe(t.Context(), t.TempDir(), nil, func(ctx context.Context, client *nativeamp.Client) (string, error) {
+		return client.DiscoveryProbe(ctx)
+	})
+	require.ErrorIs(t, err, ErrHostAuthorityUnavailable)
+	require.ErrorIs(t, err, ErrContainmentIncomplete)
+	require.Equal(t, 2, len(authority.events))
+	root := strings.TrimPrefix(authority.events[0], "prepare:")
+	_, statErr := os.Stat(root)
+	require.NoError(t, statErr)
+	require.Zero(t, authority.reclaimCalls)
+}
+
+func TestHostAuthorityUnusableStdioFailedSettlementRetainsTree(t *testing.T) {
+	path, _ := fakeAgentAmpPath(t, "")
+	authority := newRecordingAuthority()
+	authority.unusableStdio = true
+	authority.waitErr = errors.New("stdio child settlement uncertain")
+	agent := NewAgent(WithHostAuthority(authority), WithExecutablePath(path), WithScratchDir(t.TempDir()))
+
+	err := agent.runStartupWithProbe(t.Context(), t.TempDir(), nil, func(ctx context.Context, client *nativeamp.Client) (string, error) {
+		return client.DiscoveryProbe(ctx)
+	})
+	require.ErrorIs(t, err, ErrContainmentIncomplete)
+	require.GreaterOrEqual(t, len(authority.events), 3)
+	root := strings.TrimPrefix(authority.events[0], "prepare:")
+	require.Equal(t, []string{"prepare:" + root, "start:" + root, "wait:" + root}, authority.events[:3])
+	_, statErr := os.Stat(root)
+	require.NoError(t, statErr)
+	require.Zero(t, authority.reclaimCalls)
+}
+
+func TestHostAuthorityFailedPrepareRetainsOpaqueTree(t *testing.T) {
+	want := errors.New("prepare outcome uncertain")
+	authority := newRecordingAuthority()
+	authority.prepareErr = want
+	agent := NewAgent(WithHostAuthority(authority), WithScratchDir(t.TempDir()))
+
+	_, err := newAgentSession(t.Context(), agent, "session", t.TempDir(), parsedSessionMeta{}, "", nil)
+	require.ErrorIs(t, err, want)
+	require.ErrorIs(t, err, ErrContainmentIncomplete)
+	require.Len(t, authority.events, 1)
+	root := strings.TrimPrefix(authority.events[0], "prepare:")
+	_, statErr := os.Stat(root)
+	require.NoError(t, statErr, "a failed Prepare result leaves the attempted tree opaque and retained")
+	require.Zero(t, authority.reclaimCalls)
+}
+
+func TestHostAuthorityFailedPrepareQuarantinesAtCapacity(t *testing.T) {
+	path, _ := fakeAgentAmpPath(t, "")
+	authority := newRecordingAuthority()
+	authority.prepareErr = errors.New("prepare outcome uncertain")
+	agent := NewAgent(
+		WithHostAuthority(authority),
+		WithExecutablePath(path),
+		WithScratchDir(t.TempDir()),
+		WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1}),
+	)
+	probe := func(ctx context.Context, client *nativeamp.Client) (string, error) {
+		return client.DiscoveryProbe(ctx)
+	}
+
+	require.ErrorIs(t, agent.runStartupWithProbe(t.Context(), t.TempDir(), nil, probe), ErrContainmentIncomplete)
+	require.ErrorContains(t, agent.runStartupWithProbe(t.Context(), t.TempDir(), nil, probe), "backpressure")
+	require.Len(t, authority.events, 1, "quarantine prevents unbounded new prepared roots")
+}
+
+func TestHostAuthorityBusyReclaimIsRetryable(t *testing.T) {
+	path, _ := fakeAgentAmpPath(t, "")
+	authority := newRecordingAuthority()
+	agent := NewAgent(
+		WithHostAuthority(authority),
+		WithExecutablePath(path),
+		WithScratchDir(t.TempDir()),
+		WithEnv(map[string]string{"AMP_API_KEY": "fake"}),
+	)
+	session, err := newAgentSession(t.Context(), agent, "session", t.TempDir(), parsedSessionMeta{}, "", nil)
+	require.NoError(t, err)
+	root := session.settingsDir
+
+	authority.reclaimErr = ErrNativeTreeBusy
+	err = session.Close(t.Context())
+	require.ErrorIs(t, err, ErrNativeTreeBusy)
+	require.NotErrorIs(t, err, ErrContainmentIncomplete)
+	_, statErr := os.Stat(root)
+	require.NoError(t, statErr)
+	agent.mu.Lock()
+	recorded := agent.lifecycleContainmentErr
+	agent.mu.Unlock()
+	require.NoError(t, recorded)
+	eventsBeforeAdmission := len(authority.events)
+	_, err = agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
+	require.ErrorIs(t, err, ErrNativeTreeBusy)
+	require.Len(t, authority.events, eventsBeforeAdmission, "busy cleanup blocks new managed runtime admission")
+
+	authority.reclaimErr = nil
+	require.NoError(t, session.Close(t.Context()))
+	_, statErr = os.Stat(root)
+	require.ErrorIs(t, statErr, os.ErrNotExist)
+	require.Equal(t, 3, authority.reclaimCalls)
+}
+
+func TestHostAuthorityWaitFailureRetainsPreparedTree(t *testing.T) {
+	path, _ := fakeAgentAmpPath(t, "")
+	authority := newRecordingAuthority()
+	authority.waitErr = errors.New("authority wait lost containment")
+	agent := NewAgent(WithHostAuthority(authority), WithExecutablePath(path), WithScratchDir(t.TempDir()))
+
+	err := agent.runStartupWithProbe(t.Context(), t.TempDir(), nil, func(ctx context.Context, client *nativeamp.Client) (string, error) {
+		return client.DiscoveryProbe(ctx)
+	})
+	require.ErrorIs(t, err, ErrContainmentIncomplete)
+	require.GreaterOrEqual(t, len(authority.events), 3)
+	root := strings.TrimPrefix(authority.events[0], "prepare:")
+	require.Equal(t, []string{"prepare:" + root, "start:" + root, "wait:" + root}, authority.events[:3])
+	require.Zero(t, authority.reclaimCalls)
+	_, statErr := os.Stat(root)
+	require.NoError(t, statErr)
+}
+
+type contextRevokeProcess struct{}
+
+func (*contextRevokeProcess) Stdin() io.WriteCloser { return nil }
+func (*contextRevokeProcess) Stdout() io.ReadCloser { return nil }
+func (*contextRevokeProcess) Stderr() io.ReadCloser { return nil }
+func (*contextRevokeProcess) Wait(context.Context) (NativeResult, error) {
+	return NativeResult{Revoked: true}, nil
+}
+func (*contextRevokeProcess) Revoke(context.Context) error { return context.Canceled }
+
+func TestHostAuthorityDetachedRevokeContextDoesNotLatch(t *testing.T) {
+	agent := NewAgent(WithHostAuthority(newRecordingAuthority()))
+	process := nativeProcessBridge{agent: agent, process: &contextRevokeProcess{}}
+
+	require.ErrorIs(t, process.Revoke(t.Context()), context.Canceled)
+	result, err := process.Wait(context.Background())
+	require.NoError(t, err)
+	require.True(t, result.Revoked)
+	agent.mu.Lock()
+	latched := agent.lifecycleContainmentErr
+	agent.mu.Unlock()
+	require.NoError(t, latched)
+}
+
+func TestHostAuthorityMixedContextFailureRemainsContainmentUncertainty(t *testing.T) {
+	want := errors.New("authority also lost process state")
+	err := authorityBoundaryError(errors.Join(context.Canceled, want))
+	require.ErrorIs(t, err, want)
+	require.ErrorIs(t, err, ErrContainmentIncomplete)
 }

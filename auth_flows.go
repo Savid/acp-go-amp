@@ -208,16 +208,6 @@ func (p *providerAuth) authorize(ctx context.Context, params json.RawMessage) (a
 		return nil, inputErr
 	}
 
-	// Manual material never enters Amp's native store. Hosted login does, so
-	// assert that store before minting an id or superseding any retained flow:
-	// a local-policy refusal must leave the owner's existing flow and durable
-	// lineage untouched.
-	if method.Type != authMethodTypeAPI {
-		if storeErr := session.authPolicy(); storeErr != nil {
-			return nil, authFailed(authCauseNativeVeto, request.providerID, request.method, "")
-		}
-	}
-
 	flowID, err := newAuthToken()
 	if err != nil {
 		return nil, authFailed(authCauseProcess, request.providerID, request.method, "")
@@ -647,10 +637,6 @@ func (p *providerAuth) callback(ctx context.Context, params json.RawMessage) (an
 
 	if login == nil {
 		return nil, p.fail(flow, authCauseTransport, false)
-	}
-
-	if storeErr := session.authPolicy(); storeErr != nil {
-		return nil, p.fail(flow, authCauseNativeVeto, false)
 	}
 
 	releaseSlot, admitted := p.admitSlot(ctx, providerID)

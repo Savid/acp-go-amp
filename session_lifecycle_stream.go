@@ -72,7 +72,7 @@ func (s *agentSession) openPromptStream(ctx context.Context) (*promptStream, err
 		cycleID:       id + lifecycleCycleSuffix,
 		turnID:        id + lifecycleTurnSuffix,
 		negotiated:    negotiated,
-		authoritative: s.agent.options.HostAuthority != nil,
+		authoritative: s.agent.options.hostAuthoritySupplied,
 	}
 
 	// The stream opens on a certified boundary only where one was actually

@@ -555,9 +555,9 @@ func TestStaleCloserCannotEvictTheReinstalledOwner(t *testing.T) {
 }
 
 // TestCloseContainmentFailureRetainsTheExactInstalledSession pins the close
-// ownership boundary: an incomplete process proof cannot evict the wrapper or
-// release the settings and scratch state a surviving descendant may still use.
-// Once a later attempt can prove the boundary, that same pointer is reclaimed.
+// ownership boundary: a busy process tree cannot evict the wrapper or release
+// settings and scratch state a descendant still uses. Once a later reclaim can
+// prove vacancy, that same pointer is reclaimed.
 func TestCloseContainmentFailureRetainsTheExactInstalledSession(t *testing.T) {
 	authority := newRecordingAuthority()
 	agent := newTestAgent(
@@ -574,11 +574,11 @@ func TestCloseContainmentFailureRetainsTheExactInstalledSession(t *testing.T) {
 	agent.mu.Unlock()
 	agent.observe.AddActiveSession(t.Context(), 1)
 
-	authority.reclaimErr = ErrContainmentIncomplete
+	authority.reclaimErr = ErrNativeTreeBusy
 
 	_, err = agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: session.id})
-	if !errors.Is(err, ErrContainmentIncomplete) {
-		t.Fatalf("CloseSession = %v, want containment sentinel", err)
+	if !errors.Is(err, ErrNativeTreeBusy) {
+		t.Fatalf("CloseSession = %v, want busy sequencing result", err)
 	}
 
 	retained, lookupErr := agent.session(session.id)
@@ -593,8 +593,8 @@ func TestCloseContainmentFailureRetainsTheExactInstalledSession(t *testing.T) {
 		t.Fatalf("failed close removed settings dir: %v", statErr)
 	}
 
-	// A later successful reclaim proves that path ownership returned, while the
-	// authority failure remains latched against new native admission.
+	// A later successful reclaim proves that path ownership returned. Busy is a
+	// sequencing result and never poisons later native admission.
 	authority.reclaimErr = nil
 
 	if _, err := agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: session.id}); err != nil {

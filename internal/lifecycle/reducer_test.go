@@ -757,11 +757,18 @@ func TestNegotiatedVersionPinsTheScalarVersion(t *testing.T) {
 	require.Equal(t, Version, Negotiated{Version: Version}.NegotiatedVersion())
 }
 
-// TestAdvertisementRendersTheAnswer pins the exact scalar wire shape.
+// TestAdvertisementRendersTheAnswer pins the exact scalar wire shape and every
+// proven fact.
 func TestAdvertisementRendersTheAnswer(t *testing.T) {
 	t.Parallel()
 
-	require.Equal(t, map[string]any{"version": Version}, richConfiguration().Advertisement())
+	require.Equal(t, map[string]any{
+		"version":                 Version,
+		"updatesOutsidePrompt":    true,
+		"authoritativeQuiescence": true,
+		"quiescenceSource":        "process-containment",
+		"activityKinds":           []string{"task", "subagent"},
+	}, richConfiguration().Advertisement())
 	require.Nil(t, (Negotiated{}).Advertisement())
 }
 

@@ -20,14 +20,10 @@ const (
 	authLedgerRemoved   = "removed"
 )
 
-// Closed proofSource enum. Presence alone is never enough: without durable
-// provenance binding the resident credential to this connection generation the
-// honest answer is not_confirmed however plainly the slot is occupied.
-const (
-	authProofConfirmedPresent = "confirmed_present"
-	authProofConfirmedAbsent  = "confirmed_absent"
-	authProofNotConfirmed     = "not_confirmed"
-)
+// The ledger proves lineage, not current native credential residence. Inventory
+// therefore reports the sole proof status it can establish without reading a
+// prepared native tree.
+const authProofNotConfirmed = "not_confirmed"
 
 const (
 	authLedgerVendorDir = "amp"
@@ -290,13 +286,9 @@ type authInventoryResult struct {
 	Entries []authInventoryEntry `json:"entries"`
 }
 
-// inventory reports residence from the ledger and, for hosted login, a probe of
-// the native slot the record names. The ledger alone is never sufficient — an
-// adapter's record of its own intent cannot prove residence — and a probe alone
-// proves only that something is resident, not that it is the thing this
-// connection installed. Manual material is handed to the host and never
-// installed into native state, so its honest proof remains not_confirmed across
-// both the current process and a restart.
+// inventory reports durable lineage without reading native credential state.
+// The ledger cannot prove that credential material is currently resident, so
+// every entry truthfully reports not_confirmed.
 func (p *providerAuth) inventory(_ context.Context, params json.RawMessage) (any, error) {
 	fields, err := authParamFields(params, authFieldSessionID)
 	if err != nil {
@@ -308,9 +300,8 @@ func (p *providerAuth) inventory(_ context.Context, params json.RawMessage) (any
 		return nil, err
 	}
 
-	session, err := p.authSession(sessionID)
-	if err != nil {
-		return nil, err
+	if _, sessionErr := p.authSession(sessionID); sessionErr != nil {
+		return nil, sessionErr
 	}
 
 	records, err := p.ledger.list()
@@ -327,71 +318,14 @@ func (p *providerAuth) inventory(_ context.Context, params json.RawMessage) (any
 			continue
 		}
 
-		proof := authProofNotConfirmed
-
-		if record.Method == authMethodLogin {
-			if storeErr := session.authPolicy(); storeErr != nil {
-				return nil, authFailed(authCauseNativeVeto, record.ProviderID, record.Method, "")
-			}
-
-			residence := p.authResidence(session, record.ProviderID, record.ConnectionID)
-			present := false
-
-			if residence != "" {
-				var presentErr error
-
-				present, presentErr = authSecretPresent(residence)
-				if presentErr != nil {
-					return nil, authFailed(authCauseHarvestFailed, record.ProviderID, record.Method, "")
-				}
-			}
-
-			proof = authProofSource(record.State, present)
-		}
-
 		entries = append(entries, authInventoryEntry{
 			ProviderID:        record.ProviderID,
 			ConnectionID:      record.ConnectionID,
 			Revision:          record.Revision,
 			BindingGeneration: record.BindingGeneration,
-			ProofSource:       proof,
+			ProofSource:       authProofNotConfirmed,
 		})
 	}
 
 	return authInventoryResult{Entries: entries}, nil
-}
-
-// authResidence names the slot this session's own flow for a connection wrote
-// into. It is addressed by connection because the ledger is: two connections
-// have two records and two logins, and answering one record's proof from the
-// other's residence would report residence nothing established. A ledger record
-// with no flow in this session names a slot that lived in a session that is
-// gone, so it falls back to this session's isolated home, where the probe
-// honestly finds nothing.
-func (p *providerAuth) authResidence(session *agentSession, providerID string, connectionID string) string {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	for _, flow := range p.byID {
-		if flow.sessionID == session.id && flow.providerID == providerID &&
-			flow.connectionID == connectionID && flow.residence != "" {
-			return flow.residence
-		}
-	}
-
-	return ""
-}
-
-// authProofSource is the total function of ledger state and native probe. A
-// sibling reports exactly the cell the two select and never chooses a value.
-func authProofSource(state string, present bool) string {
-	if state != authLedgerConfirmed {
-		return authProofNotConfirmed
-	}
-
-	if present {
-		return authProofConfirmedPresent
-	}
-
-	return authProofConfirmedAbsent
 }

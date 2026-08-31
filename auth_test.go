@@ -476,7 +476,7 @@ func TestAuthFailureShapeIsClosed(t *testing.T) {
 		}
 	}
 
-	bare := authFailure(t, authFailed(authCausePolicy, "", "", ""))
+	bare := authFailure(t, authFailed(authCauseBindingConflict, "", "", ""))
 	if len(bare) != 3 || bare["retryable"] != false {
 		t.Fatalf("bare failure = %#v", bare)
 	}
@@ -485,7 +485,7 @@ func TestAuthFailureShapeIsClosed(t *testing.T) {
 		authCauseTransport: true, authCauseProcess: true, authCauseTimeout: true,
 		authCauseNativeVeto: false, authCauseProviderRefused: false, authCauseHarvestFailed: false,
 		authCauseUnsupportedVariant: false, authCauseFlowExpired: false, authCauseFlowState: false,
-		authCauseFlowCancelled: false, authCausePolicy: false, authCauseBindingConflict: false,
+		authCauseFlowCancelled: false, authCauseBindingConflict: false,
 	}
 	for cause, want := range retryable {
 		if got := authCauseRetryable(cause); got != want {
@@ -512,7 +512,6 @@ func TestAuthFlowTransitionTable(t *testing.T) {
 		{cause: authCauseTimeout, inFlight: true, state: authStateFailed, reason: authReasonAcceptanceUnknown},
 		{cause: authCauseHarvestFailed, state: authStateFailed, reason: authReasonHarvestFailed},
 		{cause: authCauseFlowExpired, state: authStateExpired, reason: authReasonDeadline},
-		{cause: authCausePolicy},
 		{cause: authCauseBindingConflict},
 		{cause: authCauseFlowState},
 		{cause: authCauseFlowCancelled},
@@ -553,10 +552,6 @@ func TestAuthSessionAccessorsAndPanicGuard(t *testing.T) {
 		t.Fatal("the session reports no isolated data home")
 	}
 
-	if err := fixture.session.authPolicy(); err != nil {
-		t.Fatalf("the wrapper's own settings file does not assert the file store: %v", err)
-	}
-
 	done := make(chan struct{})
 
 	fixture.broker.goSafe("probe", func() {
@@ -575,16 +570,12 @@ func TestAuthSessionAccessorsAndPanicGuard(t *testing.T) {
 func TestAuthNativeSeamsAreTheOnlyNativeEntryPoints(t *testing.T) {
 	// The package reaches amp's credential state through exactly these, so a
 	// second reader cannot appear without changing one of them.
-	if authReadSecret == nil || authSecretPresent == nil || authStorePolicy == nil || authStartLogin == nil {
+	if authReadSecret == nil || authStartLogin == nil {
 		t.Fatal("a native provider-auth entry point is unset")
 	}
 
 	if _, _, err := authReadSecret(t.TempDir()); err != nil {
 		t.Fatalf("authReadSecret over an empty home: %v", err)
-	}
-
-	if err := authStorePolicy(); err != nil {
-		t.Fatalf("store policy = %v", err)
 	}
 
 	if path := nativeamp.AuthSecretsPath("/data"); path != filepath.Join("/data", "amp", "secrets.json") {
