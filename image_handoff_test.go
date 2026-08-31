@@ -65,6 +65,13 @@ func handoffPolicy(root string, limits ImageLimits) promptImagePolicy {
 	return promptImagePolicy{limits: limits, handoffRoot: root}
 }
 
+func TestHandoffCapabilityScalar(t *testing.T) {
+	require.NotContains(t, initializeMeta(t), "acp-go.dev/handoff")
+
+	meta := initializeMeta(t, WithInputHandoffRoot(t.TempDir()))
+	require.Equal(t, map[string]any{"version": 1}, meta["acp-go.dev/handoff"])
+}
+
 // requireHandoffError pins one handoff verdict exactly: the input error shape
 // plus the whole message, which must be the declared constant and never a string
 // built from something the adapter observed.

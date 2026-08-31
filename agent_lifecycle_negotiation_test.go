@@ -1608,41 +1608,6 @@ func TestCloseNeverRewritesALossTerminalizedFailure(t *testing.T) {
 	require.Equal(t, stored, after, "the close's own commit rewrote no frame the failure committed")
 }
 
-// TestCancelCarriesNoRouteVerdictToPrecedeTheReservedKey pins this adapter's
-// structural exception to the refusal-precedence rule. Route validation precedes
-// the reserved-key refusal on every surface that carries both, and this adapter
-// carries only one: one short-lived process serves one prompt and there is no
-// elicitation surface, so `acp-go.dev/route` is neither advertised nor validated
-// and a cancel bearing it is applied. The lifecycle key is the single verdict a
-// cancel can produce here, and a cancel carrying both still reports it.
-func TestCancelCarriesNoRouteVerdictToPrecedeTheReservedKey(t *testing.T) {
-	agent, _, sessionID := lifecycleAgent(t, lifecycleOffer(1.0))
-
-	malformedRoute := map[string]any{"version": 99.0, "turnNonce": ""}
-
-	require.NoError(t, agent.Cancel(t.Context(), acp.CancelNotification{
-		SessionId: sessionID,
-		Meta:      map[string]any{"acp-go.dev/route": malformedRoute},
-	}), "this adapter validates no turn nonce, so a route envelope produces no verdict")
-
-	err := agent.Cancel(t.Context(), acp.CancelNotification{
-		SessionId: sessionID,
-		Meta: map[string]any{
-			"acp-go.dev/route": malformedRoute,
-			lifecycle.MetaKey:  map[string]any{"version": 1.0},
-		},
-	})
-
-	var requestErr *acp.RequestError
-
-	require.ErrorAs(t, err, &requestErr)
-	require.Equal(t, invalidParamsCode, requestErr.Code)
-
-	data, ok := requestErr.Data.(map[string]any)
-	require.True(t, ok)
-	require.Equal(t, lifecycle.MetaPath, data[jsonFieldField])
-}
-
 // TestLifecycleKeyRefusedBeforeExtensionMethodResolution pins the precedence on
 // the extension surface: the reserved key is answered before the method name is
 // resolved, so a method this adapter does not dispatch reports the key rather

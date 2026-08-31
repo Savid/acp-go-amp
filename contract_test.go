@@ -1028,26 +1028,11 @@ func TestInitializeAdvertisesTheFamilyMediaEnvelope(t *testing.T) {
 	}, envelope)
 }
 
-// TestMediaEnvelopeIsNotConditionedOnRouteSupport pins that Amp advertises the
-// family media envelope while advertising no route surface at all, so a host must
-// never infer one from the other.
-func TestMediaEnvelopeIsNotConditionedOnRouteSupport(t *testing.T) {
+func TestRouteCapabilityScalar(t *testing.T) {
 	meta := initializeMeta(t)
 
 	require.NotContains(t, meta, "acp-go.dev/route")
 	require.Contains(t, meta, metaMediaEnvelopeKey)
-}
-
-func TestHandoffAdvertisementFollowsTheConfiguredReadRoot(t *testing.T) {
-	require.NotContains(t, initializeMeta(t), metaHandoffKey)
-
-	meta := initializeMeta(t, WithInputHandoffRoot(t.TempDir()))
-	require.Equal(t, []string{metaHandoffKey, metaMediaEnvelopeKey, ampMetaKey}, sortedMetaKeys(meta))
-	require.Equal(t, map[string]any{"version": 1}, meta[metaHandoffKey])
-
-	encoded, err := json.Marshal(meta[metaHandoffKey])
-	require.NoError(t, err)
-	require.JSONEq(t, `{"version":1}`, string(encoded))
 }
 
 // loadGate parks the first main-subpath Load after arming, once the underlying

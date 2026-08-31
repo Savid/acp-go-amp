@@ -194,14 +194,13 @@ func TestSessionMetaAccumulatesRegardlessOfOptionOrder(t *testing.T) {
 // overwriting, or quietly dropping it are all answers a host cannot see.
 func TestMetaBuildersRefuseAReservedFamilyLiteral(t *testing.T) {
 	literals := []string{
-		metaRouteKey,
 		"acp-go.dev/mediaEnvelope",
 		"acp-go.dev/handoff",
 		"acp-go.dev/lifecycle",
 	}
 
 	if got := reservedFamilyLiterals(); len(got) != len(literals) {
-		t.Fatalf("reserved literal set = %#v, want the closed four %#v", got, literals)
+		t.Fatalf("reserved literal set = %#v, want %#v", got, literals)
 	}
 
 	for _, literal := range literals {
