@@ -510,10 +510,26 @@ func TestStartAuthLoginReportsAWorkingDirectoryFailure(t *testing.T) {
 }
 
 func TestStartAuthLoginReportsAStartFailure(t *testing.T) {
-	client := newTestClient(t, nil, Options{CLIPath: filepath.Join(t.TempDir(), "missing-amp"), Cwd: t.TempDir()})
-	if _, err := client.StartAuthLogin(t.Context()); err == nil {
-		t.Fatal("a missing binary started a login")
-	}
+	t.Run("discovery", func(t *testing.T) {
+		client := newTestClient(t, nil, Options{CLIPath: filepath.Join(t.TempDir(), "missing-amp"), Cwd: t.TempDir()})
+		if _, err := client.StartAuthLogin(t.Context()); err == nil {
+			t.Fatal("a missing binary started a login")
+		}
+	})
+
+	t.Run("managed start", func(t *testing.T) {
+		want := errors.New("managed start refused")
+		client := newTestClient(t, nil, Options{
+			CLIPath: "amp",
+			Cwd:     t.TempDir(),
+			StartNative: func(context.Context, NativeRequest) (NativeProcess, error) {
+				return nil, want
+			},
+		})
+		if _, err := client.StartAuthLogin(t.Context()); !errors.Is(err, want) {
+			t.Fatalf("StartAuthLogin = %v, want %v", err, want)
+		}
+	})
 }
 
 func TestAuthSurfaceResidualBoundaryErrors(t *testing.T) {
