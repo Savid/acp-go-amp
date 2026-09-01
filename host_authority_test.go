@@ -304,7 +304,7 @@ func TestManagedStartupProbeCacheIsAuthorityScoped(t *testing.T) {
 	}
 }
 
-func TestHostAuthorityOrdinaryStartRefusalReclaimsPreparedResidence(t *testing.T) {
+func TestHostAuthorityNoOrdinaryFallback(t *testing.T) {
 	path, _ := fakeAgentAmpPath(t, "")
 	want := errors.New("managed launch refused")
 	authority := newRecordingAuthority()
