@@ -154,18 +154,20 @@ func (c *Client) AuthDeploymentSupported() bool {
 // AuthLogin is one running `amp login`. It owns the child's containment
 // boundary, its pipes, and the single authorization URL it printed.
 type AuthLogin struct {
-	process  NativeProcess
-	stdin    io.WriteCloser
-	stdout   io.ReadCloser
-	stderr   io.ReadCloser
-	waitDone chan struct{}
-	waitErr  error
-	result   NativeResult
-	waitStop context.CancelFunc
-	url      chan string
-	dataHome string
-	settle   func(context.Context) error
-	cleanup  func() error
+	process    NativeProcess
+	stdin      io.WriteCloser
+	stdout     io.ReadCloser
+	stderr     io.ReadCloser
+	stdoutDone chan struct{}
+	stderrDone chan struct{}
+	waitDone   chan struct{}
+	waitErr    error
+	result     NativeResult
+	waitStop   context.CancelFunc
+	url        chan string
+	dataHome   string
+	settle     func(context.Context) error
+	cleanup    func() error
 
 	stdinOnce sync.Once
 	stdinErr  error
@@ -223,17 +225,19 @@ func (c *Client) StartAuthLogin(ctx context.Context) (*AuthLogin, error) {
 
 	waitCtx, stopWaiting := context.WithCancel(context.Background())
 	login := &AuthLogin{
-		process:  process,
-		stdin:    process.Stdin(),
-		stdout:   process.Stdout(),
-		stderr:   process.Stderr(),
-		waitDone: make(chan struct{}),
-		waitStop: stopWaiting,
-		url:      make(chan string, 1),
-		dataHome: dataHome,
-		onPanic:  c.options.OnGoroutinePanic,
-		settle:   c.options.AfterNativeWait,
-		cleanup:  c.options.CleanupResidence,
+		process:    process,
+		stdin:      process.Stdin(),
+		stdout:     process.Stdout(),
+		stderr:     process.Stderr(),
+		stdoutDone: make(chan struct{}),
+		stderrDone: make(chan struct{}),
+		waitDone:   make(chan struct{}),
+		waitStop:   stopWaiting,
+		url:        make(chan string, 1),
+		dataHome:   dataHome,
+		onPanic:    c.options.OnGoroutinePanic,
+		settle:     c.options.AfterNativeWait,
+		cleanup:    c.options.CleanupResidence,
 	}
 
 	go login.readStdout(ctx)
@@ -324,6 +328,7 @@ func (l *AuthLogin) recoverGoroutine(ctx context.Context, name string) {
 // is validated as a URL before anything else looks at the line, so output the
 // harness wraps or reflows yields no URL rather than the wrong bytes.
 func (l *AuthLogin) readStdout(ctx context.Context) {
+	defer closeAuthLoginWorker(l.stdoutDone)
 	defer l.recoverGoroutine(ctx, "amp login stdout reader")
 	defer close(l.url)
 
@@ -351,9 +356,24 @@ func (l *AuthLogin) readStdout(ctx context.Context) {
 // drainStderr consumes the child's stderr and forwards none of it. A native
 // login failure line can quote the value the owner pasted.
 func (l *AuthLogin) drainStderr(ctx context.Context) {
+	defer closeAuthLoginWorker(l.stderrDone)
 	defer l.recoverGoroutine(ctx, "amp login stderr drain")
 
 	_, _ = io.Copy(io.Discard, l.stderr)
+}
+
+// StartAuthLogin always supplies worker signals; nil admits only narrow manual
+// values that did not start a worker.
+func closeAuthLoginWorker(done chan struct{}) {
+	if done != nil {
+		close(done)
+	}
+}
+
+func joinAuthLoginWorker(done <-chan struct{}) {
+	if done != nil {
+		<-done
+	}
 }
 
 func authLoginURL(candidate string) bool {
@@ -493,11 +513,17 @@ func (l *AuthLogin) closeWithContext(closeCtx context.Context) error {
 		cleanupErr = l.cleanup()
 	}
 
+	stdoutErr := l.stdout.Close()
+	stderrErr := l.stderr.Close()
+
+	joinAuthLoginWorker(l.stdoutDone)
+	joinAuthLoginWorker(l.stderrDone)
+
 	return errors.Join(
 		revokeErr,
 		waitErr,
-		l.stdout.Close(),
-		l.stderr.Close(),
+		stdoutErr,
+		stderrErr,
 		cleanupErr,
 	)
 }

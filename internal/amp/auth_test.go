@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -432,6 +433,47 @@ type stubWriteCloser struct{ closeErr error }
 func (s stubWriteCloser) Write(p []byte) (int, error) { return len(p), nil }
 func (s stubWriteCloser) Close() error                { return s.closeErr }
 
+type authWorkerReadCloser struct {
+	readStarted chan struct{}
+	closeCalled chan struct{}
+	release     chan struct{}
+	readOnce    sync.Once
+	closeOnce   sync.Once
+	closeOrder  *[]string
+	name        string
+}
+
+func newAuthWorkerReadCloser(name string, closeOrder *[]string) *authWorkerReadCloser {
+	return &authWorkerReadCloser{
+		readStarted: make(chan struct{}),
+		closeCalled: make(chan struct{}),
+		release:     make(chan struct{}),
+		closeOrder:  closeOrder,
+		name:        name,
+	}
+}
+
+func (r *authWorkerReadCloser) Read([]byte) (int, error) {
+	r.readOnce.Do(func() { close(r.readStarted) })
+	<-r.release
+
+	return 0, io.EOF
+}
+
+func (r *authWorkerReadCloser) Close() error {
+	r.closeOnce.Do(func() {
+		*r.closeOrder = append(*r.closeOrder, r.name)
+		close(r.closeCalled)
+	})
+
+	return nil
+}
+
+type authPanicReadCloser struct{}
+
+func (authPanicReadCloser) Read([]byte) (int, error) { panic("read panic") }
+func (authPanicReadCloser) Close() error             { return nil }
+
 func TestAuthLoginSubmitReportsAFailedStdinClose(t *testing.T) {
 	want := errors.New("close refused")
 	login := &AuthLogin{stdin: stubWriteCloser{closeErr: want}}
@@ -639,6 +681,131 @@ func TestAuthLoginIncompleteCloseCancelsAndJoinsSettlementWithoutCleanup(t *test
 	if cleaned {
 		t.Fatal("incomplete settlement cleaned the auth residence")
 	}
+}
+
+func TestAuthLoginCloseJoinsPipeWorkers(t *testing.T) {
+	for _, testCase := range []struct {
+		name       string
+		incomplete bool
+	}{
+		{name: "terminal"},
+		{name: "incomplete wait", incomplete: true},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			closeOrder := []string{}
+			stdout := newAuthWorkerReadCloser("stdout", &closeOrder)
+			stderr := newAuthWorkerReadCloser("stderr", &closeOrder)
+			waitDone := make(chan struct{})
+			login := &AuthLogin{
+				process:    newCoverageNativeProcess(),
+				stdin:      &coverageWriteCloser{},
+				stdout:     stdout,
+				stderr:     stderr,
+				stdoutDone: make(chan struct{}),
+				stderrDone: make(chan struct{}),
+				waitDone:   waitDone,
+				url:        make(chan string, 1),
+			}
+
+			closeCtx := t.Context()
+			if testCase.incomplete {
+				var cancel context.CancelFunc
+
+				closeCtx, cancel = context.WithCancel(t.Context())
+				cancel()
+				login.waitStop = func() { close(waitDone) }
+			} else {
+				close(waitDone)
+			}
+
+			go login.readStdout(t.Context())
+			go login.drainStderr(t.Context())
+			<-stdout.readStarted
+			<-stderr.readStarted
+
+			closeDone := make(chan error, 1)
+			go func() { closeDone <- login.closeWithContext(closeCtx) }()
+			<-stdout.closeCalled
+			<-stderr.closeCalled
+
+			if len(closeOrder) != 2 || closeOrder[0] != "stdout" || closeOrder[1] != "stderr" {
+				t.Fatalf("stream close order = %v", closeOrder)
+			}
+
+			select {
+			case err := <-closeDone:
+				t.Fatalf("Close returned before pipe workers completed: %v", err)
+			default:
+			}
+
+			close(stdout.release)
+			close(stderr.release)
+			err := <-closeDone
+			if testCase.incomplete {
+				if !errors.Is(err, context.Canceled) || !errors.Is(err, ErrContainmentIncomplete) {
+					t.Fatalf("Close = %v, want canceled incomplete containment", err)
+				}
+			} else if err != nil {
+				t.Fatalf("Close = %v", err)
+			}
+		})
+	}
+}
+
+func TestAuthLoginPipeWorkerCompletionIncludesPanicCallback(t *testing.T) {
+	callbackStarted := make(chan string, 2)
+	callbackRelease := make(chan struct{})
+	login := &AuthLogin{
+		stdout:     authPanicReadCloser{},
+		stderr:     authPanicReadCloser{},
+		stdoutDone: make(chan struct{}),
+		stderrDone: make(chan struct{}),
+		url:        make(chan string, 1),
+		onPanic: func(_ context.Context, name string, recovered any) {
+			if recovered != "read panic" {
+				t.Errorf("recovered = %v", recovered)
+			}
+
+			callbackStarted <- name
+			<-callbackRelease
+		},
+	}
+
+	go login.readStdout(t.Context())
+	go login.drainStderr(t.Context())
+	names := map[string]bool{
+		<-callbackStarted: true,
+		<-callbackStarted: true,
+	}
+	if !names["amp login stdout reader"] || !names["amp login stderr drain"] {
+		t.Fatalf("panic callbacks = %v", names)
+	}
+
+	select {
+	case <-login.stdoutDone:
+		t.Fatal("stdout worker completed before its panic callback")
+	default:
+	}
+	select {
+	case <-login.stderrDone:
+		t.Fatal("stderr worker completed before its panic callback")
+	default:
+	}
+
+	close(callbackRelease)
+	<-login.stdoutDone
+	<-login.stderrDone
+}
+
+func TestAuthLoginPipeWorkersPermitNarrowManualObjects(t *testing.T) {
+	login := &AuthLogin{
+		stdout: io.NopCloser(strings.NewReader("")),
+		stderr: io.NopCloser(strings.NewReader("")),
+		url:    make(chan string, 1),
+	}
+
+	login.readStdout(t.Context())
+	login.drainStderr(t.Context())
 }
 
 func TestAuthLoginPanicHandlerRuns(t *testing.T) {
