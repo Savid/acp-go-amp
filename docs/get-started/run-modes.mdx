@@ -18,3 +18,35 @@ Omitting `WithHostAuthority` selects the same behavior for an embedded agent.
 Embedded `Serve` or `NewAgent` may add `WithHostAuthority`. Managed mode
 routes every probe, prompt, helper, login, and browser descendant through the
 authority. Settings, MCP files, and seed files are complete before preparation.
+
+```go
+err := ampacp.Serve(ctx, input, output,
+	ampacp.WithExecutablePath("amp"),
+	ampacp.WithScratchDir("/var/lib/my-host/amp-scratch"),
+	ampacp.WithHostAuthority(authority),
+)
+```
+
+The authority is mandatory once supplied. An unavailable authority, unusable
+process streams, or uncertain containment fails closed without an ordinary
+launch fallback.
+
+## Flag and option equivalents
+
+| Flag | Go option |
+| --- | --- |
+| `-path` | `WithExecutablePath` |
+| `-home` | `WithHome`, which Amp rejects when non-empty |
+| `-model` | `WithDefaultModel`, which Amp rejects when non-empty |
+| `-scratch-dir` | `WithScratchDir` |
+| `-provider-auth-root` | `WithProviderAuthRoot` |
+| `-provider-auth-direct-home` | `WithProviderAuthDirectHome`, which Amp rejects when non-empty |
+| `-seed-file` | `WithSeedFiles` |
+
+`-debug` configures the command's logger and `-version` prints the binary
+version. Embed-only options, including `WithHostAuthority`, session stores,
+turn and concurrency limits, image limits, and telemetry providers, have no CLI
+flag.
+
+See [Security](/docs/operations/security) for preparation, launch, settlement,
+reclaim, and authority-loss behavior.

@@ -22,7 +22,7 @@ const (
 	platformDarwin   = "darwin"
 	platformLinux    = "linux"
 	platformWindows  = "windows"
-	privateEnvPrefix = "ACP_" + "GO_AMP_INTERNAL_"
+	privateEnvPrefix = "ACP_GO_AMP_INTERNAL_"
 )
 
 var runtimeGOOS = runtime.GOOS
@@ -245,6 +245,7 @@ func WithExecutablePath(path string) Option {
 	}
 }
 
+// WithHostAuthority routes native processes and tree ownership through authority.
 func WithHostAuthority(authority HostAuthority) Option {
 	return func(options *Options) {
 		options.hostAuthoritySupplied = true

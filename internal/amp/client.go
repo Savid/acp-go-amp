@@ -44,7 +44,7 @@ const (
 	ampArgStreamJSONInput       = "--stream-json-input"
 	ampArgExecute               = "-x"
 	ampArgNoArchiveAfterExecute = "--no-archive-after-execute"
-	adapterPrivateEnvPrefix     = "ACP_" + "GO_AMP_INTERNAL_"
+	adapterPrivateEnvPrefix     = "ACP_GO_AMP_INTERNAL_"
 	scrubbedTracebackEnv        = "GOTRACEBACK"
 	scrubbedRedactionEnv        = "AMP_DISABLE_SECRET_REDACTION"
 )
