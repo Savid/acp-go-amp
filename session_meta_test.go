@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"maps"
+	"os"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
@@ -32,14 +33,17 @@ func TestSessionMetaStrictness(t *testing.T) {
 	}
 }
 
-func TestActiveOmittedEnvMeansDefaultEnv(t *testing.T) {
+func TestActiveOmittedEnvReconstructsAcceptedCarrier(t *testing.T) {
 	ctx := context.Background()
 	path, _ := fakeAgentAmpPath(t, "")
 	cwd := t.TempDir()
 	extra := t.TempDir()
 	server := StdioMCPServer("stdio", "printf", []string{"ok"}, map[string]string{"A": "B"})
 	explicitOptions := NewAmpOptions(
-		WithAmpEnv(map[string]string{"AMP_URL": "https://session.example.test"}),
+		WithAmpEnv(map[string]string{
+			"AMP_API_KEY": "session-key",
+			"AMP_URL":     "https://session.example.test",
+		}),
 		WithAmpMode("high"),
 	)
 	omittedEnvOptions := []SessionRequestOption{
@@ -51,7 +55,6 @@ func TestActiveOmittedEnvMeansDefaultEnv(t *testing.T) {
 	agent := newTestAgent(
 		WithExecutablePath(path),
 		WithScratchDir(testScratchDir(t)),
-		WithEnv(map[string]string{"AMP_API_KEY": "default"}),
 	)
 	resp, err := agent.NewSession(ctx, NewSessionRequest(cwd,
 		WithSessionAdditionalDirectories(extra),
@@ -61,28 +64,60 @@ func TestActiveOmittedEnvMeansDefaultEnv(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSession explicit env: %v", err)
 	}
-	if _, loadErr := agent.LoadSession(ctx, LoadSessionRequest(resp.SessionId, cwd, omittedEnvOptions...)); !isMismatchField(loadErr, "env") {
-		t.Fatalf("active load omitted env = %v, want env mismatch", loadErr)
+	if _, loadErr := agent.LoadSession(ctx, LoadSessionRequest(resp.SessionId, cwd, omittedEnvOptions...)); loadErr != nil {
+		t.Fatalf("active load omitted env: %v", loadErr)
 	}
-	if _, resumeErr := agent.ResumeSession(ctx, ResumeSessionRequest(resp.SessionId, cwd, omittedEnvOptions...)); !isMismatchField(resumeErr, "env") {
-		t.Fatalf("active resume omitted env = %v, want env mismatch", resumeErr)
+	if _, resumeErr := agent.ResumeSession(ctx, ResumeSessionRequest(resp.SessionId, cwd, omittedEnvOptions...)); resumeErr != nil {
+		t.Fatalf("active resume omitted env: %v", resumeErr)
 	}
 
-	defaultAgent := newTestAgent(
-		WithExecutablePath(path),
-		WithScratchDir(testScratchDir(t)),
-		WithEnv(map[string]string{"AMP_API_KEY": "default"}),
-	)
-	defaultResp, err := defaultAgent.NewSession(ctx, NewSessionRequest(cwd))
-	if err != nil {
-		t.Fatalf("NewSession default env: %v", err)
+	changed := append([]SessionRequestOption(nil), omittedEnvOptions...)
+	changed = append(changed, WithSessionAmpOptions(NewAmpOptions(
+		WithAmpEnv(map[string]string{
+			"AMP_API_KEY": "rotated-key",
+			"AMP_URL":     "https://session.example.test",
+		}),
+		WithAmpMode("high"),
+	)))
+	if _, resumeErr := agent.ResumeSession(ctx, ResumeSessionRequest(resp.SessionId, cwd, changed...)); !isMismatchField(resumeErr, optionEnvKey) {
+		t.Fatalf("active resume changed env = %v, want env mismatch", resumeErr)
 	}
-	if _, err := defaultAgent.LoadSession(ctx, LoadSessionRequest(defaultResp.SessionId, cwd)); err != nil {
-		t.Fatalf("active load omitted env against default env: %v", err)
+}
+
+func TestSessionResidenceEnvRejectedBeforeMutation(t *testing.T) {
+	keys := []string{envHome, envXDGConfigHome, envXDGCacheHome, envXDGDataHome, envXDGStateHome}
+	for _, key := range keys {
+		t.Run(key, func(t *testing.T) {
+			scratch := t.TempDir()
+			store := &recordingStore{}
+			agent := newTestAgent(WithScratchDir(scratch), WithSessionStore(store))
+			_, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir(),
+				WithSessionAmpOptions(NewAmpOptions(WithAmpEnv(map[string]string{
+					"AMP_API_KEY": "key",
+					key:           "/caller-owned",
+				}))),
+			))
+			requireUnsupportedField(t, err, "_meta.amp.options.env."+key)
+			if store.replaceCalls != 0 {
+				t.Fatalf("invalid residence env made %d store mutations", store.replaceCalls)
+			}
+			entries, readErr := os.ReadDir(scratch)
+			if readErr != nil || len(entries) != 0 {
+				t.Fatalf("invalid residence env mutated scratch: entries=%d err=%v", len(entries), readErr)
+			}
+		})
 	}
-	if _, err := defaultAgent.ResumeSession(ctx, ResumeSessionRequest(defaultResp.SessionId, cwd)); err != nil {
-		t.Fatalf("active resume omitted env against default env: %v", err)
-	}
+
+	t.Run("windows case alias", func(t *testing.T) {
+		simulateWindowsEnvironment(t)
+		err := newTestAgent().validateSessionStartOptions(AmpOptions{Env: map[string]string{"home": "/caller-owned"}})
+		requireUnsupportedField(t, err, "_meta.amp.options.env.home")
+
+		entry := json.RawMessage(`{"format":"amp-thread-mirror-v1","sessionId":"T-bad","nativeSessionId":"T-bad","cwd":"/cwd","env":{"amp_api_key":"first","AMP_API_KEY":"second"},"updatedAtUnixMilli":1,"createdAtUnixMilli":1}`)
+		if _, ok := manifestFromStoreEntry(entry); ok {
+			t.Fatal("stored env accepted a platform-case duplicate")
+		}
+	})
 }
 
 func TestColdLoadReconstructsStoredEnvAndRefusesAChangedCarrier(t *testing.T) {

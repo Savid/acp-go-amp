@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 )
 
 // ProviderCredentialType selects one variant of the closed credential union.
@@ -105,39 +104,8 @@ func (credential *ProviderCredential) UnmarshalJSON(data []byte) error {
 // strictCredentialFields walks the object once so a duplicate key is rejected
 // rather than silently winning.
 func strictCredentialFields(data []byte) (map[string]json.RawMessage, error) {
-	decoder := json.NewDecoder(bytes.NewReader(data))
-
-	token, err := decoder.Token()
-	if err != nil || token != json.Delim('{') {
-		return nil, errProviderCredentialInvalid
-	}
-
-	fields := map[string]json.RawMessage{}
-
-	for decoder.More() {
-		keyToken, err := decoder.Token()
-		if err != nil {
-			return nil, errProviderCredentialInvalid
-		}
-
-		key, _ := keyToken.(string)
-		if _, duplicate := fields[key]; duplicate {
-			return nil, errProviderCredentialInvalid
-		}
-
-		var value json.RawMessage
-		if err := decoder.Decode(&value); err != nil {
-			return nil, errProviderCredentialInvalid
-		}
-
-		fields[key] = value
-	}
-
-	if _, err := decoder.Token(); err != nil {
-		return nil, errProviderCredentialInvalid
-	}
-
-	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+	fields, err := strictJSONObjectFields(data)
+	if err != nil {
 		return nil, errProviderCredentialInvalid
 	}
 

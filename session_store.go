@@ -14,6 +14,13 @@ const (
 	SessionStoreMainSubpath = ""
 	SessionStoreFormat      = "amp-thread-mirror-v1"
 	transcriptSubpath       = "transcript"
+
+	manifestFieldFormat             = "format"
+	manifestFieldNativeSessionID    = "nativeSessionId"
+	manifestFieldCwd                = "cwd"
+	manifestFieldTitle              = "title"
+	manifestFieldUpdatedAtUnixMilli = "updatedAtUnixMilli"
+	manifestFieldCreatedAtUnixMilli = "createdAtUnixMilli"
 )
 
 type SessionStoreEntry = json.RawMessage
@@ -369,6 +376,10 @@ func cloneEntries(entries []SessionStoreEntry) []SessionStoreEntry {
 // manifestFromStoreEntry parses a main-key row as an amp manifest, reporting
 // whether it is a valid manifest for this store format.
 func manifestFromStoreEntry(entry json.RawMessage) (ampManifest, bool) {
+	if !strictManifestJSON(entry) {
+		return ampManifest{}, false
+	}
+
 	var manifest ampManifest
 	if err := json.Unmarshal(entry, &manifest); err != nil {
 		return ampManifest{}, false
@@ -379,4 +390,42 @@ func manifestFromStoreEntry(entry json.RawMessage) (ampManifest, bool) {
 	}
 
 	return manifest, true
+}
+
+// strictManifestJSON validates the closed adapter-authored manifest envelope
+// before encoding/json can silently accept a duplicate member, a case alias,
+// or trailing input. The env object is walked too because decoding it straight
+// into a map would otherwise hide duplicate environment keys.
+func strictManifestJSON(entry json.RawMessage) bool {
+	fields, err := strictJSONObjectFields(entry)
+	if err != nil {
+		return false
+	}
+
+	for field := range fields {
+		switch field {
+		case manifestFieldFormat,
+			jsonFieldSessionID,
+			manifestFieldNativeSessionID,
+			manifestFieldCwd,
+			manifestFieldTitle,
+			optionModeKey,
+			optionEnvKey,
+			manifestFieldUpdatedAtUnixMilli,
+			manifestFieldCreatedAtUnixMilli:
+		default:
+			return false
+		}
+	}
+
+	env, ok := fields[optionEnvKey]
+	if !ok {
+		return false
+	}
+
+	if _, err := strictJSONObjectFields(env); err != nil {
+		return false
+	}
+
+	return true
 }

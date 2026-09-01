@@ -42,7 +42,7 @@ func (a *Agent) validateSessionStartOptions(options AmpOptions) error {
 	}
 
 	for key := range options.Env {
-		if invalidEnvName(key) || strings.HasPrefix(strings.ToUpper(key), privateEnvPrefix) {
+		if invalidEnvName(key) || strings.HasPrefix(strings.ToUpper(key), privateEnvPrefix) || managedSessionEnvKey(key) {
 			return unsupportedField("_meta.amp.options.env." + key)
 		}
 	}

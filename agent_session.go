@@ -3,7 +3,6 @@ package ampacp
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"log/slog"
 	"maps"
@@ -859,6 +858,16 @@ func (a *Agent) loadOrResume(ctx context.Context, sessionID acp.SessionId, cwd s
 		return nil, nil, false, nil, err
 	}
 
+	// Omission means reconstruction, for an active wrapper just as it does for
+	// a cold manifest. Lift the accepted carrier before the startup gate so a
+	// session whose credential is session-scoped remains resumable without the
+	// host resending secret-bearing state.
+	if session := use.session; session != nil && !meta.optionFields.env {
+		session.mu.Lock()
+		meta.options.Env = cloneStringMap(session.sessionEnv)
+		session.mu.Unlock()
+	}
+
 	startErr := a.ensureStartup(ctx, cwd, meta)
 	if startErr != nil {
 		return nil, nil, false, nil, startErr
@@ -1618,12 +1627,8 @@ func (a *Agent) loadManifest(ctx context.Context, sessionID acp.SessionId) (ampM
 		return ampManifest{}, unknownSessionError()
 	}
 
-	var manifest ampManifest
-	if err := json.Unmarshal(entries[len(entries)-1], &manifest); err != nil {
-		return ampManifest{}, acp.NewInternalError(map[string]any{jsonFieldError: err.Error()})
-	}
-
-	if manifest.Format != SessionStoreFormat || manifest.SessionID != string(sessionID) || !validNativeSessionID(manifest.NativeSessionID) || !validStoredSessionEnv(manifest.Env) {
+	manifest, ok := manifestFromStoreEntry(entries[len(entries)-1])
+	if !ok || manifest.SessionID != string(sessionID) {
 		return ampManifest{}, acp.NewInternalError(map[string]any{jsonFieldError: "invalid amp session manifest"})
 	}
 

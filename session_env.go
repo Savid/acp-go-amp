@@ -52,6 +52,21 @@ func managedSessionEnv(home, config, cache, data, state string) map[string]strin
 	}
 }
 
+// managedSessionEnvKey reports whether key names an adapter-owned residence
+// variable under the target platform's environment identity. Callers cannot
+// persist these names: the session residence is rebuilt for each live wrapper,
+// so accepting one would write a manifest that recovery must reject.
+func managedSessionEnvKey(key string) bool {
+	canonical := canonicalEnvKey(key)
+	for managed := range managedSessionEnv("", "", "", "", "") {
+		if canonicalEnvKey(managed) == canonical {
+			return true
+		}
+	}
+
+	return false
+}
+
 // operationEnvNames are the only session-supplied values that reach a child
 // which is not a prompt. A session's raw PATH is its prompt carrier and nothing
 // else; the credential and the deployment URL are what an authenticated
@@ -88,8 +103,8 @@ func validStoredSessionEnv(env map[string]string) bool {
 		return false
 	}
 
-	for key := range managedSessionEnv("", "", "", "", "") {
-		if _, exists := env[key]; exists {
+	for key := range env {
+		if managedSessionEnvKey(key) {
 			return false
 		}
 	}

@@ -46,7 +46,10 @@ stdio or embed the agent directly in Go.
 - Preserve ordinary Amp stream JSON bytes in the `transcript` store subpath.
   Image-bearing tool results use canonical artifact references so base64 and
   signed URLs do not leak into transcript or diagnostic surfaces.
-- Do not persist auth, settings, API keys, or other secrets.
+- Provider-auth ledger/residence contents and native settings are never
+  persisted. Session environment is persisted in the manifest and makes the
+  configured `SessionStore` secret-bearing when it contains `AMP_API_KEY` or
+  another credential.
 - Every request builder that accepts a caller `_meta` map merges rather than
   assigns, so option order carries no meaning, and refuses any `acp-go.dev/*`
   family literal in that map rather than merging, overwriting, or dropping it.
@@ -123,8 +126,9 @@ stdio or embed the agent directly in Go.
 
 ## Security And Boundaries
 
-- `AMP_API_KEY` and `AMP_URL` are injected from live process environment or
-  options; they are never written to `SessionStore`.
+- `AMP_API_KEY` and `AMP_URL` may be injected from live process environment or
+  options. Session-scoped values are written to the manifest; treat the
+  `SessionStore` as secret-bearing whenever they carry a credential.
 - `session/load` replays local transcript frames for display; it does not create
   a new server-side thread.
 - Native continuation requires the original server-side Amp thread to still

@@ -171,6 +171,40 @@ func TestLoadManifestErrorsAndListFilters(t *testing.T) {
 	}
 }
 
+func TestManifestRecoveryAndListingRejectNonCanonicalJSON(t *testing.T) {
+	ctx := context.Background()
+	entries := map[string]SessionStoreEntry{
+		"unknown field":              json.RawMessage(`{"format":"amp-thread-mirror-v1","sessionId":"T-bad","nativeSessionId":"T-bad","cwd":"/forged","title":"forged","env":{},"updatedAtUnixMilli":1,"createdAtUnixMilli":1,"unknown":true}`),
+		"duplicate field":            json.RawMessage(`{"format":"amp-thread-mirror-v1","format":"amp-thread-mirror-v1","sessionId":"T-bad","nativeSessionId":"T-bad","cwd":"/forged","title":"forged","env":{},"updatedAtUnixMilli":1,"createdAtUnixMilli":1}`),
+		"case alias":                 json.RawMessage(`{"Format":"amp-thread-mirror-v1","sessionId":"T-bad","nativeSessionId":"T-bad","cwd":"/forged","title":"forged","env":{},"updatedAtUnixMilli":1,"createdAtUnixMilli":1}`),
+		"trailing input":             json.RawMessage(`{"format":"amp-thread-mirror-v1","sessionId":"T-bad","nativeSessionId":"T-bad","cwd":"/forged","title":"forged","env":{},"updatedAtUnixMilli":1,"createdAtUnixMilli":1} {}`),
+		"duplicate nested env field": json.RawMessage(`{"format":"amp-thread-mirror-v1","sessionId":"T-bad","nativeSessionId":"T-bad","cwd":"/forged","title":"forged","env":{"AMP_API_KEY":"first","AMP_API_KEY":"second"},"updatedAtUnixMilli":1,"createdAtUnixMilli":1}`),
+		"case alias of nested field": json.RawMessage(`{"format":"amp-thread-mirror-v1","sessionId":"T-bad","nativeSessionId":"T-bad","cwd":"/forged","title":"forged","Env":{},"updatedAtUnixMilli":1,"createdAtUnixMilli":1}`),
+	}
+
+	for name, entry := range entries {
+		t.Run(name, func(t *testing.T) {
+			store := NewInMemorySessionStore()
+			key := SessionKey{SessionID: "T-bad", Subpath: SessionStoreMainSubpath}
+			if err := store.Replace(ctx, key, []SessionStoreReplacement{{Key: key, Entries: []SessionStoreEntry{entry}}}); err != nil {
+				t.Fatalf("seed manifest: %v", err)
+			}
+
+			if _, err := newTestAgent(WithSessionStore(store)).loadManifest(ctx, "T-bad"); err == nil {
+				t.Fatal("recovery accepted non-canonical manifest")
+			}
+
+			summaries, err := store.ListSessions(ctx)
+			if err != nil || len(summaries) != 1 {
+				t.Fatalf("list committed key: summaries=%#v err=%v", summaries, err)
+			}
+			if summaries[0].Cwd != "" || summaries[0].Title != "" {
+				t.Fatalf("listing trusted non-canonical manifest: %#v", summaries[0])
+			}
+		})
+	}
+}
+
 func TestRemainingAgentBranches(t *testing.T) {
 	ctx := context.Background()
 	path, _ := fakeAgentAmpPath(t, "")
