@@ -515,28 +515,59 @@ func (c *Client) outputAtPath(ctx context.Context, path string, args ...string) 
 		return nil, fmt.Errorf("amp %s: %w", strings.Join(args, " "), err)
 	}
 
-	_ = process.Stdin().Close()
+	stdin := process.Stdin()
+	stdoutStream := process.Stdout()
+	stderrStream := process.Stderr()
+	_ = stdin.Close()
 
 	var stdout, stderr bytes.Buffer
 
 	readDone := make(chan struct{}, 2)
 
-	go func() { _, _ = io.Copy(&stdout, process.Stdout()); readDone <- struct{}{} }()
-	go func() { _, _ = io.Copy(&stderr, process.Stderr()); readDone <- struct{}{} }()
+	go func() { _, _ = io.Copy(&stdout, stdoutStream); readDone <- struct{}{} }()
+	go func() { _, _ = io.Copy(&stderr, stderrStream); readDone <- struct{}{} }()
 
 	result, waitErr := process.Wait(ctx)
-	if errors.Is(waitErr, context.Canceled) || errors.Is(waitErr, context.DeadlineExceeded) {
-		revokeCtx, cancel := context.WithTimeout(context.Background(), defaultCloseWait)
+	terminal := waitErr == nil
+
+	detachedWait := errors.Is(waitErr, context.Canceled) || errors.Is(waitErr, context.DeadlineExceeded)
+	if waitErr != nil && (c.options.StartNative != nil || detachedWait) {
+		initialWaitErr := waitErr
+		revokeCtx, cancelRevoke := context.WithTimeout(context.Background(), defaultCloseWait)
 		revokeErr := process.Revoke(revokeCtx)
-		result, waitErr = process.Wait(revokeCtx)
 
-		cancel()
+		cancelRevoke()
 
-		waitErr = errors.Join(waitErr, revokeErr)
+		terminalCtx, cancelTerminal := context.WithTimeout(context.Background(), defaultCloseWait)
+		result, waitErr = process.Wait(terminalCtx)
+
+		cancelTerminal()
+
+		if waitErr != nil {
+			waitErr = errors.Join(initialWaitErr, revokeErr, waitErr, ErrContainmentIncomplete)
+		} else {
+			terminal = true
+
+			if detachedWait {
+				waitErr = revokeErr
+			} else {
+				waitErr = errors.Join(initialWaitErr, revokeErr)
+			}
+		}
+	}
+
+	if !terminal {
+		_ = stdoutStream.Close()
+		_ = stderrStream.Close()
 	}
 
 	<-readDone
 	<-readDone
+
+	if terminal {
+		_ = stdoutStream.Close()
+		_ = stderrStream.Close()
+	}
 
 	if waitErr != nil || result.ExitCode != 0 || result.Signal != 0 || result.Revoked {
 		msg := strings.TrimSpace(stripANSI(stderr.String()))
@@ -567,11 +598,19 @@ func (c *Client) startNative(ctx context.Context, request NativeRequest) (Native
 
 	tracked := trackProcess(process)
 	if tracked.Stdin() == nil || tracked.Stdout() == nil || tracked.Stderr() == nil {
-		settleCtx, cancel := context.WithTimeout(context.Background(), defaultCloseWait)
-		revokeErr := tracked.Revoke(settleCtx)
-		_, waitErr := tracked.Wait(settleCtx)
+		revokeCtx, cancelRevoke := context.WithTimeout(context.Background(), defaultCloseWait)
+		revokeErr := tracked.Revoke(revokeCtx)
 
-		cancel()
+		cancelRevoke()
+
+		waitCtx, cancelWait := context.WithTimeout(context.Background(), defaultCloseWait)
+		_, waitErr := tracked.Wait(waitCtx)
+
+		cancelWait()
+
+		if c.options.StartNative != nil && waitErr != nil {
+			waitErr = errors.Join(waitErr, ErrContainmentIncomplete)
+		}
 
 		return nil, errors.Join(errors.New("native process returned unusable host stdio"), revokeErr, waitErr)
 	}
@@ -835,6 +874,7 @@ type Turn struct {
 	stdoutDone    chan struct{}
 	stopTerminal  context.CancelFunc
 	closeOnce     sync.Once
+	closeErr      error
 	onPanic       func(ctx context.Context, name string, recovered any)
 }
 
@@ -992,16 +1032,14 @@ func (t *Turn) Interrupt(ctx context.Context) error {
 }
 
 func (t *Turn) Close() error {
-	var err error
-
 	t.closeOnce.Do(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), defaultCloseWait)
-		err = t.closeWithContext(ctx)
+		t.closeErr = t.closeWithContext(ctx)
 
 		cancel()
 	})
 
-	return err
+	return t.closeErr
 }
 
 func (t *Turn) closeWithContext(ctx context.Context) error {

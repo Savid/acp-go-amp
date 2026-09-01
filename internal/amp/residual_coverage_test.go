@@ -8,7 +8,10 @@ import (
 	"log/slog"
 	"os/exec"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -36,6 +39,103 @@ type coverageNativeProcess struct {
 	wait      func(context.Context) (NativeResult, error)
 	revokeErr error
 }
+
+type blockedProbeReadCloser struct {
+	entered   chan struct{}
+	closed    chan struct{}
+	enterOnce sync.Once
+	closeOnce sync.Once
+	active    atomic.Int32
+	closes    atomic.Int32
+}
+
+type eofTrackingReadCloser struct {
+	reader     *bytes.Reader
+	eof        atomic.Bool
+	earlyClose atomic.Bool
+}
+
+func newEOFTrackingReadCloser(content string) *eofTrackingReadCloser {
+	return &eofTrackingReadCloser{reader: bytes.NewReader([]byte(content))}
+}
+
+func (r *eofTrackingReadCloser) Read(data []byte) (int, error) {
+	n, err := r.reader.Read(data)
+	if errors.Is(err, io.EOF) {
+		r.eof.Store(true)
+	}
+
+	return n, err
+}
+
+func (r *eofTrackingReadCloser) Close() error {
+	if !r.eof.Load() {
+		r.earlyClose.Store(true)
+	}
+
+	return nil
+}
+
+func newBlockedProbeReadCloser() *blockedProbeReadCloser {
+	return &blockedProbeReadCloser{entered: make(chan struct{}), closed: make(chan struct{})}
+}
+
+func (r *blockedProbeReadCloser) Read([]byte) (int, error) {
+	r.active.Add(1)
+	defer r.active.Add(-1)
+	r.enterOnce.Do(func() { close(r.entered) })
+	<-r.closed
+
+	return 0, io.EOF
+}
+
+func (r *blockedProbeReadCloser) Close() error {
+	r.closes.Add(1)
+	r.closeOnce.Do(func() { close(r.closed) })
+
+	return nil
+}
+
+type blockedProbeProcess struct {
+	stdin       *coverageWriteCloser
+	stdout      *blockedProbeReadCloser
+	stderr      *blockedProbeReadCloser
+	waits       atomic.Int32
+	stdinCalls  atomic.Int32
+	stdoutCalls atomic.Int32
+	stderrCalls atomic.Int32
+	unresolved  error
+}
+
+func (p *blockedProbeProcess) Stdin() io.WriteCloser {
+	p.stdinCalls.Add(1)
+
+	return p.stdin
+}
+
+func (p *blockedProbeProcess) Stdout() io.ReadCloser {
+	p.stdoutCalls.Add(1)
+
+	return p.stdout
+}
+
+func (p *blockedProbeProcess) Stderr() io.ReadCloser {
+	p.stderrCalls.Add(1)
+
+	return p.stderr
+}
+
+func (p *blockedProbeProcess) Wait(ctx context.Context) (NativeResult, error) {
+	if p.waits.Add(1) == 1 {
+		<-ctx.Done()
+
+		return NativeResult{}, ctx.Err()
+	}
+
+	return NativeResult{}, p.unresolved
+}
+
+func (*blockedProbeProcess) Revoke(context.Context) error { return nil }
 
 func newCoverageNativeProcess() *coverageNativeProcess {
 	return &coverageNativeProcess{
@@ -194,6 +294,199 @@ func TestClientOutputResidualBranches(t *testing.T) {
 	require.ErrorContains(t, err, "exit code 7")
 }
 
+func TestClientOutputUnresolvedSecondWaitClosesAndJoinsBlockedStreams(t *testing.T) {
+	stdout := newBlockedProbeReadCloser()
+	stderr := newBlockedProbeReadCloser()
+	unresolved := errors.New("second wait unresolved")
+	process := &blockedProbeProcess{
+		stdin: &coverageWriteCloser{}, stdout: stdout, stderr: stderr, unresolved: unresolved,
+	}
+	client := NewClient(nil, Options{
+		Cwd: t.TempDir(),
+		StartNative: func(context.Context, NativeRequest) (NativeProcess, error) {
+			return process, nil
+		},
+	})
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() {
+		_, err := client.outputAtPath(ctx, "amp", "version")
+		done <- err
+	}()
+
+	<-stdout.entered
+	<-stderr.entered
+	cancel()
+
+	err := <-done
+	require.ErrorIs(t, err, context.Canceled)
+	require.ErrorIs(t, err, unresolved)
+	require.ErrorIs(t, err, ErrContainmentIncomplete)
+	require.Equal(t, int32(2), process.waits.Load())
+	require.Equal(t, int32(1), process.stdinCalls.Load())
+	require.Equal(t, int32(1), process.stdoutCalls.Load())
+	require.Equal(t, int32(1), process.stderrCalls.Load())
+	require.Equal(t, int32(1), stdout.closes.Load())
+	require.Equal(t, int32(1), stderr.closes.Load())
+	require.Zero(t, stdout.active.Load())
+	require.Zero(t, stderr.active.Load())
+}
+
+func TestClientOutputManagedIndependentWaitUsesFreshTerminalProofAndNaturalDrain(t *testing.T) {
+	stdout := newEOFTrackingReadCloser("preserved output")
+	stderr := newEOFTrackingReadCloser("independent wait diagnostic")
+	independent := errors.New("independent host wait failure")
+	process := newCoverageNativeProcess()
+	process.stdout = stdout
+	process.stderr = stderr
+	waits := 0
+	process.wait = func(context.Context) (NativeResult, error) {
+		waits++
+		if waits == 1 {
+			return NativeResult{}, independent
+		}
+
+		return NativeResult{}, nil
+	}
+	client := NewClient(nil, Options{
+		Cwd: t.TempDir(),
+		StartNative: func(context.Context, NativeRequest) (NativeProcess, error) {
+			return process, nil
+		},
+	})
+
+	_, err := client.outputAtPath(t.Context(), "amp", "version")
+	require.ErrorIs(t, err, independent)
+	require.ErrorContains(t, err, "independent wait diagnostic")
+	require.Equal(t, 2, waits)
+	require.True(t, stdout.eof.Load())
+	require.True(t, stderr.eof.Load())
+	require.False(t, stdout.earlyClose.Load())
+	require.False(t, stderr.earlyClose.Load())
+}
+
+func TestClientOutputDetachedFirstWaitAcceptsFreshTerminalProof(t *testing.T) {
+	process := newCoverageNativeProcess()
+	waits := 0
+	process.wait = func(context.Context) (NativeResult, error) {
+		waits++
+		if waits == 1 {
+			return NativeResult{}, context.Canceled
+		}
+
+		return NativeResult{}, nil
+	}
+	client := NewClient(nil, Options{
+		Cwd: t.TempDir(),
+		StartNative: func(context.Context, NativeRequest) (NativeProcess, error) {
+			return process, nil
+		},
+	})
+
+	_, err := client.outputAtPath(t.Context(), "amp", "version")
+	require.NoError(t, err)
+	require.Equal(t, 2, waits)
+}
+
+func TestClientOutputFreshWaitGetsFullBoundAfterRevokeExhaustion(t *testing.T) {
+	independent := errors.New("initial wait refused")
+	process := newCoverageNativeProcess()
+	waits := 0
+	var revokeDeadline time.Time
+	process.wait = func(ctx context.Context) (NativeResult, error) {
+		waits++
+		if waits == 1 {
+			return NativeResult{}, independent
+		}
+
+		terminalDeadline, ok := ctx.Deadline()
+		require.True(t, ok)
+		require.True(t, terminalDeadline.After(revokeDeadline),
+			"the terminal proof inherited the already-consumed revoke bound")
+
+		return NativeResult{Revoked: true}, nil
+	}
+	process.revokeErr = context.DeadlineExceeded
+	client := NewClient(nil, Options{
+		Cwd: t.TempDir(),
+		StartNative: func(context.Context, NativeRequest) (NativeProcess, error) {
+			return &revokeDeadlineProcess{coverageNativeProcess: process, deadline: &revokeDeadline}, nil
+		},
+	})
+
+	_, err := client.outputAtPath(t.Context(), "amp", "version")
+	require.ErrorIs(t, err, independent)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.NotErrorIs(t, err, ErrContainmentIncomplete)
+	require.Equal(t, 2, waits)
+}
+
+type revokeDeadlineProcess struct {
+	*coverageNativeProcess
+	deadline *time.Time
+}
+
+func (p *revokeDeadlineProcess) Revoke(ctx context.Context) error {
+	deadline, _ := ctx.Deadline()
+	*p.deadline = deadline
+
+	return p.revokeErr
+}
+
+type blockingTurnCloseWriter struct {
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+	calls   atomic.Int32
+	err     error
+}
+
+func (*blockingTurnCloseWriter) Write(data []byte) (int, error) { return len(data), nil }
+
+func (w *blockingTurnCloseWriter) Close() error {
+	w.calls.Add(1)
+	w.once.Do(func() { close(w.entered) })
+	<-w.release
+
+	return w.err
+}
+
+func TestTurnCloseReturnsOneStoredResultToEveryCaller(t *testing.T) {
+	want := errors.New("turn close failed")
+	writer := &blockingTurnCloseWriter{
+		entered: make(chan struct{}), release: make(chan struct{}), err: want,
+	}
+	turn := &Turn{stdin: writer}
+
+	const callers = 8
+	start := make(chan struct{})
+	results := make(chan error, callers)
+	for range callers {
+		go func() {
+			<-start
+			results <- turn.Close()
+		}()
+	}
+
+	close(start)
+	<-writer.entered
+	close(writer.release)
+
+	var first error
+	for range callers {
+		err := <-results
+		require.ErrorIs(t, err, want)
+		if first == nil {
+			first = err
+		} else {
+			require.Same(t, first, err)
+		}
+	}
+
+	require.Same(t, first, turn.Close())
+	require.Equal(t, int32(1), writer.calls.Load())
+}
+
 func TestClientNativeStarterAndResolverResidualBranches(t *testing.T) {
 	want := errors.New("starter refused")
 	client := NewClient(nil, Options{StartNative: func(context.Context, NativeRequest) (NativeProcess, error) {
@@ -221,6 +514,7 @@ func TestClientNativeStarterAndResolverResidualBranches(t *testing.T) {
 		client.options.StartNative = func(context.Context, NativeRequest) (NativeProcess, error) { return process, nil }
 		_, err = client.startNative(t.Context(), NativeRequest{})
 		require.ErrorContains(t, err, "unusable host stdio")
+		require.NotErrorIs(t, err, ErrContainmentIncomplete)
 	}
 
 	client = NewClient(nil, Options{ResolvedExecutable: "relative", StartNative: func(context.Context, NativeRequest) (NativeProcess, error) {
@@ -250,6 +544,33 @@ func TestClientNativeStarterAndResolverResidualBranches(t *testing.T) {
 	client = NewClient(nil, Options{OrdinaryEnvironment: map[string]string{"PATH": t.TempDir()}})
 	_, err = client.discover(t.Context(), []string{"PATH=" + t.TempDir()}, t.TempDir())
 	require.ErrorContains(t, err, "find amp in PATH")
+}
+
+func TestClientManagedUnusableStdioGetsFreshTerminalSettlementBound(t *testing.T) {
+	revokeErr := errors.New("revoke callback failed")
+	waitErr := errors.New("wait callback failed")
+	base := newCoverageNativeProcess()
+	base.stdout = nil
+	base.revokeErr = revokeErr
+	var revokeDeadline time.Time
+	base.wait = func(ctx context.Context) (NativeResult, error) {
+		waitDeadline, ok := ctx.Deadline()
+		require.True(t, ok)
+		require.True(t, waitDeadline.After(revokeDeadline),
+			"managed settlement Wait inherited the Revoke deadline")
+
+		return NativeResult{}, waitErr
+	}
+	process := &revokeDeadlineProcess{coverageNativeProcess: base, deadline: &revokeDeadline}
+	client := NewClient(nil, Options{StartNative: func(context.Context, NativeRequest) (NativeProcess, error) {
+		return process, nil
+	}})
+
+	_, err := client.startNative(t.Context(), NativeRequest{})
+	require.ErrorContains(t, err, "unusable host stdio")
+	require.ErrorIs(t, err, revokeErr)
+	require.ErrorIs(t, err, waitErr)
+	require.ErrorIs(t, err, ErrContainmentIncomplete)
 }
 
 func TestOrdinaryAndTrackedProcessResidualBranches(t *testing.T) {
