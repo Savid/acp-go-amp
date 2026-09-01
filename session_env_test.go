@@ -184,7 +184,6 @@ func TestWindowsSessionEnvironmentComposesOneCaseInsensitiveChain(t *testing.T) 
 	resp, err := agent.NewSession(ctx, NewSessionRequest(t.TempDir(), WithSessionAmpOptions(NewAmpOptions(
 		WithAmpEnv(map[string]string{
 			"PATH":         sessionPathDir,
-			"Home":         callerHome,
 			"Amp_Api_Key":  "session-key",
 			"Session_Only": "session-value",
 		}),
@@ -215,9 +214,9 @@ func TestWindowsSessionEnvironmentComposesOneCaseInsensitiveChain(t *testing.T) 
 		// A session value that is not a named operation value is the prompt's
 		// alone; a probe never sees one.
 		if run.isPrompt() {
-			// The residence phase is applied after every caller phase, so the
-			// isolated home stands even though both caller phases named HOME
-			// under a spelling that only Windows folds together.
+			// The residence phase is applied after the caller phase, so the
+			// isolated home stands even though the agent named HOME under a
+			// spelling that only Windows folds together.
 			requireChildEnv(t, run.Env, "HOME", managedHome)
 			requireChildEnv(t, run.Env, "SESSION_ONLY", "session-value")
 

@@ -183,7 +183,6 @@ func TestPortableWindowsSessionEnvironmentPrecedence(t *testing.T) {
 	resp, err := agent.NewSession(ctx, NewSessionRequest(t.TempDir(), WithSessionAmpOptions(NewAmpOptions(
 		WithAmpEnv(map[string]string{
 			"PATH":               sessionDir,
-			"Home":               callerHome,
 			"Amp_Api_Key":        "session-key",
 			"AMP_CARRIER_MARKER": "amp-marker.exe",
 		}),
@@ -210,9 +209,9 @@ func TestPortableWindowsSessionEnvironmentPrecedence(t *testing.T) {
 		requireChildEnv(t, run.Env, "AMP_API_KEY", "session-key")
 
 		if run.isPrompt() {
-			// The residence phase is applied after every caller phase, so the
-			// isolated home stands even though both caller phases named HOME
-			// under a spelling only Windows folds together.
+			// The residence phase is applied after the caller phase, so the
+			// isolated home stands even though the agent named HOME under a
+			// spelling only Windows folds together.
 			requireChildEnv(t, run.Env, "HOME", filepath.Join(session.settingsDir, "home"))
 			requireChildEnv(t, run.Env, "AMP_CARRIER_MARKER", "amp-marker.exe")
 

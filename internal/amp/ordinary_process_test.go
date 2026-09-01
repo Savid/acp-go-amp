@@ -33,6 +33,7 @@ func TestOrdinaryProcessResultAndPipes(t *testing.T) {
 		Arguments:  []string{"-test.run=^TestOrdinaryProcessHelper$"},
 		Environment: []string{
 			"GO_WANT_ORDINARY_PROCESS_HELPER=1",
+			"GOCOVERDIR=" + os.Getenv("GOCOVERDIR"),
 		},
 		WorkingDirectory: t.TempDir(),
 	})
@@ -73,6 +74,7 @@ func TestOrdinaryProcessCanceledWaitCanSettleAfterRevoke(t *testing.T) {
 		Environment: []string{
 			"GO_WANT_ORDINARY_PROCESS_HELPER=1",
 			"GO_WANT_ORDINARY_PROCESS_BLOCK=1",
+			"GOCOVERDIR=" + os.Getenv("GOCOVERDIR"),
 		},
 		WorkingDirectory: t.TempDir(),
 	})
