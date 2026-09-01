@@ -37,6 +37,24 @@ func browserProbeDir(t *testing.T, marker string) string {
 	return dir
 }
 
+func TestMaterializeBrowserShimReportsFilesystemFailures(t *testing.T) {
+	parentFile := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(parentFile, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := MaterializeBrowserShim(filepath.Join(parentFile, "browser")); err == nil {
+		t.Fatal("shim materialization ignored directory creation failure")
+	}
+
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, browserLauncherNames[0]), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := MaterializeBrowserShim(dir); err == nil {
+		t.Fatal("shim materialization ignored launcher write failure")
+	}
+}
+
 // TestLoginNeverExecsABrowserLauncher runs the adapter's login path with a
 // deterministic harness and a recording launcher ahead of every other PATH
 // entry. It proves the PATH interception used on Darwin and Linux;

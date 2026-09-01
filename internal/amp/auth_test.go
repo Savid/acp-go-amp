@@ -467,6 +467,86 @@ func TestStartAuthLoginReportsAStartFailure(t *testing.T) {
 	}
 }
 
+func TestAuthSurfaceResidualBoundaryErrors(t *testing.T) {
+	invalid := NewClient(nil, Options{Env: map[string]string{"bad=key": "x"}})
+	if invalid.AuthDeploymentSupported() {
+		t.Fatal("deployment support accepted an invalid login environment")
+	}
+	if _, err := invalid.StartAuthLogin(t.Context()); err == nil {
+		t.Fatal("login accepted an invalid environment")
+	}
+	if _, err := authLoginEnv(invalid, map[string]string{"bad=key": "x"}, t.TempDir()); err == nil {
+		t.Fatal("authLoginEnv accepted an invalid environment")
+	}
+
+	path, _ := fakeAmpPath(t, "login")
+	withoutShim := NewClient(nil, Options{
+		CLIPath:                   path,
+		Cwd:                       t.TempDir(),
+		Env:                       map[string]string{dataHomeEnv: t.TempDir()},
+		OrdinaryEnvironment:       map[string]string{"PATH": os.Getenv("PATH")},
+		TestOnlyAuthLoginPlatform: linuxPlatform,
+	})
+	if err := withoutShim.CheckAuthLoginSafety(t.Context()); err != nil {
+		t.Fatalf("CheckAuthLoginSafety: %v", err)
+	}
+	if _, err := withoutShim.StartAuthLogin(t.Context()); !errors.Is(err, ErrBrowserLaunchUnsupported) {
+		t.Fatalf("StartAuthLogin without shim = %v", err)
+	}
+}
+
+func TestAuthLoginSettlementAndCloseResidualBranches(t *testing.T) {
+	wantWait := errors.New("wait refused")
+	wantSettle := errors.New("settle refused")
+	process := newCoverageNativeProcess()
+	process.wait = func(context.Context) (NativeResult, error) { return NativeResult{ExitCode: 2}, wantWait }
+	login := &AuthLogin{
+		process:  process,
+		waitDone: make(chan struct{}),
+		settle: func(context.Context) error {
+			return wantSettle
+		},
+	}
+	login.waitNative()
+	if !errors.Is(login.waitErr, wantWait) || !errors.Is(login.waitErr, wantSettle) {
+		t.Fatalf("waitNative error = %v", login.waitErr)
+	}
+
+	cleaned := false
+	settled := make(chan struct{})
+	close(settled)
+	login = &AuthLogin{
+		process:  newCoverageNativeProcess(),
+		stdin:    &coverageWriteCloser{},
+		stdout:   io.NopCloser(strings.NewReader("")),
+		stderr:   io.NopCloser(strings.NewReader("")),
+		waitDone: settled,
+		cleanup: func() error {
+			cleaned = true
+
+			return nil
+		},
+	}
+	if err := login.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if !cleaned {
+		t.Fatal("Close skipped cleanup after a settled boundary")
+	}
+
+	timeoutCtx, cancel := context.WithCancel(t.Context())
+	cancel()
+	login = &AuthLogin{
+		process:  newCoverageNativeProcess(),
+		stdout:   io.NopCloser(strings.NewReader("")),
+		stderr:   io.NopCloser(strings.NewReader("")),
+		waitDone: make(chan struct{}),
+	}
+	if err := login.closeWithContext(timeoutCtx); !errors.Is(err, ErrContainmentIncomplete) {
+		t.Fatalf("timed-out close = %v", err)
+	}
+}
+
 func TestAuthLoginPanicHandlerRuns(t *testing.T) {
 	recovered := make(chan any, 1)
 	login := &AuthLogin{onPanic: func(_ context.Context, _ string, value any) { recovered <- value }}

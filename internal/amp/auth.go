@@ -447,43 +447,47 @@ func (l *AuthLogin) Close() error {
 	l.closeOnce.Do(func() {
 		_ = l.closeStdin()
 		closeCtx, cancel := context.WithTimeout(context.Background(), defaultCloseWait)
-		revokeErr := l.process.Revoke(closeCtx)
-
-		var (
-			waitErr error
-			result  NativeResult
-		)
-
-		settled := false
-
-		select {
-		case <-l.waitDone:
-			waitErr = l.waitErr
-			result = l.result
-			settled = true
-		case <-closeCtx.Done():
-			waitErr = errors.Join(closeCtx.Err(), ErrContainmentIncomplete)
-		}
+		l.closeErr = l.closeWithContext(closeCtx)
 
 		cancel()
-
-		if settled && (result.Revoked || result.Signal != 0) && !errors.Is(waitErr, ErrContainmentIncomplete) {
-			waitErr = nil
-		}
-
-		var cleanupErr error
-		if l.cleanup != nil && !errors.Is(waitErr, ErrContainmentIncomplete) {
-			cleanupErr = l.cleanup()
-		}
-
-		l.closeErr = errors.Join(
-			revokeErr,
-			waitErr,
-			l.stdout.Close(),
-			l.stderr.Close(),
-			cleanupErr,
-		)
 	})
 
 	return l.closeErr
+}
+
+func (l *AuthLogin) closeWithContext(closeCtx context.Context) error {
+	revokeErr := l.process.Revoke(closeCtx)
+
+	var (
+		waitErr error
+		result  NativeResult
+	)
+
+	settled := false
+
+	select {
+	case <-l.waitDone:
+		waitErr = l.waitErr
+		result = l.result
+		settled = true
+	case <-closeCtx.Done():
+		waitErr = errors.Join(closeCtx.Err(), ErrContainmentIncomplete)
+	}
+
+	if settled && (result.Revoked || result.Signal != 0) && !errors.Is(waitErr, ErrContainmentIncomplete) {
+		waitErr = nil
+	}
+
+	var cleanupErr error
+	if l.cleanup != nil && !errors.Is(waitErr, ErrContainmentIncomplete) {
+		cleanupErr = l.cleanup()
+	}
+
+	return errors.Join(
+		revokeErr,
+		waitErr,
+		l.stdout.Close(),
+		l.stderr.Close(),
+		cleanupErr,
+	)
 }

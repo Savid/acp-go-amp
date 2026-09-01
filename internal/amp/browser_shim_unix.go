@@ -9,7 +9,7 @@ import (
 )
 
 func MaterializeBrowserShim(dir string) (string, error) {
-	if err := os.Mkdir(dir, 0o700); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", fmt.Errorf("create browser shim directory: %w", err)
 	}
 

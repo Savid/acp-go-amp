@@ -57,7 +57,7 @@ func unixOrdinaryExecutableRules() ordinaryExecutableSearchRules {
 	return ordinaryExecutableSearchRules{pathSeparators: string(os.PathSeparator), requireExecuteBit: true}
 }
 
-func windowsOrdinaryExecutableRules(environment []string) ordinaryExecutableSearchRules { //nolint:unused // Used by the Windows build-tagged selector.
+func windowsOrdinaryExecutableRules(environment []string) ordinaryExecutableSearchRules {
 	return ordinaryExecutableSearchRules{pathSeparators: `:\/`, extensions: ordinaryWindowsExecutableExtensions(ordinaryEnvironmentValue(environment, "PATHEXT", true)), foldEnvironmentKey: true}
 }
 
@@ -74,9 +74,9 @@ func ordinaryEnvironmentValue(environment []string, name string, fold bool) stri
 	return value
 }
 
-const defaultWindowsExecutableExtensions = ".com;.exe;.bat;.cmd" //nolint:unused // Used by the Windows build-tagged selector.
+const defaultWindowsExecutableExtensions = ".com;.exe;.bat;.cmd"
 
-func ordinaryWindowsExecutableExtensions(value string) []string { //nolint:unused // Used by the Windows build-tagged selector.
+func ordinaryWindowsExecutableExtensions(value string) []string {
 	if value == "" {
 		value = defaultWindowsExecutableExtensions
 	}
