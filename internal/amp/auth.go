@@ -499,8 +499,8 @@ func (l *AuthLogin) closeWithContext(closeCtx context.Context) error {
 		cleanupErr = l.cleanup()
 	}
 
-	stdoutErr := l.stdout.Close()
-	stderrErr := l.stderr.Close()
+	stdoutErr := closeAuthLoginStream(l.stdout)
+	stderrErr := closeAuthLoginStream(l.stderr)
 
 	<-l.stdoutDone
 	<-l.stderrDone
@@ -512,4 +512,15 @@ func (l *AuthLogin) closeWithContext(closeCtx context.Context) error {
 		stderrErr,
 		cleanupErr,
 	)
+}
+
+// Wait owns ordinary os/exec pipe closure, so releasing a terminal login may
+// legitimately observe that its read descriptors are already closed.
+func closeAuthLoginStream(stream io.Closer) error {
+	err := stream.Close()
+	if errors.Is(err, os.ErrClosed) {
+		return nil
+	}
+
+	return err
 }

@@ -291,9 +291,10 @@ func TestStartAuthLoginRelaysThePrintedURL(t *testing.T) {
 		t.Fatalf("DataHome = %q, want the session data home %q", login.DataHome(), dataHome)
 	}
 
-	// Close is idempotent and reports the same result to every caller.
-	if first, second := login.Close(), login.Close(); !errors.Is(second, first) && first != second {
-		t.Fatalf("Close is not idempotent: %v then %v", first, second)
+	// Wait has already released ordinary os/exec pipe descriptors; that normal
+	// terminal release is still a successful, idempotent close.
+	if first, second := login.Close(), login.Close(); first != nil || second != nil {
+		t.Fatalf("Close = %v then %v", first, second)
 	}
 }
 
@@ -432,6 +433,18 @@ type stubWriteCloser struct{ closeErr error }
 
 func (s stubWriteCloser) Write(p []byte) (int, error) { return len(p), nil }
 func (s stubWriteCloser) Close() error                { return s.closeErr }
+
+func TestAuthLoginStreamCloseAcceptsReleasedDescriptors(t *testing.T) {
+	alreadyClosed := &os.PathError{Op: "close", Path: "|0", Err: os.ErrClosed}
+	if err := closeAuthLoginStream(stubWriteCloser{closeErr: alreadyClosed}); err != nil {
+		t.Fatalf("already-closed stream = %v", err)
+	}
+
+	want := errors.New("close refused")
+	if err := closeAuthLoginStream(stubWriteCloser{closeErr: want}); !errors.Is(err, want) {
+		t.Fatalf("independent close error = %v, want %v", err, want)
+	}
+}
 
 type authWorkerReadCloser struct {
 	readStarted chan struct{}
