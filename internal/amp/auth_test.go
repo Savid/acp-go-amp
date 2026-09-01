@@ -474,6 +474,13 @@ type authPanicReadCloser struct{}
 func (authPanicReadCloser) Read([]byte) (int, error) { panic("read panic") }
 func (authPanicReadCloser) Close() error             { return nil }
 
+func closedAuthWorkerDone() chan struct{} {
+	done := make(chan struct{})
+	close(done)
+
+	return done
+}
+
 func TestAuthLoginSubmitReportsAFailedStdinClose(t *testing.T) {
 	want := errors.New("close refused")
 	login := &AuthLogin{stdin: stubWriteCloser{closeErr: want}}
@@ -558,11 +565,13 @@ func TestAuthLoginSettlementAndCloseResidualBranches(t *testing.T) {
 	settled := make(chan struct{})
 	close(settled)
 	login = &AuthLogin{
-		process:  newCoverageNativeProcess(),
-		stdin:    &coverageWriteCloser{},
-		stdout:   io.NopCloser(strings.NewReader("")),
-		stderr:   io.NopCloser(strings.NewReader("")),
-		waitDone: settled,
+		process:    newCoverageNativeProcess(),
+		stdin:      &coverageWriteCloser{},
+		stdout:     io.NopCloser(strings.NewReader("")),
+		stderr:     io.NopCloser(strings.NewReader("")),
+		stdoutDone: closedAuthWorkerDone(),
+		stderrDone: closedAuthWorkerDone(),
+		waitDone:   settled,
 		cleanup: func() error {
 			cleaned = true
 
@@ -579,10 +588,12 @@ func TestAuthLoginSettlementAndCloseResidualBranches(t *testing.T) {
 	timeoutCtx, cancel := context.WithCancel(t.Context())
 	cancel()
 	login = &AuthLogin{
-		process:  newCoverageNativeProcess(),
-		stdout:   io.NopCloser(strings.NewReader("")),
-		stderr:   io.NopCloser(strings.NewReader("")),
-		waitDone: make(chan struct{}),
+		process:    newCoverageNativeProcess(),
+		stdout:     io.NopCloser(strings.NewReader("")),
+		stderr:     io.NopCloser(strings.NewReader("")),
+		stdoutDone: closedAuthWorkerDone(),
+		stderrDone: closedAuthWorkerDone(),
+		waitDone:   make(chan struct{}),
 	}
 	if err := login.closeWithContext(timeoutCtx); !errors.Is(err, ErrContainmentIncomplete) {
 		t.Fatalf("timed-out close = %v", err)
@@ -595,12 +606,14 @@ func TestAuthLoginIncompleteCloseCancelsAndJoinsWaiterWithoutCleanup(t *testing.
 	settled := false
 	cleaned := false
 	login := &AuthLogin{
-		process:  process,
-		stdin:    &coverageWriteCloser{},
-		stdout:   io.NopCloser(strings.NewReader("")),
-		stderr:   io.NopCloser(strings.NewReader("")),
-		waitDone: make(chan struct{}),
-		waitStop: stopWaiting,
+		process:    process,
+		stdin:      &coverageWriteCloser{},
+		stdout:     io.NopCloser(strings.NewReader("")),
+		stderr:     io.NopCloser(strings.NewReader("")),
+		stdoutDone: closedAuthWorkerDone(),
+		stderrDone: closedAuthWorkerDone(),
+		waitDone:   make(chan struct{}),
+		waitStop:   stopWaiting,
 		settle: func(context.Context) error {
 			settled = true
 
@@ -646,12 +659,14 @@ func TestAuthLoginIncompleteCloseCancelsAndJoinsSettlementWithoutCleanup(t *test
 	settleExited := make(chan struct{})
 	cleaned := false
 	login := &AuthLogin{
-		process:  process,
-		stdin:    &coverageWriteCloser{},
-		stdout:   io.NopCloser(strings.NewReader("")),
-		stderr:   io.NopCloser(strings.NewReader("")),
-		waitDone: make(chan struct{}),
-		waitStop: stopWaiting,
+		process:    process,
+		stdin:      &coverageWriteCloser{},
+		stdout:     io.NopCloser(strings.NewReader("")),
+		stderr:     io.NopCloser(strings.NewReader("")),
+		stdoutDone: closedAuthWorkerDone(),
+		stderrDone: closedAuthWorkerDone(),
+		waitDone:   make(chan struct{}),
+		waitStop:   stopWaiting,
 		settle: func(ctx context.Context) error {
 			close(settleStarted)
 			<-ctx.Done()
@@ -797,15 +812,19 @@ func TestAuthLoginPipeWorkerCompletionIncludesPanicCallback(t *testing.T) {
 	<-login.stderrDone
 }
 
-func TestAuthLoginPipeWorkersPermitNarrowManualObjects(t *testing.T) {
+func TestAuthLoginPipeWorkersCloseOwnedSignals(t *testing.T) {
 	login := &AuthLogin{
-		stdout: io.NopCloser(strings.NewReader("")),
-		stderr: io.NopCloser(strings.NewReader("")),
-		url:    make(chan string, 1),
+		stdout:     io.NopCloser(strings.NewReader("")),
+		stderr:     io.NopCloser(strings.NewReader("")),
+		stdoutDone: make(chan struct{}),
+		stderrDone: make(chan struct{}),
+		url:        make(chan string, 1),
 	}
 
 	login.readStdout(t.Context())
 	login.drainStderr(t.Context())
+	<-login.stdoutDone
+	<-login.stderrDone
 }
 
 func TestAuthLoginPanicHandlerRuns(t *testing.T) {

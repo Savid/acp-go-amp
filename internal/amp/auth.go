@@ -328,7 +328,7 @@ func (l *AuthLogin) recoverGoroutine(ctx context.Context, name string) {
 // is validated as a URL before anything else looks at the line, so output the
 // harness wraps or reflows yields no URL rather than the wrong bytes.
 func (l *AuthLogin) readStdout(ctx context.Context) {
-	defer closeAuthLoginWorker(l.stdoutDone)
+	defer close(l.stdoutDone)
 	defer l.recoverGoroutine(ctx, "amp login stdout reader")
 	defer close(l.url)
 
@@ -356,24 +356,10 @@ func (l *AuthLogin) readStdout(ctx context.Context) {
 // drainStderr consumes the child's stderr and forwards none of it. A native
 // login failure line can quote the value the owner pasted.
 func (l *AuthLogin) drainStderr(ctx context.Context) {
-	defer closeAuthLoginWorker(l.stderrDone)
+	defer close(l.stderrDone)
 	defer l.recoverGoroutine(ctx, "amp login stderr drain")
 
 	_, _ = io.Copy(io.Discard, l.stderr)
-}
-
-// StartAuthLogin always supplies worker signals; nil admits only narrow manual
-// values that did not start a worker.
-func closeAuthLoginWorker(done chan struct{}) {
-	if done != nil {
-		close(done)
-	}
-}
-
-func joinAuthLoginWorker(done <-chan struct{}) {
-	if done != nil {
-		<-done
-	}
 }
 
 func authLoginURL(candidate string) bool {
@@ -516,8 +502,8 @@ func (l *AuthLogin) closeWithContext(closeCtx context.Context) error {
 	stdoutErr := l.stdout.Close()
 	stderrErr := l.stderr.Close()
 
-	joinAuthLoginWorker(l.stdoutDone)
-	joinAuthLoginWorker(l.stderrDone)
+	<-l.stdoutDone
+	<-l.stderrDone
 
 	return errors.Join(
 		revokeErr,
