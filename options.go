@@ -133,6 +133,10 @@ type runtimeOptions struct {
 	// active load/resume use. It runs before native export and is nil in
 	// production.
 	afterSessionUseAdmitted func(*agentSessionUse)
+	// afterReplacementPredecessorClosed is an internal boundary barrier used by
+	// deterministic tests after the old residence is fully reclaimed and before
+	// the successor is constructed. Production leaves it nil.
+	afterReplacementPredecessorClosed func(*agentSession)
 	// beforePersistenceReplace, beforeDeleteTombstone, and
 	// beforeTerminalDelivery are internal ordering barriers for deterministic
 	// lifecycle tests. Production leaves them nil.

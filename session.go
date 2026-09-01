@@ -241,6 +241,14 @@ type sessionPersistenceFence struct {
 	changed    bool
 }
 
+type sessionReplacementState struct {
+	nativeID    string
+	title       string
+	createdUnix int64
+	updatedUnix int64
+	rawEventSeq int64
+}
+
 type sessionTeardownFlight struct {
 	generation uint64
 	done       chan struct{}
@@ -668,6 +676,45 @@ func (s *agentSession) Close(ctx context.Context) (err error) {
 	}
 
 	return s.finalizeScratch(settlement.runtimeErr, settlement.boundaryErr)
+}
+
+// closeForReplacement settles an installed predecessor through the same
+// containment and durable rungs as session/close, but leaves logical map and
+// gauge ownership with the caller so it can publish a successor under the same
+// ACP session id without an addressable gap or slot churn.
+func (s *agentSession) closeForReplacement(ctx context.Context) (err error) {
+	ctx, flight, err := s.beginTeardown(ctx)
+	if err != nil {
+		return err
+	}
+	defer s.finishTeardownOnReturn(flight)
+
+	return s.closeInstalledRung(ctx)
+}
+
+func (s *agentSession) closeInstalledRung(ctx context.Context) error {
+	settlement := s.settleCloseRung(ctx)
+	if fenceErr := s.fencePersistenceForClose(ctx); fenceErr != nil {
+		return errors.Join(settlement.runtimeErr, fenceErr)
+	}
+
+	if !amp.ProcessContainmentComplete(settlement.boundaryErr) {
+		return errors.Join(settlement.runtimeErr, settlement.boundaryErr)
+	}
+
+	if commitErr := s.commitCloseRung(ctx); commitErr != nil {
+		return errors.Join(settlement.runtimeErr, commitErr)
+	}
+
+	if terminalErr := s.deliverPendingTerminal(ctx); terminalErr != nil {
+		return errors.Join(settlement.runtimeErr, terminalErr)
+	}
+
+	if settlement.runtimeErr != nil {
+		return settlement.runtimeErr
+	}
+
+	return s.finalizeScratch(nil, settlement.boundaryErr)
 }
 
 // closeAtShutdown is the ladder embedded shutdown runs. It carries the same
@@ -1152,6 +1199,30 @@ func (s *agentSession) nativeSessionID() string {
 	defer s.mu.Unlock()
 
 	return s.nativeID
+}
+
+func (s *agentSession) replacementState() sessionReplacementState {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return sessionReplacementState{
+		nativeID:    s.nativeID,
+		title:       s.title,
+		createdUnix: s.createdUnix,
+		updatedUnix: s.updatedUnix,
+		rawEventSeq: s.rawEventSeq.Load(),
+	}
+}
+
+func (s *agentSession) applyReplacementState(state sessionReplacementState) {
+	s.mu.Lock()
+	s.nativeID = state.nativeID
+	s.title = state.title
+	s.createdUnix = state.createdUnix
+	s.updatedUnix = state.updatedUnix
+	s.mu.Unlock()
+
+	s.rawEventSeq.Store(state.rawEventSeq)
 }
 
 // persistAfterTurn durably commits the manifest plus the full transcript in one

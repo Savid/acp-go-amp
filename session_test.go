@@ -1160,8 +1160,8 @@ func promptCarriersConcurrently(t *testing.T, agent *Agent, ids ...acp.SessionId
 // option, so one complete raw PATH in session env is the whole carrier. Two
 // sessions run concurrent turns that resolve and execute their own marker
 // command out of their own PATH, a second turn follows a resume, one carrier is
-// rotated across a close-and-re-prepare boundary, and the retired values reach
-// nothing afterwards. Each operation directory also holds an amp stand-in that
+// rotated on that same logical id across a close-and-re-prepare boundary, and
+// the retired values reach nothing afterwards. Each operation directory also holds an amp stand-in that
 // exits nonzero: a session PATH that could shadow the harness would fail every
 // turn instead of running the real one.
 func TestAmpSessionCarrierRunsRealMarkersAndRotatesWithoutCrossing(t *testing.T) {
@@ -1211,18 +1211,23 @@ func TestAmpSessionCarrierRunsRealMarkersAndRotatesWithoutCrossing(t *testing.T)
 		first.bearer: first, second.bearer: second,
 	})
 
-	// Rotation happens at the idle close-and-re-prepare boundary: the session
-	// holding the retired bearer and directory is closed, and a fresh one
-	// carries the new values.
-	if _, err := agent.CloseSession(ctx, acp.CloseSessionRequest{SessionId: firstID}); err != nil {
-		t.Fatalf("close the rotated-out session: %v", err)
+	predecessor, predecessorErr := agent.session(firstID)
+	if predecessorErr != nil {
+		t.Fatalf("rotation predecessor: %v", predecessorErr)
 	}
-
 	settled = len(carrierRuns(t, state))
 	settledChildren := len(childEnvironments(t, state))
-	rotatedID, _ := newCarrierSession(t, agent, rotated)
+	if _, err := agent.ResumeSession(ctx, ResumeSessionRequest(firstID, firstCwd,
+		WithSessionAmpOptions(NewAmpOptions(WithAmpEnv(rotated.env()))),
+	)); err != nil {
+		t.Fatalf("rotate first session: %v", err)
+	}
+	successor, successorErr := agent.session(firstID)
+	if successorErr != nil || successor == predecessor {
+		t.Fatalf("rotation did not replace the first wrapper: successor=%p predecessor=%p err=%v", successor, predecessor, successorErr)
+	}
 
-	promptCarriersConcurrently(t, agent, secondID, rotatedID)
+	promptCarriersConcurrently(t, agent, secondID, firstID)
 	requireCarrierRuns(t, carrierRuns(t, state), settled, map[string]carrier{
 		second.bearer: second, rotated.bearer: rotated,
 	})
@@ -1234,18 +1239,6 @@ func TestAmpSessionCarrierRunsRealMarkersAndRotatesWithoutCrossing(t *testing.T)
 			}
 		}
 	}
-
-	// The closed session is
-	// gone rather than retried against the new carrier, and the untouched
-	// session refuses to adopt the rotated one on an active request.
-	if _, err := agent.Prompt(ctx, TextPromptRequest(firstID, "test-turn", "x")); err == nil {
-		t.Fatal("a prompt on the rotated-out session succeeded")
-	}
-
-	_, err := agent.ResumeSession(ctx, ResumeSessionRequest(secondID, secondCwd, WithSessionAmpOptions(
-		NewAmpOptions(WithAmpEnv(rotated.env())),
-	)))
-	requireInvalidParamsData(t, err, map[string]any{jsonFieldError: valMismatch, jsonFieldField: optionEnvKey})
 
 	requireNoShadowedHarness(t, state)
 }

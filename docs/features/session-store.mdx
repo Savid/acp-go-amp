@@ -49,9 +49,10 @@ sees, so no settled turn claims a prefix the store does not hold. It also runs
 on a context detached from the prompt request, so cancelling the request ends
 the native turn and never the commit of what that turn already streamed. These
 records back `session/load` replay and reconstruct the session environment for
-native continuation. An explicit load or resume environment must equal the
-stored session environment; a different bearer or `PATH` is a different
-session boundary and is refused on the existing record. Settings files and
+native continuation. An omitted load or resume environment reconstructs the
+stored carrier. An explicit changed bearer or `PATH` is a resume boundary: the
+old residence is contained and reclaimed before a successor residence is
+prepared and published under the same logical session id. Settings files and
 provider-auth residence contents are never written to the store.
 
 The first turn of a session publishes one additional generation the moment Amp

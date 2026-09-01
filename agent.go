@@ -101,6 +101,7 @@ type agentSessionFlight struct {
 type agentSessionUse struct {
 	generation uint64
 	session    *agentSession
+	replacing  bool
 	done       chan struct{}
 }
 

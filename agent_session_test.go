@@ -104,6 +104,10 @@ func TestActiveLoadResumeSemantics(t *testing.T) {
 		t.Fatalf("NewSession: %v", newErr)
 	}
 	id := resp.SessionId
+	predecessor, predecessorErr := agent.session(id)
+	if predecessorErr != nil {
+		t.Fatalf("predecessor: %v", predecessorErr)
+	}
 
 	if _, loadErr := agent.LoadSession(ctx, LoadSessionRequest(id, t.TempDir(), requestOptions(false)...)); !isMismatchField(loadErr, "cwd") {
 		t.Fatalf("different active cwd = %v, want cwd mismatch", loadErr)
@@ -122,12 +126,16 @@ func TestActiveLoadResumeSemantics(t *testing.T) {
 	)); !isMismatchField(loadErr, "additionalDirectories") {
 		t.Fatalf("different active additionalDirectories = %v, want mismatch", loadErr)
 	}
-	if _, resumeErr := agent.ResumeSession(ctx, ResumeSessionRequest(id, cwd,
+	if _, loadErr := agent.LoadSession(ctx, LoadSessionRequest(id, cwd,
 		WithSessionAdditionalDirectories(extra),
 		WithSessionMCPServers(server),
 		WithSessionAmpOptions(NewAmpOptions(WithAmpEnv(map[string]string{"AMP_URL": "https://other.example.test"}), WithAmpMode("high"))),
-	)); !isMismatchField(resumeErr, "env") {
-		t.Fatalf("different active env = %v, want env mismatch", resumeErr)
+	)); loadErr != nil {
+		t.Fatalf("different active env boundary: %v", loadErr)
+	}
+	replacement, replacementErr := agent.session(id)
+	if replacementErr != nil || replacement == predecessor {
+		t.Fatalf("active env boundary did not replace wrapper: replacement=%p predecessor=%p err=%v", replacement, predecessor, replacementErr)
 	}
 	if _, loadErr := agent.LoadSession(ctx, LoadSessionRequest(id, cwd,
 		WithSessionAdditionalDirectories(extra),
