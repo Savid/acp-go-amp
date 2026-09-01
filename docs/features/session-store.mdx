@@ -93,7 +93,6 @@ session store confidential application data.
 addressed, and replays transcript frames to the client. `session/resume`
 hydrates without replaying history.
 
-<Warning>
 A local transcript restore is not native thread resurrection. The mirror is the
 durability boundary for display replay; the server-side Amp thread is the native
 continuation unit.
@@ -101,7 +100,6 @@ continuation unit.
 Native continuation requires the live server-side Amp thread and AMP_API_KEY, so the mirror alone cannot continue a turn.
 
 If the thread is deleted or unavailable, session/load can replay the local transcript for display, but a subsequent prompt fails with one terminal `native_state_missing` error — the adapter does not rebuild a thread from transcript text, because that would lose native state.
-</Warning>
 
 If a store write fails after a settled turn, the adapter keeps the frames in
 memory and blocks the next prompt with a `mirror_unsynced` error until the write

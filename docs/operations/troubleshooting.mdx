@@ -62,12 +62,10 @@ quoted for Amp images is not a published limit — it is a constant carried in t
 shipped amp CLI's minified bundle, a separate client-side pre-flight rather than
 the service ceiling.
 
-<Note>
 The cap applies per commit, not per thread, so a long thread has less headroom
 for one image than a fresh thread does. Treat 921,600 as the bound that holds
 for a fresh thread and expect the practical ceiling on a continued thread to be
 lower; an oversize append still fails before any bytes are stored.
-</Note>
 
 Output failures reaching `-32603` with `error: "amp_turn_failed"`,
 `cause: "transport"`, and `stage: "image_output"` always carry
