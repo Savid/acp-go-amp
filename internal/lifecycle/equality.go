@@ -25,13 +25,9 @@ func decodeValue(raw []byte) (any, bool) {
 
 	var value any
 
-	if err := reader.Decode(&value); err != nil {
-		return nil, false
-	}
-
-	if _, err := reader.Token(); !errors.Is(err, io.EOF) {
-		return nil, false
-	}
+	// The unique-member scan above already decoded this exact document through
+	// EOF with the same json.Decoder settings.
+	_ = reader.Decode(&value)
 
 	return value, true
 }

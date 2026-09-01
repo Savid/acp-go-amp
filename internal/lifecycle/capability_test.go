@@ -53,4 +53,56 @@ func TestLifecycleCapabilityStrictScalar(t *testing.T) {
 			require.Error(t, json.Unmarshal([]byte(test.data), &value))
 		})
 	}
+
+	for _, data := range []string{
+		`{"version":1,`,
+		`{"version":1`,
+		`{"version":1} {}`,
+	} {
+		require.Error(t, decoded.UnmarshalJSON([]byte(data)))
+	}
+}
+
+func TestLifecycleCapabilityValidatesEveryMember(t *testing.T) {
+	t.Parallel()
+
+	var decoded Negotiated
+	require.NoError(t, json.Unmarshal([]byte(`{
+		"version":1,
+		"updatesOutsidePrompt":true,
+		"authoritativeQuiescence":true,
+		"quiescenceSource":"process-containment",
+		"activityKinds":["task","subagent"]
+	}`), &decoded))
+	require.Equal(t, Negotiated{
+		Version:                 Version,
+		UpdatesOutsidePrompt:    true,
+		AuthoritativeQuiescence: true,
+		QuiescenceSource:        ProofClassProcessContainment,
+		ActivityKinds:           []ActivityKind{ActivityTask, ActivitySubagent},
+	}, decoded)
+
+	for _, test := range []struct {
+		name string
+		data string
+	}{
+		{"truncated member", `{"version":1,`},
+		{"truncated object", `{"version":1`},
+		{"updates type", `{"version":1,"updatesOutsidePrompt":1}`},
+		{"authority type", `{"version":1,"authoritativeQuiescence":1}`},
+		{"source type", `{"version":1,"quiescenceSource":1}`},
+		{"kinds type", `{"version":1,"activityKinds":1}`},
+		{"invalid kind", `{"version":1,"activityKinds":["worker"]}`},
+		{"duplicate kind", `{"version":1,"activityKinds":["task","task"]}`},
+		{"authority missing source", `{"version":1,"authoritativeQuiescence":true}`},
+		{"authority wrong source", `{"version":1,"authoritativeQuiescence":true,"quiescenceSource":"other"}`},
+		{"source without authority", `{"version":1,"quiescenceSource":"process-containment"}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			var value Negotiated
+			require.Error(t, json.Unmarshal([]byte(test.data), &value))
+		})
+	}
 }

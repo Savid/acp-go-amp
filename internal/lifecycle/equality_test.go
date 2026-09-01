@@ -1,6 +1,7 @@
 package lifecycle
 
 import (
+	"bytes"
 	"encoding/json"
 	"testing"
 
@@ -97,4 +98,33 @@ func TestDecodeValueRefusesAFrameThatIsNotOneValue(t *testing.T) {
 	value, decodable := decodeValue([]byte(` {"a": 1} `))
 	require.True(t, decodable)
 	require.Equal(t, map[string]any{"a": json.Number("1")}, value)
+}
+
+func TestUniqueJSONMemberScannerRefusesMalformedAndDuplicateStructures(t *testing.T) {
+	t.Parallel()
+
+	for _, raw := range []string{
+		`{1:2}`,
+		`{"a":1,"a":2}`,
+		`{"a":{"b":1,"b":2}}`,
+		`[{"a":1,"a":2}]`,
+		`{"a":[1,]}`,
+		`{"a":`,
+		`[1,`,
+	} {
+		require.False(t, jsonDocumentHasUniqueMembers([]byte(raw)), raw)
+	}
+
+	reader := json.NewDecoder(bytes.NewReader(nil))
+	_, ok := nextObjectMemberName(reader)
+	require.False(t, ok)
+
+	reader = json.NewDecoder(bytes.NewReader([]byte(`1`)))
+	_, ok = nextObjectMemberName(reader)
+	require.False(t, ok)
+
+	reader = json.NewDecoder(bytes.NewReader([]byte(`[]`)))
+	_, err := reader.Token()
+	require.NoError(t, err)
+	require.False(t, consumeUniqueJSONValue(reader))
 }

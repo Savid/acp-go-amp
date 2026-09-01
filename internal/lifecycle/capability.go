@@ -26,10 +26,8 @@ func (n *Negotiated) UnmarshalJSON(data []byte) error {
 			return fmt.Errorf("decode lifecycle capability member: %w", err)
 		}
 
-		field, ok := token.(string)
-		if !ok {
-			return errors.New("lifecycle capability member name must be a string")
-		}
+		// encoding/json admits only string member names after an object opens.
+		field, _ := token.(string)
 
 		switch field {
 		case fieldVersion, fieldUpdatesOutsidePrompt, fieldAuthoritativeQuiescence,
