@@ -161,6 +161,7 @@ type AuthLogin struct {
 	waitDone chan struct{}
 	waitErr  error
 	result   NativeResult
+	waitStop context.CancelFunc
 	url      chan string
 	dataHome string
 	settle   func(context.Context) error
@@ -220,12 +221,14 @@ func (c *Client) StartAuthLogin(ctx context.Context) (*AuthLogin, error) {
 	// boundary mutated.
 	dataHome := environmentMap(environment)[dataHomeEnv]
 
+	waitCtx, stopWaiting := context.WithCancel(context.Background())
 	login := &AuthLogin{
 		process:  process,
 		stdin:    process.Stdin(),
 		stdout:   process.Stdout(),
 		stderr:   process.Stderr(),
 		waitDone: make(chan struct{}),
+		waitStop: stopWaiting,
 		url:      make(chan string, 1),
 		dataHome: dataHome,
 		onPanic:  c.options.OnGoroutinePanic,
@@ -235,7 +238,7 @@ func (c *Client) StartAuthLogin(ctx context.Context) (*AuthLogin, error) {
 
 	go login.readStdout(ctx)
 	go login.drainStderr(ctx)
-	go login.waitNative() //nolint:gosec // Wait must outlive cancellation and settle containment.
+	go login.waitNative(waitCtx)
 
 	return login, nil
 }
@@ -421,10 +424,12 @@ func (l *AuthLogin) Settled() (bool, error) {
 	}
 }
 
-func (l *AuthLogin) waitNative() {
-	l.result, l.waitErr = l.process.Wait(context.Background())
-	if l.settle != nil {
-		l.waitErr = errors.Join(l.waitErr, l.settle(context.Background()))
+func (l *AuthLogin) waitNative(ctx context.Context) {
+	l.result, l.waitErr = l.process.Wait(ctx)
+
+	l.waitErr = markDetachedWaitIncomplete(l.waitErr)
+	if l.settle != nil && !errors.Is(l.waitErr, ErrContainmentIncomplete) {
+		l.waitErr = errors.Join(l.waitErr, markDetachedWaitIncomplete(l.settle(ctx)))
 	}
 
 	close(l.waitDone)
@@ -472,6 +477,11 @@ func (l *AuthLogin) closeWithContext(closeCtx context.Context) error {
 		settled = true
 	case <-closeCtx.Done():
 		waitErr = errors.Join(closeCtx.Err(), ErrContainmentIncomplete)
+
+		if l.waitStop != nil {
+			l.waitStop()
+			<-l.waitDone
+		}
 	}
 
 	if settled && (result.Revoked || result.Signal != 0) && !errors.Is(waitErr, ErrContainmentIncomplete) {

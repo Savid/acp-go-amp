@@ -24,6 +24,20 @@ type residualAuthority struct {
 	reclaimErr   error
 }
 
+type contextReclaimAuthority struct {
+	residualAuthority
+	started chan struct{}
+	exited  chan struct{}
+}
+
+func (a *contextReclaimAuthority) ReclaimNativeTree(ctx context.Context, _ string) error {
+	close(a.started)
+	<-ctx.Done()
+	close(a.exited)
+
+	return ctx.Err()
+}
+
 func (a residualAuthority) NativeEnvironment() map[string]string {
 	if a.envPanic {
 		panic("environment panic")
@@ -384,6 +398,31 @@ func TestAgentCleanupResidenceResidualBranches(t *testing.T) {
 	t.Cleanup(func() { removeSessionDir = original })
 	require.ErrorIs(t, agent.closeAttempt(), errAgentGoroutinePanic)
 	require.Empty(t, agent.cleanupResidences)
+}
+
+func TestCleanupResidenceContextReclaimRetainsPreparedRetry(t *testing.T) {
+	authority := &contextReclaimAuthority{
+		residualAuthority: residualAuthority{environment: nativeamp.CaptureOrdinaryEnvironment()},
+		started:           make(chan struct{}),
+		exited:            make(chan struct{}),
+	}
+	agent := NewAgent(WithHostAuthority(authority))
+	residence := &agentCleanupResidence{
+		agent: agent, id: 1, root: t.TempDir(), prepared: true,
+	}
+	agent.cleanupResidences[residence.id] = residence
+
+	reclaimCtx, cancelReclaim := context.WithCancel(t.Context())
+	reclaimDone := make(chan error, 1)
+	go func() { reclaimDone <- residence.reclaimWithContext(reclaimCtx) }()
+	<-authority.started
+	cancelReclaim()
+
+	require.ErrorIs(t, <-reclaimDone, context.Canceled)
+	<-authority.exited
+	require.True(t, residence.prepared)
+	require.True(t, residence.retryable)
+	require.Same(t, residence, agent.cleanupResidences[residence.id])
 }
 
 func TestSessionTeardownResidualBranches(t *testing.T) {

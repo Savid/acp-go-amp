@@ -507,7 +507,7 @@ func TestAuthLoginSettlementAndCloseResidualBranches(t *testing.T) {
 			return wantSettle
 		},
 	}
-	login.waitNative()
+	login.waitNative(t.Context())
 	if !errors.Is(login.waitErr, wantWait) || !errors.Is(login.waitErr, wantSettle) {
 		t.Fatalf("waitNative error = %v", login.waitErr)
 	}
@@ -544,6 +544,100 @@ func TestAuthLoginSettlementAndCloseResidualBranches(t *testing.T) {
 	}
 	if err := login.closeWithContext(timeoutCtx); !errors.Is(err, ErrContainmentIncomplete) {
 		t.Fatalf("timed-out close = %v", err)
+	}
+}
+
+func TestAuthLoginIncompleteCloseCancelsAndJoinsWaiterWithoutCleanup(t *testing.T) {
+	process := newContextBoundCoverageProcess()
+	waitCtx, stopWaiting := context.WithCancel(context.Background())
+	settled := false
+	cleaned := false
+	login := &AuthLogin{
+		process:  process,
+		stdin:    &coverageWriteCloser{},
+		stdout:   io.NopCloser(strings.NewReader("")),
+		stderr:   io.NopCloser(strings.NewReader("")),
+		waitDone: make(chan struct{}),
+		waitStop: stopWaiting,
+		settle: func(context.Context) error {
+			settled = true
+
+			return nil
+		},
+		cleanup: func() error {
+			cleaned = true
+
+			return nil
+		},
+	}
+	go login.waitNative(waitCtx)
+	<-process.waitStarted
+
+	closeCtx, cancelClose := context.WithCancel(t.Context())
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- login.closeWithContext(closeCtx) }()
+
+	select {
+	case <-process.waitExited:
+		t.Fatal("login waiter exited before the close lifetime expired")
+	default:
+	}
+
+	cancelClose()
+	err := <-closeDone
+	if !errors.Is(err, context.Canceled) || !errors.Is(err, ErrContainmentIncomplete) {
+		t.Fatalf("closeWithContext = %v, want cancelled incomplete containment", err)
+	}
+	<-process.waitExited
+	if settled {
+		t.Fatal("detached wait reclaimed the auth residence")
+	}
+	if cleaned {
+		t.Fatal("incomplete close cleaned the auth residence")
+	}
+}
+
+func TestAuthLoginIncompleteCloseCancelsAndJoinsSettlementWithoutCleanup(t *testing.T) {
+	process := newCoverageNativeProcess()
+	waitCtx, stopWaiting := context.WithCancel(context.Background())
+	settleStarted := make(chan struct{})
+	settleExited := make(chan struct{})
+	cleaned := false
+	login := &AuthLogin{
+		process:  process,
+		stdin:    &coverageWriteCloser{},
+		stdout:   io.NopCloser(strings.NewReader("")),
+		stderr:   io.NopCloser(strings.NewReader("")),
+		waitDone: make(chan struct{}),
+		waitStop: stopWaiting,
+		settle: func(ctx context.Context) error {
+			close(settleStarted)
+			<-ctx.Done()
+			close(settleExited)
+
+			return ctx.Err()
+		},
+		cleanup: func() error {
+			cleaned = true
+
+			return nil
+		},
+	}
+	go login.waitNative(waitCtx)
+	<-settleStarted
+
+	closeCtx, cancelClose := context.WithCancel(t.Context())
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- login.closeWithContext(closeCtx) }()
+	cancelClose()
+
+	err := <-closeDone
+	if !errors.Is(err, context.Canceled) || !errors.Is(err, ErrContainmentIncomplete) {
+		t.Fatalf("closeWithContext = %v, want cancelled incomplete containment", err)
+	}
+	<-settleExited
+	if cleaned {
+		t.Fatal("incomplete settlement cleaned the auth residence")
 	}
 }
 

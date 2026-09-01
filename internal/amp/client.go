@@ -832,6 +832,8 @@ type Turn struct {
 	stderrMu      sync.Mutex
 	stderrTail    bytes.Buffer
 	stderrDone    chan struct{}
+	stdoutDone    chan struct{}
+	stopTerminal  context.CancelFunc
 	closeOnce     sync.Once
 	onPanic       func(ctx context.Context, name string, recovered any)
 }
@@ -892,16 +894,26 @@ func (t *Turn) Send(ctx context.Context, payload any) error {
 
 func (t *Turn) start(ctx context.Context) {
 	t.stderrDone = make(chan struct{})
+	t.stdoutDone = make(chan struct{})
+
+	terminalCtx, stopTerminal := context.WithCancel(context.Background())
+	t.stopTerminal = stopTerminal
+
 	go t.drainStderr(ctx)
-	go t.readStdout(ctx)
+	go t.readStdout(ctx, terminalCtx)
 }
 
-func (t *Turn) readStdout(ctx context.Context) {
+func (t *Turn) readStdout(ctx context.Context, terminalCtx context.Context) {
 	defer t.recoverGoroutine(ctx, "amp stdout reader")
+	defer func() {
+		if t.stdoutDone != nil {
+			close(t.stdoutDone)
+		}
+	}()
 	defer close(t.messages)
 	defer close(t.errs)
 	defer func() {
-		if err := t.wait(); err != nil {
+		if err := t.wait(terminalCtx); err != nil {
 			select {
 			case <-t.stderrDone:
 			case <-time.After(defaultCloseKillAfter):
@@ -932,6 +944,8 @@ func (t *Turn) readStdout(ctx context.Context) {
 		case <-ctx.Done():
 			t.sendErr(ctx.Err())
 
+			return
+		case <-terminalCtx.Done():
 			return
 		}
 	}
@@ -964,6 +978,8 @@ func (t *Turn) Interrupt(ctx context.Context) error {
 	revokeErr := t.process.Revoke(ctx)
 
 	result, waitErr := t.process.Wait(ctx)
+	waitErr = markDetachedWaitIncomplete(waitErr)
+
 	if (result.Revoked || result.Signal != 0) && !errors.Is(waitErr, ErrContainmentIncomplete) {
 		waitErr = nil
 	}
@@ -979,35 +995,54 @@ func (t *Turn) Close() error {
 	var err error
 
 	t.closeOnce.Do(func() {
-		if t.process != nil {
-			ctx, cancel := context.WithTimeout(context.Background(), defaultCloseWait)
-			err = errors.Join(err, t.Interrupt(ctx))
+		ctx, cancel := context.WithTimeout(context.Background(), defaultCloseWait)
+		err = t.closeWithContext(ctx)
 
-			cancel()
-		}
-
-		if t.stdin != nil {
-			err = errors.Join(err, t.stdin.Close())
-		}
-
-		if t.stdout != nil {
-			err = errors.Join(err, t.stdout.Close())
-		}
-
-		if t.stderr != nil {
-			err = errors.Join(err, t.stderr.Close())
-		}
+		cancel()
 	})
 
 	return err
 }
 
-func (t *Turn) wait() error {
+func (t *Turn) closeWithContext(ctx context.Context) error {
+	var err error
+	if t.process != nil {
+		err = errors.Join(err, t.Interrupt(ctx))
+	}
+
+	if t.stopTerminal != nil {
+		t.stopTerminal()
+	}
+
+	if t.stdin != nil {
+		err = errors.Join(err, t.stdin.Close())
+	}
+
+	if t.stdout != nil {
+		err = errors.Join(err, t.stdout.Close())
+	}
+
+	if t.stderr != nil {
+		err = errors.Join(err, t.stderr.Close())
+	}
+
+	if t.stdoutDone != nil {
+		<-t.stdoutDone
+	}
+
+	if t.stderrDone != nil {
+		<-t.stderrDone
+	}
+
+	return err
+}
+
+func (t *Turn) wait(ctx context.Context) error {
 	if t.process == nil {
 		return nil
 	}
 
-	result, err := t.process.Wait(context.Background())
+	result, err := t.process.Wait(ctx)
 	if err == nil && (result.ExitCode != 0 || result.Signal != 0 || result.Revoked) {
 		return fmt.Errorf("native exit code %d signal %d revoked %t", result.ExitCode, result.Signal, result.Revoked)
 	}

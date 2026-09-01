@@ -416,7 +416,7 @@ func (s *agentSession) newAuthClient(ctx context.Context) (*nativeamp.Client, fu
 		Env: env, ResolutionEnv: composeEnv(s.agent.options.Env), ResolvedExecutable: s.agent.retainedHarnessPath(),
 		MCPConfigPath: residence.mcpFile, MaxLineBytes: s.agent.options.runtime.maxJSONLineBytes,
 		OnGoroutinePanic: s.agent.onNativeGoroutinePanic, WritableRoot: residence.root, BrowserShim: browserShim,
-		AfterNativeWait:  func(context.Context) error { return cleanupResidence.reclaim() },
+		AfterNativeWait:  cleanupResidence.reclaimWithContext,
 		CleanupResidence: cleanup,
 	}
 	s.agent.configureNativeClient(&options)

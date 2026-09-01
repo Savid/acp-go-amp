@@ -117,6 +117,15 @@ func (r *agentCleanupResidence) finalize() error {
 }
 
 func (r *agentCleanupResidence) reclaim() error {
+	reclaimCtx, cancel := context.WithTimeout(context.Background(), defaultNativeCommandTimeout)
+	reclaimErr := r.reclaimWithContext(reclaimCtx)
+
+	cancel()
+
+	return reclaimErr
+}
+
+func (r *agentCleanupResidence) reclaimWithContext(ctx context.Context) error {
 	r.agent.mu.Lock()
 	root := r.root
 	prepared := r.prepared
@@ -126,12 +135,10 @@ func (r *agentCleanupResidence) reclaim() error {
 		return nil
 	}
 
-	reclaimCtx, cancel := context.WithTimeout(context.Background(), defaultNativeCommandTimeout)
-	reclaimErr := r.agent.reclaimNativeTree(reclaimCtx, root)
-
-	cancel()
-
+	reclaimErr := r.agent.reclaimNativeTree(ctx, root)
 	if reclaimErr != nil {
+		r.setRetryable()
+
 		return reclaimErr
 	}
 

@@ -185,7 +185,7 @@ func TestClientOutputResidualBranches(t *testing.T) {
 	}})
 	_, err = client.outputAtPath(t.Context(), "amp", "threads", "list")
 	require.ErrorContains(t, err, "exit code")
-	require.Equal(t, 1, waitCalls)
+	require.Equal(t, 2, waitCalls)
 
 	process = newCoverageNativeProcess()
 	process.wait = func(context.Context) (NativeResult, error) { return NativeResult{ExitCode: 7}, nil }
@@ -285,28 +285,150 @@ func TestOrdinaryAndTrackedProcessResidualBranches(t *testing.T) {
 
 type blockingCoverageProcess struct {
 	*coverageNativeProcess
-	release chan struct{}
-	result  NativeResult
-	err     error
+	waitStarted chan struct{}
+	terminal    chan struct{}
+	result      NativeResult
+	err         error
 }
 
-func (p *blockingCoverageProcess) Wait(context.Context) (NativeResult, error) {
-	<-p.release
+type contextBoundCoverageProcess struct {
+	*coverageNativeProcess
+	waitStarted chan struct{}
+	waitExited  chan struct{}
+}
+
+func newContextBoundCoverageProcess() *contextBoundCoverageProcess {
+	return &contextBoundCoverageProcess{
+		coverageNativeProcess: newCoverageNativeProcess(),
+		waitStarted:           make(chan struct{}, 2),
+		waitExited:            make(chan struct{}, 2),
+	}
+}
+
+func (p *contextBoundCoverageProcess) Wait(ctx context.Context) (NativeResult, error) {
+	p.waitStarted <- struct{}{}
+	<-ctx.Done()
+	p.waitExited <- struct{}{}
+
+	return NativeResult{}, ctx.Err()
+}
+
+func (p *blockingCoverageProcess) Wait(ctx context.Context) (NativeResult, error) {
+	p.waitStarted <- struct{}{}
+
+	select {
+	case <-ctx.Done():
+		return NativeResult{}, ctx.Err()
+	case <-p.terminal:
+	}
 
 	return p.result, p.err
 }
 
-func TestTrackedProcessWaitHonorsContextThenMemoizesResult(t *testing.T) {
+func TestTrackedProcessWaitDetachesThenRejoinsTheHostCache(t *testing.T) {
 	base := newCoverageNativeProcess()
-	underlying := &blockingCoverageProcess{coverageNativeProcess: base, release: make(chan struct{}), result: NativeResult{ExitCode: 3}, err: errors.New("done")}
+	underlying := &blockingCoverageProcess{
+		coverageNativeProcess: base,
+		waitStarted:           make(chan struct{}, 2),
+		terminal:              make(chan struct{}),
+		result:                NativeResult{ExitCode: 3},
+		err:                   errors.New("done"),
+	}
 	tracked := trackProcess(underlying)
 
-	_, err := tracked.Wait(cancelledContext())
+	firstCtx, cancelFirst := context.WithCancel(t.Context())
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := tracked.Wait(firstCtx)
+		firstDone <- err
+	}()
+	<-underlying.waitStarted
+	cancelFirst()
+	err := <-firstDone
 	require.ErrorIs(t, err, context.Canceled)
-	close(underlying.release)
-	result, err := tracked.Wait(t.Context())
+
+	type waitResult struct {
+		result NativeResult
+		err    error
+	}
+	secondDone := make(chan waitResult, 1)
+	go func() {
+		result, waitErr := tracked.Wait(t.Context())
+		secondDone <- waitResult{result: result, err: waitErr}
+	}()
+	<-underlying.waitStarted
+
+	select {
+	case <-secondDone:
+		require.Fail(t, "rejoined wait returned before the host terminal cache settled")
+	default:
+	}
+
+	close(underlying.terminal)
+	second := <-secondDone
+	result, err := second.result, second.err
 	require.Equal(t, NativeResult{ExitCode: 3}, result)
 	require.ErrorContains(t, err, "done")
+}
+
+func TestTurnIncompleteCloseCancelsAndJoinsTerminalObservation(t *testing.T) {
+	process := newContextBoundCoverageProcess()
+	promptCtx, cancelPrompt := context.WithCancel(t.Context())
+	turn := &Turn{
+		process:      process,
+		stdin:        &coverageWriteCloser{},
+		stdout:       io.NopCloser(bytes.NewBufferString(`{"type":"result","subtype":"success"}` + "\n")),
+		stderr:       io.NopCloser(bytes.NewReader(nil)),
+		maxLineBytes: 1024,
+		messages:     make(chan Message),
+		errs:         make(chan error, 4),
+	}
+	turn.start(promptCtx)
+	cancelPrompt()
+	<-process.waitStarted
+
+	select {
+	case <-process.waitExited:
+		require.Fail(t, "prompt cancellation stopped terminal observation")
+	default:
+	}
+
+	closeCtx, cancelClose := context.WithCancel(t.Context())
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- turn.closeWithContext(closeCtx) }()
+	<-process.waitStarted
+	cancelClose()
+
+	err := <-closeDone
+	require.ErrorIs(t, err, context.Canceled)
+	require.ErrorIs(t, err, ErrContainmentIncomplete)
+	<-process.waitExited
+	<-process.waitExited
+
+	for range turn.Messages() {
+	}
+	for range turn.Errors() {
+	}
+}
+
+func TestTurnTerminalCloseStopsBlockedDeliveryAndJoinsWorkers(t *testing.T) {
+	process := newCoverageNativeProcess()
+	turn := &Turn{
+		process:      process,
+		stdin:        &coverageWriteCloser{},
+		stdout:       io.NopCloser(bytes.NewBufferString(`{"type":"result","subtype":"success"}` + "\n")),
+		stderr:       io.NopCloser(bytes.NewReader(nil)),
+		maxLineBytes: 1024,
+		messages:     make(chan Message),
+		errs:         make(chan error, 4),
+	}
+	turn.start(t.Context())
+
+	require.NoError(t, turn.closeWithContext(t.Context()))
+	for range turn.Messages() {
+	}
+	for range turn.Errors() {
+	}
 }
 
 func TestTurnReaderAndErrorResidualBranches(t *testing.T) {
@@ -317,7 +439,7 @@ func TestTurnReaderAndErrorResidualBranches(t *testing.T) {
 		maxLineBytes: 1024,
 		stderrDone:   make(chan struct{}),
 	}
-	turn.readStdout(cancelledContext())
+	turn.readStdout(cancelledContext(), t.Context())
 	require.ErrorIs(t, <-turn.errs, context.Canceled)
 
 	turn = &Turn{
@@ -327,13 +449,13 @@ func TestTurnReaderAndErrorResidualBranches(t *testing.T) {
 		maxLineBytes: 1024,
 		stderrDone:   make(chan struct{}),
 	}
-	turn.readStdout(t.Context())
+	turn.readStdout(t.Context(), t.Context())
 	require.ErrorContains(t, <-turn.errs, "read amp stdout")
 
-	require.NoError(t, (&Turn{}).wait())
+	require.NoError(t, (&Turn{}).wait(t.Context()))
 	process := newCoverageNativeProcess()
 	process.wait = func(context.Context) (NativeResult, error) { return NativeResult{Signal: 9}, nil }
-	require.ErrorContains(t, (&Turn{process: process}).wait(), "signal 9")
+	require.ErrorContains(t, (&Turn{process: process}).wait(t.Context()), "signal 9")
 
 	turn = &Turn{errs: make(chan error, 1), log: slog.New(slog.DiscardHandler)}
 	turn.errs <- errors.New("full")
