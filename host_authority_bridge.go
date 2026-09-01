@@ -132,6 +132,8 @@ func (p nativeProcessBridge) Wait(ctx context.Context) (nativeamp.NativeResult, 
 
 func (p nativeProcessBridge) Revoke(ctx context.Context) error {
 	err := p.process.Revoke(ctx)
+	boundaryErr := authorityBoundaryError(err)
+	p.agent.recordAuthorityFailure(boundaryErr)
 
-	return authorityBoundaryError(err)
+	return boundaryErr
 }

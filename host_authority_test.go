@@ -540,7 +540,7 @@ func TestHostAuthorityWaitFailureRetainsPreparedTree(t *testing.T) {
 	require.NoError(t, statErr)
 }
 
-type contextRevokeProcess struct{}
+type contextRevokeProcess struct{ err error }
 
 func (*contextRevokeProcess) Stdin() io.WriteCloser { return nil }
 func (*contextRevokeProcess) Stdout() io.ReadCloser { return nil }
@@ -548,11 +548,11 @@ func (*contextRevokeProcess) Stderr() io.ReadCloser { return nil }
 func (*contextRevokeProcess) Wait(context.Context) (NativeResult, error) {
 	return NativeResult{Revoked: true}, nil
 }
-func (*contextRevokeProcess) Revoke(context.Context) error { return context.Canceled }
+func (p *contextRevokeProcess) Revoke(context.Context) error { return p.err }
 
 func TestHostAuthorityDetachedRevokeContextDoesNotLatch(t *testing.T) {
 	agent := NewAgent(WithHostAuthority(newRecordingAuthority()))
-	process := nativeProcessBridge{agent: agent, process: &contextRevokeProcess{}}
+	process := nativeProcessBridge{agent: agent, process: &contextRevokeProcess{err: context.Canceled}}
 
 	require.ErrorIs(t, process.Revoke(t.Context()), context.Canceled)
 	result, err := process.Wait(context.Background())
@@ -562,6 +562,20 @@ func TestHostAuthorityDetachedRevokeContextDoesNotLatch(t *testing.T) {
 	latched := agent.lifecycleContainmentErr
 	agent.mu.Unlock()
 	require.NoError(t, latched)
+}
+
+func TestHostAuthorityRevokeLossLatchesAdmission(t *testing.T) {
+	agent := NewAgent(WithHostAuthority(newRecordingAuthority()))
+	process := nativeProcessBridge{agent: agent, process: &contextRevokeProcess{err: ErrHostAuthorityUnavailable}}
+
+	err := process.Revoke(t.Context())
+	require.ErrorIs(t, err, ErrHostAuthorityUnavailable)
+	require.ErrorIs(t, err, ErrContainmentIncomplete)
+	agent.mu.Lock()
+	latched := agent.lifecycleContainmentErr
+	agent.mu.Unlock()
+	require.ErrorIs(t, latched, ErrHostAuthorityUnavailable)
+	require.ErrorIs(t, latched, ErrContainmentIncomplete)
 }
 
 func TestHostAuthorityMixedContextFailureRemainsContainmentUncertainty(t *testing.T) {
