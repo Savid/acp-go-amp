@@ -73,3 +73,10 @@ func requireInternalErrorData(t *testing.T, err error, want map[string]any) {
 	require.Equal(t, -32603, reqErr.Code)
 	require.Equal(t, want, reqErr.Data)
 }
+
+func residualCancelledContext() context.Context {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	return ctx
+}

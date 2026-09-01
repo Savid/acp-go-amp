@@ -4,12 +4,15 @@ package ampacp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/coder/acp-go-sdk"
 	ampnative "github.com/savid/acp-go-amp/internal/amp"
+	"github.com/stretchr/testify/require"
 )
 
 func TestInMemoryStoreReplaceAppendDelete(t *testing.T) {
@@ -488,4 +491,81 @@ func TestInMemoryStoreTombstoneFinality(t *testing.T) {
 	if err != nil || len(entries) != 1 {
 		t.Fatalf("untombstoned replace: entries=%d err=%v", len(entries), err)
 	}
+}
+
+type residualHookStore struct {
+	*InMemorySessionStore
+	afterTranscriptLoad func()
+	afterReplace        func()
+	failReplace         bool
+}
+
+func (s *residualHookStore) Load(ctx context.Context, key SessionKey) ([]SessionStoreEntry, error) {
+	entries, err := s.InMemorySessionStore.Load(ctx, key)
+	if err == nil && key.Subpath == transcriptSubpath && s.afterTranscriptLoad != nil {
+		after := s.afterTranscriptLoad
+		s.afterTranscriptLoad = nil
+		after()
+	}
+
+	return entries, err
+}
+
+func (s *residualHookStore) Replace(ctx context.Context, main SessionKey, replacements []SessionStoreReplacement) error {
+	if s.failReplace {
+		return errors.New("replace refused")
+	}
+	if err := s.InMemorySessionStore.Replace(ctx, main, replacements); err != nil {
+		return err
+	}
+	if s.afterReplace != nil {
+		after := s.afterReplace
+		s.afterReplace = nil
+		after()
+	}
+
+	return nil
+}
+
+func TestColdCarrierPersistenceResidualCallSites(t *testing.T) {
+	for _, phase := range []string{"persist", "validate"} {
+		t.Run(phase, func(t *testing.T) {
+			path, _ := fakeAgentAmpPath(t, "")
+			store := &residualHookStore{InMemorySessionStore: NewInMemorySessionStore()}
+			agent := newTestAgent(
+				WithExecutablePath(path),
+				WithScratchDir(testScratchDir(t)),
+				WithSessionStore(store),
+			)
+			cwd := t.TempDir()
+			created, err := agent.NewSession(t.Context(), NewSessionRequest(cwd,
+				WithSessionAmpOptions(NewAmpOptions(WithAmpEnv(map[string]string{"AMP_API_KEY": "old"}))),
+			))
+			require.NoError(t, err)
+			_, err = agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: created.SessionId})
+			require.NoError(t, err)
+
+			switch phase {
+			case "persist":
+				store.failReplace = true
+			case "validate":
+				store.afterReplace = func() {
+					agent.mu.Lock()
+					agent.sessionUses[created.SessionId] = &agentSessionUse{}
+					agent.mu.Unlock()
+				}
+			}
+			_, err = agent.ResumeSession(t.Context(), ResumeSessionRequest(created.SessionId, cwd,
+				WithSessionAmpOptions(NewAmpOptions(WithAmpEnv(map[string]string{"AMP_API_KEY": "new"}))),
+			))
+			require.Error(t, err)
+		})
+	}
+}
+
+func TestManifestStrictDecodeAcceptsTheCurrentTypedShape(t *testing.T) {
+	entry := json.RawMessage(`{"format":"amp-thread-mirror-v1","sessionId":"T-1","nativeSessionId":"T-1","cwd":"/cwd","env":{},"updatedAtUnixMilli":1,"createdAtUnixMilli":1}`)
+	manifest, ok := manifestFromStoreEntry(entry)
+	require.True(t, ok)
+	require.Equal(t, "T-1", manifest.SessionID)
 }

@@ -1423,3 +1423,9 @@ func TestDeleteIsNeverResurrectedByALateCommit(t *testing.T) {
 
 	require.Equal(t, after, store.replaceCount(), "no write recreates the row after delete succeeds")
 }
+
+func TestPromptSettlementTimeoutResidualBranch(t *testing.T) {
+	state := &promptTurnState{completed: make(chan struct{})}
+	settlement := state.awaitSettlement(residualCancelledContext())
+	require.ErrorIs(t, settlement.containmentErr, amp.ErrContainmentIncomplete)
+}

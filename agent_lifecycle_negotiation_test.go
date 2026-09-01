@@ -1694,3 +1694,16 @@ func TestLifecycleKeyRefusedBeforeExtensionMethodResolution(t *testing.T) {
 	require.Empty(t, sessions)
 	require.Nil(t, agent.providerAuth)
 }
+
+func TestSetConfigOptionUseAdmissionResidualBranch(t *testing.T) {
+	agent := NewAgent()
+	id := acp.SessionId("T-config")
+	use := &agentSessionUse{done: make(chan struct{})}
+	agent.sessionUses[id] = use
+	_, err := agent.SetSessionConfigOption(residualCancelledContext(), acp.SetSessionConfigOptionRequest{ValueId: &acp.SetSessionConfigOptionValueId{
+		SessionId: id,
+		ConfigId:  "mode",
+		Value:     "medium",
+	}})
+	require.Error(t, err)
+}

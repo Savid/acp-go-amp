@@ -282,3 +282,35 @@ func TestRecoveredVacancyStatesTheBoundaryItProved(t *testing.T) {
 	require.True(t, state.Quiescence.Certified)
 	require.Equal(t, "amp-process-tree/authority", state.Quiescence.Barrier)
 }
+
+func TestTerminalDeliveryRefusesUnnegotiatedQuiescence(t *testing.T) {
+	negotiated := lifecycle.Negotiated{Version: lifecycle.Version}
+	stream := lifecycle.NewStream("stream", negotiated)
+	require.NoError(t, emitLifecyclePrefix(stream))
+
+	prompt := &promptStream{
+		session:       &agentSession{id: "T-lifecycle"},
+		stream:        stream,
+		cycleID:       "cycle",
+		turnID:        "turn",
+		authoritative: true,
+	}
+	_, err := prompt.terminalDelivery(
+		lifecycleOutcome{stopReason: "end_turn", outcome: lifecycle.OutcomeSuccess}, true,
+	)
+	require.Error(t, err)
+}
+
+func emitLifecyclePrefix(stream *lifecycle.Stream) error {
+	if _, err := stream.Emit(lifecycle.SnapshotEvent("open", lifecycle.QuiescenceFact{})); err != nil {
+		return err
+	}
+	if _, err := stream.Emit(lifecycle.AcceptedEvent(lifecycle.Submission{
+		SubmissionID: "submission", ClientNonce: "nonce",
+	}, "turn")); err != nil {
+		return err
+	}
+	_, err := stream.Emit(lifecycle.RunningEvent("cycle", "turn"))
+
+	return err
+}

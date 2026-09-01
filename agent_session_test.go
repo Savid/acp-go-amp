@@ -4612,3 +4612,212 @@ func TestSettlementPreparationAndPanicContainmentDefensiveBranches(t *testing.T)
 	err = session.settleTurnAfterPanic(&amp.Turn{})
 	require.ErrorIs(t, err, amp.ErrContainmentIncomplete)
 }
+
+func TestActiveReplacementOwnershipResidualBranches(t *testing.T) {
+	agent := NewAgent()
+	id := acp.SessionId("T-residual")
+	predecessor := &agentSession{agent: agent, id: id}
+	successor := &agentSession{agent: agent, id: id}
+	use := &agentSessionUse{session: predecessor}
+
+	require.Error(t, agent.beginActiveReplacement(id, use, predecessor))
+	_, _, err := agent.replaceActiveSession(t.Context(), id, use, predecessor, parsedSessionMeta{}, "/cwd", "", nil)
+	require.Error(t, err)
+	require.Error(t, agent.publishActiveReplacement(id, use, predecessor, successor))
+	_, err = agent.retireFailedActiveReplacement(id, nil, predecessor)
+	require.Error(t, err)
+
+	agent.sessions[id] = predecessor
+	agent.sessionUses[id] = use
+	agent.sessionFlights[id] = &agentSessionFlight{use: &agentSessionUse{}, session: predecessor}
+	_, err = agent.retireFailedActiveReplacement(id, use, predecessor)
+	require.Error(t, err)
+
+	delete(agent.sessionFlights, id)
+	agent.sessions[id] = successor
+	_, err = agent.retireFailedActiveReplacement(id, use, predecessor)
+	require.Error(t, err)
+
+	agent.sessions[id] = predecessor
+	agent.sessionUses[id] = &agentSessionUse{session: predecessor, replacing: true}
+	_, err = agent.sessionForCancel(id)
+	require.Error(t, err)
+}
+
+func TestActiveReplacementPhaseOwnershipResidualBranches(t *testing.T) {
+	for _, phase := range []string{"transcript", "verify", "publish"} {
+		t.Run(phase, func(t *testing.T) {
+			path, _ := fakeAgentAmpPath(t, "")
+			store := &residualHookStore{InMemorySessionStore: NewInMemorySessionStore()}
+			agent := newTestAgent(
+				WithExecutablePath(path),
+				WithScratchDir(testScratchDir(t)),
+				WithSessionStore(store),
+			)
+			cwd := t.TempDir()
+			created, err := agent.NewSession(t.Context(), NewSessionRequest(cwd,
+				WithSessionAmpOptions(NewAmpOptions(WithAmpEnv(map[string]string{"AMP_API_KEY": "old"}))),
+			))
+			require.NoError(t, err)
+			_, err = agent.Prompt(t.Context(), TextPromptRequest(created.SessionId, "first", "first"))
+			require.NoError(t, err)
+
+			mutateOwnership := func() {
+				agent.mu.Lock()
+				agent.sessions[created.SessionId] = &agentSession{agent: agent, id: created.SessionId}
+				agent.mu.Unlock()
+			}
+			agent.options.runtime.afterReplacementPredecessorClosed = func(*agentSession) {
+				switch phase {
+				case "transcript":
+					store.afterTranscriptLoad = mutateOwnership
+				case "verify":
+					agent.options.runtime.exportThread = func(context.Context, *amp.Client, string) (json.RawMessage, error) {
+						mutateOwnership()
+
+						return json.RawMessage(`{}`), nil
+					}
+				case "publish":
+					store.afterReplace = mutateOwnership
+				}
+			}
+
+			_, err = agent.ResumeSession(t.Context(), ResumeSessionRequest(created.SessionId, cwd,
+				WithSessionAmpOptions(NewAmpOptions(WithAmpEnv(map[string]string{"AMP_API_KEY": "new"}))),
+			))
+			require.Error(t, err)
+		})
+	}
+}
+
+func TestLoadActiveSessionResidualCallSites(t *testing.T) {
+	newActive := func(t *testing.T) (*Agent, *carrierFailureStore, *agentSession, *agentSessionUse) {
+		t.Helper()
+		path, _ := fakeAgentAmpPath(t, "")
+		store := &carrierFailureStore{InMemorySessionStore: NewInMemorySessionStore()}
+		agent := newTestAgent(
+			WithExecutablePath(path),
+			WithScratchDir(testScratchDir(t)),
+			WithSessionStore(store),
+		)
+		created, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
+		require.NoError(t, err)
+		session, err := agent.session(created.SessionId)
+		require.NoError(t, err)
+		use := &agentSessionUse{generation: 1, session: session, done: make(chan struct{})}
+		agent.sessionUses[created.SessionId] = use
+
+		return agent, store, session, use
+	}
+
+	t.Run("request mismatch", func(t *testing.T) {
+		agent, _, session, use := newActive(t)
+		_, err := agent.loadActiveSession(t.Context(), session.id, use, session, parsedSessionMeta{},
+			t.TempDir(), session.mcpConfigJSON, session.additionalDirectories)
+		require.Error(t, err)
+	})
+
+	t.Run("transcript load", func(t *testing.T) {
+		agent, store, session, use := newActive(t)
+		store.failTranscriptLoad = true
+		_, err := agent.loadActiveSession(t.Context(), session.id, use, session, parsedSessionMeta{},
+			session.cwd, session.mcpConfigJSON, session.additionalDirectories)
+		require.ErrorContains(t, err, "transcript load failed")
+	})
+}
+
+func TestActiveRequestAndSessionUtilityResidualBranches(t *testing.T) {
+	newBase := func() *agentSession {
+		return &agentSession{
+			cwd:                   "/cwd",
+			additionalDirectories: []string{"/extra"},
+			mcpConfigJSON:         "{}",
+			sessionEnv:            map[string]string{"A": "B"},
+			mode:                  modeMedium,
+		}
+	}
+	cases := []struct {
+		name string
+		edit func(*agentSession, *parsedSessionMeta, *string, *[]string)
+	}{
+		{"cwd", func(_ *agentSession, _ *parsedSessionMeta, cwd *string, _ *[]string) { *cwd = "/other" }},
+		{"directories", func(_ *agentSession, _ *parsedSessionMeta, _ *string, dirs *[]string) { *dirs = nil }},
+		{"mcp", func(s *agentSession, _ *parsedSessionMeta, _ *string, _ *[]string) { s.mcpConfigJSON = "other" }},
+		{"env", func(s *agentSession, _ *parsedSessionMeta, _ *string, _ *[]string) {
+			s.sessionEnv = map[string]string{"A": "C"}
+		}},
+		{"mode", func(_ *agentSession, meta *parsedSessionMeta, _ *string, _ *[]string) {
+			meta.optionFields.mode = true
+			meta.options.Mode = "other"
+		}},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			session := newBase()
+			meta := parsedSessionMeta{options: AmpOptions{Env: map[string]string{"A": "B"}, Mode: modeMedium}}
+			cwd := "/cwd"
+			dirs := []string{"/extra"}
+			test.edit(session, &meta, &cwd, &dirs)
+			require.Error(t, session.applyActiveRequest(meta, cwd, "{}", dirs))
+		})
+	}
+
+	require.False(t, validStoredSessionEnv(map[string]string{envHome: "/caller"}))
+	require.Error(t, validateEnvironment(map[string]string{privateEnvPrefix + "X": "secret"}))
+	require.NoError(t, firstError(nil, nil))
+	require.ErrorIs(t, firstError(nil, context.Canceled), context.Canceled)
+
+	agent := NewAgent()
+	session := &agentSession{agent: agent}
+	entries, err := session.loadTranscript(t.Context())
+	require.NoError(t, err)
+	require.Nil(t, entries)
+	require.NoError(t, session.interrupt(t.Context()))
+
+	containment := errors.New("lost")
+	session.scratchContainmentErr = containment
+	require.ErrorIs(t, session.verifyContinuable(t.Context()), containment)
+	require.ErrorIs(t, session.ready(), containment)
+}
+
+func TestPublicCleanupRetryResidualBranches(t *testing.T) {
+	newBlockedAgent := func() *Agent {
+		agent := NewAgent()
+		id := acp.SessionId("T-cleanup")
+		session := &agentSession{agent: agent, id: id, nativeTreeOpaque: true}
+		agent.retainCleanupOwner(id, session, agentCleanupDeleted)
+
+		return agent
+	}
+
+	agent := newBlockedAgent()
+	_, err := agent.ListSessions(t.Context(), acp.ListSessionsRequest{})
+	require.ErrorIs(t, err, ErrContainmentIncomplete)
+
+	agent = newBlockedAgent()
+	_, err = agent.UnstableDeleteSession(t.Context(), acp.UnstableDeleteSessionRequest{SessionId: "T-other"})
+	require.ErrorIs(t, err, ErrContainmentIncomplete)
+
+	agent = newBlockedAgent()
+	session, transcript, cold, use, err := agent.loadOrResume(t.Context(), "T-other", t.TempDir(), nil, nil, nil)
+	require.ErrorIs(t, err, ErrContainmentIncomplete)
+	require.Nil(t, session)
+	require.Nil(t, transcript)
+	require.False(t, cold)
+	require.Nil(t, use)
+
+	agent = NewAgent()
+	id := acp.SessionId("T-deleted-owner")
+	done := &agentSession{agent: agent, id: id, deleteDone: true}
+	agent.retainCleanupOwner(id, done, agentCleanupDeleted)
+	require.NoError(t, agent.retryCleanupOwner(t.Context(), id))
+}
+
+func TestLoadTranscriptWithoutStoreResidualBranch(t *testing.T) {
+	agent := NewAgent()
+	agent.store = nil
+	session := &agentSession{agent: agent, id: "T-no-store"}
+	entries, err := session.loadTranscript(t.Context())
+	require.NoError(t, err)
+	require.Nil(t, entries)
+}

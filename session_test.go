@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 	ampnative "github.com/savid/acp-go-amp/internal/amp"
+	"github.com/stretchr/testify/require"
 )
 
 func TestAgentLifecycleErrorBranches(t *testing.T) {
@@ -1530,4 +1532,47 @@ func TestAgentCloseIsLastWordOverAnUncommittableMirror(t *testing.T) {
 	if remaining != 0 {
 		t.Fatalf("memoized shutdown recreated %d sessions", remaining)
 	}
+}
+
+func TestSessionTeardownResidualBranches(t *testing.T) {
+	session := &agentSession{agent: NewAgent()}
+	session.teardownFlight = &sessionTeardownFlight{done: make(chan struct{})}
+	_, _, err := session.beginTeardown(residualCancelledContext())
+	require.ErrorIs(t, err, context.Canceled)
+
+	panicErr := errors.New("teardown panic")
+	done := make(chan struct{})
+	close(done)
+	session.teardownFlight = &sessionTeardownFlight{done: done, panicErr: panicErr}
+	_, _, err = session.beginTeardown(t.Context())
+	require.ErrorIs(t, err, panicErr)
+
+	err = session.closeForReplacement(withCallbackProvenance(t.Context(), session.agent, session.teardownFlight))
+	require.Error(t, err)
+}
+
+func TestNewSessionMCPWriteFailure(t *testing.T) {
+	original := writeFile
+	t.Cleanup(func() { writeFile = original })
+	writeFile = func(path string, data []byte, mode os.FileMode) error {
+		if filepath.Base(path) == "mcp.json" {
+			return errors.New("write MCP failed")
+		}
+
+		return original(path, data, mode)
+	}
+
+	agent := NewAgent(WithScratchDir(t.TempDir()))
+	_, err := newAgentSession(t.Context(), agent, "T-write-failure", t.TempDir(), parsedSessionMeta{}, "", nil)
+	require.ErrorContains(t, err, "write amp MCP config")
+}
+
+func TestVerifyContinuableRecordsIncompleteContainment(t *testing.T) {
+	agent := newTestAgent()
+	agent.options.runtime.exportThread = func(context.Context, *ampnative.Client, string) (json.RawMessage, error) {
+		return nil, fmt.Errorf("export: %w", ampnative.ErrContainmentIncomplete)
+	}
+	session := &agentSession{agent: agent, id: "T-containment", nativeID: "native-thread"}
+	require.Error(t, session.verifyContinuable(t.Context()))
+	require.ErrorIs(t, session.scratchContainmentError(), ampnative.ErrContainmentIncomplete)
 }

@@ -122,3 +122,59 @@ func requireNoTransientProbeRoots(t *testing.T, scratch string) {
 		require.False(t, strings.HasPrefix(entry.Name(), "acp-go-amp-startup-"), entry.Name())
 	}
 }
+
+func TestAgentCleanupResidenceResidualBranches(t *testing.T) {
+	closed := NewAgent()
+	closed.closed = true
+	_, err := closed.reserveCleanupResidence()
+	require.Error(t, err)
+
+	agent := NewAgent()
+	opaque := &agentCleanupResidence{agent: agent, id: 1, opaque: true, retryable: true}
+	agent.cleanupResidences[opaque.id] = opaque
+	agent.retryCleanupResidences(t.Context())
+	require.Contains(t, agent.cleanupResidences, opaque.id)
+
+	agent = NewAgent()
+	root := t.TempDir()
+	residence := &agentCleanupResidence{agent: agent, id: 1, root: root, retryable: true}
+	agent.cleanupResidences[residence.id] = residence
+	original := removeSessionDir
+	panicked := false
+	removeSessionDir = func(path string) error {
+		if !panicked {
+			panicked = true
+			panic("cleanup panic")
+		}
+
+		return original(path)
+	}
+	t.Cleanup(func() { removeSessionDir = original })
+	require.ErrorIs(t, agent.closeAttempt(), errAgentGoroutinePanic)
+	require.Empty(t, agent.cleanupResidences)
+}
+
+func TestCleanupResidenceContextReclaimRetainsPreparedRetry(t *testing.T) {
+	authority := &contextReclaimAuthority{
+		residualAuthority: residualAuthority{environment: nativeamp.CaptureOrdinaryEnvironment()},
+		started:           make(chan struct{}),
+		exited:            make(chan struct{}),
+	}
+	agent := NewAgent(WithHostAuthority(authority))
+	residence := &agentCleanupResidence{
+		agent: agent, id: 1, root: t.TempDir(), prepared: true,
+	}
+	agent.cleanupResidences[residence.id] = residence
+
+	reclaimCtx, cancelReclaim := context.WithCancel(t.Context())
+	reclaimDone := make(chan error, 1)
+	go func() { reclaimDone <- residence.reclaimWithContext(reclaimCtx) }()
+	<-authority.started
+	cancelReclaim()
+
+	require.ErrorIs(t, <-reclaimDone, context.Canceled)
+	<-authority.exited
+	require.True(t, residence.prepared)
+	require.True(t, residence.retryable)
+	require.Same(t, residence, agent.cleanupResidences[residence.id])
+}

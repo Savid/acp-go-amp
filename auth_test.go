@@ -12,6 +12,7 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 	nativeamp "github.com/savid/acp-go-amp/internal/amp"
+	"github.com/stretchr/testify/require"
 )
 
 // fakeLoginURL is the hosted paste-back URL the fake amp binary prints, and the
@@ -581,4 +582,94 @@ func TestAuthNativeSeamsAreTheOnlyNativeEntryPoints(t *testing.T) {
 	if path := nativeamp.AuthSecretsPath("/data"); path != filepath.Join("/data", "amp", "secrets.json") {
 		t.Fatalf("AuthSecretsPath = %q", path)
 	}
+}
+
+func TestHostedAuthFlowResidualRefusals(t *testing.T) {
+	t.Run("native start", func(t *testing.T) {
+		fixture := newAuthFixture(t, "login")
+		original := authStartLogin
+		authStartLogin = func(*nativeamp.Client, context.Context) (*nativeamp.AuthLogin, error) {
+			return nil, errors.New("native start refused")
+		}
+		t.Cleanup(func() { authStartLogin = original })
+
+		_, err := fixture.authorize("connection-process", "request-process")
+		requireAuthCause(t, err, authCauseProcess)
+	})
+
+	t.Run("lineage moved before hosted paste", func(t *testing.T) {
+		fixture := newAuthFixture(t, "login-hang")
+		flow := fixture.mustAuthorize("connection-moved")
+		record, _, err := fixture.broker.ledger.read(authProviderID, "connection-moved")
+		require.NoError(t, err)
+		record.BindingGeneration++
+		require.NoError(t, fixture.broker.ledger.write(record))
+
+		err = fixture.callback(flow.FlowID, "pasted")
+		requireAuthCause(t, err, authCauseBindingConflict)
+	})
+}
+
+func TestNewAuthClientConstructionResidualFailures(t *testing.T) {
+	path, _ := fakeAgentAmpPath(t, "")
+	originalSafety := authCheckLoginSafety
+	authCheckLoginSafety = func(*nativeamp.Client, context.Context) error { return nil }
+	t.Cleanup(func() { authCheckLoginSafety = originalSafety })
+
+	newSession := func(agent *Agent) *agentSession {
+		return &agentSession{agent: agent, id: "T-auth", cwd: t.TempDir(), operationEnv: map[string]string{}}
+	}
+
+	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(testScratchDir(t)))
+	agent.closed = true
+	_, _, err := newSession(agent).newAuthClient(t.Context())
+	require.Error(t, err)
+
+	scratchFile := filepath.Join(t.TempDir(), "scratch-file")
+	require.NoError(t, os.WriteFile(scratchFile, []byte("x"), 0o600))
+	agent = newTestAgent(WithExecutablePath(path), WithScratchDir(scratchFile))
+	_, _, err = newSession(agent).newAuthClient(t.Context())
+	require.Error(t, err)
+
+	originalMkdirTemp := mkdirTemp
+	t.Cleanup(func() { mkdirTemp = originalMkdirTemp })
+	mkdirTemp = func(string, string) (string, error) { return "", errors.New("materialize refused") }
+	agent = newTestAgent(WithExecutablePath(path), WithScratchDir(testScratchDir(t)))
+	_, _, err = newSession(agent).newAuthClient(t.Context())
+	require.ErrorContains(t, err, "materialize refused")
+	mkdirTemp = originalMkdirTemp
+
+	shimRoot := filepath.Join(t.TempDir(), "auth-residence")
+	require.NoError(t, os.MkdirAll(shimRoot, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(shimRoot, "browser-shim"), []byte("collision"), 0o600))
+	mkdirTemp = func(string, string) (string, error) { return shimRoot, nil }
+	agent = newTestAgent(WithExecutablePath(path), WithScratchDir(testScratchDir(t)))
+	_, _, err = newSession(agent).newAuthClient(t.Context())
+	require.Error(t, err)
+	mkdirTemp = originalMkdirTemp
+
+	originalWrite := writeFile
+	t.Cleanup(func() { writeFile = originalWrite })
+	writeFile = func(name string, data []byte, mode os.FileMode) error {
+		if filepath.Base(name) == "seed.txt" {
+			return errors.New("seed refused")
+		}
+
+		return originalWrite(name, data, mode)
+	}
+	agent = newTestAgent(WithExecutablePath(path), WithScratchDir(testScratchDir(t)), WithSeedFiles(map[string]string{"seed.txt": "seed"}))
+	_, _, err = newSession(agent).newAuthClient(t.Context())
+	require.ErrorContains(t, err, "seed refused")
+	writeFile = originalWrite
+
+	authority := residualAuthority{environment: nativeamp.CaptureOrdinaryEnvironment(), prepareErr: errors.New("prepare refused")}
+	agent = newTestAgent(WithExecutablePath(path), WithScratchDir(testScratchDir(t)), WithHostAuthority(authority))
+	_, _, err = newSession(agent).newAuthClient(t.Context())
+	require.ErrorContains(t, err, "prepare Amp auth residence")
+
+	recording := newRecordingAuthority()
+	agent = newTestAgent(WithExecutablePath(path), WithScratchDir(testScratchDir(t)), WithHostAuthority(recording))
+	_, cleanup, err := newSession(agent).newAuthClient(t.Context())
+	require.NoError(t, err)
+	require.NoError(t, cleanup())
 }
