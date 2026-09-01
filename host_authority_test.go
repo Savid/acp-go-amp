@@ -11,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/coder/acp-go-sdk"
 	nativeamp "github.com/savid/acp-go-amp/internal/amp"
@@ -27,6 +28,7 @@ type recordingAuthority struct {
 	inspectReclaim func(string) error
 	prepareErr     error
 	startErr       error
+	startPanic     bool
 	waitErr        error
 	reclaimErr     error
 	reclaimCalls   int
@@ -102,6 +104,9 @@ func (a *recordingAuthority) StartNative(_ context.Context, request NativeReques
 	}
 	a.events = append(a.events, "start:"+root)
 	a.mu.Unlock()
+	if a.startPanic {
+		panic("contract-violating StartNative panic")
+	}
 	if a.startErr != nil {
 		return nil, a.startErr
 	}
@@ -299,7 +304,7 @@ func TestManagedStartupProbeCacheIsAuthorityScoped(t *testing.T) {
 	}
 }
 
-func TestHostAuthorityNoOrdinaryFallback(t *testing.T) {
+func TestHostAuthorityOrdinaryStartRefusalReclaimsPreparedResidence(t *testing.T) {
 	path, _ := fakeAgentAmpPath(t, "")
 	want := errors.New("managed launch refused")
 	authority := newRecordingAuthority()
@@ -309,15 +314,105 @@ func TestHostAuthorityNoOrdinaryFallback(t *testing.T) {
 		return client.StartupProbe(ctx)
 	})
 	require.ErrorIs(t, err, want)
-	require.ErrorIs(t, err, ErrContainmentIncomplete)
+	require.NotErrorIs(t, err, ErrContainmentIncomplete)
 	require.NotEmpty(t, authority.events)
 	for _, event := range authority.events {
 		require.False(t, strings.HasPrefix(event, "wait:"), "refused managed launch must not acquire an ordinary process")
-		require.False(t, strings.HasPrefix(event, "reclaim:"), "an ambiguous managed start cannot authorize reclaim")
 	}
 	root := strings.TrimPrefix(authority.events[0], "prepare:")
 	_, statErr := os.Stat(root)
-	require.NoError(t, statErr, "an ambiguous managed start retains its prepared residence")
+	require.ErrorIs(t, statErr, os.ErrNotExist, "a refused start leaves no child and authorizes reclaim")
+	require.Equal(t, []string{"prepare:" + root, "start:" + root, "reclaim:" + root}, authority.events)
+	require.Equal(t, 1, authority.reclaimCalls)
+
+	agent.mu.Lock()
+	latched := agent.lifecycleContainmentErr
+	agent.mu.Unlock()
+	require.NoError(t, latched, "an ordinary start refusal must not poison later managed admission")
+}
+
+func TestHostAuthorityStartPanicRetainsPreparedResidence(t *testing.T) {
+	path, _ := fakeAgentAmpPath(t, "")
+	authority := newRecordingAuthority()
+	authority.startPanic = true
+	agent := NewAgent(WithHostAuthority(authority), WithExecutablePath(path), WithScratchDir(t.TempDir()))
+
+	err := agent.runStartupWithProbe(t.Context(), t.TempDir(), nil, func(ctx context.Context, client *nativeamp.Client) (string, error) {
+		return client.DiscoveryProbe(ctx)
+	})
+	require.ErrorIs(t, err, ErrHostAuthorityUnavailable)
+	require.ErrorIs(t, err, ErrContainmentIncomplete)
+	require.Len(t, authority.events, 2)
+	root := strings.TrimPrefix(authority.events[0], "prepare:")
+	require.Equal(t, "start:"+root, authority.events[1])
+	_, statErr := os.Stat(root)
+	require.NoError(t, statErr, "a panicked start supplies no no-child proof")
+	require.Zero(t, authority.reclaimCalls)
+}
+
+func TestHostAuthorityFirstLossFansOutAcrossLiveSessions(t *testing.T) {
+	path, _ := fakeAgentAmpPath(t, "")
+	authority := newRecordingAuthority()
+	agent := NewAgent(
+		WithHostAuthority(authority),
+		WithExecutablePath(path),
+		WithScratchDir(t.TempDir()),
+		WithEnv(map[string]string{"AMP_API_KEY": "fake"}),
+	)
+
+	first, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
+	require.NoError(t, err)
+	second, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
+	require.NoError(t, err)
+
+	agent.mu.Lock()
+	firstSession := agent.sessions[first.SessionId]
+	secondSession := agent.sessions[second.SessionId]
+	agent.mu.Unlock()
+	require.NotNil(t, firstSession)
+	require.NotNil(t, secondSession)
+
+	authority.startErr = ErrHostAuthorityUnavailable
+	var nativeOptions nativeamp.Options
+	agent.configureNativeClient(&nativeOptions)
+	_, err = nativeOptions.StartNative(t.Context(), nativeamp.NativeRequest{
+		Executable:       path,
+		Environment:      nativeamp.BuildEnv(firstSession.env, firstSession.cwd),
+		WorkingDirectory: firstSession.cwd,
+	})
+	require.ErrorIs(t, err, ErrHostAuthorityUnavailable)
+	require.NotErrorIs(t, err, ErrContainmentIncomplete)
+
+	require.Eventually(t, func() bool {
+		firstSession.mu.Lock()
+		firstClosed := firstSession.closed
+		firstSession.mu.Unlock()
+		secondSession.mu.Lock()
+		secondClosed := secondSession.closed
+		secondSession.mu.Unlock()
+		agent.mu.Lock()
+		_, firstSettling := agent.sessionFlights[first.SessionId]
+		_, secondSettling := agent.sessionFlights[second.SessionId]
+		agent.mu.Unlock()
+
+		return firstClosed && secondClosed && !firstSettling && !secondSettling
+	}, 5*time.Second, 10*time.Millisecond)
+
+	_, err = agent.Prompt(t.Context(), TextPromptRequest(second.SessionId, "turn-after-loss", "must not launch"))
+	require.ErrorIs(t, err, errSessionClosed)
+
+	authority.mu.Lock()
+	startsBeforeRefusal := len(authority.events)
+	authority.mu.Unlock()
+	_, err = nativeOptions.StartNative(t.Context(), nativeamp.NativeRequest{
+		Executable:       path,
+		Environment:      nativeamp.BuildEnv(secondSession.env, secondSession.cwd),
+		WorkingDirectory: secondSession.cwd,
+	})
+	require.ErrorIs(t, err, ErrHostAuthorityUnavailable)
+	authority.mu.Lock()
+	require.Len(t, authority.events, startsBeforeRefusal, "latched authority loss must block new native admission")
+	authority.mu.Unlock()
 }
 
 func TestHostAuthorityNilProcessRetainsPreparedTree(t *testing.T) {

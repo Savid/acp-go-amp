@@ -3,8 +3,11 @@ package ampacp
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"reflect"
+	"time"
 
+	"github.com/coder/acp-go-sdk"
 	nativeamp "github.com/savid/acp-go-amp/internal/amp"
 )
 
@@ -52,7 +55,7 @@ func (a *Agent) prepareNativeTree(ctx context.Context, root string) (err error) 
 	a.mu.Unlock()
 
 	if boundaryErr != nil {
-		return authorityBoundaryError(boundaryErr)
+		return boundaryErr
 	}
 
 	defer func() {
@@ -80,7 +83,7 @@ func (a *Agent) reclaimNativeTree(ctx context.Context, root string) (err error) 
 	a.mu.Unlock()
 
 	if boundaryErr != nil {
-		return authorityBoundaryError(boundaryErr)
+		return boundaryErr
 	}
 
 	defer func() {
@@ -111,8 +114,53 @@ func (a *Agent) recordAuthorityFailure(err error) {
 	err = publicContainmentError(err)
 
 	a.mu.Lock()
+	firstLoss := a.lifecycleContainmentErr == nil
 	a.lifecycleContainmentErr = errors.Join(a.lifecycleContainmentErr, err)
+
+	var sessions map[acp.SessionId]*agentSession
+	if firstLoss {
+		sessions = make(map[acp.SessionId]*agentSession, len(a.sessions))
+		for id, session := range a.sessions {
+			sessions[id] = session
+		}
+	}
 	a.mu.Unlock()
+
+	if firstLoss {
+		a.fanoutAuthorityFailure(sessions)
+	}
+}
+
+// fanoutAuthorityFailure retires every session that was live when the first
+// global authority boundary was lost. Each close is detached from the callback
+// that discovered the loss: synchronously joining that same prompt would make
+// the close wait on itself. The ordinary removeSession ladder still owns the
+// admission fence, native interruption, prompt settlement, durable rung, and
+// terminal delivery.
+func (a *Agent) fanoutAuthorityFailure(sessions map[acp.SessionId]*agentSession) {
+	for id, session := range sessions {
+		go a.settleAuthorityLostSession(id, session)
+	}
+}
+
+func (a *Agent) settleAuthorityLostSession(id acp.SessionId, session *agentSession) {
+	ctx, cancel := context.WithTimeout(context.Background(), a.authorityFailureFanoutTimeout())
+	defer cancel()
+
+	err := invokeShutdownStep(func() error {
+		return a.removeSession(ctx, id, session)
+	})
+	if err != nil && a.log != nil {
+		a.log.DebugContext(ctx, "amp authority-loss session settlement failed", slog.String("failure", cleanupFailureClass(err)))
+	}
+}
+
+func (a *Agent) authorityFailureFanoutTimeout() time.Duration {
+	return a.options.runtime.nativeCancelTimeout +
+		2*a.options.runtime.nativeCloseTurnWait +
+		a.sessionStoreLoadTimeout() +
+		sessionStoreWriteTimeout +
+		defaultNativeCommandTimeout
 }
 
 func containmentIncomplete(err error) bool {

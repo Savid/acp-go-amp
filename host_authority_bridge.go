@@ -24,29 +24,60 @@ func (a *Agent) configureNativeClient(options *nativeamp.Options) {
 		a.mu.Unlock()
 
 		if boundaryErr != nil {
-			return nil, authorityBoundaryError(boundaryErr)
+			return nil, boundaryErr
 		}
 
-		process, err := a.options.HostAuthority.StartNative(ctx, NativeRequest{
+		process, err := startHostNative(a.options.HostAuthority, ctx, NativeRequest{
 			Executable: request.Executable, Arguments: append([]string(nil), request.Arguments...),
 			Environment: append([]string(nil), request.Environment...), WorkingDirectory: request.WorkingDirectory,
 		})
 		if err != nil {
-			boundaryErr := authorityBoundaryError(err)
-			a.recordAuthorityFailure(boundaryErr)
+			startErr := startNativeError(err)
+			a.recordAuthorityFailure(startErr)
 
-			return nil, boundaryErr
+			return nil, startErr
 		}
 
 		if nativeProcessNil(process) {
-			err = errors.Join(ErrHostAuthorityUnavailable, ErrContainmentIncomplete)
+			err = ambiguousNativeStartError()
 			a.recordAuthorityFailure(err)
 
-			return nil, authorityBoundaryError(err)
+			return nil, err
 		}
 
 		return nativeProcessBridge{agent: a, process: process}, nil
 	}
+}
+
+func startHostNative(authority HostAuthority, ctx context.Context, request NativeRequest) (process NativeProcess, err error) {
+	defer func() {
+		if recover() != nil {
+			process = nil
+			err = ambiguousNativeStartError()
+		}
+	}()
+
+	return authority.StartNative(ctx, request)
+}
+
+// A returned StartNative error is a refusal: the authority contract proves no
+// child or reusable-identity ambiguity remains. Preserve that error exactly
+// unless it already carries an authority sentinel. Only contract violations on
+// the successful-return side manufacture ambiguity.
+func startNativeError(err error) error {
+	if err == nil {
+		return nil
+	}
+
+	if containmentIncomplete(err) {
+		return authorityBoundaryError(err)
+	}
+
+	return err
+}
+
+func ambiguousNativeStartError() error {
+	return errors.Join(ErrHostAuthorityUnavailable, ErrContainmentIncomplete, nativeamp.ErrContainmentIncomplete)
 }
 
 func authorityBoundaryError(err error) error {
@@ -62,13 +93,22 @@ func authorityBoundaryError(err error) error {
 }
 
 func nativeProcessNil(process NativeProcess) bool {
-	if process == nil {
+	return interfaceValueNil(process)
+}
+
+func interfaceValueNil(value any) bool {
+	if value == nil {
 		return true
 	}
 
-	value := reflect.ValueOf(process)
+	reflected := reflect.ValueOf(value)
 
-	return value.Kind() == reflect.Pointer && value.IsNil()
+	switch reflected.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return reflected.IsNil()
+	default:
+		return false
+	}
 }
 
 type nativeProcessBridge struct {

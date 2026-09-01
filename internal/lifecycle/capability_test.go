@@ -18,6 +18,9 @@ func TestLifecycleCapabilityStrictScalar(t *testing.T) {
 	require.Equal(t, Version, offer.Version)
 
 	var decoded Negotiated
+	require.NoError(t, json.Unmarshal([]byte(`{"version":1}`), &decoded))
+	require.Equal(t, Negotiated{Version: Version}, decoded)
+
 	require.NoError(t, json.Unmarshal([]byte(`{
 		"version":1,
 		"updatesOutsidePrompt":false,
@@ -25,13 +28,12 @@ func TestLifecycleCapabilityStrictScalar(t *testing.T) {
 		"activityKinds":[]
 	}`), &decoded))
 	require.Equal(t, Version, decoded.Version)
-	require.NoError(t, json.Unmarshal([]byte(`{}`), &decoded))
-	require.False(t, decoded.Present())
 
 	for _, test := range []struct {
 		name string
 		data string
 	}{
+		{"empty", `{}`},
 		{"missing", `{"updatesOutsidePrompt":true}`},
 		{"other integer", `{"version":2}`},
 		{"fractional", `{"version":1.0}`},

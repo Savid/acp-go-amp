@@ -8,7 +8,6 @@ import (
 	"io"
 )
 
-//nolint:gocyclo // The strict decoder keeps all closed-field and lexical checks in one pass.
 func (n *Negotiated) UnmarshalJSON(data []byte) error {
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.UseNumber()
@@ -80,21 +79,8 @@ func (n *Negotiated) UnmarshalJSON(data []byte) error {
 		return errors.New("lifecycle capability carries trailing input")
 	}
 
-	if len(seen) == 0 {
-		*n = Negotiated{}
-
-		return nil
-	}
-
-	for _, required := range []string{
-		fieldVersion,
-		fieldUpdatesOutsidePrompt,
-		fieldAuthoritativeQuiescence,
-		fieldActivityKinds,
-	} {
-		if !seen[required] {
-			return fmt.Errorf("lifecycle capability field %q is required", required)
-		}
+	if !seen[fieldVersion] {
+		return fmt.Errorf("lifecycle capability field %q is required", fieldVersion)
 	}
 
 	for index, kind := range decoded.ActivityKinds {
