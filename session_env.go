@@ -83,6 +83,20 @@ func operationSessionEnv(env map[string]string) map[string]string {
 	return out
 }
 
+func validStoredSessionEnv(env map[string]string) bool {
+	if env == nil || validateEnvironment(env) != nil {
+		return false
+	}
+
+	for key := range managedSessionEnv("", "", "", "", "") {
+		if _, exists := env[key]; exists {
+			return false
+		}
+	}
+
+	return true
+}
+
 // invalidEnvName reports a key that cannot be delivered as an environment
 // variable name at all. The native boundary refuses such a key on every phase,
 // so the public surface names it while the caller can still act on it.

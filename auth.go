@@ -71,9 +71,10 @@ const (
 // Native entry points. Every read and every login this surface performs goes
 // through exactly these.
 var (
-	authStartLogin = (*nativeamp.Client).StartAuthLogin
-	authCloseLogin = (*nativeamp.AuthLogin).Close
-	authReadSecret = nativeamp.AuthReadSecret
+	authStartLogin       = (*nativeamp.Client).StartAuthLogin
+	authCheckLoginSafety = (*nativeamp.Client).CheckAuthLoginSafety
+	authCloseLogin       = (*nativeamp.AuthLogin).Close
+	authReadSecret       = nativeamp.AuthReadSecret
 )
 
 // authMethodNames lists every advertised leg in the order the capability
@@ -339,6 +340,24 @@ func (s *agentSession) authDataHome() string {
 }
 
 func (s *agentSession) newAuthClient(ctx context.Context) (*nativeamp.Client, func() error, error) {
+	preflightOptions := nativeamp.Options{
+		CLIPath:            s.agent.options.ExecutablePath,
+		Cwd:                s.cwd,
+		Env:                cloneStringMap(s.operationEnv),
+		ResolutionEnv:      composeEnv(s.agent.options.Env),
+		ResolvedExecutable: s.agent.retainedHarnessPath(),
+	}
+	s.agent.configureNativeClient(&preflightOptions)
+
+	preflight := nativeamp.NewClient(s.agent.log, preflightOptions)
+	if !preflight.AuthDeploymentSupported() {
+		return nil, nil, nativeamp.ErrBrowserLaunchUnsupported
+	}
+
+	if err := authCheckLoginSafety(preflight, ctx); err != nil {
+		return nil, nil, err
+	}
+
 	cleanupResidence, err := s.agent.reserveCleanupResidence()
 	if err != nil {
 		return nil, nil, err

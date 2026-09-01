@@ -17,7 +17,7 @@ func TestInMemoryStoreReplaceAppendDelete(t *testing.T) {
 	store := NewInMemorySessionStore()
 	main := SessionKey{SessionID: "T-1", Subpath: SessionStoreMainSubpath}
 	transcript := SessionKey{SessionID: "T-1", Subpath: transcriptSubpath}
-	manifest, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, SessionID: "T-1", NativeSessionID: "T-1", Cwd: "/tmp", UpdatedAtUnixMilli: 2})
+	manifest, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, SessionID: "T-1", NativeSessionID: "T-1", Cwd: "/tmp", Env: map[string]string{}, UpdatedAtUnixMilli: 2})
 	if err := store.Replace(ctx, main, []SessionStoreReplacement{{Key: main, Entries: []SessionStoreEntry{manifest}}}); err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +59,7 @@ func TestInMemoryStoreRefusesDuplicateReplacementKeys(t *testing.T) {
 	store := NewInMemorySessionStore()
 	main := SessionKey{SessionID: "T-1", Subpath: SessionStoreMainSubpath}
 	transcript := SessionKey{SessionID: "T-1", Subpath: transcriptSubpath}
-	manifest, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, SessionID: "T-1", NativeSessionID: "T-1", Cwd: "/tmp", UpdatedAtUnixMilli: 2})
+	manifest, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, SessionID: "T-1", NativeSessionID: "T-1", Cwd: "/tmp", Env: map[string]string{}, UpdatedAtUnixMilli: 2})
 	committed := json.RawMessage(`{"type":"committed"}`)
 
 	if err := store.Replace(ctx, main, []SessionStoreReplacement{
@@ -151,8 +151,8 @@ func TestInMemoryStoreContractEdges(t *testing.T) {
 		t.Fatal("replace without main succeeded")
 	}
 
-	manifest1, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, SessionID: "T-1", NativeSessionID: "T-1", Cwd: "/tmp/one", Title: "one", UpdatedAtUnixMilli: 10})
-	manifest2, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, SessionID: "T-2", NativeSessionID: "T-2", Cwd: "/tmp/two", Title: "two", UpdatedAtUnixMilli: 10})
+	manifest1, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, SessionID: "T-1", NativeSessionID: "T-1", Cwd: "/tmp/one", Title: "one", Env: map[string]string{}, UpdatedAtUnixMilli: 10})
+	manifest2, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, SessionID: "T-2", NativeSessionID: "T-2", Cwd: "/tmp/two", Title: "two", Env: map[string]string{}, UpdatedAtUnixMilli: 10})
 	if err := store.Replace(ctx, main1, []SessionStoreReplacement{
 		{Key: main1, Entries: []SessionStoreEntry{manifest1}},
 		{Key: transcript, Entries: []SessionStoreEntry{json.RawMessage(`{"type":"assistant"}`)}},
@@ -234,14 +234,18 @@ func TestInMemoryStoreContractEdges(t *testing.T) {
 	if _, ok := manifestFromStoreEntry(json.RawMessage(`{`)); ok {
 		t.Fatal("malformed manifest accepted")
 	}
+	if _, ok := manifestFromStoreEntry(json.RawMessage(`{"format":"amp-thread-mirror-v1","sessionId":"T-1","nativeSessionId":"T-1"}`)); ok {
+		t.Fatal("manifest without current env state accepted")
+	}
 	overlongManifest, _ := json.Marshal(ampManifest{
 		Format: SessionStoreFormat, SessionID: "s-1",
 		NativeSessionID: "T-" + strings.Repeat("x", ampnative.MaxThreadIDBytes),
+		Env:             map[string]string{},
 	})
 	if _, ok := manifestFromStoreEntry(overlongManifest); ok {
 		t.Fatal("overlong native thread id manifest accepted")
 	}
-	missingSession, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, NativeSessionID: "T-1"})
+	missingSession, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, NativeSessionID: "T-1", Env: map[string]string{}})
 	if _, ok := manifestFromStoreEntry(missingSession); ok {
 		t.Fatal("manifest without session id accepted")
 	}
@@ -251,7 +255,7 @@ func TestInMemoryStoreEmptySessionIDSemantics(t *testing.T) {
 	ctx := context.Background()
 	store := NewInMemorySessionStore()
 	main := SessionKey{SessionID: "T-1", Subpath: SessionStoreMainSubpath}
-	manifest, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, SessionID: "T-1", NativeSessionID: "T-1", Cwd: "/tmp", UpdatedAtUnixMilli: 2})
+	manifest, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, SessionID: "T-1", NativeSessionID: "T-1", Cwd: "/tmp", Env: map[string]string{}, UpdatedAtUnixMilli: 2})
 	if err := store.Replace(ctx, main, []SessionStoreReplacement{{Key: main, Entries: []SessionStoreEntry{manifest}}}); err != nil {
 		t.Fatal(err)
 	}
@@ -336,7 +340,7 @@ func TestInMemoryStoreReplaceEmptyEntryKeySurvives(t *testing.T) {
 	store := NewInMemorySessionStore()
 	main := SessionKey{SessionID: "T-1", Subpath: SessionStoreMainSubpath}
 	transcript := SessionKey{SessionID: "T-1", Subpath: transcriptSubpath}
-	manifest, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, SessionID: "T-1", NativeSessionID: "T-1", Cwd: "/tmp", UpdatedAtUnixMilli: 3})
+	manifest, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, SessionID: "T-1", NativeSessionID: "T-1", Cwd: "/tmp", Env: map[string]string{}, UpdatedAtUnixMilli: 3})
 
 	// A Replace that lists a subkey with an empty Entries slice must keep that
 	// key live (present in Load and ListSubkeys), not tombstone it.
@@ -377,7 +381,7 @@ func TestInMemoryStoreZeroValueSelfHeals(t *testing.T) {
 	ctx := context.Background()
 	main := SessionKey{SessionID: "T-1", Subpath: SessionStoreMainSubpath}
 	transcript := SessionKey{SessionID: "T-1", Subpath: transcriptSubpath}
-	manifest, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, SessionID: "T-1", NativeSessionID: "T-1", Cwd: "/tmp", UpdatedAtUnixMilli: 4})
+	manifest, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, SessionID: "T-1", NativeSessionID: "T-1", Cwd: "/tmp", Env: map[string]string{}, UpdatedAtUnixMilli: 4})
 
 	// A zero-value store has nil maps; write paths must self-heal, not panic.
 	store := &InMemorySessionStore{}
@@ -414,7 +418,7 @@ func TestInMemoryStoreTombstoneFinality(t *testing.T) {
 	store := NewInMemorySessionStore()
 	main := SessionKey{SessionID: "T-1", Subpath: SessionStoreMainSubpath}
 	transcript := SessionKey{SessionID: "T-1", Subpath: transcriptSubpath}
-	manifest, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, SessionID: "T-1", NativeSessionID: "T-1", Cwd: "/tmp", UpdatedAtUnixMilli: 5})
+	manifest, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, SessionID: "T-1", NativeSessionID: "T-1", Cwd: "/tmp", Env: map[string]string{}, UpdatedAtUnixMilli: 5})
 
 	if err := store.Replace(ctx, main, []SessionStoreReplacement{
 		{Key: main, Entries: []SessionStoreEntry{manifest}},
@@ -473,7 +477,7 @@ func TestInMemoryStoreTombstoneFinality(t *testing.T) {
 
 	// A different session is untouched by the first one's tombstone.
 	other := SessionKey{SessionID: "T-2", Subpath: SessionStoreMainSubpath}
-	otherManifest, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, SessionID: "T-2", NativeSessionID: "T-2", Cwd: "/tmp", UpdatedAtUnixMilli: 6})
+	otherManifest, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, SessionID: "T-2", NativeSessionID: "T-2", Cwd: "/tmp", Env: map[string]string{}, UpdatedAtUnixMilli: 6})
 	if err := store.Replace(ctx, other, []SessionStoreReplacement{{Key: other, Entries: []SessionStoreEntry{otherManifest}}}); err != nil {
 		t.Fatalf("replace an untombstoned session: %v", err)
 	}

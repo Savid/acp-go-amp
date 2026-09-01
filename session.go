@@ -128,12 +128,13 @@ type ampManifest struct {
 	// NativeSessionID is the server-side Amp thread id. It is empty until the
 	// session's first prompt turn creates the thread and the wrapper adopts
 	// the id from the stream-json init frame.
-	NativeSessionID    string `json:"nativeSessionId,omitempty"`
-	Cwd                string `json:"cwd"`
-	Title              string `json:"title,omitempty"`
-	Mode               string `json:"mode,omitempty"`
-	UpdatedAtUnixMilli int64  `json:"updatedAtUnixMilli"`
-	CreatedAtUnixMilli int64  `json:"createdAtUnixMilli"`
+	NativeSessionID    string            `json:"nativeSessionId,omitempty"`
+	Cwd                string            `json:"cwd"`
+	Title              string            `json:"title,omitempty"`
+	Mode               string            `json:"mode,omitempty"`
+	Env                map[string]string `json:"env"`
+	UpdatedAtUnixMilli int64             `json:"updatedAtUnixMilli"`
+	CreatedAtUnixMilli int64             `json:"createdAtUnixMilli"`
 }
 
 type agentSession struct {
@@ -154,6 +155,7 @@ type agentSession struct {
 	// receives: the static agent base, the named operation values, and the
 	// adapter-managed residence, with no session PATH.
 	env                   map[string]string
+	sessionEnv            map[string]string
 	operationEnv          map[string]string
 	rawEvents             bool
 	rawEventMu            sync.Mutex
@@ -355,6 +357,7 @@ func newAgentSession(ctx context.Context, agent *Agent, id acp.SessionId, cwd st
 	session.additionalDirectories = append([]string(nil), additionalDirs...)
 	session.mcpConfigJSON = mcpConfigJSON
 	session.env = env
+	session.sessionEnv = composeEnv(meta.options.Env)
 	session.operationEnv = operationEnv
 	session.rawEvents = meta.rawEvent
 	session.settingsFile = settingsFile
@@ -1136,6 +1139,7 @@ func (s *agentSession) manifest() ampManifest {
 		Cwd:                s.cwd,
 		Title:              s.title,
 		Mode:               s.mode,
+		Env:                cloneStringMap(s.sessionEnv),
 		UpdatedAtUnixMilli: s.updatedUnix,
 		CreatedAtUnixMilli: s.createdUnix,
 	}

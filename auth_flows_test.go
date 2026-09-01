@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -122,6 +123,41 @@ func TestAuthorizeRefusesUnsupportedLoginPlatformsBeforeNativeMint(t *testing.T)
 	flowID, _ := authFailure(t, err)[authFieldFlowID].(string)
 	if status := fixture.status(flowID); status.State != authStateFailed || status.Reason != authReasonNativeVeto {
 		t.Fatalf("state/reason = %q/%q, want failed/native_veto", status.State, status.Reason)
+	}
+}
+
+func TestManagedAuthorizeAuditsBeforeAuthResidenceMaterialization(t *testing.T) {
+	authority := newRecordingAuthority()
+	fixture := newAuthFixture(t, "login", WithHostAuthority(authority))
+
+	original := authCheckLoginSafety
+	want := nativeamp.ErrBrowserLaunchUnsupported
+	authCheckLoginSafety = func(*nativeamp.Client, context.Context) error { return want }
+	t.Cleanup(func() { authCheckLoginSafety = original })
+
+	authority.mu.Lock()
+	eventsBefore := append([]string(nil), authority.events...)
+	authority.mu.Unlock()
+
+	fixture.agent.mu.Lock()
+	residencesBefore := len(fixture.agent.cleanupResidences)
+	fixture.agent.mu.Unlock()
+
+	_, err := fixture.authorize("connection-1", "request-1")
+	requireAuthCause(t, err, authCauseUnsupportedVariant)
+
+	authority.mu.Lock()
+	eventsAfter := append([]string(nil), authority.events...)
+	authority.mu.Unlock()
+	if !slices.Equal(eventsAfter, eventsBefore) {
+		t.Fatalf("authority events after preflight refusal = %v, want %v", eventsAfter, eventsBefore)
+	}
+
+	fixture.agent.mu.Lock()
+	residencesAfter := len(fixture.agent.cleanupResidences)
+	fixture.agent.mu.Unlock()
+	if residencesAfter != residencesBefore {
+		t.Fatalf("cleanup residences after preflight refusal = %d, want %d", residencesAfter, residencesBefore)
 	}
 }
 

@@ -867,7 +867,7 @@ func TestStoreSortingAndTombstoneEdges(t *testing.T) {
 	store := NewInMemorySessionStore()
 	putStoredSession(t, store, "T-b", "/b", nil)
 	putStoredSession(t, store, "T-a", "/a", nil)
-	newer, err := json.Marshal(ampManifest{Format: SessionStoreFormat, SessionID: "T-new", NativeSessionID: "T-new", UpdatedAtUnixMilli: 3})
+	newer, err := json.Marshal(ampManifest{Format: SessionStoreFormat, SessionID: "T-new", NativeSessionID: "T-new", Env: map[string]string{}, UpdatedAtUnixMilli: 3})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -922,6 +922,7 @@ func putStoredSession(t *testing.T, store *InMemorySessionStore, id string, cwd 
 		NativeSessionID:    id,
 		Cwd:                cwd,
 		Mode:               "medium",
+		Env:                map[string]string{},
 		CreatedAtUnixMilli: 1,
 		UpdatedAtUnixMilli: 2,
 	})
@@ -1206,7 +1207,7 @@ func TestLifecycleSessionConstructionErrorsPropagate(t *testing.T) {
 	sessionID := acp.SessionId("T-load-construction")
 	manifest, err := json.Marshal(ampManifest{
 		Format: SessionStoreFormat, SessionID: string(sessionID), NativeSessionID: string(sessionID), Cwd: cwd,
-		CreatedAtUnixMilli: 1, UpdatedAtUnixMilli: 2,
+		Env: map[string]string{}, CreatedAtUnixMilli: 1, UpdatedAtUnixMilli: 2,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -2293,6 +2294,7 @@ func TestStoredDeleteAuthorityRequiresMatchingKeyAndAbsoluteCwd(t *testing.T) {
 				NativeSessionID:    "T-native-B",
 				Cwd:                cwd,
 				Mode:               modeMedium,
+				Env:                map[string]string{},
 				CreatedAtUnixMilli: 1,
 				UpdatedAtUnixMilli: 2,
 			})
@@ -2565,6 +2567,7 @@ func TestPublishedFlightPanicAndDefensiveCompletionBranches(t *testing.T) {
 			SessionID:       "T-invalid-cold-cwd",
 			NativeSessionID: "T-native-invalid-cwd",
 			Cwd:             "relative",
+			Env:             map[string]string{},
 		}, true)
 		require.NoError(t, err)
 		require.Nil(t, owner)
@@ -3310,7 +3313,7 @@ func TestDeleteHydratesColdOwnerInsteadOfPartialConstructionOwner(t *testing.T) 
 	cwd := t.TempDir()
 	manifest, err := json.Marshal(ampManifest{
 		Format: SessionStoreFormat, SessionID: idText, NativeSessionID: "T-partial-owner-native", Cwd: cwd,
-		Mode: modeMedium, CreatedAtUnixMilli: 1, UpdatedAtUnixMilli: 2,
+		Mode: modeMedium, Env: map[string]string{}, CreatedAtUnixMilli: 1, UpdatedAtUnixMilli: 2,
 	})
 	require.NoError(t, err)
 	main := SessionKey{SessionID: idText, Subpath: SessionStoreMainSubpath}
@@ -4116,7 +4119,7 @@ func TestPrepareDeleteOwnerLosingConstructionTransitions(t *testing.T) {
 
 			owner, active, err := agent.prepareDeleteOwner(
 				t.Context(), id, flight, nil, false,
-				ampManifest{NativeSessionID: "T-native", Cwd: t.TempDir(), Mode: modeMedium}, true,
+				ampManifest{NativeSessionID: "T-native", Cwd: t.TempDir(), Mode: modeMedium, Env: map[string]string{}}, true,
 			)
 			require.False(t, active)
 			if test.winner || test.cleanupErr != nil {

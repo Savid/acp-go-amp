@@ -19,8 +19,12 @@ fallback. Omitted `WithHostAuthority` selects ordinary same-identity execution.
 ## Secrets and local inputs
 
 Provider login has its own prepared residence. It is reclaimed after host
-`Wait` and before the secret read. Credentials never enter the session store.
-`AMP_API_KEY` is memory-only; `GOTRACEBACK`,
+`Wait` and before the secret read. The hosted-login executable audit completes
+before that residence and its browser shim are created. The provider-auth
+ledger and native residence contents never enter the session store. The session
+manifest does persist the complete session environment; a store is
+therefore secret-bearing when that environment carries `AMP_API_KEY`.
+`GOTRACEBACK`,
 `AMP_DISABLE_SECRET_REDACTION`, and private adapter variables are scrubbed.
 `WithInputHandoffRoot` permits digest-verified image reads below an absolute
 read-only root.

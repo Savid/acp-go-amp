@@ -33,7 +33,7 @@ under a separate fixed `60s` bound.
 
 | Subpath | Contents |
 |---|---|
-| main | Manifest: `sessionId` (the adapter-minted ACP session ID), `nativeSessionId` (the Amp thread ID, absent until the first prompt turn creates the thread), `cwd`, `title`, selected `mode`, and Unix-millisecond create/update timestamps. |
+| main | Manifest: `sessionId` (the adapter-minted ACP session ID), `nativeSessionId` (the Amp thread ID, absent until the first prompt turn creates the thread), `cwd`, `title`, selected `mode`, the complete session `env` including raw `PATH`, and Unix-millisecond create/update timestamps. |
 | `transcript` | The full ordered Amp stream-JSON frame mirror for every prompt turn, including what a cancelled or failed turn streamed before it ended. |
 | `_artifacts/images/<digest>.json` | Canonical typed image tool-result record containing embedded base64 and media type, or an HTTP(S) resource URI, plus native identity, checksum, and creation time. |
 
@@ -48,8 +48,11 @@ process containment boundary completes and before the terminal state the host
 sees, so no settled turn claims a prefix the store does not hold. It also runs
 on a context detached from the prompt request, so cancelling the request ends
 the native turn and never the commit of what that turn already streamed. These
-records back `session/load` replay. Auth environment values, settings files, and
-API keys are never written to the store.
+records back `session/load` replay and reconstruct the session environment for
+native continuation. An explicit load or resume environment must equal the
+stored session environment; a different bearer or `PATH` is a different
+session boundary and is refused on the existing record. Settings files and
+provider-auth residence contents are never written to the store.
 
 The first turn of a session publishes one additional generation the moment Amp
 reports the thread it just created: the manifest plus the state already
@@ -98,6 +101,10 @@ durability boundary for display replay; the server-side Amp thread is the native
 continuation unit.
 
 Native continuation requires the live server-side Amp thread and AMP_API_KEY, so the mirror alone cannot continue a turn.
+
+The manifest stores the complete session environment so a cold load does not
+ask the caller to resend it. Treat the store as secret-bearing whenever the
+session environment contains `AMP_API_KEY` or another credential.
 
 If the thread is deleted or unavailable, session/load can replay the local transcript for display, but a subsequent prompt fails with one terminal `native_state_missing` error — the adapter does not rebuild a thread from transcript text, because that would lose native state.
 

@@ -2,6 +2,8 @@ package ampacp
 
 import (
 	"context"
+	"encoding/json"
+	"maps"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
@@ -83,7 +85,7 @@ func TestActiveOmittedEnvMeansDefaultEnv(t *testing.T) {
 	}
 }
 
-func TestColdLoadOmittedEnvBuildsDefaultEnv(t *testing.T) {
+func TestColdLoadReconstructsStoredEnvAndRefusesAChangedCarrier(t *testing.T) {
 	ctx := context.Background()
 	path, _ := fakeAgentAmpPath(t, "")
 	store := NewInMemorySessionStore()
@@ -95,7 +97,7 @@ func TestColdLoadOmittedEnvBuildsDefaultEnv(t *testing.T) {
 		WithEnv(map[string]string{"AMP_API_KEY": "create-default"}),
 	)
 	resp, err := created.NewSession(ctx, NewSessionRequest(cwd, WithSessionAmpOptions(NewAmpOptions(
-		WithAmpEnv(map[string]string{"AMP_URL": "https://session.example.test"}),
+		WithAmpEnv(map[string]string{"AMP_URL": "https://session.example.test", "PATH": "/create/bin"}),
 	))))
 	if err != nil {
 		t.Fatalf("NewSession explicit env: %v", err)
@@ -103,16 +105,55 @@ func TestColdLoadOmittedEnvBuildsDefaultEnv(t *testing.T) {
 	if closeErr := created.Close(); closeErr != nil {
 		t.Fatalf("Close created agent: %v", closeErr)
 	}
+	entries, err := store.Load(ctx, SessionKey{SessionID: string(resp.SessionId), Subpath: SessionStoreMainSubpath})
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("load stored manifest: entries=%d err=%v", len(entries), err)
+	}
+	var manifest ampManifest
+	if decodeErr := json.Unmarshal(entries[0], &manifest); decodeErr != nil {
+		t.Fatalf("decode stored manifest: %v", decodeErr)
+	}
+	if want := map[string]string{"AMP_URL": "https://session.example.test", "PATH": "/create/bin"}; !maps.Equal(manifest.Env, want) {
+		t.Fatalf("stored session env = %#v, want %#v", manifest.Env, want)
+	}
+	matching := newTestAgent(
+		WithExecutablePath(path),
+		WithScratchDir(testScratchDir(t)),
+		WithSessionStore(store),
+		WithEnv(map[string]string{"AMP_API_KEY": "matching-default"}),
+	)
+	if _, resumeErr := matching.ResumeSession(ctx, ResumeSessionRequest(resp.SessionId, cwd,
+		WithSessionAmpOptions(NewAmpOptions(WithAmpEnv(map[string]string{
+			"AMP_URL": "https://session.example.test",
+			"PATH":    "/create/bin",
+		}))),
+	)); resumeErr != nil {
+		t.Fatalf("cold resume with matching env: %v", resumeErr)
+	}
+	if closeErr := matching.Close(); closeErr != nil {
+		t.Fatalf("Close matching agent: %v", closeErr)
+	}
 
 	restored := newTestAgent(
 		WithExecutablePath(path),
 		WithScratchDir(testScratchDir(t)),
 		WithSessionStore(store),
 		WithEnv(map[string]string{
-			"AMP_API_KEY": "restore-default",
-			"AMP_URL":     "https://default.example.test",
+			"AMP_API_KEY":  "restore-default",
+			"AMP_URL":      "https://default.example.test",
+			"RESTORE_ONLY": "must-not-leak",
 		}),
 	)
+	_, mismatchErr := restored.LoadSession(ctx, LoadSessionRequest(resp.SessionId, cwd,
+		WithSessionAmpOptions(NewAmpOptions(WithAmpEnv(map[string]string{
+			"AMP_API_KEY": "rotated",
+			"PATH":        "/rotated/bin",
+		}))),
+	))
+	if !isMismatchField(mismatchErr, optionEnvKey) {
+		t.Fatalf("cold load with changed env = %v, want env mismatch", mismatchErr)
+	}
+
 	if _, loadErr := restored.LoadSession(ctx, LoadSessionRequest(resp.SessionId, cwd)); loadErr != nil {
 		t.Fatalf("cold load omitted env: %v", loadErr)
 	}
@@ -121,8 +162,8 @@ func TestColdLoadOmittedEnvBuildsDefaultEnv(t *testing.T) {
 		t.Fatalf("restored session lookup: %v", err)
 	}
 	env := activeRequestEnv(session.env)
-	if env["AMP_API_KEY"] != "restore-default" || env["AMP_URL"] != "https://default.example.test" {
-		t.Fatalf("cold load env = %#v, want restored default env", env)
+	if env["AMP_API_KEY"] != "restore-default" || env["AMP_URL"] != "https://session.example.test" || env["PATH"] != "/create/bin" || env["RESTORE_ONLY"] != "must-not-leak" {
+		t.Fatalf("cold load env = %#v, want stored session env", env)
 	}
 }
 

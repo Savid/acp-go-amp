@@ -374,7 +374,7 @@ func manifestFromStoreEntry(entry json.RawMessage) (ampManifest, bool) {
 		return ampManifest{}, false
 	}
 
-	if manifest.Format != SessionStoreFormat || manifest.SessionID == "" || !validNativeSessionID(manifest.NativeSessionID) {
+	if manifest.Format != SessionStoreFormat || manifest.SessionID == "" || !validNativeSessionID(manifest.NativeSessionID) || !validStoredSessionEnv(manifest.Env) {
 		return ampManifest{}, false
 	}
 

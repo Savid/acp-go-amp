@@ -408,13 +408,11 @@ func (p *providerAuth) mintPresentation(ctx context.Context, session *agentSessi
 
 	client, cleanup, err := session.newAuthClient(ctx)
 	if err != nil {
+		if errors.Is(err, nativeamp.ErrBrowserLaunchUnsupported) {
+			return authAuthorizeResult{}, authCauseUnsupportedVariant
+		}
+
 		return authAuthorizeResult{}, authCauseProcess
-	}
-
-	if !client.AuthDeploymentSupported() {
-		_ = cleanup()
-
-		return authAuthorizeResult{}, authCauseUnsupportedVariant
 	}
 
 	login, err := authStartLogin(client, ctx)

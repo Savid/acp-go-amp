@@ -187,15 +187,9 @@ func (c *Client) StartAuthLogin(ctx context.Context) (*AuthLogin, error) {
 		return nil, err
 	}
 
-	path, err := c.resolveExecutable(ctx, c.options.Cwd)
+	path, err := c.authLoginSafety(ctx)
 	if err != nil {
 		return nil, err
-	}
-
-	if c.options.StartNative == nil {
-		if safetyErr := c.checkAuthLoginSafety(path); safetyErr != nil {
-			return nil, fmt.Errorf("amp login: %w", safetyErr)
-		}
 	}
 
 	cwd := c.options.Cwd
@@ -244,6 +238,27 @@ func (c *Client) StartAuthLogin(ctx context.Context) (*AuthLogin, error) {
 	go login.waitNative() //nolint:gosec // Wait must outlive cancellation and settle containment.
 
 	return login, nil
+}
+
+// CheckAuthLoginSafety audits the exact executable this client would launch
+// without constructing a command or allocating its browser residence.
+func (c *Client) CheckAuthLoginSafety(ctx context.Context) error {
+	_, err := c.authLoginSafety(ctx)
+
+	return err
+}
+
+func (c *Client) authLoginSafety(ctx context.Context) (string, error) {
+	path, err := c.resolveExecutable(ctx, c.options.Cwd)
+	if err != nil {
+		return "", err
+	}
+
+	if err := c.checkAuthLoginSafety(path); err != nil {
+		return "", fmt.Errorf("amp login: %w", err)
+	}
+
+	return path, nil
 }
 
 func (c *Client) authLoginArgs() []string {

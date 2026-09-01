@@ -442,7 +442,7 @@ func TestAReopenedSessionIdServesTheAuthSurfaceAgain(t *testing.T) {
 
 	manifest, err := json.Marshal(ampManifest{
 		Format: SessionStoreFormat, SessionID: string(fixture.session.id),
-		NativeSessionID: string(fixture.session.id), Cwd: t.TempDir(),
+		NativeSessionID: string(fixture.session.id), Cwd: t.TempDir(), Env: map[string]string{},
 	})
 	if err != nil {
 		t.Fatalf("marshal manifest: %v", err)
@@ -492,7 +492,7 @@ func TestReopeningAnIdDoesNotAdmitTheLifetimeItReplaced(t *testing.T) {
 
 	manifest, err := json.Marshal(ampManifest{
 		Format: SessionStoreFormat, SessionID: string(fixture.session.id),
-		NativeSessionID: string(fixture.session.id), Cwd: t.TempDir(),
+		NativeSessionID: string(fixture.session.id), Cwd: t.TempDir(), Env: map[string]string{},
 	})
 	if err != nil {
 		t.Fatalf("marshal manifest: %v", err)

@@ -11,6 +11,9 @@ Set `AMP_API_KEY` for authenticated turns. The adapter scrubs it from login.
 
 With `WithProviderAuthRoot`, eight session-scoped `_amp/auth/*` methods are
 advertised, including `_amp/auth/credential`. Hosted login runs through host
-authority in its own prepared residence. `Wait` settles the process, reclaim
-precedes the secret read, and the credential is returned once. The values-free
-ledger stores no credential and disconnect performs no Amp-side mutation.
+authority in its own prepared residence. Darwin and Linux audit the exact
+configured Amp executable before that residence or its browser shim is
+materialized, and the launch repeats the same fail-closed audit in managed and
+ordinary modes. `Wait` settles the process, reclaim precedes the secret read,
+and the credential is returned once. The values-free ledger stores no
+credential and disconnect performs no Amp-side mutation.

@@ -629,7 +629,7 @@ func (a *Agent) prepareDeleteOwner(
 		a,
 		id,
 		manifest.Cwd,
-		parsedSessionMeta{options: AmpOptions{Mode: manifest.Mode}},
+		parsedSessionMeta{options: AmpOptions{Mode: manifest.Mode, Env: cloneStringMap(manifest.Env)}},
 		"",
 		nil,
 	)
@@ -960,6 +960,14 @@ func (a *Agent) loadColdSession(ctx context.Context, sessionID acp.SessionId, us
 
 	if meta.options.Mode == "" {
 		meta.options.Mode = manifest.Mode
+	}
+
+	if meta.optionFields.env {
+		if !maps.Equal(composeEnv(meta.options.Env), manifest.Env) {
+			return nil, nil, mismatchField(optionEnvKey)
+		}
+	} else {
+		meta.options.Env = cloneStringMap(manifest.Env)
 	}
 
 	session, err := newLifecycleAgentSession(ctx, a, sessionID, cwd, meta, mcpConfig, additionalDirs)
@@ -1615,7 +1623,7 @@ func (a *Agent) loadManifest(ctx context.Context, sessionID acp.SessionId) (ampM
 		return ampManifest{}, acp.NewInternalError(map[string]any{jsonFieldError: err.Error()})
 	}
 
-	if manifest.Format != SessionStoreFormat || manifest.SessionID != string(sessionID) || !validNativeSessionID(manifest.NativeSessionID) {
+	if manifest.Format != SessionStoreFormat || manifest.SessionID != string(sessionID) || !validNativeSessionID(manifest.NativeSessionID) || !validStoredSessionEnv(manifest.Env) {
 		return ampManifest{}, acp.NewInternalError(map[string]any{jsonFieldError: "invalid amp session manifest"})
 	}
 
@@ -1638,7 +1646,7 @@ func (s *agentSession) applyActiveRequest(meta parsedSessionMeta, cwd string, mc
 		return mismatchField("mcpServers")
 	}
 
-	if !maps.Equal(activeRequestEnv(s.env), activeRequestEnv(composeEnv(s.agent.options.Env, meta.options.Env))) {
+	if !maps.Equal(s.sessionEnv, composeEnv(meta.options.Env)) {
 		return mismatchField(optionEnvKey)
 	}
 

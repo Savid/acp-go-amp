@@ -1,8 +1,10 @@
 package amp
 
 import (
+	"context"
 	"crypto/sha256"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -130,17 +132,30 @@ func TestAuthLoginSafetyRefusalPrecedesCommandConstruction(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	want := errors.New("unsafe browser launch")
-	client := newTestClient(t, nil, Options{CLIPath: path, Cwd: t.TempDir()})
-	client.checkAuthLoginSafety = func(got string) error {
-		if got != path {
-			t.Fatalf("safety-audit path = %q, want %q", got, path)
-		}
+	for _, managed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("managed=%t", managed), func(t *testing.T) {
+			want := errors.New("unsafe browser launch")
+			options := Options{CLIPath: path, Cwd: t.TempDir()}
+			if managed {
+				options.StartNative = func(context.Context, NativeRequest) (NativeProcess, error) {
+					t.Fatal("managed login started before its safety audit")
 
-		return want
-	}
+					return nil, errors.New("unreachable")
+				}
+			}
 
-	if _, err := client.StartAuthLogin(t.Context()); !errors.Is(err, want) {
-		t.Fatalf("StartAuthLogin = %v, want %v", err, want)
+			client := newTestClient(t, nil, options)
+			client.checkAuthLoginSafety = func(got string) error {
+				if got != path {
+					t.Fatalf("safety-audit path = %q, want %q", got, path)
+				}
+
+				return want
+			}
+
+			if _, err := client.StartAuthLogin(t.Context()); !errors.Is(err, want) {
+				t.Fatalf("StartAuthLogin = %v, want %v", err, want)
+			}
+		})
 	}
 }

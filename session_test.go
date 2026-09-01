@@ -61,7 +61,7 @@ func TestLoadResumeManifestAndConfigBranches(t *testing.T) {
 	path, _ := fakeAgentAmpPath(t, "")
 	cwd := t.TempDir()
 	store := NewInMemorySessionStore()
-	manifest, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, SessionID: "T-load", NativeSessionID: "T-load", Cwd: cwd, Mode: "high", CreatedAtUnixMilli: 1, UpdatedAtUnixMilli: 2})
+	manifest, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, SessionID: "T-load", NativeSessionID: "T-load", Cwd: cwd, Mode: "high", Env: map[string]string{}, CreatedAtUnixMilli: 1, UpdatedAtUnixMilli: 2})
 	if err := store.Replace(ctx, SessionKey{SessionID: "T-load", Subpath: SessionStoreMainSubpath}, []SessionStoreReplacement{
 		{Key: SessionKey{SessionID: "T-load", Subpath: SessionStoreMainSubpath}, Entries: []SessionStoreEntry{manifest}},
 		{Key: SessionKey{SessionID: "T-load", Subpath: transcriptSubpath}, Entries: []SessionStoreEntry{
@@ -143,7 +143,7 @@ func TestLoadManifestErrorsAndListFilters(t *testing.T) {
 		}
 	}
 	overlongID := acp.SessionId("T-" + strings.Repeat("x", ampnative.MaxThreadIDBytes))
-	overlong, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, SessionID: string(overlongID), NativeSessionID: string(overlongID)})
+	overlong, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, SessionID: string(overlongID), NativeSessionID: string(overlongID), Env: map[string]string{}})
 	overlongStore := NewInMemorySessionStore()
 	if err := overlongStore.Replace(ctx, SessionKey{SessionID: string(overlongID)}, []SessionStoreReplacement{{
 		Key: SessionKey{SessionID: string(overlongID)}, Entries: []SessionStoreEntry{overlong},
@@ -158,7 +158,7 @@ func TestLoadManifestErrorsAndListFilters(t *testing.T) {
 		t.Fatal("list error ignored")
 	}
 	store := NewInMemorySessionStore()
-	manifest, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, SessionID: "T-list", NativeSessionID: "T-list", Cwd: "/cwd", UpdatedAtUnixMilli: 0})
+	manifest, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, SessionID: "T-list", NativeSessionID: "T-list", Cwd: "/cwd", Env: map[string]string{}, UpdatedAtUnixMilli: 0})
 	if err := store.Replace(ctx, SessionKey{SessionID: "T-list", Subpath: SessionStoreMainSubpath}, []SessionStoreReplacement{{Key: SessionKey{SessionID: "T-list", Subpath: SessionStoreMainSubpath}, Entries: []SessionStoreEntry{manifest}}}); err != nil {
 		t.Fatal(err)
 	}
@@ -195,7 +195,7 @@ func TestRemainingAgentBranches(t *testing.T) {
 		t.Fatal(err)
 	}
 	store := NewInMemorySessionStore()
-	manifest, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, SessionID: "T-file", NativeSessionID: "T-file", Cwd: t.TempDir()})
+	manifest, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, SessionID: "T-file", NativeSessionID: "T-file", Cwd: t.TempDir(), Env: map[string]string{}})
 	if err := store.Replace(ctx, SessionKey{SessionID: "T-file", Subpath: ""}, []SessionStoreReplacement{{Key: SessionKey{SessionID: "T-file", Subpath: ""}, Entries: []SessionStoreEntry{manifest}}}); err != nil {
 		t.Fatal(err)
 	}
@@ -210,7 +210,7 @@ func TestRemainingAgentBranches(t *testing.T) {
 		activeLimited.finishSessionUse("T-file", use)
 	}
 	activeLimited.options.ConcurrencyLimits.MaxActiveSessions = 1
-	manifest2, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, SessionID: "T-file-2", NativeSessionID: "T-file-2", Cwd: t.TempDir()})
+	manifest2, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, SessionID: "T-file-2", NativeSessionID: "T-file-2", Cwd: t.TempDir(), Env: map[string]string{}})
 	if err := store.Replace(ctx, SessionKey{SessionID: "T-file-2", Subpath: ""}, []SessionStoreReplacement{{Key: SessionKey{SessionID: "T-file-2", Subpath: ""}, Entries: []SessionStoreEntry{manifest2}}}); err != nil {
 		t.Fatal(err)
 	}
@@ -830,7 +830,7 @@ func TestTombstoneCascade(t *testing.T) {
 	ctx := context.Background()
 	store := NewInMemorySessionStore()
 	main := SessionKey{SessionID: "T-cascade", Subpath: SessionStoreMainSubpath}
-	manifest, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, SessionID: "T-cascade", NativeSessionID: "T-cascade"})
+	manifest, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, SessionID: "T-cascade", NativeSessionID: "T-cascade", Env: map[string]string{}})
 	if err := store.Replace(ctx, main, []SessionStoreReplacement{{Key: main, Entries: []SessionStoreEntry{manifest}}}); err != nil {
 		t.Fatal(err)
 	}

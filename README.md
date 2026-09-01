@@ -150,7 +150,10 @@ rejects at session start.
   manual method starts no native login child.
 - Durable mirroring through a host-provided `SessionStore`; ordinary frames are
   retained under `transcript`, while image-bearing tool frames use canonical
-  artifact references backed by `_artifacts/images/` records.
+  artifact references backed by `_artifacts/images/` records. The manifest
+  retains the complete session environment, including raw `PATH`, so cold
+  load/resume reconstructs the original carrier without asking the caller to
+  resend it.
 - Native continuation requires the live server-side Amp thread and
   `AMP_API_KEY`; when it is gone, `session/load` still replays local display
   history and a later prompt returns the `native_state_missing` terminal error.
@@ -186,9 +189,10 @@ Live integration tests require a local authenticated `amp` CLI. The live target
 sets `ACP_GO_AMP_RUN_INTEGRATION=1` and `ACP_GO_AMP_RUN_LIVE_TOKENS=1` and may
 spend model tokens. Live tests always launch Amp with isolated native HOME/XDG
 state; `AMP_API_KEY` and `AMP_URL` are injected from explicit policy or
-option values and are never written to the session store. If the required credentials
-are absent, live tests fail instead of launching against the developer's real
-Amp home.
+option values. Session environment values are durable, so the store is
+secret-bearing when they include credentials. If the required credentials are
+absent, live tests fail instead of launching
+against the developer's real Amp home.
 
 ## License
 
