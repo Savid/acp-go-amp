@@ -419,7 +419,7 @@ func TestNewSessionMCPWriteFailure(t *testing.T) {
 	require.ErrorContains(t, err, "write amp MCP config")
 }
 
-func TestManifestStrictDecodeMakesSecondDecodeInfallible(t *testing.T) {
+func TestManifestStrictDecodeAcceptsTheCurrentTypedShape(t *testing.T) {
 	entry := json.RawMessage(`{"format":"amp-thread-mirror-v1","sessionId":"T-1","nativeSessionId":"T-1","cwd":"/cwd","env":{},"updatedAtUnixMilli":1,"createdAtUnixMilli":1}`)
 	manifest, ok := manifestFromStoreEntry(entry)
 	require.True(t, ok)

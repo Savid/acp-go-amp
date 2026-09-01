@@ -234,6 +234,9 @@ func TestInMemoryStoreContractEdges(t *testing.T) {
 	if _, ok := manifestFromStoreEntry(json.RawMessage(`{`)); ok {
 		t.Fatal("malformed manifest accepted")
 	}
+	if _, ok := manifestFromStoreEntry(json.RawMessage(`{"format":"amp-thread-mirror-v1","sessionId":"T-1","nativeSessionId":"T-1","cwd":1,"env":{}}`)); ok {
+		t.Fatal("manifest with a malformed typed field accepted")
+	}
 	if _, ok := manifestFromStoreEntry(json.RawMessage(`{"format":"amp-thread-mirror-v1","sessionId":"T-1","nativeSessionId":"T-1"}`)); ok {
 		t.Fatal("manifest without current env state accepted")
 	}

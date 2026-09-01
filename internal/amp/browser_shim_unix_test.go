@@ -46,11 +46,12 @@ func TestMaterializeBrowserShimReportsFilesystemFailures(t *testing.T) {
 		t.Fatal("shim materialization ignored directory creation failure")
 	}
 
-	dir := t.TempDir()
-	if err := os.Mkdir(filepath.Join(dir, browserLauncherNames[0]), 0o700); err != nil {
-		t.Fatal(err)
+	originalWriteFile := browserShimWriteFile
+	t.Cleanup(func() { browserShimWriteFile = originalWriteFile })
+	browserShimWriteFile = func(string, []byte, os.FileMode) error {
+		return errors.New("write fault")
 	}
-	if _, err := MaterializeBrowserShim(dir); err == nil {
+	if _, err := MaterializeBrowserShim(filepath.Join(t.TempDir(), "browser")); err == nil {
 		t.Fatal("shim materialization ignored launcher write failure")
 	}
 }
