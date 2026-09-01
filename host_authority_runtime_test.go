@@ -49,6 +49,10 @@ func (a residualAuthority) PrepareNativeTree(context.Context, string) error {
 	return a.prepareErr
 }
 
+func (a residualAuthority) ReadNativeAppendLog(context.Context, string, uint64) ([][]byte, error) {
+	return nil, nil
+}
+
 func (a residualAuthority) StartNative(context.Context, NativeRequest) (NativeProcess, error) {
 	return nil, ErrHostAuthorityUnavailable
 }

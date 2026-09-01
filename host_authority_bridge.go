@@ -18,6 +18,9 @@ func (a *Agent) configureNativeClient(options *nativeamp.Options) {
 		return
 	}
 
+	options.ReadNativeAppendLog = func(ctx context.Context, path string, offset uint64) ([][]byte, error) {
+		return readHostNativeAppendLog(a.options.HostAuthority, ctx, path, offset)
+	}
 	options.StartNative = func(ctx context.Context, request nativeamp.NativeRequest) (nativeamp.NativeProcess, error) {
 		a.mu.Lock()
 		boundaryErr := a.lifecycleContainmentErr
@@ -47,6 +50,22 @@ func (a *Agent) configureNativeClient(options *nativeamp.Options) {
 
 		return nativeProcessBridge{agent: a, process: process}, nil
 	}
+}
+
+func readHostNativeAppendLog(
+	authority HostAuthority,
+	ctx context.Context,
+	path string,
+	offset uint64,
+) (entries [][]byte, err error) {
+	defer func() {
+		if recover() != nil {
+			entries = nil
+			err = ErrHostAuthorityUnavailable
+		}
+	}()
+
+	return authority.ReadNativeAppendLog(ctx, path, offset)
 }
 
 func startHostNative(authority HostAuthority, ctx context.Context, request NativeRequest) (process NativeProcess, err error) {

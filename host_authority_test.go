@@ -26,6 +26,7 @@ type recordingAuthority struct {
 	lockOnPrepare  bool
 	inspectPrepare func(string) error
 	inspectReclaim func(string) error
+	readAppendLog  func(context.Context, string, uint64) ([][]byte, error)
 	prepareErr     error
 	startErr       error
 	startPanic     bool
@@ -64,6 +65,14 @@ func (a *recordingAuthority) PrepareNativeTree(_ context.Context, root string) e
 	}
 
 	return nil
+}
+
+func (a *recordingAuthority) ReadNativeAppendLog(ctx context.Context, path string, offset uint64) ([][]byte, error) {
+	if a.readAppendLog == nil {
+		return nil, nil
+	}
+
+	return a.readAppendLog(ctx, path, offset)
 }
 
 func (a *recordingAuthority) ReclaimNativeTree(_ context.Context, root string) error {
@@ -289,6 +298,40 @@ func TestHostAuthorityManagedLaunchTrace(t *testing.T) {
 		root := strings.TrimPrefix(events[index], "prepare:")
 		require.Equal(t, []string{"prepare:" + root, "start:" + root, "wait:" + root, "reclaim:" + root}, events[index:index+4])
 	}
+}
+
+func TestHostAuthorityReadNativeAppendLogDelegatesAndGuardsPanic(t *testing.T) {
+	authority := newRecordingAuthority()
+	callCtx := t.Context()
+	want := [][]byte{[]byte("first"), []byte("second")}
+	authority.readAppendLog = func(ctx context.Context, path string, offset uint64) ([][]byte, error) {
+		require.Same(t, callCtx, ctx)
+		require.Equal(t, "/native/append.log", path)
+		require.Equal(t, uint64(17), offset)
+
+		return want, nil
+	}
+
+	agent := NewAgent(WithHostAuthority(authority))
+	var options nativeamp.Options
+	agent.configureNativeClient(&options)
+	records, err := options.ReadNativeAppendLog(callCtx, "/native/append.log", 17)
+	require.NoError(t, err)
+	require.Equal(t, want, records)
+
+	wantErr := errors.New("read refused")
+	authority.readAppendLog = func(context.Context, string, uint64) ([][]byte, error) { return nil, wantErr }
+	records, err = options.ReadNativeAppendLog(callCtx, "/native/append.log", 17)
+	require.Nil(t, records)
+	require.ErrorIs(t, err, wantErr)
+
+	authority.readAppendLog = func(context.Context, string, uint64) ([][]byte, error) {
+		panic("read append log panic")
+	}
+	records, err = options.ReadNativeAppendLog(callCtx, "/native/append.log", 17)
+	require.Nil(t, records)
+	require.ErrorIs(t, err, ErrHostAuthorityUnavailable)
+	require.NotErrorIs(t, err, ErrContainmentIncomplete)
 }
 
 func TestManagedStartupProbeCacheIsAuthorityScoped(t *testing.T) {

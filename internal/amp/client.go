@@ -76,6 +76,7 @@ type Options struct {
 	ResolvedExecutable  string
 	OrdinaryEnvironment map[string]string
 	NativeEnvironment   map[string]string
+	ReadNativeAppendLog func(context.Context, string, uint64) ([][]byte, error)
 	StartNative         NativeStarter
 	Mode                string
 	MCPConfigPath       string
