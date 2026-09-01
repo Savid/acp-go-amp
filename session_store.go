@@ -381,9 +381,8 @@ func manifestFromStoreEntry(entry json.RawMessage) (ampManifest, bool) {
 	}
 
 	var manifest ampManifest
-	if err := json.Unmarshal(entry, &manifest); err != nil {
-		return ampManifest{}, false
-	}
+	// strictManifestJSON decoded this exact document through EOF.
+	_ = json.Unmarshal(entry, &manifest)
 
 	if manifest.Format != SessionStoreFormat || manifest.SessionID == "" || !validNativeSessionID(manifest.NativeSessionID) || !validStoredSessionEnv(manifest.Env) {
 		return ampManifest{}, false
