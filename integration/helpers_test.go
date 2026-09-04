@@ -322,18 +322,26 @@ func connectLiveAgentBinary(
 	cmd := exec.Command(agentPath, args...) // #nosec G204 -- path is the test-built agent binary.
 	cmd.Env = append(os.Environ(), envAmpAPIKey+"=fake-integration-key")
 
-	stdin, err := cmd.StdinPipe()
+	// Both ends of the agent's stdio belong to this test: exec.Cmd's own pipe
+	// helpers hand their parent ends to Cmd.Wait, which closes them as the
+	// child exits and drops whatever it wrote but nobody had read yet — here
+	// that is the agent's last JSON-RPC responses.
+	childStdin, stdin, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
 	}
-	stdout, err := cmd.StdoutPipe()
+	stdout, childStdout, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
 	}
+	cmd.Stdin, cmd.Stdout = childStdin, childStdout
 
 	var stderr lockedBuffer
 	cmd.Stderr = &stderr
-	if startErr := cmd.Start(); startErr != nil {
+	startErr := cmd.Start()
+	_ = childStdin.Close()
+	_ = childStdout.Close()
+	if startErr != nil {
 		t.Fatal(startErr)
 	}
 

@@ -557,7 +557,16 @@ func (c *Client) outputAtPath(ctx context.Context, path string, args ...string) 
 		}
 	}
 
-	if !terminal {
+	// A wait that came back with an exit code, a signal, or a revocation reached
+	// the child, so nothing is left writing to the pipes: the readers see EOF on
+	// their own and keep every byte the child wrote before it exited. Only a
+	// wait that never reached the child needs its readers unblocked by a close
+	// underneath them, and a command whose output is closed out from under it
+	// answers with the diagnosis it never printed — an empty version, a
+	// truncated thread listing, a missing-thread refusal with no stderr.
+	reaped := terminal || result != (NativeResult{})
+
+	if !reaped {
 		_ = stdoutStream.Close()
 		_ = stderrStream.Close()
 	}
@@ -565,7 +574,7 @@ func (c *Client) outputAtPath(ctx context.Context, path string, args ...string) 
 	<-readDone
 	<-readDone
 
-	if terminal {
+	if reaped {
 		_ = stdoutStream.Close()
 		_ = stderrStream.Close()
 	}

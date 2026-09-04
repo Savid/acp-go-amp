@@ -2,8 +2,10 @@ package amp
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -42,11 +44,11 @@ func TestOrdinaryProcessResultAndPipes(t *testing.T) {
 	}
 
 	_ = process.Stdin().Close()
-	stdoutDone := make(chan []byte, 1)
-	stderrDone := make(chan []byte, 1)
-	go func() { data, _ := io.ReadAll(process.Stdout()); stdoutDone <- data }()
-	go func() { data, _ := io.ReadAll(process.Stderr()); stderrDone <- data }()
 
+	// Wait runs before either stream is drained on purpose: what the child
+	// wrote belongs to whoever holds the pipe, not to whoever happened to be
+	// scheduled before the exit. A backend that hands its parent ends to
+	// exec.Cmd.Wait loses both payloads here every time.
 	result, err := process.Wait(t.Context())
 	if err != nil {
 		t.Fatal(err)
@@ -54,11 +56,60 @@ func TestOrdinaryProcessResultAndPipes(t *testing.T) {
 	if result != (NativeResult{ExitCode: 0}) {
 		t.Fatalf("result = %#v", result)
 	}
-	if got := string(<-stdoutDone); got != "ordinary stdout" {
+
+	stdout, err := io.ReadAll(process.Stdout())
+	if err != nil {
+		t.Fatal(err)
+	}
+	stderr, err := io.ReadAll(process.Stderr())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(stdout); got != "ordinary stdout" {
 		t.Fatalf("stdout = %q", got)
 	}
-	if got := string(<-stderrDone); got != "ordinary stderr" {
+	if got := string(stderr); got != "ordinary stderr" {
 		t.Fatalf("stderr = %q", got)
+	}
+}
+
+// TestOrdinaryProcessPipeExhaustionReleasesClaimedDescriptors covers each pipe
+// this backend claims: a host that cannot hand out the next one refuses the
+// start naming that stream, and every descriptor already claimed is released
+// rather than leaked into the refusal.
+func TestOrdinaryProcessPipeExhaustionReleasesClaimedDescriptors(t *testing.T) {
+	original := newProcessPipe
+	t.Cleanup(func() { newProcessPipe = original })
+
+	want := errors.New("no descriptors left")
+	for _, tc := range []struct {
+		stream string
+		allow  int
+	}{
+		{stream: "stdin", allow: 0},
+		{stream: "stdout", allow: 1},
+		{stream: "stderr", allow: 2},
+	} {
+		t.Run(tc.stream, func(t *testing.T) {
+			remaining := tc.allow
+			newProcessPipe = func() (*os.File, *os.File, error) {
+				if remaining == 0 {
+					return nil, nil, want
+				}
+
+				remaining--
+
+				return original()
+			}
+
+			_, err := startOrdinaryNative(t.Context(), NativeRequest{Executable: "ignored"})
+			if !errors.Is(err, want) {
+				t.Fatalf("error = %v, want %v", err, want)
+			}
+			if got := err.Error(); !strings.Contains(got, "create native "+tc.stream) {
+				t.Fatalf("error = %q, want it to name create native %s", got, tc.stream)
+			}
+		})
 	}
 }
 

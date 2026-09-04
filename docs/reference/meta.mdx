@@ -236,8 +236,10 @@ sequence space, and entities:
    `limit`, `failed`) and, on every outcome but `failed`, the truthful stop
    reason. No ACP v1 stop reason names a failure, so a failed cycle records its
    outcome and states none; the v1 error carries the cause instead.
-5. `quiescence_update` — after the native process handle's `Wait` proves the
-   whole process tree settled, carrying the watermark that proof covers.
+5. `quiescence_update` — emitted only under `WithHostAuthority`, once the native
+   process handle's `Wait` proves the whole process tree settled, carrying the
+   watermark that proof covers. A non-authoritative answer states no boundary
+   fact, so its incarnation ends at the terminal `idle`.
 
 The contained process exit fences the stream; the next prompt opens a new one.
 Sequences are claimed before delivery is attempted, so a lost event leaves a

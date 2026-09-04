@@ -126,20 +126,30 @@ func (a *recordingAuthority) StartNative(_ context.Context, request NativeReques
 	cmd := exec.Command(request.Executable, request.Arguments...)
 	cmd.Dir = request.WorkingDirectory
 	cmd.Env = append([]string(nil), request.Environment...)
-	stdin, err := cmd.StdinPipe()
+	// The authority owns both ends of every pipe, exactly as a real host must:
+	// exec.Cmd's own pipe helpers hand their parent ends to Cmd.Wait, which
+	// closes them as the child exits and so loses whatever the child wrote but
+	// nobody had read yet — a fake that does that answers probes with an empty
+	// version and a missing-thread refusal with no stderr.
+	childStdin, stdin, err := os.Pipe()
 	if err != nil {
 		return nil, err
 	}
-	stdout, err := cmd.StdoutPipe()
+	stdout, childStdout, err := os.Pipe()
 	if err != nil {
 		return nil, err
 	}
-	stderr, err := cmd.StderrPipe()
+	stderr, childStderr, err := os.Pipe()
 	if err != nil {
 		return nil, err
 	}
-	if err := cmd.Start(); err != nil {
-		return nil, err
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = childStdin, childStdout, childStderr
+	startErr := cmd.Start()
+	_ = childStdin.Close()
+	_ = childStdout.Close()
+	_ = childStderr.Close()
+	if startErr != nil {
+		return nil, startErr
 	}
 
 	return &recordingProcess{
