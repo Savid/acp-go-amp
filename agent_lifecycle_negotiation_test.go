@@ -215,7 +215,10 @@ func lifecycleHarness(t *testing.T) string {
 	source := filepath.Join(dir, "lifecycle_amp.go")
 	require.NoError(t, os.WriteFile(source, []byte(lifecycleHarnessSource), 0o600))
 
-	path := filepath.Join(dir, "amp")
+	// The name carries a platform-correct extension: a host that honours
+	// PATHEXT does not resolve an extensionless file as an executable, so a
+	// harness written without one is unreachable rather than merely unusual.
+	path := filepath.Join(dir, testExecutableName("amp"))
 
 	out, err := exec.Command("go", "build", "-o", path, source).CombinedOutput()
 	require.NoError(t, err, "build lifecycle harness: %s", out)
@@ -1126,17 +1129,19 @@ func TestLifecycleCancelPersistsWhatStreamed(t *testing.T) {
 	streamed := make(chan struct{})
 	client.onAgentChunk = func() { close(streamed) }
 
-	done := make(chan acp.PromptResponse, 1)
+	done := make(chan correctionResult[acp.PromptResponse], 1)
 
 	go func() {
 		resp, err := agent.Prompt(t.Context(), lifecyclePrompt(sessionID, "hang", "sub-1", "nonce-1"))
-		require.NoError(t, err)
-		done <- resp
+		done <- correctionResult[acp.PromptResponse]{value: resp, err: err}
 	}()
 
 	<-streamed
 	require.NoError(t, agent.Cancel(t.Context(), acp.CancelNotification{SessionId: sessionID}))
-	require.Equal(t, acp.StopReasonCancelled, (<-done).StopReason)
+
+	cancelled := receiveCorrection(t, done, "cancelled prompt result")
+	require.NoError(t, cancelled.err)
+	require.Equal(t, acp.StopReasonCancelled, cancelled.value.StopReason)
 
 	stored, err := agent.store.Load(t.Context(), SessionKey{SessionID: string(sessionID), Subpath: transcriptSubpath})
 	require.NoError(t, err)
@@ -1535,19 +1540,19 @@ func TestCloseEmitsNothingOnAFencedOrNeverOpenedIncarnation(t *testing.T) {
 	streamed := make(chan struct{})
 	client.onAgentChunk = func() { close(streamed) }
 
-	done := make(chan struct{})
+	done := make(chan correctionResult[acp.PromptResponse], 1)
 
 	go func() {
-		defer close(done)
-
 		resp, promptErr := agent.Prompt(t.Context(), lifecyclePrompt(prompted.SessionId, "hang", "sub-1", "nonce-1"))
-		require.NoError(t, promptErr)
-		require.Equal(t, acp.StopReasonCancelled, resp.StopReason)
+		done <- correctionResult[acp.PromptResponse]{value: resp, err: promptErr}
 	}()
 
 	<-streamed
 	require.NoError(t, agent.Cancel(t.Context(), acp.CancelNotification{SessionId: prompted.SessionId}))
-	<-done
+
+	cancelled := receiveCorrection(t, done, "cancelled prompt result")
+	require.NoError(t, cancelled.err)
+	require.Equal(t, acp.StopReasonCancelled, cancelled.value.StopReason)
 
 	fenced := client.eventTypes(t)
 	require.Equal(t,

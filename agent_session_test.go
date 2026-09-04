@@ -1268,6 +1268,16 @@ func awaitCorrectionSignal(t *testing.T, signal <-chan struct{}, name string) {
 	}
 }
 
+// correctionResult carries a value and the error that produced it across a
+// goroutine boundary. testify's require calls runtime.Goexit, which is illegal
+// off the test goroutine: the goroutine would die before its send and leave the
+// receive to time out on a failure it never reported. Sending both and
+// asserting after the receive keeps every assertion where FailNow is legal.
+type correctionResult[T any] struct {
+	value T
+	err   error
+}
+
 func receiveCorrection[T any](t *testing.T, values <-chan T, name string) T {
 	t.Helper()
 
@@ -3670,16 +3680,17 @@ func TestSessionUseGenerationDefensivePaths(t *testing.T) {
 	existing = &agentSessionUse{generation: 3, done: make(chan struct{})}
 	agent.sessionUses[id] = existing
 	barrier := newValueBarrierContext(t)
-	result := make(chan *agentSessionUse, 1)
+	result := make(chan correctionResult[*agentSessionUse], 1)
 	go func() {
 		_, use, useErr := agent.beginSessionUse(barrier, id)
-		require.NoError(t, useErr)
-		result <- use
+		result <- correctionResult[*agentSessionUse]{value: use, err: useErr}
 	}()
 	awaitCorrectionSignal(t, barrier.entered, "session-use context barrier")
 	agent.finishSessionUse(id, existing)
 	close(barrier.release)
-	use := receiveCorrection(t, result, "successor session use")
+	successor := receiveCorrection(t, result, "successor session use")
+	require.NoError(t, successor.err)
+	use := successor.value
 	agent.finishSessionUse(id, use)
 
 	agent.cleanupOwners[id] = []agentCleanupOwner{{session: session, kind: agentCleanupPrepared}}
@@ -3734,16 +3745,17 @@ func TestSessionFlightGenerationDefensivePaths(t *testing.T) {
 	existing = &agentSessionFlight{generation: 2, done: make(chan struct{})}
 	agent.sessionFlights[id] = existing
 	barrier := newValueBarrierContext(t)
-	result := make(chan *agentSessionFlight, 1)
+	result := make(chan correctionResult[*agentSessionFlight], 1)
 	go func() {
 		_, flight, flightErr := agent.beginSessionFlight(barrier, id, agentSessionDeleteFlight, nil)
-		require.NoError(t, flightErr)
-		result <- flight
+		result <- correctionResult[*agentSessionFlight]{value: flight, err: flightErr}
 	}()
 	awaitCorrectionSignal(t, barrier.entered, "session-flight context barrier")
 	agent.finishSessionFlight(id, existing)
 	close(barrier.release)
-	created := receiveCorrection(t, result, "successor session flight")
+	successor := receiveCorrection(t, result, "successor session flight")
+	require.NoError(t, successor.err)
+	created := successor.value
 	agent.finishSessionFlight(id, created)
 
 	require.True(t, agent.contextOwnsSessionFlightDependency(withCallbackProvenance(t.Context(), agent, existing), existing))
@@ -3811,16 +3823,17 @@ func TestSessionTeardownAndPersistenceGenerationDefensivePaths(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 
 	barrier := newValueBarrierContext(t)
-	result := make(chan *sessionTeardownFlight, 1)
+	result := make(chan correctionResult[*sessionTeardownFlight], 1)
 	go func() {
 		_, flight, teardownErr := session.beginTeardown(barrier)
-		require.NoError(t, teardownErr)
-		result <- flight
+		result <- correctionResult[*sessionTeardownFlight]{value: flight, err: teardownErr}
 	}()
 	awaitCorrectionSignal(t, barrier.entered, "session-teardown context barrier")
 	session.finishTeardown(teardown)
 	close(barrier.release)
-	created := receiveCorrection(t, result, "successor teardown flight")
+	successorTeardown := receiveCorrection(t, result, "successor teardown flight")
+	require.NoError(t, successorTeardown.err)
+	created := successorTeardown.value
 	session.finishTeardown(created)
 
 	prompt := newPromptTurnState()
@@ -3840,16 +3853,17 @@ func TestSessionTeardownAndPersistenceGenerationDefensivePaths(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 
 	barrier = newValueBarrierContext(t)
-	persistResult := make(chan *sessionPersistenceFlight, 1)
+	persistResult := make(chan correctionResult[*sessionPersistenceFlight], 1)
 	go func() {
 		_, flight, persistErr := session.beginPersistence(barrier, sessionPersistenceOrdinary)
-		require.NoError(t, persistErr)
-		persistResult <- flight
+		persistResult <- correctionResult[*sessionPersistenceFlight]{value: flight, err: persistErr}
 	}()
 	awaitCorrectionSignal(t, barrier.entered, "persistence context barrier")
 	session.finishPersistence(persistence)
 	close(barrier.release)
-	newPersistence := receiveCorrection(t, persistResult, "successor persistence flight")
+	successorPersistence := receiveCorrection(t, persistResult, "successor persistence flight")
+	require.NoError(t, successorPersistence.err)
+	newPersistence := successorPersistence.value
 	session.finishPersistence(newPersistence)
 
 	persistence = &sessionPersistenceFlight{generation: 4, done: make(chan struct{})}

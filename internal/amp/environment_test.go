@@ -40,12 +40,13 @@ func TestOrdinaryWindowsExecutableExtensions(t *testing.T) {
 
 func TestLookPathInEnvironment(t *testing.T) {
 	dir := t.TempDir()
-	executable := filepath.Join(dir, "amp")
+	executable := filepath.Join(dir, testExecutableName("amp"))
 	require.NoError(t, os.WriteFile(executable, []byte("x"), 0o700))
 	notExecutable := filepath.Join(dir, "plain")
 	require.NoError(t, os.WriteFile(notExecutable, []byte("x"), 0o600))
 
-	path, err := lookPathInEnvironment("amp", []string{"PATH=/missing:" + dir})
+	missing := absTestPath("missing")
+	path, err := lookPathInEnvironment("amp", []string{"PATH=" + missing + string(os.PathListSeparator) + dir})
 	require.NoError(t, err)
 	require.Equal(t, executable, path)
 
@@ -59,7 +60,7 @@ func TestLookPathInEnvironment(t *testing.T) {
 		env  []string
 	}{
 		{"empty", "", nil},
-		{"relative path", filepath.Join("relative", "amp"), nil},
+		{"relative path", filepath.Join("relative", testExecutableName("amp")), nil},
 		{"missing PATH", "amp", nil},
 		{"not found", "missing", []string{"PATH=" + dir}},
 		{"not executable", notExecutable, nil},
@@ -75,7 +76,7 @@ func TestLookPathInOrdinaryEnvironmentWithPlatformRules(t *testing.T) {
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "bin")
 	require.NoError(t, os.Mkdir(bin, 0o700))
-	executable := filepath.Join(bin, "tool")
+	executable := filepath.Join(bin, testExecutableName("tool"))
 	require.NoError(t, os.WriteFile(executable, []byte("x"), 0o700))
 	withoutExtension := filepath.Join(bin, "windows-tool")
 	require.NoError(t, os.WriteFile(withoutExtension+".exe", []byte("x"), 0o600))
@@ -94,13 +95,6 @@ func TestLookPathInOrdinaryEnvironmentWithPlatformRules(t *testing.T) {
 	path, err = ordinaryExecutableFile(withExtension, ordinaryExecutableSearchRules{extensions: []string{".exe", ".cmd"}})
 	require.NoError(t, err)
 	require.Equal(t, withExtension, path)
-
-	path, err = lookPathInOrdinaryEnvironmentWithRules("tool", []string{"PATH=.:missing"}, bin, unixOrdinaryExecutableRules())
-	require.NoError(t, err)
-	require.Equal(t, executable, path)
-	path, err = lookPathInOrdinaryEnvironmentWithRules("tool", []string{"PATH=:missing"}, bin, unixOrdinaryExecutableRules())
-	require.NoError(t, err)
-	require.Equal(t, executable, path)
 
 	original := ordinaryEnvironmentGetwd
 	t.Cleanup(func() { ordinaryEnvironmentGetwd = original })

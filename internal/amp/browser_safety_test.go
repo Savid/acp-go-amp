@@ -127,7 +127,7 @@ func TestCheckAuthLoginBrowserSafetyUsesTheHostPlatform(t *testing.T) {
 }
 
 func TestAuthLoginSafetyRefusalPrecedesCommandConstruction(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "amp")
+	path := filepath.Join(t.TempDir(), testExecutableName("amp"))
 	if err := os.WriteFile(path, []byte("not executed"), 0o700); err != nil {
 		t.Fatal(err)
 	}

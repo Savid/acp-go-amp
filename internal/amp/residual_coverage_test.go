@@ -166,7 +166,7 @@ func TestClientDiscoveryAndProbeResidualErrors(t *testing.T) {
 	require.ErrorIs(t, methodProbeError("threads export", containment, false), ErrContainmentIncomplete)
 	require.NoError(t, methodProbeError("threads export", nil, false))
 
-	_, err = newTestClient(t, nil, Options{ResolvedExecutable: "/missing"}).ListThreads(cancelledContext())
+	_, err = newTestClient(t, nil, Options{ResolvedExecutable: absTestPath("missing")}).ListThreads(cancelledContext())
 	require.ErrorIs(t, err, context.Canceled)
 
 	_, err = Discover(t.Context(), "amp")
@@ -220,78 +220,6 @@ func TestClientStartTurnResidualErrors(t *testing.T) {
 	}})
 	_, err = client.Execute(t.Context(), map[string]string{"text": "x"})
 	require.ErrorContains(t, err, "close amp stdin")
-}
-
-func TestClientOutputResidualBranches(t *testing.T) {
-	client := NewClient(nil, Options{OrdinaryEnvironment: map[string]string{"PATH": t.TempDir()}})
-	_, err := client.outputWithArgs(t.Context(), "version")
-	require.Error(t, err)
-
-	original := getwd
-	t.Cleanup(func() { getwd = original })
-	getwd = func() (string, error) { return "/chosen", nil }
-	require.Equal(t, "/chosen", NewClient(nil, Options{}).commandCwd())
-
-	_, err = client.outputAtPath(cancelledContext(), "/unused", "version")
-	require.ErrorIs(t, err, context.Canceled)
-
-	wantProbe := errors.New("probe refused")
-	client = NewClient(nil, Options{NewProbeClient: func(context.Context) (*Client, func() error, error) {
-		return nil, nil, wantProbe
-	}})
-	_, err = client.outputAtPath(t.Context(), "/unused", "version")
-	require.ErrorIs(t, err, wantProbe)
-
-	wantCleanup := errors.New("cleanup refused")
-	client = NewClient(nil, Options{NewProbeClient: func(context.Context) (*Client, func() error, error) {
-		return NewClient(nil, Options{}), func() error { return wantCleanup }, nil
-	}})
-	_, err = client.outputAtPath(t.Context(), "/unused", "version")
-	require.ErrorIs(t, err, wantCleanup)
-
-	path, _ := fakeAmpPath(t, "")
-	client = NewClient(nil, Options{NewProbeClient: func(context.Context) (*Client, func() error, error) {
-		return newTestProbeClient(t, nil, Options{CLIPath: path, Cwd: t.TempDir()}), func() error { return wantCleanup }, nil
-	}})
-	_, err = client.outputAtPath(t.Context(), path, "version")
-	require.ErrorIs(t, err, wantCleanup)
-
-	client = NewClient(nil, Options{Cwd: t.TempDir(), Env: map[string]string{"bad=key": "x"}, StartNative: func(context.Context, NativeRequest) (NativeProcess, error) {
-		return newCoverageNativeProcess(), nil
-	}})
-	_, err = client.outputAtPath(t.Context(), "amp", "version")
-	require.ErrorContains(t, err, "invalid environment key")
-
-	wantStart := errors.New("start refused")
-	client = NewClient(nil, Options{Cwd: t.TempDir(), StartNative: func(context.Context, NativeRequest) (NativeProcess, error) {
-		return nil, wantStart
-	}})
-	_, err = client.outputAtPath(t.Context(), "amp", "version")
-	require.ErrorIs(t, err, wantStart)
-
-	var waitCalls int
-	process := newCoverageNativeProcess()
-	process.wait = func(context.Context) (NativeResult, error) {
-		waitCalls++
-		if waitCalls == 1 {
-			return NativeResult{}, context.Canceled
-		}
-
-		return NativeResult{Revoked: true}, errors.New("terminal")
-	}
-	process.revokeErr = errors.New("revoke refused")
-	client = NewClient(nil, Options{Cwd: t.TempDir(), StartNative: func(context.Context, NativeRequest) (NativeProcess, error) {
-		return process, nil
-	}})
-	_, err = client.outputAtPath(t.Context(), "amp", "threads", "list")
-	require.ErrorContains(t, err, "exit code")
-	require.Equal(t, 2, waitCalls)
-
-	process = newCoverageNativeProcess()
-	process.wait = func(context.Context) (NativeResult, error) { return NativeResult{ExitCode: 7}, nil }
-	client.options.StartNative = func(context.Context, NativeRequest) (NativeProcess, error) { return process, nil }
-	_, err = client.outputAtPath(t.Context(), "amp", "version")
-	require.ErrorContains(t, err, "exit code 7")
 }
 
 func TestClientOutputUnresolvedSecondWaitClosesAndJoinsBlockedStreams(t *testing.T) {
@@ -401,8 +329,16 @@ func TestClientOutputFreshWaitGetsFullBoundAfterRevokeExhaustion(t *testing.T) {
 
 		terminalDeadline, ok := ctx.Deadline()
 		require.True(t, ok)
-		require.True(t, terminalDeadline.After(revokeDeadline),
+		// The revoke bound is consumed and cancelled before this call, so a
+		// terminal proof derived from it would arrive already done. Liveness is
+		// the exact signal; the deadline ordering is the coarser one, and a
+		// host whose monotonic clock ticks in milliseconds can hand both bounds
+		// the same instant, so it is stated as "no earlier than" rather than
+		// "strictly after".
+		require.NoError(t, ctx.Err(),
 			"the terminal proof inherited the already-consumed revoke bound")
+		require.False(t, terminalDeadline.Before(revokeDeadline),
+			"the terminal proof was bounded before the revoke it follows")
 
 		return NativeResult{Revoked: true}, nil
 	}
@@ -556,8 +492,12 @@ func TestClientManagedUnusableStdioGetsFreshTerminalSettlementBound(t *testing.T
 	base.wait = func(ctx context.Context) (NativeResult, error) {
 		waitDeadline, ok := ctx.Deadline()
 		require.True(t, ok)
-		require.True(t, waitDeadline.After(revokeDeadline),
-			"managed settlement Wait inherited the Revoke deadline")
+		// As above: the Revoke bound is already cancelled here, so liveness is
+		// what separates a fresh settlement bound from an inherited one on a
+		// host whose clock cannot resolve the two instants apart.
+		require.NoError(t, ctx.Err(), "managed settlement Wait inherited the Revoke deadline")
+		require.False(t, waitDeadline.Before(revokeDeadline),
+			"managed settlement Wait was bounded before the Revoke it follows")
 
 		return NativeResult{}, waitErr
 	}

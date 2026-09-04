@@ -5,11 +5,62 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/stretchr/testify/require"
 )
+
+// absTestPath builds a host-absolute path from POSIX-looking segments, so a
+// test states "an absolute working directory" rather than a spelling only
+// one platform accepts.
+func absTestPath(segments ...string) string {
+	root := "/"
+	if runtime.GOOS == "windows" {
+		root = `C:\`
+	}
+
+	return filepath.Join(append([]string{root}, segments...)...)
+}
+
+// hostFilePerm maps a POSIX file mode onto the permission bits the host
+// actually records. Windows keeps no POSIX mode: os.Chmod there sets only the
+// read-only attribute, so a writable file reports 0666 and a read-only one
+// 0444 whatever mode created it. Restriction on Windows is the inherited ACL,
+// which these bits do not describe.
+func hostFilePerm(perm os.FileMode) os.FileMode {
+	if runtime.GOOS != "windows" {
+		return perm
+	}
+
+	if perm&0o200 == 0 {
+		return 0o444
+	}
+
+	return 0o666
+}
+
+// hostDirPerm is hostFilePerm for a directory, which Windows always reports as
+// 0777 because the read-only attribute does not apply to one.
+func hostDirPerm(perm os.FileMode) os.FileMode {
+	if runtime.GOOS != "windows" {
+		return perm
+	}
+
+	return 0o777
+}
+
+// testExecutableName spells a harness file name the way the host resolves
+// executables. Windows honours PATHEXT, so a name with no extension is not an
+// executable there however it is written to disk.
+func testExecutableName(base string) string {
+	if runtime.GOOS == "windows" {
+		return base + ".exe"
+	}
+
+	return base
+}
 
 // testHarnessPath stands in for the absolute harness a real probe resolves and
 // validates. The agent retains whatever a probe answers, so a stubbed probe
@@ -18,7 +69,7 @@ import (
 func testHarnessPath(t *testing.T) string {
 	t.Helper()
 
-	return filepath.Join(t.TempDir(), "amp")
+	return filepath.Join(t.TempDir(), testExecutableName("amp"))
 }
 
 // testScratchDir is a scratch parent the isolated identity can enter. Trees

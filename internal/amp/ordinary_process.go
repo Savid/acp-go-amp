@@ -2,10 +2,8 @@ package amp
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
-	"os"
 	"os/exec"
 	"sync"
 	"sync/atomic"
@@ -118,7 +116,7 @@ func (p *ordinaryProcess) Revoke(ctx context.Context) error {
 
 		if p.cmd.Process != nil {
 			p.revokeErr = p.cmd.Process.Kill()
-			if errors.Is(p.revokeErr, os.ErrProcessDone) {
+			if processAlreadyGone(p.revokeErr) {
 				p.revokeErr = nil
 			}
 		}

@@ -24,6 +24,18 @@ func simulateWindowsEnvironment(t *testing.T) {
 	runtimeGOOS = platformWindows
 }
 
+// simulateUnixEnvironment selects the Unix environment key identity for the
+// duration of a test, so a contract stated as "under the Unix identity" is
+// exercised on a Windows runner as well as on a Unix one.
+func simulateUnixEnvironment(t *testing.T) {
+	t.Helper()
+
+	original := runtimeGOOS
+	t.Cleanup(func() { runtimeGOOS = original })
+
+	runtimeGOOS = platformLinux
+}
+
 // childEnvironments reads every environment block the fake amp recorded, one
 // per spawned process.
 func childEnvironments(t *testing.T, state string) [][]string {
@@ -274,6 +286,8 @@ func TestWindowsSessionEnvironmentGatesTheFoldedAPIKey(t *testing.T) {
 func TestAmbiguousEnvironmentKeysAreRefused(t *testing.T) {
 	ambiguous := map[string]string{"Path": "a", "PATH": "b"}
 
+	simulateUnixEnvironment(t)
+
 	if previous, key := ambiguousEnvKeys(ambiguous); previous != "" || key != "" {
 		t.Fatalf("Unix identity reported ambiguity: %q, %q", previous, key)
 	}
@@ -341,6 +355,8 @@ func TestOperationSessionEnvNamesOnlyTheOperationValues(t *testing.T) {
 		"Amp_Api_Key":  "folded",
 		"SESSION_ONLY": "value",
 	}
+
+	simulateUnixEnvironment(t)
 
 	unix := operationSessionEnv(session)
 	if len(unix) != 2 || unix["AMP_API_KEY"] != "key" || unix["AMP_URL"] != "https://amp.example" {

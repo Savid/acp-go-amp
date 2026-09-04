@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -83,7 +84,7 @@ func TestAuthLedgerRootValidation(t *testing.T) {
 
 	for _, dir := range []string{root, ledger.dir} {
 		info, statErr := os.Stat(dir)
-		if statErr != nil || info.Mode().Perm() != authLedgerDirMode {
+		if statErr != nil || info.Mode().Perm() != hostDirPerm(authLedgerDirMode) {
 			t.Fatalf("%s mode = %v/%v", dir, info, statErr)
 		}
 	}
@@ -192,7 +193,7 @@ func TestAuthLedgerWritesAtomicallyAndDurably(t *testing.T) {
 	}
 
 	info, err := os.Stat(ledger.path(authProviderID, "connection-1"))
-	if err != nil || info.Mode().Perm() != authLedgerFileMode {
+	if err != nil || info.Mode().Perm() != hostFilePerm(authLedgerFileMode) {
 		t.Fatalf("entry mode = %v/%v", info, err)
 	}
 
@@ -302,7 +303,21 @@ func TestAuthLedgerSurfacesWriteFailures(t *testing.T) {
 	ledgerRename = originalRename
 	ledgerOpen = func(string) (*os.File, error) { return nil, want }
 
-	if err := ledger.write(record); !errors.Is(err, want) {
+	err := ledger.write(record)
+
+	// Windows FlushFileBuffers accepts no directory handle, so the ledger flushes
+	// no directory there and has no open for this seam to refuse. The entry is
+	// durable under its final name regardless: it was written, restricted and
+	// fsynced before the rename that published it.
+	if runtime.GOOS == "windows" {
+		if err != nil {
+			t.Fatalf("dir sync failure = %v, want no directory flush on this platform", err)
+		}
+
+		return
+	}
+
+	if !errors.Is(err, want) {
 		t.Fatalf("dir sync failure = %v", err)
 	}
 }

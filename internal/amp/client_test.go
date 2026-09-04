@@ -5,8 +5,32 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
+
+// testExecutableName spells a harness file name the way the host resolves
+// executables. Windows honours PATHEXT, so a name with no extension is not an
+// executable there however it is written to disk.
+func testExecutableName(base string) string {
+	if runtime.GOOS == "windows" {
+		return base + ".exe"
+	}
+
+	return base
+}
+
+// absTestPath builds a host-absolute path from POSIX-looking segments, so a
+// test states "an absolute path" rather than a spelling only one platform
+// accepts.
+func absTestPath(segments ...string) string {
+	root := "/"
+	if runtime.GOOS == "windows" {
+		root = `C:\`
+	}
+
+	return filepath.Join(append([]string{root}, segments...)...)
+}
 
 func newTestClient(t *testing.T, logger *slog.Logger, options Options) *Client {
 	t.Helper()

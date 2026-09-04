@@ -160,11 +160,11 @@ func TestLoadManifestErrorsAndListFilters(t *testing.T) {
 		t.Fatal("list error ignored")
 	}
 	store := NewInMemorySessionStore()
-	manifest, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, SessionID: "T-list", NativeSessionID: "T-list", Cwd: "/cwd", Env: map[string]string{}, UpdatedAtUnixMilli: 0})
+	manifest, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, SessionID: "T-list", NativeSessionID: "T-list", Cwd: absTestPath("cwd"), Env: map[string]string{}, UpdatedAtUnixMilli: 0})
 	if err := store.Replace(ctx, SessionKey{SessionID: "T-list", Subpath: SessionStoreMainSubpath}, []SessionStoreReplacement{{Key: SessionKey{SessionID: "T-list", Subpath: SessionStoreMainSubpath}, Entries: []SessionStoreEntry{manifest}}}); err != nil {
 		t.Fatal(err)
 	}
-	resp, err := newTestAgent(WithSessionStore(store)).ListSessions(ctx, acp.ListSessionsRequest{Cwd: acp.Ptr("/other")})
+	resp, err := newTestAgent(WithSessionStore(store)).ListSessions(ctx, acp.ListSessionsRequest{Cwd: acp.Ptr(absTestPath("other"))})
 	if err != nil {
 		t.Fatal(err)
 	}

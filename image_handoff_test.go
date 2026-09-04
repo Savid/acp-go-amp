@@ -11,8 +11,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/stretchr/testify/require"
@@ -36,8 +38,21 @@ func writeHandoffFile(t *testing.T, root, subpath string, data []byte) string {
 	return path
 }
 
+// fileURI spells a host path as a file URI. RFC 8089 puts the path after an
+// empty authority, so a Windows path whose first component is a drive letter
+// gains the separating slash a Unix path already carries.
 func fileURI(path string) string {
-	return "file://" + filepath.ToSlash(path)
+	return fileURIWithHost("", path)
+}
+
+// fileURIWithHost spells a host path as a file URI under a named authority.
+func fileURIWithHost(host, path string) string {
+	slashed := filepath.ToSlash(path)
+	if !strings.HasPrefix(slashed, "/") {
+		slashed = "/" + slashed
+	}
+
+	return "file://" + host + slashed
 }
 
 // handoffBlock builds a handoff-form image content block: empty data, a file URI
@@ -433,7 +448,7 @@ func TestHandoffAcceptsLocalhostURIHost(t *testing.T) {
 	path := writeHandoffFile(t, root, "valid.png", data)
 
 	block := acp.ImageBlock("", imageMIMEPNG)
-	block.Image.Uri = acp.Ptr("file://" + handoffURIHost + filepath.ToSlash(path))
+	block.Image.Uri = acp.Ptr(fileURIWithHost(handoffURIHost, path))
 	block.Image.Meta = map[string]any{metaHandoffKey: map[string]any{
 		handoffFieldVersion:   handoffVersion,
 		handoffFieldDigest:    handoffDigest(data),
@@ -500,7 +515,7 @@ func TestHandoffPathNotAllowed(t *testing.T) {
 		outside := writeHandoffFile(t, t.TempDir(), "secret.png", data)
 
 		block := acp.ImageBlock("", imageMIMEPNG)
-		block.Image.Uri = acp.Ptr("file://" + filepath.ToSlash(root) + "/%2e%2e/" +
+		block.Image.Uri = acp.Ptr(fileURI(root) + "/%2e%2e/" +
 			filepath.Base(filepath.Dir(outside)) + "/secret.png")
 		block.Image.Meta = map[string]any{metaHandoffKey: map[string]any{
 			handoffFieldVersion:   handoffVersion,
@@ -1032,7 +1047,19 @@ func rootSnapshot(t *testing.T, root string) map[string]string {
 			return statErr
 		}
 
-		snapshot[path] = fmt.Sprintf("%v|%d|%v", info.Mode(), info.Size(), info.ModTime())
+		modified := info.ModTime()
+		if runtime.GOOS == "windows" && entry.IsDir() {
+			// Windows publishes a directory's last-write time to its parent
+			// entry lazily, so two stats taken either side of an operation that
+			// touched neither can still disagree about when the directory last
+			// changed. The entry set, the modes and the sizes still state
+			// whether anything was written, moved or removed; only the
+			// directory's own clock reading is dropped, and only where the
+			// platform will not answer it consistently.
+			modified = time.Time{}
+		}
+
+		snapshot[path] = fmt.Sprintf("%v|%d|%v", info.Mode(), info.Size(), modified)
 
 		return nil
 	}))

@@ -354,7 +354,7 @@ func TestProviderAuthRejectsAnInjectionOption(t *testing.T) {
 }
 
 func TestProviderAuthDirectHomeIsRejectedFailClosed(t *testing.T) {
-	agent := newTestAgent(WithProviderAuthDirectHome("/consented/home"))
+	agent := newTestAgent(WithProviderAuthDirectHome(absTestPath("consented", "home")))
 	if err := agent.validateSessionStartOptions(AmpOptions{}); err == nil {
 		t.Fatal("a consented exact home was accepted")
 	} else {
@@ -370,7 +370,8 @@ func TestProviderAuthDirectHomeIsRejectedFailClosed(t *testing.T) {
 		t.Fatal("a relative provider-auth root was accepted at construction")
 	}
 
-	if err := validateProviderAuthRoots(Options{ProviderAuthRoot: "/abs", ProviderAuthDirectHome: "/abs"}); err != nil {
+	root := absTestPath("abs")
+	if err := validateProviderAuthRoots(Options{ProviderAuthRoot: root, ProviderAuthDirectHome: root}); err != nil {
 		t.Fatalf("absolute roots rejected: %v", err)
 	}
 }

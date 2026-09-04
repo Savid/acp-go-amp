@@ -42,10 +42,6 @@ func environmentMap(entries []string) map[string]string {
 	return values
 }
 
-func environmentValue(environment []string, name string) string {
-	return ordinaryEnvironmentValue(environment, name, false)
-}
-
 type ordinaryExecutableSearchRules struct {
 	pathSeparators     string
 	extensions         []string
@@ -99,26 +95,35 @@ func ordinaryWindowsExecutableExtensions(value string) []string {
 	return extensions
 }
 
+// lookPathInEnvironment resolves a harness name against a caller-supplied
+// process environment under the host's own executable search rules. The rules
+// are the platform's, not one platform's spelled everywhere: a Unix host
+// requires the execute bit and separates PATH on the colon, while a Windows
+// host has neither an execute bit nor an extensionless executable and folds the
+// PATH key, so a name resolved under the wrong rule set is a name no host would
+// have launched.
 func lookPathInEnvironment(file string, environment []string) (string, error) {
 	if file == "" {
 		return "", errors.New("executable name is empty")
 	}
 
-	if strings.ContainsRune(file, os.PathSeparator) {
+	rules := ordinaryExecutableRules(environment)
+
+	if strings.ContainsAny(file, rules.pathSeparators) {
 		if !filepath.IsAbs(file) {
 			return "", fmt.Errorf("executable path %q is not absolute", file)
 		}
 
-		return matchOrdinaryExecutableFile(file, true)
+		return ordinaryExecutableFile(file, rules)
 	}
 
-	search := environmentValue(environment, "PATH")
+	search := ordinaryEnvironmentValue(environment, "PATH", rules.foldEnvironmentKey)
 	if search == "" {
 		return "", fmt.Errorf("executable %q cannot be resolved without PATH", file)
 	}
 
 	for _, dir := range filepath.SplitList(search) {
-		if path, err := matchOrdinaryExecutableFile(filepath.Join(dir, file), true); err == nil {
+		if path, err := ordinaryExecutableFile(filepath.Join(dir, file), rules); err == nil {
 			return path, nil
 		}
 	}

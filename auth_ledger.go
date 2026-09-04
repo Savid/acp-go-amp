@@ -229,12 +229,11 @@ func writeLedgerFile(file ledgerFile, contents []byte) error {
 }
 
 func (l *authLedger) syncDir() error {
-	dir, err := ledgerOpen(l.dir)
-	if err != nil {
-		return fmt.Errorf("open provider auth ledger root: %w", err)
+	if err := syncAuthLedgerDirectory(l.dir); err != nil {
+		return fmt.Errorf("sync provider auth ledger root: %w", err)
 	}
 
-	return errors.Join(dir.Sync(), dir.Close())
+	return nil
 }
 
 func (l *authLedger) list() ([]authLedgerRecord, error) {
