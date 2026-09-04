@@ -11,7 +11,6 @@ const (
 	keyMaxDimension    = "maxDimension"
 	keyImageFormats    = "imageFormats"
 	keyDocumentFormats = "documentFormats"
-	keyVersions        = "versions"
 )
 
 // perImageByteTerm is one term of the per-image decoded byte gate: a bound and
@@ -96,5 +95,5 @@ func mediaEnvelopeMeta(limits ImageLimits) map[string]any {
 // emitted only when a read root is configured, so its absence tells a host that
 // its option never reached this adapter.
 func handoffAdvertisement() map[string]any {
-	return map[string]any{keyVersions: []int64{handoffVersion}}
+	return map[string]any{handoffFieldVersion: handoffVersion}
 }

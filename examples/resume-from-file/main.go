@@ -155,6 +155,7 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 		"sessionId":          *sessionID,
 		"nativeSessionId":    nativeSessionID,
 		"cwd":                *cwd,
+		"env":                map[string]string{},
 		"createdAtUnixMilli": now,
 		"updatedAtUnixMilli": now,
 	})

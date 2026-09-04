@@ -26,7 +26,7 @@ func TestWithSeedFilesClones(t *testing.T) {
 
 func TestResolveSeedPathConfinement(t *testing.T) {
 	root := t.TempDir()
-	for _, key := range []string{"", "   ", "/abs/path", "..", "../escape", "sub/../..", "."} {
+	for _, key := range []string{"", "   ", absTestPath("abs", "path"), "..", "../escape", "sub/../..", "."} {
 		if _, _, err := resolveSeedPath(root, key); err == nil {
 			t.Fatalf("key %q accepted", key)
 		}
@@ -65,8 +65,8 @@ func TestWriteSeedFiles(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if info.Mode().Perm() != 0o600 {
-			t.Fatalf("seed %q mode = %v, want 0600", rel, info.Mode().Perm())
+		if want := hostFilePerm(0o600); info.Mode().Perm() != want {
+			t.Fatalf("seed %q mode = %v, want %v", rel, info.Mode().Perm(), want)
 		}
 	}
 	if err := writeSeedFiles(root, map[string]string{"../escape.json": "x"}); err == nil {

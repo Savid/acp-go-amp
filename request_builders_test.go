@@ -194,18 +194,17 @@ func TestSessionMetaAccumulatesRegardlessOfOptionOrder(t *testing.T) {
 // overwriting, or quietly dropping it are all answers a host cannot see.
 func TestMetaBuildersRefuseAReservedFamilyLiteral(t *testing.T) {
 	literals := []string{
-		metaRouteKey,
 		"acp-go.dev/mediaEnvelope",
 		"acp-go.dev/handoff",
 		"acp-go.dev/lifecycle",
 	}
 
 	if got := reservedFamilyLiterals(); len(got) != len(literals) {
-		t.Fatalf("reserved literal set = %#v, want the closed four %#v", got, literals)
+		t.Fatalf("reserved literal set = %#v, want %#v", got, literals)
 	}
 
 	for _, literal := range literals {
-		meta := map[string]any{literal: map[string]any{"versions": []any{1}}}
+		meta := map[string]any{literal: map[string]any{"version": 1}}
 
 		requirePanics(t, literal, func() { WithSessionMeta(meta) })
 		requirePanics(t, literal, func() { WithListSessionsMeta(meta) })

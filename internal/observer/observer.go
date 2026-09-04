@@ -65,7 +65,6 @@ type Config struct {
 type Observer struct {
 	propagator propagation.TextMapPropagator
 	tracer     trace.Tracer
-	runtime    *runtimeObserver
 
 	acpRequestCount    metric.Int64Counter
 	acpRequestDuration metric.Float64Histogram
@@ -136,7 +135,6 @@ func New(config Config) *Observer {
 		propagator: propagator,
 		tracer:     tracerProvider.Tracer(InstrumentationName, tracerOptions...),
 	}
-	observer.runtime = newRuntimeObserver(meter, "acp_go_amp")
 	observer.acpRequestCount = mustInt64Counter(meter, "acp_go_amp.acp.request.count", "ACP requests.")
 	observer.acpRequestDuration = mustFloat64Histogram(meter, "acp_go_amp.acp.request.duration", "ACP request duration.")
 	observer.genAIDuration = mustFloat64Histogram(meter, "gen_ai.client.operation.duration", "Amp prompt operation duration.")
@@ -172,12 +170,6 @@ func mustFloat64Histogram(meter metric.Meter, name string, description string) m
 
 func mustInt64UpDownCounter(meter metric.Meter, name string, description string) metric.Int64UpDownCounter {
 	instrument, _ := meter.Int64UpDownCounter(name, metric.WithDescription(description))
-
-	return instrument
-}
-
-func mustInt64Gauge(meter metric.Meter, name string, description string) metric.Int64Gauge {
-	instrument, _ := meter.Int64Gauge(name, metric.WithDescription(description))
 
 	return instrument
 }

@@ -10,7 +10,6 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -45,39 +44,21 @@ const (
 	ampArgStreamJSONInput       = "--stream-json-input"
 	ampArgExecute               = "-x"
 	ampArgNoArchiveAfterExecute = "--no-archive-after-execute"
-	adapterSupervisorModeEnv    = "ACP_GO_AMP_INTERNAL_NATIVE_SUPERVISOR"
-	adapterOneShotDeathPhaseEnv = "ACP_GO_AMP_TEST_ONE_SHOT_DEATH_PHASE"
-	adapterOneShotDeathPathEnv  = "ACP_GO_AMP_TEST_ONE_SHOT_DEATH_PATH"
-	adapterOneShotDeathStateEnv = "ACP_GO_AMP_TEST_ONE_SHOT_DEATH_STATE"
-	adapterPrivateEnvPrefix     = "ACP_" + "GO_AMP_INTERNAL_"
+	adapterPrivateEnvPrefix     = "ACP_GO_AMP_INTERNAL_"
 	scrubbedTracebackEnv        = "GOTRACEBACK"
 	scrubbedRedactionEnv        = "AMP_DISABLE_SECRET_REDACTION"
 )
 
 var (
-	commandContext             = exec.CommandContext
-	getwd                      = os.Getwd
-	closeWriteCloser           = func(closer io.Closer) error { return closer.Close() }
-	openPipe                   = os.Pipe
-	probeCache                 sync.Map
-	processTreeDescendantCount = func(tree *processTree) (int, bool) {
-		return tree.descendantCount()
-	}
-	processTreeTerminateAndWait = func(tree *processTree, timeout time.Duration) error {
-		return tree.terminateAndWait(timeout)
-	}
-	prepareProcessTree = prepareProcessTreeCommand
-	newCommandWait     = startCommandWait
-	commandWaitTimeout = defaultCloseWait
+	getwd            = os.Getwd
+	closeWriteCloser = func(closer io.Closer) error { return closer.Close() }
+	probeCache       sync.Map
 )
 
 type Options struct {
 	CLIPath      string
 	Cwd          string
 	SettingsFile string
-	// ScratchParent is the already-resolved parent for the account-login browser
-	// shim. The embedding package owns temp-directory resolution.
-	ScratchParent string
 	// Env is the complete child environment overlay this client's children
 	// receive. A prompt client carries the logical session's own values
 	// including its raw PATH; a probe or one-shot client carries the static
@@ -93,72 +74,29 @@ type Options struct {
 	// file directly: no lookup runs at all, so no later environment can select
 	// a different binary than the one that passed validation.
 	ResolvedExecutable  string
-	Isolation           *ProcessIsolation
 	OrdinaryEnvironment map[string]string
+	NativeEnvironment   map[string]string
+	ReadNativeAppendLog func(context.Context, string, uint64) ([][]byte, error)
+	StartNative         NativeStarter
 	Mode                string
 	MCPConfigPath       string
 	MaxLineBytes        int
 	// OnGoroutinePanic is invoked with the recovered value when a turn-owned
 	// goroutine panics, so the embedding agent can log the panic instead of
 	// crashing the process. A nil handler leaves the panic to propagate.
-	OnGoroutinePanic func(ctx context.Context, name string, recovered any)
-	// NewProcessSnapshotObserver registers one successfully started contained
-	// native root with the embedding agent's absolute descendant inventory.
-	NewProcessSnapshotObserver func(context.Context, ProcessInventory) ProcessSnapshotObserver
-	DarwinBestEffort           bool
-	AcquireNativeRoot          func(context.Context) (func(), error)
-	NewDarwinGeneration        func(context.Context) (*DarwinGeneration, error)
-	WritableRoot               string
-	TestOnlyAuthLoginPlatform  string
-}
-
-// ProcessInventory queries the current absolute inventory exposed by an
-// authoritative containment boundary. False means no absolute count is available.
-type ProcessInventory func() (count int, available bool)
-
-// ProcessSnapshotObserver reports inventory only for authoritative containment.
-// Refresh is optional when no absolute live inventory exists; Complete follows
-// successful completion of the authoritative boundary.
-type ProcessSnapshotObserver struct {
-	Refresh    func(context.Context)
-	Complete   func(context.Context)
-	Incomplete func()
+	OnGoroutinePanic          func(ctx context.Context, name string, recovered any)
+	WritableRoot              string
+	BrowserShim               string
+	NewProbeClient            func(context.Context) (*Client, func() error, error)
+	AfterNativeWait           func(context.Context) error
+	CleanupResidence          func() error
+	TestOnlyAuthLoginPlatform string
 }
 
 type Client struct {
-	log                         *slog.Logger
-	options                     Options
-	checkAuthLoginCompatibility func(string) error
-}
-
-func (c *Client) newProcessSnapshotObserver(ctx context.Context, tree *processTree) ProcessSnapshotObserver {
-	if c == nil || c.options.NewProcessSnapshotObserver == nil {
-		return ProcessSnapshotObserver{}
-	}
-
-	return c.options.NewProcessSnapshotObserver(ctx, func() (int, bool) {
-		return processTreeDescendantCount(tree)
-	})
-}
-
-func observeProcessTreeSnapshot(ctx context.Context, observer ProcessSnapshotObserver) {
-	if observer.Refresh != nil {
-		observer.Refresh(ctx)
-	}
-}
-
-func finishProcessTreeObservation(ctx context.Context, observer ProcessSnapshotObserver, containmentErr error) {
-	if ProcessContainmentComplete(containmentErr) {
-		if observer.Complete != nil {
-			observer.Complete(ctx)
-		}
-
-		return
-	}
-
-	if observer.Incomplete != nil {
-		observer.Incomplete()
-	}
+	log                  *slog.Logger
+	options              Options
+	checkAuthLoginSafety func(string) error
 }
 
 func NewClient(log *slog.Logger, options Options) *Client {
@@ -170,28 +108,28 @@ func NewClient(log *slog.Logger, options Options) *Client {
 		options.MaxLineBytes = defaultMaxJSONLineBytes
 	}
 
-	if options.Isolation == nil && options.OrdinaryEnvironment == nil {
+	if options.StartNative == nil && options.OrdinaryEnvironment == nil {
 		options.OrdinaryEnvironment = CaptureOrdinaryEnvironment()
 	}
 
-	checkAuthLoginCompatibility := CheckAuthLoginBrowserCompatibility
+	checkAuthLoginSafety := CheckAuthLoginBrowserSafety
 
 	if options.TestOnlyAuthLoginPlatform != "" {
 		if options.TestOnlyAuthLoginPlatform == linuxPlatform || options.TestOnlyAuthLoginPlatform == darwinPlatform {
 			// Fake Amp binaries used by the login tests model the supported
 			// variants behaviorally; they do not carry Amp's bundled JS.
-			checkAuthLoginCompatibility = func(string) error { return nil }
+			checkAuthLoginSafety = func(string) error { return nil }
 		} else {
-			checkAuthLoginCompatibility = func(path string) error {
-				return checkAuthLoginBrowserCompatibilityOnPlatform(options.TestOnlyAuthLoginPlatform, path)
+			checkAuthLoginSafety = func(path string) error {
+				return checkAuthLoginBrowserSafetyOnPlatform(options.TestOnlyAuthLoginPlatform, path)
 			}
 		}
 	}
 
 	return &Client{
-		log:                         log,
-		options:                     options,
-		checkAuthLoginCompatibility: checkAuthLoginCompatibility,
+		log:                  log,
+		options:              options,
+		checkAuthLoginSafety: checkAuthLoginSafety,
 	}
 }
 
@@ -228,8 +166,10 @@ const startupProbeTimeout = 30 * time.Second
 // passed. Every probe child runs that file, and the caller retains it for the
 // session launches that follow.
 func (c *Client) StartupProbe(ctx context.Context) (string, error) {
-	if err := c.validateProbeResidence(); err != nil {
-		return "", err
+	if c.options.NewProbeClient == nil {
+		if err := c.validateProbeResidence(); err != nil {
+			return "", err
+		}
 	}
 
 	path, version, err := c.discoverVersion(ctx)
@@ -238,15 +178,21 @@ func (c *Client) StartupProbe(ctx context.Context) (string, error) {
 	}
 
 	cacheKey := path + "\x00" + version
-	if _, ok := probeCache.Load(cacheKey); ok {
-		return path, nil
+	cacheable := c.options.StartNative == nil
+
+	if cacheable {
+		if _, ok := probeCache.Load(cacheKey); ok {
+			return path, nil
+		}
 	}
 
 	if err := c.pinnedTo(path).probeSubcommands(ctx); err != nil {
 		return "", err
 	}
 
-	probeCache.Store(cacheKey, struct{}{})
+	if cacheable {
+		probeCache.Store(cacheKey, struct{}{})
+	}
 
 	return path, nil
 }
@@ -254,8 +200,10 @@ func (c *Client) StartupProbe(ctx context.Context) (string, error) {
 // DiscoveryProbe verifies the executable and version without running commands
 // that require an authenticated Amp account.
 func (c *Client) DiscoveryProbe(ctx context.Context) (string, error) {
-	if err := c.validateProbeResidence(); err != nil {
-		return "", err
+	if c.options.NewProbeClient == nil {
+		if err := c.validateProbeResidence(); err != nil {
+			return "", err
+		}
 	}
 
 	path, _, err := c.discoverVersion(ctx)
@@ -376,7 +324,7 @@ func (c *Client) probeSubcommands(ctx context.Context) error {
 // missing-thread error means the subcommand exists (probe passes, nil); any
 // other error means the subcommand is missing or broken (probe fails).
 func methodProbeError(name string, err error, requireMissingThread bool) error {
-	if errors.Is(err, ErrProcessContainmentIncomplete) {
+	if errors.Is(err, ErrContainmentIncomplete) {
 		return fmt.Errorf("amp %s probe containment failed: %w", name, err)
 	}
 
@@ -420,7 +368,7 @@ func (c *Client) ExportThread(ctx context.Context, threadID string) (json.RawMes
 
 func (c *Client) DeleteThread(ctx context.Context, threadID string) error {
 	_, err := c.output(ctx, ampArgThreads, ampThreadDelete, threadID)
-	if err != nil && !errors.Is(err, ErrProcessContainmentIncomplete) && strings.Contains(err.Error(), "does not exist") {
+	if err != nil && !errors.Is(err, ErrContainmentIncomplete) && strings.Contains(err.Error(), "does not exist") {
 		return nil
 	}
 
@@ -467,132 +415,25 @@ func (c *Client) startTurn(ctx context.Context, args []string, input any) (*Turn
 		return nil, err
 	}
 
-	cmd := commandContext(context.Background(), path, args...)
-	cmd.Dir = cwd
-	cmd.Env = environment
-
-	if cmd.Stdin != nil {
-		return nil, errors.New("create amp stdin: exec: Stdin already set")
-	}
-
-	if cmd.Stdout != nil {
-		return nil, errors.New("create amp stdout: exec: Stdout already set")
-	}
-
-	if cmd.Stderr != nil {
-		return nil, errors.New("create amp stderr: exec: Stderr already set")
-	}
-
-	launch, err := c.prepareProcessLaunch(ctx, cmd)
+	process, err := c.startNative(ctx, NativeRequest{
+		Executable: path, Arguments: append([]string(nil), args...),
+		Environment: environment, WorkingDirectory: cwd,
+	})
 	if err != nil {
-		return nil, err
-	}
-
-	cmd = launch.cmd
-	if cmd.Stdin != nil {
-		return nil, errors.Join(errors.New("create amp stdin: exec: Stdin already set"), launch.close())
-	}
-
-	if cmd.Stdout != nil {
-		return nil, errors.Join(errors.New("create amp stdout: exec: Stdout already set"), launch.close())
-	}
-
-	if cmd.Stderr != nil {
-		return nil, errors.Join(errors.New("create amp stderr: exec: Stderr already set"), launch.close())
-	}
-
-	stdinReader, stdin, err := openPipe()
-	if err != nil {
-		closeErr := launch.close()
-
-		return nil, errors.Join(fmt.Errorf("create amp stdin: %w", err), closeErr)
-	}
-
-	cmd.Stdin = stdinReader
-
-	stdout, stdoutWriter, err := openPipe()
-	if err != nil {
-		_ = stdinReader.Close()
-		_ = stdin.Close()
-		closeErr := launch.close()
-
-		return nil, errors.Join(fmt.Errorf("create amp stdout: %w", err), closeErr)
-	}
-
-	cmd.Stdout = stdoutWriter
-
-	stderr, stderrWriter, err := openPipe()
-	if err != nil {
-		_ = stdinReader.Close()
-		_ = stdin.Close()
-		_ = stdout.Close()
-		_ = stdoutWriter.Close()
-		closeErr := launch.close()
-
-		return nil, errors.Join(fmt.Errorf("create amp stderr: %w", err), closeErr)
-	}
-
-	cmd.Stderr = stderrWriter
-	cmd.WaitDelay = defaultCloseKillAfter
-
-	if contextErr := ctx.Err(); contextErr != nil {
-		_ = stdinReader.Close()
-		_ = stdin.Close()
-		_ = stdout.Close()
-		_ = stdoutWriter.Close()
-		_ = stderr.Close()
-		_ = stderrWriter.Close()
-
-		return nil, errors.Join(contextErr, launch.close())
-	}
-
-	tree, err := startProcessTree(launch)
-	if err != nil {
-		_ = stdinReader.Close()
-		_ = stdin.Close()
-		_ = stdout.Close()
-		_ = stdoutWriter.Close()
-		_ = stderr.Close()
-		_ = stderrWriter.Close()
-
 		return nil, fmt.Errorf("start amp: %w", err)
 	}
 
-	_ = stdinReader.Close()
-	_ = stdoutWriter.Close()
-	_ = stderrWriter.Close()
-
-	var processObserver ProcessSnapshotObserver
-
-	func() {
-		defer func() {
-			if recovered := recover(); recovered != nil {
-				_ = stdin.Close()
-				_ = stdout.Close()
-				_ = stderr.Close()
-				containmentErr := processTreeTerminateAndWait(tree, defaultCloseWait)
-				finishProcessTreeObservation(context.Background(), processObserver, containmentErr)
-
-				panic(recovered)
-			}
-		}()
-
-		processObserver = c.newProcessSnapshotObserver(ctx, tree)
-		observeProcessTreeSnapshot(ctx, processObserver)
-	}()
-
 	turn := &Turn{
-		log:             c.log,
-		cmd:             cmd,
-		tree:            tree,
-		processObserver: processObserver,
-		stdin:           stdin,
-		stdout:          stdout,
-		stderr:          stderr,
-		maxLineBytes:    c.options.MaxLineBytes,
-		messages:        make(chan Message),
-		errs:            make(chan error, 4),
-		onPanic:         c.options.OnGoroutinePanic,
+		log:           c.log,
+		process:       process,
+		authoritative: c.options.StartNative != nil,
+		stdin:         process.Stdin(),
+		stdout:        process.Stdout(),
+		stderr:        process.Stderr(),
+		maxLineBytes:  c.options.MaxLineBytes,
+		messages:      make(chan Message),
+		errs:          make(chan error, 4),
+		onPanic:       c.options.OnGoroutinePanic,
 	}
 	turn.start(ctx)
 
@@ -605,7 +446,7 @@ func (c *Client) startTurn(ctx context.Context, args []string, input any) (*Turn
 		return nil, errors.Join(err, turn.Close())
 	}
 
-	if err := closeWriteCloser(stdin); err != nil {
+	if err := closeWriteCloser(turn.stdin); err != nil {
 		return nil, errors.Join(fmt.Errorf("close amp stdin: %w", err), turn.Close())
 	}
 
@@ -643,6 +484,23 @@ func (c *Client) outputAtPath(ctx context.Context, path string, args ...string) 
 		return nil, err
 	}
 
+	if c.options.NewProbeClient != nil {
+		probe, cleanup, err := c.options.NewProbeClient(ctx)
+		if err != nil {
+			return nil, err
+		}
+
+		if err := probe.validateProbeResidence(); err != nil {
+			return nil, errors.Join(err, cleanup())
+		}
+
+		probe.options.ResolvedExecutable = path
+		probe.options.NewProbeClient = nil
+		out, runErr := probe.outputAtPath(ctx, path, args...)
+
+		return out, errors.Join(runErr, cleanup())
+	}
+
 	cwd := c.commandCwd()
 
 	environment, err := c.buildEnvironment(c.options.Env, cwd)
@@ -650,183 +508,124 @@ func (c *Client) outputAtPath(ctx context.Context, path string, args ...string) 
 		return nil, err
 	}
 
-	cmd := commandContext(context.Background(), path, args...)
-	cmd.Dir = cwd
-	cmd.Env = environment
-
-	launch, err := c.prepareProcessLaunch(ctx, cmd)
+	process, err := c.startNative(ctx, NativeRequest{
+		Executable: path, Arguments: append([]string(nil), args...),
+		Environment: environment, WorkingDirectory: cwd,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("amp %s: %w", strings.Join(args, " "), err)
 	}
 
-	cmd = launch.cmd
-	if cmd.Stdin != nil {
-		return nil, errors.Join(errors.New("create amp stdin: exec: Stdin already set"), launch.close())
-	}
-
-	if cmd.Stdout != nil {
-		return nil, errors.Join(errors.New("create amp stdout: exec: Stdout already set"), launch.close())
-	}
-
-	if cmd.Stderr != nil {
-		return nil, errors.Join(errors.New("create amp stderr: exec: Stderr already set"), launch.close())
-	}
+	stdin := process.Stdin()
+	stdoutStream := process.Stdout()
+	stderrStream := process.Stderr()
+	_ = stdin.Close()
 
 	var stdout, stderr bytes.Buffer
 
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	// A provider descendant may inherit stdout/stderr after the native root
-	// exits. Bound exec's copy-goroutine wait so the selected containment
-	// boundary can settle instead of deadlocking in Cmd.Wait.
-	cmd.WaitDelay = defaultCloseKillAfter
+	readDone := make(chan struct{}, 2)
 
-	if contextErr := ctx.Err(); contextErr != nil {
-		return nil, errors.Join(contextErr, launch.close())
-	}
+	go func() { _, _ = io.Copy(&stdout, stdoutStream); readDone <- struct{}{} }()
+	go func() { _, _ = io.Copy(&stderr, stderrStream); readDone <- struct{}{} }()
 
-	tree, err := startProcessTree(launch)
-	if err != nil {
-		return nil, fmt.Errorf("amp %s: %w", strings.Join(args, " "), err)
-	}
+	result, waitErr := process.Wait(ctx)
+	terminal := waitErr == nil
 
-	processObserver := c.newProcessSnapshotObserver(ctx, tree)
-	observeProcessTreeSnapshot(ctx, processObserver)
+	detachedWait := errors.Is(waitErr, context.Canceled) || errors.Is(waitErr, context.DeadlineExceeded)
+	if waitErr != nil && (c.options.StartNative != nil || detachedWait) {
+		initialWaitErr := waitErr
+		revokeCtx, cancelRevoke := context.WithTimeout(context.Background(), defaultCloseWait)
+		revokeErr := process.Revoke(revokeCtx)
 
-	waiter := tree.commandWait()
-	waitErr, completed := waiter.await(ctx)
+		cancelRevoke()
 
-	var cancellationErr error
+		terminalCtx, cancelTerminal := context.WithTimeout(context.Background(), defaultCloseWait)
+		result, waitErr = process.Wait(terminalCtx)
 
-	if !completed {
-		cancellationErr = errors.Join(waitErr, tree.kill())
-		waitErr = nil
-	}
+		cancelTerminal()
 
-	observeProcessTreeSnapshot(ctx, processObserver)
+		if waitErr != nil {
+			waitErr = errors.Join(initialWaitErr, revokeErr, waitErr, ErrContainmentIncomplete)
+		} else {
+			terminal = true
 
-	containmentErr := processTreeTerminateAndWait(tree, defaultCloseWait)
-	if ProcessContainmentComplete(containmentErr) && !completed {
-		waitCtx, cancelWait := context.WithTimeout(context.Background(), commandWaitTimeout)
-		waitErr, completed = waiter.await(waitCtx)
-
-		cancelWait()
-
-		if !completed {
-			containmentErr = errors.Join(
-				containmentErr,
-				fmt.Errorf("%w: wait for contained Amp command: %v", ErrProcessContainmentIncomplete, waitErr),
-			)
-			waitErr = nil
+			if detachedWait {
+				waitErr = revokeErr
+			} else {
+				waitErr = errors.Join(initialWaitErr, revokeErr)
+			}
 		}
 	}
 
-	finishProcessTreeObservation(ctx, processObserver, containmentErr)
+	// A wait that came back with an exit code, a signal, or a revocation reached
+	// the child, so nothing is left writing to the pipes: the readers see EOF on
+	// their own and keep every byte the child wrote before it exited. Only a
+	// wait that never reached the child needs its readers unblocked by a close
+	// underneath them, and a command whose output is closed out from under it
+	// answers with the diagnosis it never printed — an empty version, a
+	// truncated thread listing, a missing-thread refusal with no stderr.
+	reaped := terminal || result != (NativeResult{})
 
-	waitErr = normalizeWaitDelay(waitErr, containmentErr)
+	if !reaped {
+		_ = stdoutStream.Close()
+		_ = stderrStream.Close()
+	}
 
-	if cancellationErr != nil || waitErr != nil || containmentErr != nil {
-		var msg string
-		if completed {
-			msg = strings.TrimSpace(stripANSI(stderr.String()))
-		}
+	<-readDone
+	<-readDone
 
+	if reaped {
+		_ = stdoutStream.Close()
+		_ = stderrStream.Close()
+	}
+
+	if waitErr != nil || result.ExitCode != 0 || result.Signal != 0 || result.Revoked {
+		msg := strings.TrimSpace(stripANSI(stderr.String()))
 		if msg == "" {
-			msg = errors.Join(cancellationErr, waitErr, containmentErr).Error()
+			msg = fmt.Sprintf("exit code %d signal %d", result.ExitCode, result.Signal)
 		}
 
-		return nil, errors.Join(
-			fmt.Errorf("amp %s: %s", strings.Join(args, " "), msg),
-			cancellationErr,
-			containmentErr,
-		)
+		return nil, errors.Join(fmt.Errorf("amp %s: %s", strings.Join(args, " "), msg), waitErr)
 	}
 
 	return stdout.Bytes(), nil
 }
 
-func (c *Client) prepareProcessLaunch(ctx context.Context, cmd *exec.Cmd) (*processTreeCommand, error) {
-	if c.options.Isolation != nil {
-		if err := validateProcessIsolation(c.options.Isolation); err != nil {
-			return nil, fmt.Errorf("validate Amp process isolation: %w", err)
-		}
+func (c *Client) startNative(ctx context.Context, request NativeRequest) (NativeProcess, error) {
+	starter := c.options.StartNative
+	if starter == nil {
+		starter = startOrdinaryNative
 	}
 
-	if c.options.DarwinBestEffort && c.options.Isolation != nil {
-		return nil, errors.New("darwin best-effort containment cannot be combined with process isolation")
-	}
-
-	var generation *DarwinGeneration
-
-	if c.options.DarwinBestEffort {
-		if c.options.NewDarwinGeneration == nil {
-			return nil, fmt.Errorf("%w: Darwin generation factory is unavailable", ErrProcessContainmentIncomplete)
-		}
-
-		var err error
-
-		generation, err = c.options.NewDarwinGeneration(ctx)
-		if err != nil {
-			return nil, err
-		}
-
-		if err := generation.prepareCommand(cmd, c.options.WritableRoot); err != nil {
-			finishErr := generation.finish(true)
-
-			return nil, errors.Join(err, finishErr)
-		}
-	}
-
-	launch, err := prepareProcessTree(cmd, processLaunchOptions{
-		DarwinBestEffort: c.options.DarwinBestEffort,
-		Generation:       generation,
-		Isolation:        c.options.Isolation,
-	})
+	process, err := starter(ctx, request)
 	if err != nil {
-		finishErr := generation.finish(true)
-
-		return nil, errors.Join(err, finishErr)
+		return nil, err
 	}
 
-	if c.options.Isolation != nil && !launch.nativeIsolation {
-		if err := applyProcessIsolation(launch.cmd, c.options.Isolation); err != nil {
-			closeErr := launch.close()
-
-			return nil, errors.Join(fmt.Errorf("apply Amp process isolation: %w", err), closeErr)
-		}
+	if process == nil {
+		return nil, errors.New("native process returned unusable host stdio")
 	}
 
-	launch.nativeEnv = append([]string(nil), cmd.Env...)
-	launch.onStartCancel = func(cancel func()) func() bool { return context.AfterFunc(ctx, cancel) }
-	launch.startError = ctx.Err
-	launch.bestEffort = c.options.DarwinBestEffort
-	launch.generation = generation
-	launch.acquireNative = func() (func(), error) {
-		if c.options.AcquireNativeRoot == nil {
-			return func() {}, nil
+	tracked := trackProcess(process)
+	if tracked.Stdin() == nil || tracked.Stdout() == nil || tracked.Stderr() == nil {
+		revokeCtx, cancelRevoke := context.WithTimeout(context.Background(), defaultCloseWait)
+		revokeErr := tracked.Revoke(revokeCtx)
+
+		cancelRevoke()
+
+		waitCtx, cancelWait := context.WithTimeout(context.Background(), defaultCloseWait)
+		_, waitErr := tracked.Wait(waitCtx)
+
+		cancelWait()
+
+		if c.options.StartNative != nil && waitErr != nil {
+			waitErr = errors.Join(waitErr, ErrContainmentIncomplete)
 		}
 
-		release, acquireErr := c.options.AcquireNativeRoot(ctx)
-		if acquireErr != nil {
-			return nil, acquireErr
-		}
-
-		if release == nil {
-			return nil, errors.New("native root hook returned nil release")
-		}
-
-		return release, nil
+		return nil, errors.Join(errors.New("native process returned unusable host stdio"), revokeErr, waitErr)
 	}
 
-	return launch, nil
-}
-
-func normalizeWaitDelay(waitErr error, containmentErr error) error {
-	if errors.Is(waitErr, exec.ErrWaitDelay) && containmentErr == nil {
-		return nil
-	}
-
-	return waitErr
+	return tracked, nil
 }
 
 func (c *Client) globalArgs() []string {
@@ -875,7 +674,7 @@ func Discover(ctx context.Context, cliPath string, environments ...[]string) (st
 // overlay — and never against the logical session's own environment.
 func (c *Client) resolveExecutable(ctx context.Context, cwd string) (string, error) {
 	if retained := c.options.ResolvedExecutable; retained != "" {
-		if !filepath.IsAbs(retained) {
+		if c.options.StartNative == nil && !filepath.IsAbs(retained) {
 			return "", fmt.Errorf("retained amp harness %q is not an absolute path", retained)
 		}
 
@@ -891,8 +690,13 @@ func (c *Client) resolveExecutable(ctx context.Context, cwd string) (string, err
 }
 
 func (c *Client) discover(ctx context.Context, environment []string, cwd string) (string, error) {
-	if c.options.Isolation != nil {
-		return Discover(ctx, c.options.CLIPath, environment)
+	if c.options.StartNative != nil {
+		file := strings.TrimSpace(c.options.CLIPath)
+		if file == "" {
+			file = ampExecutableName
+		}
+
+		return file, nil
 	}
 
 	file := strings.TrimSpace(c.options.CLIPath)
@@ -931,23 +735,9 @@ func BuildEnv(overrides map[string]string, cwd string) []string {
 	return env
 }
 
-// BuildEnvWithIsolation constructs the complete child environment from the
-// policy base and explicit overlays. Ambient os.Environ is never consulted.
-func BuildEnvWithIsolation(isolation *ProcessIsolation, overrides map[string]string, cwd string) ([]string, error) {
-	return buildIsolatedEnvironment(isolation, cwd, overrides)
-}
-
-func buildIsolatedEnvironment(isolation *ProcessIsolation, cwd string, phases ...map[string]string) ([]string, error) {
-	if err := validateProcessIsolation(isolation); err != nil {
-		return nil, err
-	}
-
-	return buildEnvironment(cwd, append([]map[string]string{isolation.BaseEnvironment}, phases...)...)
-}
-
 func (c *Client) buildEnvironment(overrides map[string]string, cwd string) ([]string, error) {
-	if c.options.Isolation != nil {
-		return buildIsolatedEnvironment(c.options.Isolation, cwd, overrides)
+	if c.options.StartNative != nil {
+		return buildEnvironment(cwd, c.options.NativeEnvironment, overrides)
 	}
 
 	return buildEnvironment(cwd, c.options.OrdinaryEnvironment, overrides)
@@ -964,16 +754,11 @@ func buildEnvironment(cwd string, phases ...map[string]string) ([]string, error)
 	}
 
 	values := make(map[string]string, capacity)
-	keys := make([]string, 0, capacity)
 
 	set := func(key, value string) {
 		key = launchEnvironmentKey(key)
 		if isPrivateAdapterEnv(key) || isScrubbedEnv(key) {
 			return
-		}
-
-		if _, ok := values[key]; !ok {
-			keys = append(keys, key)
 		}
 
 		values[key] = value
@@ -992,6 +777,13 @@ func buildEnvironment(cwd string, phases ...map[string]string) ([]string, error)
 	if cwd != "" {
 		set("PWD", cwd)
 	}
+
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+
+	sort.Strings(keys)
 
 	out := make([]string, 0, len(keys))
 	for _, key := range keys {
@@ -1027,34 +819,7 @@ func isScrubbedEnv(key string) bool {
 }
 
 func isPrivateAdapterEnv(key string) bool {
-	if strings.HasPrefix(strings.ToUpper(key), adapterPrivateEnvPrefix) {
-		return true
-	}
-
-	switch key {
-	case adapterSupervisorModeEnv,
-		adapterOneShotDeathPhaseEnv,
-		adapterOneShotDeathPathEnv,
-		adapterOneShotDeathStateEnv:
-		return true
-	default:
-		return false
-	}
-}
-
-func withoutPrivateAdapterEnv(entries []string) []string {
-	env := make([]string, 0, len(entries))
-
-	for _, entry := range entries {
-		key, _, ok := strings.Cut(entry, "=")
-		if ok && isPrivateAdapterEnv(key) {
-			continue
-		}
-
-		env = append(env, entry)
-	}
-
-	return env
+	return strings.HasPrefix(strings.ToUpper(key), adapterPrivateEnvPrefix)
 }
 
 func versionAtLeast(got string, floor string) bool {
@@ -1104,24 +869,23 @@ func versionParts(value string) []int64 {
 }
 
 type Turn struct {
-	log             *slog.Logger
-	cmd             *exec.Cmd
-	tree            *processTree
-	stdin           io.WriteCloser
-	stdout          io.ReadCloser
-	stderr          io.ReadCloser
-	maxLineBytes    int
-	messages        chan Message
-	errs            chan error
-	stderrMu        sync.Mutex
-	stderrTail      bytes.Buffer
-	stderrDone      chan struct{}
-	waitOnce        sync.Once
-	waitState       *commandWait
-	waitFunc        func() error
-	closeOnce       sync.Once
-	onPanic         func(ctx context.Context, name string, recovered any)
-	processObserver ProcessSnapshotObserver
+	log           *slog.Logger
+	process       NativeProcess
+	authoritative bool
+	stdin         io.WriteCloser
+	stdout        io.ReadCloser
+	stderr        io.ReadCloser
+	maxLineBytes  int
+	messages      chan Message
+	errs          chan error
+	stderrMu      sync.Mutex
+	stderrTail    bytes.Buffer
+	stderrDone    chan struct{}
+	stdoutDone    chan struct{}
+	stopTerminal  context.CancelFunc
+	closeOnce     sync.Once
+	closeErr      error
+	onPanic       func(ctx context.Context, name string, recovered any)
 }
 
 // recoverGoroutine is deferred at the top of every turn-owned goroutine. It
@@ -1180,16 +944,26 @@ func (t *Turn) Send(ctx context.Context, payload any) error {
 
 func (t *Turn) start(ctx context.Context) {
 	t.stderrDone = make(chan struct{})
+	t.stdoutDone = make(chan struct{})
+
+	terminalCtx, stopTerminal := context.WithCancel(context.Background())
+	t.stopTerminal = stopTerminal
+
 	go t.drainStderr(ctx)
-	go t.readStdout(ctx)
+	go t.readStdout(ctx, terminalCtx)
 }
 
-func (t *Turn) readStdout(ctx context.Context) {
+func (t *Turn) readStdout(ctx context.Context, terminalCtx context.Context) {
 	defer t.recoverGoroutine(ctx, "amp stdout reader")
+	defer func() {
+		if t.stdoutDone != nil {
+			close(t.stdoutDone)
+		}
+	}()
 	defer close(t.messages)
 	defer close(t.errs)
 	defer func() {
-		if err := t.wait(); err != nil {
+		if err := t.wait(terminalCtx); err != nil {
 			select {
 			case <-t.stderrDone:
 			case <-time.After(defaultCloseKillAfter):
@@ -1221,6 +995,8 @@ func (t *Turn) readStdout(ctx context.Context) {
 			t.sendErr(ctx.Err())
 
 			return
+		case <-terminalCtx.Done():
+			return
 		}
 	}
 
@@ -1243,158 +1019,83 @@ func (t *Turn) drainStderr(ctx context.Context) {
 	}
 }
 
-func (t *Turn) Interrupt(ctx context.Context, killAfter time.Duration) error {
-	if t.cmd == nil || t.cmd.Process == nil {
+func (t *Turn) Interrupt(ctx context.Context) error {
+	if t.process == nil {
 		return nil
 	}
 
-	interruptErr := t.interruptProcess()
-	waiter := t.commandWait()
+	_ = t.stdin.Close()
+	revokeErr := t.process.Revoke(ctx)
 
-	if killAfter <= 0 {
-		killErr := t.killProcess()
-		containmentErr := processTreeTerminateAndWait(t.tree, defaultCloseWait)
+	result, waitErr := t.process.Wait(ctx)
+	waitErr = markDetachedWaitIncomplete(waitErr)
 
-		var waitErr error
-
-		if ProcessContainmentComplete(containmentErr) {
-			completedErr, _ := waiter.await(ctx)
-			waitErr = interruptWaitResult(completedErr)
-		}
-
-		return errors.Join(interruptErr, killErr, waitErr, containmentErr)
+	if (result.Revoked || result.Signal != 0) && !errors.Is(waitErr, ErrContainmentIncomplete) {
+		waitErr = nil
 	}
 
-	timer := time.NewTimer(killAfter)
-	defer timer.Stop()
-
-	var waitErr error
-
-	select {
-	case <-waiter.done:
-		waitErr = interruptWaitResult(waiter.err)
-	case <-timer.C:
-		waitErr = t.killProcess()
-	case <-ctx.Done():
-		waitErr = ctx.Err()
+	if result.Revoked && waitErr == nil && (errors.Is(revokeErr, context.Canceled) || errors.Is(revokeErr, context.DeadlineExceeded)) {
+		revokeErr = nil
 	}
 
-	// Direct-child exit does not complete the selected containment boundary.
-	// Drive the platform cleanup once before the cancel control path returns;
-	// Turn.Close joins the same memoized result.
-	containmentErr := processTreeTerminateAndWait(t.tree, defaultCloseWait)
-	if ProcessContainmentComplete(containmentErr) {
-		completedErr, _ := waiter.await(ctx)
-		waitErr = errors.Join(waitErr, interruptWaitResult(completedErr))
-	}
-
-	return errors.Join(interruptErr, waitErr, containmentErr)
-}
-
-func interruptWaitResult(err error) error {
-	if expectedExit(err) {
-		return nil
-	}
-
-	return err
+	return errors.Join(revokeErr, waitErr)
 }
 
 func (t *Turn) Close() error {
-	var err error
-
 	t.closeOnce.Do(func() {
-		var boundaryErr error
+		ctx, cancel := context.WithTimeout(context.Background(), defaultCloseWait)
+		t.closeErr = t.closeWithContext(ctx)
 
-		if t.cmd != nil && t.cmd.Process != nil {
-			ctx, cancel := context.WithTimeout(context.Background(), defaultCloseKillAfter+defaultCloseWait)
-			boundaryErr = t.Interrupt(ctx, defaultCloseKillAfter)
-
-			cancel()
-
-			err = errors.Join(err, boundaryErr)
-		}
-
-		if t.stdin != nil {
-			err = errors.Join(err, t.stdin.Close())
-		}
-
-		if t.stdout != nil {
-			err = errors.Join(err, t.stdout.Close())
-		}
-
-		if t.stderr != nil {
-			err = errors.Join(err, t.stderr.Close())
-		}
-
-		if ProcessContainmentComplete(boundaryErr) {
-			waitCtx, cancelWait := context.WithTimeout(context.Background(), commandWaitTimeout)
-			waitErr, completed := t.waitWithin(waitCtx)
-
-			cancelWait()
-
-			if !completed {
-				waitErr = fmt.Errorf("%w: wait for Amp command close: %v", ErrProcessContainmentIncomplete, waitErr)
-			}
-
-			err = errors.Join(err, waitErr)
-		}
-
-		if t.tree != nil && ProcessContainmentComplete(err) {
-			observeProcessTreeSnapshot(context.Background(), t.processObserver)
-			containmentErr := processTreeTerminateAndWait(t.tree, defaultCloseWait)
-			err = errors.Join(err, containmentErr)
-		}
-
-		finishProcessTreeObservation(context.Background(), t.processObserver, err)
+		cancel()
 	})
+
+	return t.closeErr
+}
+
+func (t *Turn) closeWithContext(ctx context.Context) error {
+	var err error
+	if t.process != nil {
+		err = errors.Join(err, t.Interrupt(ctx))
+	}
+
+	if t.stopTerminal != nil {
+		t.stopTerminal()
+	}
+
+	if t.stdin != nil {
+		err = errors.Join(err, t.stdin.Close())
+	}
+
+	if t.stdout != nil {
+		err = errors.Join(err, t.stdout.Close())
+	}
+
+	if t.stderr != nil {
+		err = errors.Join(err, t.stderr.Close())
+	}
+
+	if t.stdoutDone != nil {
+		<-t.stdoutDone
+	}
+
+	if t.stderrDone != nil {
+		<-t.stderrDone
+	}
 
 	return err
 }
 
-func (t *Turn) interruptProcess() error {
-	if t.tree != nil {
-		return t.tree.interrupt()
+func (t *Turn) wait(ctx context.Context) error {
+	if t.process == nil {
+		return nil
 	}
 
-	return interruptProcess(t.cmd)
-}
-
-func (t *Turn) killProcess() error {
-	if t.tree != nil {
-		return t.tree.kill()
+	result, err := t.process.Wait(ctx)
+	if err == nil && (result.ExitCode != 0 || result.Signal != 0 || result.Revoked) {
+		return fmt.Errorf("native exit code %d signal %d revoked %t", result.ExitCode, result.Signal, result.Revoked)
 	}
 
-	return killProcess(t.cmd)
-}
-
-func (t *Turn) wait() error {
-	waiter := t.commandWait()
-	<-waiter.done
-
-	return waiter.err
-}
-
-func (t *Turn) waitWithin(ctx context.Context) (error, bool) {
-	return t.commandWait().await(ctx)
-}
-
-func (t *Turn) commandWait() *commandWait {
-	t.waitOnce.Do(func() {
-		if t.tree != nil {
-			t.waitState = t.tree.commandWait()
-
-			return
-		}
-
-		wait := t.waitFunc
-		if wait == nil && t.cmd != nil {
-			wait = t.cmd.Wait
-		}
-
-		t.waitState = newCommandWait(wait)
-	})
-
-	return t.waitState
+	return err
 }
 
 func (t *Turn) sendErr(err error) {
@@ -1440,16 +1141,6 @@ func (t *Turn) exitError(err error) error {
 	}
 
 	return fmt.Errorf("amp process exited: %w: %s", err, detail)
-}
-
-func expectedExit(err error) bool {
-	if err == nil || errors.Is(err, context.Canceled) {
-		return true
-	}
-
-	var exitErr *exec.ExitError
-
-	return errors.As(err, &exitErr)
 }
 
 func stripANSI(s string) string {

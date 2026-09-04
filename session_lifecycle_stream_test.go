@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
-	nativeamp "github.com/savid/acp-go-amp/internal/amp"
 	"github.com/savid/acp-go-amp/internal/lifecycle"
 	"github.com/stretchr/testify/require"
 )
@@ -43,15 +42,23 @@ func lifecycleStreamSession(t *testing.T, answer lifecycle.Negotiated, conn agen
 	return &agentSession{agent: agent, id: "sess-stream"}
 }
 
-// authoritativeAnswer is the answer a configuration whose containment enumerates
-// the whole descendant tree gives.
+// authoritativeAnswer is the exact lifecycle capability.
 func authoritativeAnswer() lifecycle.Negotiated {
 	return lifecycle.Negotiated{
-		Versions:                []int{1},
+		Version:                 1,
 		AuthoritativeQuiescence: true,
 		QuiescenceSource:        lifecycle.ProofClassProcessContainment,
 		ActivityKinds:           []lifecycle.ActivityKind{},
 	}
+}
+
+func authoritativeLifecycleStreamSession(t *testing.T, conn agentClient) *agentSession {
+	t.Helper()
+	session := lifecycleStreamSession(t, authoritativeAnswer(), conn)
+	session.agent.options.HostAuthority = newRecordingAuthority()
+	session.agent.options.hostAuthoritySupplied = true
+
+	return session
 }
 
 // TestPromptStreamIsAbsentWithoutAnAnswer pins that a connection the host offered
@@ -64,7 +71,7 @@ func TestPromptStreamIsAbsentWithoutAnAnswer(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, incarnation)
 	require.NoError(t, incarnation.accept(t.Context(), lifecycle.Submission{}))
-	require.NoError(t, incarnation.settle(t.Context(), lifecycleOutcome{}, nativeamp.ContainmentProof{}))
+	require.NoError(t, incarnation.settle(t.Context(), lifecycleOutcome{}, false))
 }
 
 // TestPromptStreamFailsWhenItCannotMintAnIncarnation pins that a stream this
@@ -118,7 +125,7 @@ func TestPromptStreamFailsThePromptOnAnEmissionFailure(t *testing.T) {
 		require.NoError(t, err)
 		require.ErrorContains(t, incarnation.settle(t.Context(),
 			lifecycleOutcome{stopReason: "end_turn", outcome: lifecycle.OutcomeSuccess},
-			nativeamp.ContainmentProof{}), "transport refused")
+			false), "transport refused")
 	}
 }
 
@@ -135,7 +142,7 @@ func TestPromptStreamRefusesAnEventItCannotSupport(t *testing.T) {
 	// Settling a turn no acceptance ever opened names an entity the stream never
 	// introduced.
 	err = incarnation.settle(t.Context(),
-		lifecycleOutcome{stopReason: "end_turn", outcome: lifecycle.OutcomeSuccess}, nativeamp.ContainmentProof{})
+		lifecycleOutcome{stopReason: "end_turn", outcome: lifecycle.OutcomeSuccess}, false)
 
 	var requestErr *acp.RequestError
 
@@ -147,26 +154,6 @@ func TestPromptStreamRefusesAnEventItCannotSupport(t *testing.T) {
 	require.Len(t, client.envelopes(t), 1, "a refused event is never published")
 }
 
-func TestTerminalPreparationRefusesAnInvalidQuiescenceAfterIdle(t *testing.T) {
-	client := &lifecycleClient{}
-	session := lifecycleStreamSession(t, authoritativeAnswer(), client)
-	incarnation, err := session.openPromptStream(t.Context())
-	require.NoError(t, err)
-	require.NoError(t, incarnation.accept(t.Context(), lifecycle.Submission{SubmissionID: "s", ClientNonce: "n"}))
-
-	// The stream reducer retains the negotiated process-containment authority.
-	// Mutating only the publisher-side source to a class the closed set does not
-	// contain makes the idle valid and the following quiescence claim invalid,
-	// pinning the second preparation seam.
-	incarnation.negotiated.QuiescenceSource = lifecycle.ProofClass("quiet-for-a-while")
-	_, err = incarnation.terminalDelivery(
-		lifecycleOutcome{stopReason: "end_turn", outcome: lifecycle.OutcomeSuccess},
-		nativeamp.ContainmentProof{Root: 42, Proven: true},
-	)
-	require.ErrorContains(t, err, string(lifecycle.ViolationMalformedEnvelope))
-	require.Len(t, client.envelopes(t), 3, "prepared terminal facts are not delivered before the whole pair validates")
-}
-
 // TestFencedIncarnationPublishesNothingFurther pins the end-of-emissions mark a
 // prompt leaves behind. A prompt is one contained amp process, so the incarnation
 // ends with the prompt: an event attempted afterwards is refused at this adapter
@@ -174,14 +161,14 @@ func TestTerminalPreparationRefusesAnInvalidQuiescenceAfterIdle(t *testing.T) {
 // sees it. The absent stream fences as harmlessly as it emits.
 func TestFencedIncarnationPublishesNothingFurther(t *testing.T) {
 	client := &lifecycleClient{}
-	session := lifecycleStreamSession(t, authoritativeAnswer(), client)
+	session := authoritativeLifecycleStreamSession(t, client)
 
 	incarnation, err := session.openPromptStream(t.Context())
 	require.NoError(t, err)
 	require.NoError(t, incarnation.accept(t.Context(), lifecycle.Submission{SubmissionID: "s", ClientNonce: "n"}))
 	require.NoError(t, incarnation.settle(t.Context(),
 		lifecycleOutcome{stopReason: "end_turn", outcome: lifecycle.OutcomeSuccess},
-		nativeamp.ContainmentProof{Root: 4242, Proven: true}))
+		true))
 	require.True(t, incarnation.stream.Fenced(), "terminal delivery ends the incarnation")
 
 	published := len(client.envelopes(t))
@@ -203,19 +190,18 @@ func TestFencedIncarnationPublishesNothingFurther(t *testing.T) {
 	absent.fence()
 }
 
-// TestAuthoritativeStreamStatesTheProvenBoundary pins the two facts only a
-// whole-tree proof produces: the snapshot opens on a certified boundary, and the
-// settled turn is followed by the quiescence fact the completed proof produced.
+// TestAuthoritativeStreamStatesTheProvenBoundary pins the two facts a completed
+// authority boundary produces.
 func TestAuthoritativeStreamStatesTheProvenBoundary(t *testing.T) {
 	client := &lifecycleClient{}
-	session := lifecycleStreamSession(t, authoritativeAnswer(), client)
+	session := authoritativeLifecycleStreamSession(t, client)
 
 	incarnation, err := session.openPromptStream(t.Context())
 	require.NoError(t, err)
 	require.NoError(t, incarnation.accept(t.Context(), lifecycle.Submission{SubmissionID: "s", ClientNonce: "n"}))
 	require.NoError(t, incarnation.settle(t.Context(),
 		lifecycleOutcome{stopReason: "end_turn", outcome: lifecycle.OutcomeSuccess},
-		nativeamp.ContainmentProof{Root: 4242, Proven: true}))
+		true))
 
 	require.Equal(t, []string{
 		"lifecycle_snapshot", "prompt_accepted", "state_update", "state_update", "quiescence_update",
@@ -232,26 +218,25 @@ func TestAuthoritativeStreamStatesTheProvenBoundary(t *testing.T) {
 	settled, ok := envelopes[4]["event"].(map[string]any)
 	require.True(t, ok)
 	require.Equal(t, uint64(4), settled["watermark"])
-	require.Equal(t, "amp-process-tree/4242", settled["barrier"])
+	require.Equal(t, "amp-process-tree/authority", settled["barrier"])
 
 	state := reduceEmittedStream(t, client, authoritativeAnswer()).State()
 	require.True(t, state.Quiescence.Certified)
 	require.Equal(t, uint64(4), state.Quiescence.Watermark)
 }
 
-// TestUnprovenVacancyStatesNoQuiescenceFact pins that an advertised proof class
-// is still only emitted when the proof actually completed: a boundary that
-// enumerated nothing states nothing.
+// TestUnprovenVacancyStatesNoQuiescenceFact pins that a quiescence fact is only
+// emitted when the authority boundary actually completed.
 func TestUnprovenVacancyStatesNoQuiescenceFact(t *testing.T) {
 	client := &lifecycleClient{}
-	session := lifecycleStreamSession(t, authoritativeAnswer(), client)
+	session := authoritativeLifecycleStreamSession(t, client)
 
 	incarnation, err := session.openPromptStream(t.Context())
 	require.NoError(t, err)
 	require.NoError(t, incarnation.accept(t.Context(), lifecycle.Submission{SubmissionID: "s", ClientNonce: "n"}))
 	require.NoError(t, incarnation.settle(t.Context(),
 		lifecycleOutcome{stopReason: "end_turn", outcome: lifecycle.OutcomeSuccess},
-		nativeamp.ContainmentProof{Root: 7, Descendants: 2, Proven: true}))
+		false))
 
 	require.Equal(t, []string{
 		"lifecycle_snapshot", "prompt_accepted", "state_update", "state_update",
@@ -264,7 +249,7 @@ func TestUnprovenVacancyStatesNoQuiescenceFact(t *testing.T) {
 // opens its next incarnation on a negative fact.
 func TestUnprovenVacancyOpensTheNextIncarnationNegative(t *testing.T) {
 	client := &lifecycleClient{}
-	session := lifecycleStreamSession(t, authoritativeAnswer(), client)
+	session := authoritativeLifecycleStreamSession(t, client)
 	session.recordVacancy(false)
 
 	_, err := session.openPromptStream(t.Context())
@@ -275,13 +260,11 @@ func TestUnprovenVacancyOpensTheNextIncarnationNegative(t *testing.T) {
 	require.Equal(t, map[string]any{"quiescent": false}, event["quiescence"])
 }
 
-// TestRecoveredVacancyStatesTheBoundaryItProved pins that the quiescence fact is
-// governed by the proof the settling boundary completed, never by the fact the
-// opening snapshot carried: an incarnation that opened unable to state a
-// boundary still states the one it went on to prove.
+// TestRecoveredVacancyStatesTheBoundaryItProved pins that a later successful
+// authority boundary can certify an incarnation that opened uncertified.
 func TestRecoveredVacancyStatesTheBoundaryItProved(t *testing.T) {
 	client := &lifecycleClient{}
-	session := lifecycleStreamSession(t, authoritativeAnswer(), client)
+	session := authoritativeLifecycleStreamSession(t, client)
 	session.recordVacancy(false)
 
 	incarnation, err := session.openPromptStream(t.Context())
@@ -289,7 +272,7 @@ func TestRecoveredVacancyStatesTheBoundaryItProved(t *testing.T) {
 	require.NoError(t, incarnation.accept(t.Context(), lifecycle.Submission{SubmissionID: "s", ClientNonce: "n"}))
 	require.NoError(t, incarnation.settle(t.Context(),
 		lifecycleOutcome{stopReason: "end_turn", outcome: lifecycle.OutcomeSuccess},
-		nativeamp.ContainmentProof{Root: 4242, Proven: true}))
+		true))
 
 	require.Equal(t, []string{
 		"lifecycle_snapshot", "prompt_accepted", "state_update", "state_update", "quiescence_update",
@@ -297,5 +280,37 @@ func TestRecoveredVacancyStatesTheBoundaryItProved(t *testing.T) {
 
 	state := reduceEmittedStream(t, client, authoritativeAnswer()).State()
 	require.True(t, state.Quiescence.Certified)
-	require.Equal(t, "amp-process-tree/4242", state.Quiescence.Barrier)
+	require.Equal(t, "amp-process-tree/authority", state.Quiescence.Barrier)
+}
+
+func TestTerminalDeliveryRefusesUnnegotiatedQuiescence(t *testing.T) {
+	negotiated := lifecycle.Negotiated{Version: lifecycle.Version}
+	stream := lifecycle.NewStream("stream", negotiated)
+	require.NoError(t, emitLifecyclePrefix(stream))
+
+	prompt := &promptStream{
+		session:       &agentSession{id: "T-lifecycle"},
+		stream:        stream,
+		cycleID:       "cycle",
+		turnID:        "turn",
+		authoritative: true,
+	}
+	_, err := prompt.terminalDelivery(
+		lifecycleOutcome{stopReason: "end_turn", outcome: lifecycle.OutcomeSuccess}, true,
+	)
+	require.Error(t, err)
+}
+
+func emitLifecyclePrefix(stream *lifecycle.Stream) error {
+	if _, err := stream.Emit(lifecycle.SnapshotEvent("open", lifecycle.QuiescenceFact{})); err != nil {
+		return err
+	}
+	if _, err := stream.Emit(lifecycle.AcceptedEvent(lifecycle.Submission{
+		SubmissionID: "submission", ClientNonce: "nonce",
+	}, "turn")); err != nil {
+		return err
+	}
+	_, err := stream.Emit(lifecycle.RunningEvent("cycle", "turn"))
+
+	return err
 }

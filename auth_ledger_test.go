@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -83,7 +84,7 @@ func TestAuthLedgerRootValidation(t *testing.T) {
 
 	for _, dir := range []string{root, ledger.dir} {
 		info, statErr := os.Stat(dir)
-		if statErr != nil || info.Mode().Perm() != authLedgerDirMode {
+		if statErr != nil || info.Mode().Perm() != hostDirPerm(authLedgerDirMode) {
 			t.Fatalf("%s mode = %v/%v", dir, info, statErr)
 		}
 	}
@@ -192,7 +193,7 @@ func TestAuthLedgerWritesAtomicallyAndDurably(t *testing.T) {
 	}
 
 	info, err := os.Stat(ledger.path(authProviderID, "connection-1"))
-	if err != nil || info.Mode().Perm() != authLedgerFileMode {
+	if err != nil || info.Mode().Perm() != hostFilePerm(authLedgerFileMode) {
 		t.Fatalf("entry mode = %v/%v", info, err)
 	}
 
@@ -302,7 +303,21 @@ func TestAuthLedgerSurfacesWriteFailures(t *testing.T) {
 	ledgerRename = originalRename
 	ledgerOpen = func(string) (*os.File, error) { return nil, want }
 
-	if err := ledger.write(record); !errors.Is(err, want) {
+	err := ledger.write(record)
+
+	// Windows FlushFileBuffers accepts no directory handle, so the ledger flushes
+	// no directory there and has no open for this seam to refuse. The entry is
+	// durable under its final name regardless: it was written, restricted and
+	// fsynced before the rename that published it.
+	if runtime.GOOS == "windows" {
+		if err != nil {
+			t.Fatalf("dir sync failure = %v, want no directory flush on this platform", err)
+		}
+
+		return
+	}
+
+	if !errors.Is(err, want) {
 		t.Fatalf("dir sync failure = %v", err)
 	}
 }
@@ -364,7 +379,7 @@ func TestAuthLedgerSurfacesReadFailures(t *testing.T) {
 	}
 }
 
-func TestInventoryDerivesProofFromTheLedgerAndAProbe(t *testing.T) {
+func TestInventoryDoesNotClaimNativeResidenceProof(t *testing.T) {
 	fixture := newAuthFixture(t, "login")
 
 	var empty authInventoryResult
@@ -400,7 +415,7 @@ func TestInventoryDerivesProofFromTheLedgerAndAProbe(t *testing.T) {
 
 	entry := confirmed.Entries[0]
 	if entry.ProviderID != authProviderID || entry.ConnectionID != "connection-1" ||
-		entry.Revision != 1 || entry.BindingGeneration != 1 || entry.ProofSource != authProofConfirmedPresent {
+		entry.Revision != 1 || entry.BindingGeneration != 1 || entry.ProofSource != authProofNotConfirmed {
 		t.Fatalf("inventory after completion = %#v", entry)
 	}
 
@@ -474,34 +489,23 @@ func TestInventoryKeepsEveryConnectionsBinding(t *testing.T) {
 	}
 }
 
-func TestInventoryReportsConfirmedAbsence(t *testing.T) {
+func TestInventoryDoesNotInspectNativeResidence(t *testing.T) {
 	fixture := newAuthFixture(t, "login")
-	authorized := fixture.mustAuthorize("connection-1")
+	fixture.mustAuthorize("connection-1")
 
-	if err := fixture.callback(authorized.FlowID, "pasted"); err != nil {
-		t.Fatalf("callback: %v", err)
+	originalReadSecret := authReadSecret
+	authReadSecret = func(string) (string, bool, error) {
+		panic("inventory inspected the prepared native residence")
 	}
+	t.Cleanup(func() { authReadSecret = originalReadSecret })
 
-	flow, err := fixture.broker.addressFlow(fixture.session.id, authProviderID, authorized.FlowID)
-	if err != nil {
-		t.Fatalf("addressFlow: %v", err)
-	}
-
-	fixture.broker.mu.Lock()
-	residence := flow.residence
-	fixture.broker.mu.Unlock()
-
-	if err := os.Remove(filepath.Join(residence, "amp", "secrets.json")); err != nil {
-		t.Fatal(err)
-	}
-
-	var absent authInventoryResult
-	if err := fixture.call(AuthInventoryMethod, map[string]any{authFieldSessionID: string(fixture.session.id)}, &absent); err != nil {
+	var inventory authInventoryResult
+	if err := fixture.call(AuthInventoryMethod, map[string]any{authFieldSessionID: string(fixture.session.id)}, &inventory); err != nil {
 		t.Fatalf("inventory: %v", err)
 	}
 
-	if absent.Entries[0].ProofSource != authProofConfirmedAbsent {
-		t.Fatalf("inventory = %#v", absent.Entries)
+	if inventory.Entries[0].ProofSource != authProofNotConfirmed {
+		t.Fatalf("inventory = %#v", inventory.Entries)
 	}
 }
 
@@ -523,9 +527,9 @@ func TestInventoryRejectsAddressingAndProbeFailures(t *testing.T) {
 	fixture.mustAuthorize("connection-1")
 
 	want := errors.New("read denied")
-	originalDir, originalSecret := ledgerReadDir, authSecretPresent
+	originalDir := ledgerReadDir
 
-	t.Cleanup(func() { ledgerReadDir, authSecretPresent = originalDir, originalSecret })
+	t.Cleanup(func() { ledgerReadDir = originalDir })
 
 	ledgerReadDir = func(string) ([]os.DirEntry, error) { return nil, want }
 
@@ -537,76 +541,6 @@ func TestInventoryRejectsAddressingAndProbeFailures(t *testing.T) {
 	}
 
 	requireAuthCause(t, err, authCauseHarvestFailed)
-
-	authSecretPresent = func(string) (bool, error) { return false, want }
-
-	err = fixture.call(AuthInventoryMethod, map[string]any{authFieldSessionID: string(fixture.session.id)}, nil)
-	authSecretPresent = originalSecret
-
-	if err == nil {
-		t.Fatal("inventory answered with an unreadable slot")
-	}
-
-	requireAuthCause(t, err, authCauseHarvestFailed)
-
-	// An unasserted native store vetoes the probe rather than answering from a
-	// store the adapter cannot prove is authoritative.
-	if writeErr := os.WriteFile(fixture.session.settingsFile,
-		[]byte(`{"amp.experimental.cli.nativeSecretsStorage.enabled":true}`), 0o600); writeErr != nil {
-		t.Fatal(writeErr)
-	}
-
-	err = fixture.call(AuthInventoryMethod, map[string]any{authFieldSessionID: string(fixture.session.id)}, nil)
-	if err == nil {
-		t.Fatal("inventory answered against an unasserted native store")
-	}
-
-	requireAuthCause(t, err, authCauseNativeVeto)
-}
-
-func TestAuthResidenceFallsBackToTheSessionHome(t *testing.T) {
-	fixture := newAuthFixture(t, "login")
-
-	if residence := fixture.broker.authResidence(fixture.session, authProviderID, "connection-1"); residence != fixture.session.authDataHome() {
-		t.Fatalf("residence with no flow = %q", residence)
-	}
-
-	fixture.mustAuthorize("connection-1")
-
-	if residence := fixture.broker.authResidence(fixture.session, "openai", "connection-1"); residence != fixture.session.authDataHome() {
-		t.Fatalf("residence for an unrelated provider = %q", residence)
-	}
-
-	// A connection with no flow of its own here names a slot nothing in this
-	// session established, so it falls back rather than borrowing another
-	// connection's residence.
-	if residence := fixture.broker.authResidence(fixture.session, authProviderID, "connection-2"); residence != fixture.session.authDataHome() {
-		t.Fatalf("residence for an unrelated connection = %q", residence)
-	}
-
-	if residence := fixture.broker.authResidence(fixture.session, authProviderID, "connection-1"); residence == "" {
-		t.Fatal("residence for a live flow is empty")
-	}
-}
-
-func TestAuthProofSourceIsATotalFunction(t *testing.T) {
-	cases := []struct {
-		state   string
-		present bool
-		want    string
-	}{
-		{state: authLedgerConfirmed, present: true, want: authProofConfirmedPresent},
-		{state: authLedgerConfirmed, want: authProofConfirmedAbsent},
-		{state: authLedgerIntent, present: true, want: authProofNotConfirmed},
-		{state: authLedgerIntent, want: authProofNotConfirmed},
-		{state: authLedgerRemoved, present: true, want: authProofNotConfirmed},
-	}
-
-	for _, testCase := range cases {
-		if got := authProofSource(testCase.state, testCase.present); got != testCase.want {
-			t.Fatalf("authProofSource(%q,%v) = %q, want %q", testCase.state, testCase.present, got, testCase.want)
-		}
-	}
 }
 
 func TestManualAPIKeyRestartProofAndDisconnectFence(t *testing.T) {

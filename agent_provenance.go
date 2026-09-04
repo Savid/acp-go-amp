@@ -210,21 +210,7 @@ func (a *Agent) hasActiveCallbackForSession(id acp.SessionId) bool {
 	return false
 }
 
-func invokeExternal(ctx context.Context, callback func()) {
-	leave := enterExternalCallback(ctx)
-	defer leave()
-
-	callback()
-}
-
 func invokeExternalResult[T any](ctx context.Context, callback func() T) (result T) {
-	leave := enterExternalCallback(ctx)
-	defer leave()
-
-	return callback()
-}
-
-func invokeExternalPair[A, B any](ctx context.Context, callback func() (A, B)) (first A, second B) {
 	leave := enterExternalCallback(ctx)
 	defer leave()
 

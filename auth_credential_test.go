@@ -134,8 +134,8 @@ func TestCredentialRejectsAnIncompleteFlow(t *testing.T) {
 
 func TestCredentialFailsClosedAndTerminalizesTheFlow(t *testing.T) {
 	// A completed flow whose slot cannot answer fails closed rather than
-	// reporting absence — flipping the native-secrets flag deletes the file after
-	// migrating it, so nothing found is never proof of nothing stored — and the
+	// reporting absence — the native-secrets flow consumes the file, so nothing
+	// found is never proof of nothing stored — and the
 	// leg failed after the flow existed, so the cause it returns and the reason
 	// it terminalizes on are one verdict.
 	cases := map[string]struct {
@@ -148,21 +148,6 @@ func TestCredentialFailsClosedAndTerminalizesTheFlow(t *testing.T) {
 			mode:   "login-no-secret",
 			cause:  authCauseHarvestFailed,
 			reason: authReasonHarvestFailed,
-		},
-		"unassertedStore": {
-			mode: "login",
-			arrange: func(t *testing.T, fixture *authFixture) func() {
-				t.Helper()
-
-				if err := os.WriteFile(fixture.session.settingsFile,
-					[]byte(`{"amp.experimental.cli.nativeSecretsStorage.enabled":true}`), 0o600); err != nil {
-					t.Fatal(err)
-				}
-
-				return func() {}
-			},
-			cause:  authCauseNativeVeto,
-			reason: authReasonNativeVeto,
 		},
 		"fencedLedgerEntry": {
 			mode: "login",
@@ -479,7 +464,7 @@ func TestFailHarvestKeepsARecordACauseCannotTransition(t *testing.T) {
 		t.Fatalf("addressFlow: %v", err)
 	}
 
-	for _, cause := range []string{authCausePolicy, authCauseBindingConflict, authCauseFlowState, authCauseFlowCancelled} {
+	for _, cause := range []string{authCauseBindingConflict, authCauseFlowState, authCauseFlowCancelled} {
 		requireAuthCause(t, fixture.broker.failHarvest(flow, cause), cause)
 
 		status := fixture.status(authorized.FlowID)

@@ -3,13 +3,12 @@
 package amp
 
 import (
-	"errors"
 	"testing"
 )
 
-func TestNewBrowserShimFailsClosed(t *testing.T) {
-	shim, err := newBrowserShim(t.TempDir())
-	if shim != nil || !errors.Is(err, ErrBrowserLaunchUnsupported) {
-		t.Fatalf("newBrowserShim = %v, %v; want a refusal", shim, err)
+func TestPortableWindowsBrowserShimMaterializationIsUnavailable(t *testing.T) {
+	shim, err := MaterializeBrowserShim(t.TempDir())
+	if shim != "" || err != nil {
+		t.Fatalf("MaterializeBrowserShim = %q, %v; want an unavailable shim", shim, err)
 	}
 }

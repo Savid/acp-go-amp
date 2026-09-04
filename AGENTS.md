@@ -11,12 +11,11 @@ stdio or embed the agent directly in Go.
 - Root package `ampacp`: ACP agent methods, request builders, metadata parsing,
   raw events, config options, and session-store API.
 - `internal/amp`: Amp process boundary, stream-json parsing, environment
-  construction, interrupt handling, and the contained-descendant inventory.
+  construction, interrupt handling, and browser mediation.
 - `internal/lifecycle`: the self-contained `acp-go.dev/lifecycle` reducer,
   decoder, negotiation and correlation readers, and ordered emitter.
 - `cmd/acp-go-amp`: stdio ACP command with `-path`, `-home`, `-model`,
-  `-scratch-dir`, `-debug`, `-version`, and repeatable `-seed-file` flags, plus
-  Darwin containment operations.
+  `-scratch-dir`, `-debug`, `-version`, and repeatable `-seed-file` flags.
 - `examples`: embeddable host examples that must stay covered by tests.
 - `integration`: smoke and live tests for installed Amp binaries.
 - `testdata/lifecycle`: the canonical family reducer battery, verbatim.
@@ -27,12 +26,12 @@ stdio or embed the agent directly in Go.
 - `make test`: unit tests.
 - `make coverage-check`: 100.0% total statement coverage gate.
 - `make lint`: pinned golangci-lint.
-- `make docs-audit`: public-doc forbidden-term and Amp semantics audit.
+- `make docs-audit`: required public docs, examples, flags, and Amp semantics audit.
 - `make audit`: local release gate.
 - `make test-integration-live`: live Amp prompt tests gated by
   `ACP_GO_AMP_RUN_INTEGRATION=1` and `ACP_GO_AMP_RUN_LIVE_TOKENS=1`.
-- `make test-portable-runtime`: portable ordinary-lifecycle suite, runnable only
-  on a `!unix` host that selects `internal/amp/process_unsupported.go`.
+- `make test-portable-runtime`: portable ordinary environment and executable
+  behavior suite, exercised by the strict Windows CI proof.
 
 ## Coding Rules
 
@@ -47,7 +46,10 @@ stdio or embed the agent directly in Go.
 - Preserve ordinary Amp stream JSON bytes in the `transcript` store subpath.
   Image-bearing tool results use canonical artifact references so base64 and
   signed URLs do not leak into transcript or diagnostic surfaces.
-- Do not persist auth, settings, API keys, or other secrets.
+- Provider-auth ledger/residence contents and native settings are never
+  persisted. Session environment is persisted in the manifest and makes the
+  configured `SessionStore` secret-bearing when it contains `AMP_API_KEY` or
+  another credential.
 - Every request builder that accepts a caller `_meta` map merges rather than
   assigns, so option order carries no meaning, and refuses any `acp-go.dev/*`
   family literal in that map rather than merging, overwriting, or dropping it.
@@ -124,8 +126,9 @@ stdio or embed the agent directly in Go.
 
 ## Security And Boundaries
 
-- `AMP_API_KEY` and `AMP_URL` are injected from live process environment or
-  options; they are never written to `SessionStore`.
+- `AMP_API_KEY` and `AMP_URL` may be injected from live process environment or
+  options. Session-scoped values are written to the manifest; treat the
+  `SessionStore` as secret-bearing whenever they carry a credential.
 - `session/load` replays local transcript frames for display; it does not create
   a new server-side thread.
 - Native continuation requires the original server-side Amp thread to still

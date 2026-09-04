@@ -1321,13 +1321,11 @@ func TestCloseWaitsForFullSettlement(t *testing.T) {
 	streamed := make(chan struct{})
 	client.onAgentChunk = func() { close(streamed) }
 
-	prompt := make(chan struct{})
+	prompt := make(chan error, 1)
 
 	go func() {
-		defer close(prompt)
-
 		_, err := agent.Prompt(t.Context(), lifecyclePrompt(sessionID, "hang", "sub-3", "nonce-3"))
-		require.NoError(t, err)
+		prompt <- err
 	}()
 
 	<-streamed
@@ -1337,13 +1335,11 @@ func TestCloseWaitsForFullSettlement(t *testing.T) {
 	require.NotNil(t, admitted)
 	store.gate()
 
-	closed := make(chan struct{})
+	closed := make(chan error, 1)
 
 	go func() {
-		defer close(closed)
-
 		_, err := agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: sessionID})
-		require.NoError(t, err)
+		closed <- err
 	}()
 
 	// The cancellation signal is the close admission-fence barrier: once it is
@@ -1360,8 +1356,8 @@ func TestCloseWaitsForFullSettlement(t *testing.T) {
 	}
 
 	close(store.release)
-	awaitCorrectionSignal(t, closed, "close settlement completion")
-	<-prompt
+	require.NoError(t, receiveCorrection(t, closed, "close settlement completion"))
+	require.NoError(t, receiveCorrection(t, prompt, "settled prompt result"))
 
 	ledger.record("closed")
 	steps := ledger.snapshot()
@@ -1379,13 +1375,11 @@ func TestDeleteIsNeverResurrectedByALateCommit(t *testing.T) {
 
 	store.gate()
 
-	prompt := make(chan struct{})
+	prompt := make(chan error, 1)
 
 	go func() {
-		defer close(prompt)
-
 		_, err := agent.Prompt(t.Context(), lifecyclePrompt(sessionID, "hello", "sub-4", "nonce-4"))
-		require.NoError(t, err)
+		prompt <- err
 	}()
 
 	// The early adoption commit is the first through the gate; the settlement
@@ -1408,8 +1402,8 @@ func TestDeleteIsNeverResurrectedByALateCommit(t *testing.T) {
 
 	store.release <- struct{}{}
 
-	require.NoError(t, <-deleted)
-	<-prompt
+	require.NoError(t, receiveCorrection(t, deleted, "delete result"))
+	require.NoError(t, receiveCorrection(t, prompt, "settled prompt result"))
 
 	after := store.replaceCount()
 
@@ -1422,4 +1416,10 @@ func TestDeleteIsNeverResurrectedByALateCommit(t *testing.T) {
 	require.Empty(t, transcript)
 
 	require.Equal(t, after, store.replaceCount(), "no write recreates the row after delete succeeds")
+}
+
+func TestPromptSettlementTimeoutResidualBranch(t *testing.T) {
+	state := &promptTurnState{completed: make(chan struct{})}
+	settlement := state.awaitSettlement(residualCancelledContext())
+	require.ErrorIs(t, settlement.containmentErr, amp.ErrContainmentIncomplete)
 }

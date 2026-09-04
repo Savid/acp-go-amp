@@ -773,7 +773,7 @@ func (r *Reducer) checkQuiescence(delivery Delivery, fact QuiescenceFact, vacant
 	switch {
 	case !fact.Quiescent:
 		return nil
-	case fact.Source != r.negotiated.QuiescenceSource:
+	case fact.Source != ProofClassProcessContainment:
 		return r.fail(delivery, ViolationUnnegotiatedFact, "quiescence proof "+string(fact.Source))
 	case !vacant:
 		return r.fail(delivery, ViolationFalseQuiescence, "the stream still holds live work")

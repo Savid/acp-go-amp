@@ -37,10 +37,29 @@ func browserProbeDir(t *testing.T, marker string) string {
 	return dir
 }
 
+func TestMaterializeBrowserShimReportsFilesystemFailures(t *testing.T) {
+	parentFile := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(parentFile, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := MaterializeBrowserShim(filepath.Join(parentFile, "browser")); err == nil {
+		t.Fatal("shim materialization ignored directory creation failure")
+	}
+
+	originalWriteFile := browserShimWriteFile
+	t.Cleanup(func() { browserShimWriteFile = originalWriteFile })
+	browserShimWriteFile = func(string, []byte, os.FileMode) error {
+		return errors.New("write fault")
+	}
+	if _, err := MaterializeBrowserShim(filepath.Join(t.TempDir(), "browser")); err == nil {
+		t.Fatal("shim materialization ignored launcher write failure")
+	}
+}
+
 // TestLoginNeverExecsABrowserLauncher runs the adapter's login path with a
 // deterministic harness and a recording launcher ahead of every other PATH
 // entry. It proves the PATH interception used on Darwin and Linux;
-// installed-binary compatibility is checked separately before this boundary
+// installed-binary safety is checked separately before this boundary
 // is built.
 func TestLoginNeverExecsABrowserLauncher(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "launched")
@@ -89,11 +108,7 @@ func TestLoginNeverExecsABrowserLauncher(t *testing.T) {
 	client := newTestClient(t, nil, Options{
 		CLIPath: path,
 		Cwd:     t.TempDir(),
-		// The shim is generated under the scratch parent and handed to the
-		// isolated identity, so the parent has to be one that identity can
-		// traverse rather than a t.TempDir leaf nested under a 0700 directory.
-		ScratchParent: makeInstalledAmpScratchParent(t),
-		Env:           map[string]string{dataHomeEnv: t.TempDir()},
+		Env:     map[string]string{dataHomeEnv: t.TempDir()},
 	})
 
 	login, err := client.StartAuthLogin(t.Context())
@@ -125,7 +140,7 @@ func TestLoginNeverExecsABrowserLauncher(t *testing.T) {
 	}
 
 	for i, launcher := range resolved {
-		if !strings.Contains(launcher, browserShimPrefix) || filepath.Base(launcher) != browserLauncherNames[i] {
+		if filepath.Dir(launcher) != client.options.BrowserShim || filepath.Base(launcher) != browserLauncherNames[i] {
 			t.Fatalf("the child resolved %s to %q; want a shim launcher", browserLauncherNames[i], launcher)
 		}
 	}
@@ -157,13 +172,10 @@ func TestInstalledAmpLoginExecsOnlyShimLauncher(t *testing.T) {
 	if writeErr := os.WriteFile(settingsFile, AuthSettingsDocument(), 0o600); writeErr != nil {
 		t.Fatal(writeErr)
 	}
-	scratchParent := makeInstalledAmpScratchParent(t)
-
 	client := newTestClient(t, nil, Options{
-		CLIPath:       path,
-		Cwd:           t.TempDir(),
-		SettingsFile:  settingsFile,
-		ScratchParent: scratchParent,
+		CLIPath:      path,
+		Cwd:          t.TempDir(),
+		SettingsFile: settingsFile,
 		Env: map[string]string{
 			AuthDeploymentEnv:                "http://127.0.0.1:1",
 			"ACP_GO_AMP_TEST_BROWSER_MARKER": marker,
@@ -207,108 +219,5 @@ func TestInstalledAmpLoginExecsOnlyShimLauncher(t *testing.T) {
 
 	if closeErr := login.Close(); closeErr != nil {
 		t.Fatalf("close installed Amp login: %v", closeErr)
-	}
-}
-
-func makeInstalledAmpScratchParent(t *testing.T) string {
-	t.Helper()
-
-	path, err := os.MkdirTemp("/tmp", "acp-go-amp-browser-scratch-") //nolint:usetesting // The isolated native identity must traverse the fixture root.
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(path) })
-	if err = os.Chmod(path, 0o711); err != nil {
-		t.Fatal(err)
-	}
-	if err = os.Chown(path, os.Geteuid(), os.Getegid()); err != nil {
-		t.Fatal(err)
-	}
-
-	return path
-}
-
-func TestBrowserShimLeavesNothingBehind(t *testing.T) {
-	parent := t.TempDir()
-
-	shim, err := newBrowserShim(parent)
-	if err != nil {
-		t.Fatalf("newBrowserShim: %v", err)
-	}
-
-	info, err := os.Stat(shim.dir)
-	if err != nil || info.Mode().Perm() != 0o700 {
-		t.Fatalf("shim directory mode = %v, %v; want 0700", info, err)
-	}
-
-	for _, name := range browserLauncherNames {
-		launcher, statErr := os.Stat(filepath.Join(shim.dir, name))
-		if statErr != nil || launcher.Mode().Perm()&0o100 == 0 {
-			t.Fatalf("%s launcher = %v, %v; want an executable no-op", name, launcher, statErr)
-		}
-	}
-
-	if removeErr := shim.remove(); removeErr != nil {
-		t.Fatalf("remove: %v", removeErr)
-	}
-
-	entries, err := os.ReadDir(parent)
-	if err != nil || len(entries) != 0 {
-		t.Fatalf("scratch parent after remove = %#v, %v; want empty", entries, err)
-	}
-
-	if removeErr := (*browserShim)(nil).remove(); removeErr != nil {
-		t.Fatalf("remove on an unbuilt shim = %v", removeErr)
-	}
-}
-
-// TestStartAuthLoginRefusesAnUnbuildableShim keeps the leg fail-closed: a login
-// that cannot prove the browser launch is neutralised never starts a child.
-func TestStartAuthLoginRefusesAnUnbuildableShim(t *testing.T) {
-	want := errors.New("no scratch")
-	original := browserShimMkdirTemp
-	browserShimMkdirTemp = func(string, string) (string, error) { return "", want }
-
-	t.Cleanup(func() { browserShimMkdirTemp = original })
-
-	path, state := fakeAmpPath(t, "login")
-
-	client := newTestClient(t, nil, Options{CLIPath: path, Cwd: t.TempDir(), ScratchParent: t.TempDir()})
-	if _, err := client.StartAuthLogin(t.Context()); !errors.Is(err, want) {
-		t.Fatalf("StartAuthLogin = %v, want %v", err, want)
-	}
-
-	if _, err := os.Stat(filepath.Join(state, "args.jsonl")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("a refused login still launched the harness: %v", err)
-	}
-}
-
-func TestNewBrowserShimReportsAnUnusableScratch(t *testing.T) {
-	want := errors.New("no scratch")
-	originalMkdirTemp := browserShimMkdirTemp
-	browserShimMkdirTemp = func(string, string) (string, error) { return "", want }
-
-	t.Cleanup(func() { browserShimMkdirTemp = originalMkdirTemp })
-
-	if _, err := newBrowserShim(t.TempDir()); !errors.Is(err, want) {
-		t.Fatalf("newBrowserShim = %v, want %v", err, want)
-	}
-
-	browserShimMkdirTemp = originalMkdirTemp
-
-	wantWrite := errors.New("no launcher")
-	originalWriteFile := browserShimWriteFile
-	browserShimWriteFile = func(string, []byte, os.FileMode) error { return wantWrite }
-
-	t.Cleanup(func() { browserShimWriteFile = originalWriteFile })
-
-	parent := t.TempDir()
-	if _, err := newBrowserShim(parent); !errors.Is(err, wantWrite) {
-		t.Fatalf("newBrowserShim = %v, want %v", err, wantWrite)
-	}
-
-	entries, err := os.ReadDir(parent)
-	if err != nil || len(entries) != 0 {
-		t.Fatalf("scratch parent after a failed build = %#v, %v; want empty", entries, err)
 	}
 }

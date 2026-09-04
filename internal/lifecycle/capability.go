@@ -1,0 +1,107 @@
+package lifecycle
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+)
+
+func (n *Negotiated) UnmarshalJSON(data []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+
+	opening, err := decoder.Token()
+	if err != nil || opening != json.Delim('{') {
+		return errors.New("lifecycle capability must be an object")
+	}
+
+	decoded := Negotiated{}
+	seen := map[string]bool{}
+
+	for decoder.More() {
+		token, err := decoder.Token()
+		if err != nil {
+			return fmt.Errorf("decode lifecycle capability member: %w", err)
+		}
+
+		// encoding/json admits only string member names after an object opens.
+		field, _ := token.(string)
+
+		switch field {
+		case fieldVersion, fieldUpdatesOutsidePrompt, fieldAuthoritativeQuiescence,
+			fieldQuiescenceSource, fieldActivityKinds:
+		default:
+			return fmt.Errorf("unknown lifecycle capability field %q", field)
+		}
+
+		if seen[field] {
+			return fmt.Errorf("duplicate lifecycle capability field %q", field)
+		}
+
+		seen[field] = true
+
+		switch field {
+		case fieldVersion:
+			var version json.RawMessage
+			if err := decoder.Decode(&version); err != nil || !bytes.Equal(bytes.TrimSpace(version), []byte("1")) {
+				return errors.New("lifecycle capability version must be exact integer 1")
+			}
+
+			decoded.Version = Version
+		case fieldUpdatesOutsidePrompt:
+			if err := decoder.Decode(&decoded.UpdatesOutsidePrompt); err != nil {
+				return errors.New("lifecycle capability updatesOutsidePrompt must be boolean")
+			}
+		case fieldAuthoritativeQuiescence:
+			if err := decoder.Decode(&decoded.AuthoritativeQuiescence); err != nil {
+				return errors.New("lifecycle capability authoritativeQuiescence must be boolean")
+			}
+		case fieldQuiescenceSource:
+			if err := decoder.Decode(&decoded.QuiescenceSource); err != nil {
+				return errors.New("lifecycle capability quiescenceSource must be a proof class")
+			}
+		case fieldActivityKinds:
+			if err := decoder.Decode(&decoded.ActivityKinds); err != nil {
+				return errors.New("lifecycle capability activityKinds must be an array")
+			}
+		}
+	}
+
+	if _, err := decoder.Token(); err != nil {
+		return fmt.Errorf("close lifecycle capability: %w", err)
+	}
+
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return errors.New("lifecycle capability carries trailing input")
+	}
+
+	if !seen[fieldVersion] {
+		return fmt.Errorf("lifecycle capability field %q is required", fieldVersion)
+	}
+
+	for index, kind := range decoded.ActivityKinds {
+		if !kind.Valid() {
+			return fmt.Errorf("lifecycle capability activityKinds[%d] is invalid", index)
+		}
+
+		for prior := range index {
+			if decoded.ActivityKinds[prior] == kind {
+				return fmt.Errorf("lifecycle capability activityKinds[%d] is duplicated", index)
+			}
+		}
+	}
+
+	if decoded.AuthoritativeQuiescence {
+		if !seen[fieldQuiescenceSource] || decoded.QuiescenceSource != ProofClassProcessContainment {
+			return errors.New("lifecycle capability quiescenceSource must be process-containment")
+		}
+	} else if seen[fieldQuiescenceSource] {
+		return errors.New("lifecycle capability quiescenceSource requires authoritativeQuiescence")
+	}
+
+	*n = decoded
+
+	return nil
+}

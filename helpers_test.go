@@ -6,9 +6,61 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"testing"
+
+	"github.com/coder/acp-go-sdk"
+	"github.com/stretchr/testify/require"
 )
+
+// absTestPath builds a host-absolute path from POSIX-looking segments, so a
+// test states "an absolute working directory" rather than a spelling only
+// one platform accepts.
+func absTestPath(segments ...string) string {
+	root := "/"
+	if runtime.GOOS == "windows" {
+		root = `C:\`
+	}
+
+	return filepath.Join(append([]string{root}, segments...)...)
+}
+
+// hostFilePerm maps a POSIX file mode onto the permission bits the host
+// actually records. Windows keeps no POSIX mode: os.Chmod there sets only the
+// read-only attribute, so a writable file reports 0666 and a read-only one
+// 0444 whatever mode created it. Restriction on Windows is the inherited ACL,
+// which these bits do not describe.
+func hostFilePerm(perm os.FileMode) os.FileMode {
+	if runtime.GOOS != "windows" {
+		return perm
+	}
+
+	if perm&0o200 == 0 {
+		return 0o444
+	}
+
+	return 0o666
+}
+
+// hostDirPerm is hostFilePerm for a directory, which Windows always reports as
+// 0777 because the read-only attribute does not apply to one.
+func hostDirPerm(perm os.FileMode) os.FileMode {
+	if runtime.GOOS != "windows" {
+		return perm
+	}
+
+	return 0o777
+}
+
+// testExecutableName spells a harness file name the way the host resolves
+// executables. Windows honours PATHEXT, so a name with no extension is not an
+// executable there however it is written to disk.
+func testExecutableName(base string) string {
+	if runtime.GOOS == "windows" {
+		return base + ".exe"
+	}
+
+	return base
+}
 
 // testHarnessPath stands in for the absolute harness a real probe resolves and
 // validates. The agent retains whatever a probe answers, so a stubbed probe
@@ -17,7 +69,7 @@ import (
 func testHarnessPath(t *testing.T) string {
 	t.Helper()
 
-	return filepath.Join(t.TempDir(), "amp")
+	return filepath.Join(t.TempDir(), testExecutableName("amp"))
 }
 
 // testScratchDir is a scratch parent the isolated identity can enter. Trees
@@ -38,79 +90,15 @@ func testScratchDir(t *testing.T) string {
 	return scratch
 }
 
-// testIsolationIdentity is the identity every adapter-level fixture isolates
-// to. The effective identity cannot serve as-is: the policy forbids UID or GID
-// zero, so a root test runner is rejected before reaching anything under test.
-// The substitute matches the one the native package already uses.
-func testIsolationIdentity() (uint32, uint32) {
-	uid, gid := os.Geteuid(), os.Getegid()
-	if uid == 0 || gid == 0 {
-		uid, gid = 65534, 65534
-	}
-
-	return uint32(uid), uint32(gid)
-}
-
-func testIsolationClaimsStandaloneAuthority(uid uint32) bool {
-	return uid != uint32(os.Geteuid())
-}
-
 func testContainmentOptions(options []Option) []Option {
 	options = append(options, func(options *Options) {
 		options.testOnlyNoCredential = true
-		options.testOnlyIdentityLockRoot = testIdentityLockRoot()
 		if options.testOnlyAuthLoginPlatform == "" {
 			options.testOnlyAuthLoginPlatform = platformLinux
 		}
 	})
-	if runtime.GOOS == "darwin" {
-		return append(options, WithDarwinBestEffortContainment())
-	}
 
 	return options
-}
-
-// testStandaloneStateRoot creates the state root an adapter-level fixture
-// claims. A root Linux runner uses /var/lib so every ancestor is protected
-// root-owned storage; ordinary temporary directories are intentionally
-// world-writable and must be refused by the production authority walk.
-func testStandaloneStateRoot(t *testing.T, uid, gid uint32) string {
-	t.Helper()
-
-	parent := os.TempDir()
-	if runtime.GOOS == platformLinux && os.Geteuid() == 0 {
-		parent = "/var/lib"
-	}
-	base, err := os.MkdirTemp(parent, "acp-go-amp-standalone-state-")
-	if err != nil {
-		t.Fatalf("create standalone state parent: %v", err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(base) })
-	if err := os.Chmod(base, 0o700); err != nil {
-		t.Fatalf("protect standalone state parent: %v", err)
-	}
-
-	root := filepath.Join(base, "state")
-	if err := os.Mkdir(root, 0o700); err != nil {
-		t.Fatalf("create standalone state root: %v", err)
-	}
-	if err := os.Chown(root, int(uid), int(gid)); err != nil {
-		t.Fatalf("own standalone state root: %v", err)
-	}
-	if err := os.Chmod(root, 0o700); err != nil {
-		t.Fatalf("protect standalone state root: %v", err)
-	}
-
-	return root
-}
-
-func testIdentityLockRoot() string {
-	root := filepath.Join(os.TempDir(), "acp-go-amp-agent-identities-"+strconv.Itoa(os.Getpid()))
-	if err := os.Mkdir(root, 0o700); err != nil && !os.IsExist(err) {
-		panic(err)
-	}
-
-	return root
 }
 
 func newTestAgent(options ...Option) *Agent {
@@ -119,4 +107,27 @@ func newTestAgent(options ...Option) *Agent {
 
 func serveTest(ctx context.Context, input io.Reader, output io.Writer, options ...Option) error {
 	return Serve(ctx, input, output, testContainmentOptions(options)...)
+}
+
+func requireInvalidParamsData(t *testing.T, err error, want map[string]any) {
+	t.Helper()
+	var reqErr *acp.RequestError
+	require.ErrorAs(t, err, &reqErr)
+	require.Equal(t, -32602, reqErr.Code)
+	require.Equal(t, want, reqErr.Data)
+}
+
+func requireInternalErrorData(t *testing.T, err error, want map[string]any) {
+	t.Helper()
+	var reqErr *acp.RequestError
+	require.ErrorAs(t, err, &reqErr)
+	require.Equal(t, -32603, reqErr.Code)
+	require.Equal(t, want, reqErr.Data)
+}
+
+func residualCancelledContext() context.Context {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	return ctx
 }

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 provider=amp
-packages=(./internal/amp .)
+packages=(. ./internal/amp)
 selector='^TestPortable'
 
 result_log="$(mktemp)"

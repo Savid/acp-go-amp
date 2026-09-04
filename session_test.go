@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 	ampnative "github.com/savid/acp-go-amp/internal/amp"
+	"github.com/stretchr/testify/require"
 )
 
 func TestAgentLifecycleErrorBranches(t *testing.T) {
@@ -61,7 +63,7 @@ func TestLoadResumeManifestAndConfigBranches(t *testing.T) {
 	path, _ := fakeAgentAmpPath(t, "")
 	cwd := t.TempDir()
 	store := NewInMemorySessionStore()
-	manifest, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, SessionID: "T-load", NativeSessionID: "T-load", Cwd: cwd, Mode: "high", CreatedAtUnixMilli: 1, UpdatedAtUnixMilli: 2})
+	manifest, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, SessionID: "T-load", NativeSessionID: "T-load", Cwd: cwd, Mode: "high", Env: map[string]string{}, CreatedAtUnixMilli: 1, UpdatedAtUnixMilli: 2})
 	if err := store.Replace(ctx, SessionKey{SessionID: "T-load", Subpath: SessionStoreMainSubpath}, []SessionStoreReplacement{
 		{Key: SessionKey{SessionID: "T-load", Subpath: SessionStoreMainSubpath}, Entries: []SessionStoreEntry{manifest}},
 		{Key: SessionKey{SessionID: "T-load", Subpath: transcriptSubpath}, Entries: []SessionStoreEntry{
@@ -143,7 +145,7 @@ func TestLoadManifestErrorsAndListFilters(t *testing.T) {
 		}
 	}
 	overlongID := acp.SessionId("T-" + strings.Repeat("x", ampnative.MaxThreadIDBytes))
-	overlong, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, SessionID: string(overlongID), NativeSessionID: string(overlongID)})
+	overlong, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, SessionID: string(overlongID), NativeSessionID: string(overlongID), Env: map[string]string{}})
 	overlongStore := NewInMemorySessionStore()
 	if err := overlongStore.Replace(ctx, SessionKey{SessionID: string(overlongID)}, []SessionStoreReplacement{{
 		Key: SessionKey{SessionID: string(overlongID)}, Entries: []SessionStoreEntry{overlong},
@@ -158,16 +160,50 @@ func TestLoadManifestErrorsAndListFilters(t *testing.T) {
 		t.Fatal("list error ignored")
 	}
 	store := NewInMemorySessionStore()
-	manifest, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, SessionID: "T-list", NativeSessionID: "T-list", Cwd: "/cwd", UpdatedAtUnixMilli: 0})
+	manifest, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, SessionID: "T-list", NativeSessionID: "T-list", Cwd: absTestPath("cwd"), Env: map[string]string{}, UpdatedAtUnixMilli: 0})
 	if err := store.Replace(ctx, SessionKey{SessionID: "T-list", Subpath: SessionStoreMainSubpath}, []SessionStoreReplacement{{Key: SessionKey{SessionID: "T-list", Subpath: SessionStoreMainSubpath}, Entries: []SessionStoreEntry{manifest}}}); err != nil {
 		t.Fatal(err)
 	}
-	resp, err := newTestAgent(WithSessionStore(store)).ListSessions(ctx, acp.ListSessionsRequest{Cwd: acp.Ptr("/other")})
+	resp, err := newTestAgent(WithSessionStore(store)).ListSessions(ctx, acp.ListSessionsRequest{Cwd: acp.Ptr(absTestPath("other"))})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(resp.Sessions) != 0 {
 		t.Fatalf("cwd filter failed: %#v", resp.Sessions)
+	}
+}
+
+func TestManifestRecoveryAndListingRejectNonCanonicalJSON(t *testing.T) {
+	ctx := context.Background()
+	entries := map[string]SessionStoreEntry{
+		"unknown field":              json.RawMessage(`{"format":"amp-thread-mirror-v1","sessionId":"T-bad","nativeSessionId":"T-bad","cwd":"/forged","title":"forged","env":{},"updatedAtUnixMilli":1,"createdAtUnixMilli":1,"unknown":true}`),
+		"duplicate field":            json.RawMessage(`{"format":"amp-thread-mirror-v1","format":"amp-thread-mirror-v1","sessionId":"T-bad","nativeSessionId":"T-bad","cwd":"/forged","title":"forged","env":{},"updatedAtUnixMilli":1,"createdAtUnixMilli":1}`),
+		"case alias":                 json.RawMessage(`{"Format":"amp-thread-mirror-v1","sessionId":"T-bad","nativeSessionId":"T-bad","cwd":"/forged","title":"forged","env":{},"updatedAtUnixMilli":1,"createdAtUnixMilli":1}`),
+		"trailing input":             json.RawMessage(`{"format":"amp-thread-mirror-v1","sessionId":"T-bad","nativeSessionId":"T-bad","cwd":"/forged","title":"forged","env":{},"updatedAtUnixMilli":1,"createdAtUnixMilli":1} {}`),
+		"duplicate nested env field": json.RawMessage(`{"format":"amp-thread-mirror-v1","sessionId":"T-bad","nativeSessionId":"T-bad","cwd":"/forged","title":"forged","env":{"AMP_API_KEY":"first","AMP_API_KEY":"second"},"updatedAtUnixMilli":1,"createdAtUnixMilli":1}`),
+		"case alias of nested field": json.RawMessage(`{"format":"amp-thread-mirror-v1","sessionId":"T-bad","nativeSessionId":"T-bad","cwd":"/forged","title":"forged","Env":{},"updatedAtUnixMilli":1,"createdAtUnixMilli":1}`),
+	}
+
+	for name, entry := range entries {
+		t.Run(name, func(t *testing.T) {
+			store := NewInMemorySessionStore()
+			key := SessionKey{SessionID: "T-bad", Subpath: SessionStoreMainSubpath}
+			if err := store.Replace(ctx, key, []SessionStoreReplacement{{Key: key, Entries: []SessionStoreEntry{entry}}}); err != nil {
+				t.Fatalf("seed manifest: %v", err)
+			}
+
+			if _, err := newTestAgent(WithSessionStore(store)).loadManifest(ctx, "T-bad"); err == nil {
+				t.Fatal("recovery accepted non-canonical manifest")
+			}
+
+			summaries, err := store.ListSessions(ctx)
+			if err != nil || len(summaries) != 1 {
+				t.Fatalf("list committed key: summaries=%#v err=%v", summaries, err)
+			}
+			if summaries[0].Cwd != "" || summaries[0].Title != "" {
+				t.Fatalf("listing trusted non-canonical manifest: %#v", summaries[0])
+			}
+		})
 	}
 }
 
@@ -195,7 +231,7 @@ func TestRemainingAgentBranches(t *testing.T) {
 		t.Fatal(err)
 	}
 	store := NewInMemorySessionStore()
-	manifest, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, SessionID: "T-file", NativeSessionID: "T-file", Cwd: t.TempDir()})
+	manifest, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, SessionID: "T-file", NativeSessionID: "T-file", Cwd: t.TempDir(), Env: map[string]string{}})
 	if err := store.Replace(ctx, SessionKey{SessionID: "T-file", Subpath: ""}, []SessionStoreReplacement{{Key: SessionKey{SessionID: "T-file", Subpath: ""}, Entries: []SessionStoreEntry{manifest}}}); err != nil {
 		t.Fatal(err)
 	}
@@ -210,7 +246,7 @@ func TestRemainingAgentBranches(t *testing.T) {
 		activeLimited.finishSessionUse("T-file", use)
 	}
 	activeLimited.options.ConcurrencyLimits.MaxActiveSessions = 1
-	manifest2, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, SessionID: "T-file-2", NativeSessionID: "T-file-2", Cwd: t.TempDir()})
+	manifest2, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, SessionID: "T-file-2", NativeSessionID: "T-file-2", Cwd: t.TempDir(), Env: map[string]string{}})
 	if err := store.Replace(ctx, SessionKey{SessionID: "T-file-2", Subpath: ""}, []SessionStoreReplacement{{Key: SessionKey{SessionID: "T-file-2", Subpath: ""}, Entries: []SessionStoreEntry{manifest2}}}); err != nil {
 		t.Fatal(err)
 	}
@@ -830,7 +866,7 @@ func TestTombstoneCascade(t *testing.T) {
 	ctx := context.Background()
 	store := NewInMemorySessionStore()
 	main := SessionKey{SessionID: "T-cascade", Subpath: SessionStoreMainSubpath}
-	manifest, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, SessionID: "T-cascade", NativeSessionID: "T-cascade"})
+	manifest, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, SessionID: "T-cascade", NativeSessionID: "T-cascade", Env: map[string]string{}})
 	if err := store.Replace(ctx, main, []SessionStoreReplacement{{Key: main, Entries: []SessionStoreEntry{manifest}}}); err != nil {
 		t.Fatal(err)
 	}
@@ -874,17 +910,6 @@ func TestSessionDirectBranches(t *testing.T) {
 	if _, err := newAgentSession(t.Context(), newTestAgent(WithScratchDir(fileScratch)), "T-1", "", parsedSessionMeta{}, "", nil); err == nil {
 		t.Fatal("newAgentSession with file scratch dir succeeded")
 	}
-	handoffAgent := NewAgent(
-		WithScratchDir(t.TempDir()),
-		WithProcessIsolation(ProcessIsolation{
-			UID: uint32(os.Geteuid()) + 1, GID: uint32(os.Getegid()) + 1,
-			BaseEnvironment: map[string]string{},
-		}),
-	)
-	if _, err := newAgentSession(t.Context(), handoffAgent, "T-handoff", "", parsedSessionMeta{}, "", nil); err == nil {
-		t.Fatal("unsupported session ownership handoff succeeded")
-	}
-
 	path, _ := fakeAgentAmpPath(t, "")
 	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(testScratchDir(t)))
 	session, err := newAgentSession(t.Context(), agent, "T-1", t.TempDir(), parsedSessionMeta{rawEvent: true}, "", nil)
@@ -1137,8 +1162,8 @@ func promptCarriersConcurrently(t *testing.T, agent *Agent, ids ...acp.SessionId
 // option, so one complete raw PATH in session env is the whole carrier. Two
 // sessions run concurrent turns that resolve and execute their own marker
 // command out of their own PATH, a second turn follows a resume, one carrier is
-// rotated across a close-and-re-prepare boundary, and the retired values reach
-// nothing afterwards. Each operation directory also holds an amp stand-in that
+// rotated on that same logical id across a close-and-re-prepare boundary, and
+// the retired values reach nothing afterwards. Each operation directory also holds an amp stand-in that
 // exits nonzero: a session PATH that could shadow the harness would fail every
 // turn instead of running the real one.
 func TestAmpSessionCarrierRunsRealMarkersAndRotatesWithoutCrossing(t *testing.T) {
@@ -1188,18 +1213,23 @@ func TestAmpSessionCarrierRunsRealMarkersAndRotatesWithoutCrossing(t *testing.T)
 		first.bearer: first, second.bearer: second,
 	})
 
-	// Rotation happens at the idle close-and-re-prepare boundary: the session
-	// holding the retired bearer and directory is closed, and a fresh one
-	// carries the new values.
-	if _, err := agent.CloseSession(ctx, acp.CloseSessionRequest{SessionId: firstID}); err != nil {
-		t.Fatalf("close the rotated-out session: %v", err)
+	predecessor, predecessorErr := agent.session(firstID)
+	if predecessorErr != nil {
+		t.Fatalf("rotation predecessor: %v", predecessorErr)
 	}
-
 	settled = len(carrierRuns(t, state))
 	settledChildren := len(childEnvironments(t, state))
-	rotatedID, _ := newCarrierSession(t, agent, rotated)
+	if _, err := agent.ResumeSession(ctx, ResumeSessionRequest(firstID, firstCwd,
+		WithSessionAmpOptions(NewAmpOptions(WithAmpEnv(rotated.env()))),
+	)); err != nil {
+		t.Fatalf("rotate first session: %v", err)
+	}
+	successor, successorErr := agent.session(firstID)
+	if successorErr != nil || successor == predecessor {
+		t.Fatalf("rotation did not replace the first wrapper: successor=%p predecessor=%p err=%v", successor, predecessor, successorErr)
+	}
 
-	promptCarriersConcurrently(t, agent, secondID, rotatedID)
+	promptCarriersConcurrently(t, agent, secondID, firstID)
 	requireCarrierRuns(t, carrierRuns(t, state), settled, map[string]carrier{
 		second.bearer: second, rotated.bearer: rotated,
 	})
@@ -1211,18 +1241,6 @@ func TestAmpSessionCarrierRunsRealMarkersAndRotatesWithoutCrossing(t *testing.T)
 			}
 		}
 	}
-
-	// No compatibility behavior survives the rotation: the closed session is
-	// gone rather than retried against the new carrier, and the untouched
-	// session refuses to adopt the rotated one on an active request.
-	if _, err := agent.Prompt(ctx, TextPromptRequest(firstID, "test-turn", "x")); err == nil {
-		t.Fatal("a prompt on the rotated-out session succeeded")
-	}
-
-	_, err := agent.ResumeSession(ctx, ResumeSessionRequest(secondID, secondCwd, WithSessionAmpOptions(
-		NewAmpOptions(WithAmpEnv(rotated.env())),
-	)))
-	requireInvalidParamsData(t, err, map[string]any{jsonFieldError: valMismatch, jsonFieldField: optionEnvKey})
 
 	requireNoShadowedHarness(t, state)
 }
@@ -1514,4 +1532,47 @@ func TestAgentCloseIsLastWordOverAnUncommittableMirror(t *testing.T) {
 	if remaining != 0 {
 		t.Fatalf("memoized shutdown recreated %d sessions", remaining)
 	}
+}
+
+func TestSessionTeardownResidualBranches(t *testing.T) {
+	session := &agentSession{agent: NewAgent()}
+	session.teardownFlight = &sessionTeardownFlight{done: make(chan struct{})}
+	_, _, err := session.beginTeardown(residualCancelledContext())
+	require.ErrorIs(t, err, context.Canceled)
+
+	panicErr := errors.New("teardown panic")
+	done := make(chan struct{})
+	close(done)
+	session.teardownFlight = &sessionTeardownFlight{done: done, panicErr: panicErr}
+	_, _, err = session.beginTeardown(t.Context())
+	require.ErrorIs(t, err, panicErr)
+
+	err = session.closeForReplacement(withCallbackProvenance(t.Context(), session.agent, session.teardownFlight))
+	require.Error(t, err)
+}
+
+func TestNewSessionMCPWriteFailure(t *testing.T) {
+	original := writeFile
+	t.Cleanup(func() { writeFile = original })
+	writeFile = func(path string, data []byte, mode os.FileMode) error {
+		if filepath.Base(path) == "mcp.json" {
+			return errors.New("write MCP failed")
+		}
+
+		return original(path, data, mode)
+	}
+
+	agent := NewAgent(WithScratchDir(t.TempDir()))
+	_, err := newAgentSession(t.Context(), agent, "T-write-failure", t.TempDir(), parsedSessionMeta{}, "", nil)
+	require.ErrorContains(t, err, "write amp MCP config")
+}
+
+func TestVerifyContinuableRecordsIncompleteContainment(t *testing.T) {
+	agent := newTestAgent()
+	agent.options.runtime.exportThread = func(context.Context, *ampnative.Client, string) (json.RawMessage, error) {
+		return nil, fmt.Errorf("export: %w", ampnative.ErrContainmentIncomplete)
+	}
+	session := &agentSession{agent: agent, id: "T-containment", nativeID: "native-thread"}
+	require.Error(t, session.verifyContinuable(t.Context()))
+	require.ErrorIs(t, session.scratchContainmentError(), ampnative.ErrContainmentIncomplete)
 }

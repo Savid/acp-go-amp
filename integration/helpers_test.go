@@ -5,13 +5,11 @@ package integration
 import (
 	"bytes"
 	"context"
-	"errors"
 	"io"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -33,57 +31,16 @@ const (
 
 var integrationLogger = slog.New(slog.DiscardHandler)
 
-// integrationContainmentOptions exercises Darwin's optional process-group
-// containment for integration agents.
-func integrationContainmentOptions(options []ampacp.Option) []ampacp.Option {
-	if runtime.GOOS == "darwin" {
-		return append(options, ampacp.WithDarwinBestEffortContainment())
-	}
-
-	return options
-}
-
 func newIntegrationAgent(options ...ampacp.Option) *ampacp.Agent {
-	return ampacp.NewAgent(integrationContainmentOptions(options)...)
+	return ampacp.NewAgent(options...)
 }
 
-// newIntegrationAmpClient builds a native client that reaches the amp binary on
-// the same containment terms the agent uses: a registry-recorded generation per
-// launch, rooted in a scratch parent this test owns and removed once the launch
-// completes.
 func newIntegrationAmpClient(
 	t *testing.T,
 	logger *slog.Logger,
-	kind ampacp.RuntimeResourceKind,
 	options amp.Options,
 ) *amp.Client {
 	t.Helper()
-
-	if runtime.GOOS == "darwin" {
-		parent := t.TempDir()
-		options.DarwinBestEffort = true
-		options.NewDarwinGeneration = func(context.Context) (*amp.DarwinGeneration, error) {
-			root, err := os.MkdirTemp(parent, "acp-go-amp-command-*")
-			if err != nil {
-				return nil, err
-			}
-
-			generation, err := amp.NewDarwinGenerationRecord(parent, root, string(kind))
-			if err != nil {
-				return nil, errors.Join(err, os.RemoveAll(root))
-			}
-
-			generation.Release = func(complete bool) error {
-				if !complete {
-					return nil
-				}
-
-				return os.RemoveAll(root)
-			}
-
-			return generation, nil
-		}
-	}
 
 	return amp.NewClient(logger, options)
 }
@@ -320,8 +277,7 @@ func serveLiveAgentRawForTest(
 
 	serveErr := make(chan error, 1)
 	go func() {
-		options := integrationContainmentOptions(append(base, opts...))
-		serveErr <- ampacp.Serve(serveCtx, c2aR, a2cW, options...)
+		serveErr <- ampacp.Serve(serveCtx, c2aR, a2cW, append(base, opts...)...)
 	}()
 
 	t.Cleanup(func() {
@@ -366,18 +322,26 @@ func connectLiveAgentBinary(
 	cmd := exec.Command(agentPath, args...) // #nosec G204 -- path is the test-built agent binary.
 	cmd.Env = append(os.Environ(), envAmpAPIKey+"=fake-integration-key")
 
-	stdin, err := cmd.StdinPipe()
+	// Both ends of the agent's stdio belong to this test: exec.Cmd's own pipe
+	// helpers hand their parent ends to Cmd.Wait, which closes them as the
+	// child exits and drops whatever it wrote but nobody had read yet — here
+	// that is the agent's last JSON-RPC responses.
+	childStdin, stdin, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
 	}
-	stdout, err := cmd.StdoutPipe()
+	stdout, childStdout, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
 	}
+	cmd.Stdin, cmd.Stdout = childStdin, childStdout
 
 	var stderr lockedBuffer
 	cmd.Stderr = &stderr
-	if startErr := cmd.Start(); startErr != nil {
+	startErr := cmd.Start()
+	_ = childStdin.Close()
+	_ = childStdout.Close()
+	if startErr != nil {
 		t.Fatal(startErr)
 	}
 

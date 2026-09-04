@@ -23,12 +23,12 @@ type startupProbeResidence struct {
 }
 
 type agentCleanupResidence struct {
-	agent        *Agent
-	id           uint64
-	root         string
-	release      func()
-	releaseTaken bool
-	boundaryErr  error
+	agent     *Agent
+	id        uint64
+	root      string
+	prepared  bool
+	opaque    bool
+	retryable bool
 }
 
 func (a *Agent) reserveCleanupResidence() (*agentCleanupResidence, error) {
@@ -50,14 +50,6 @@ func (a *Agent) reserveCleanupResidence() (*agentCleanupResidence, error) {
 	return residence, nil
 }
 
-func (r *agentCleanupResidence) setRelease(release func()) {
-	r.agent.mu.Lock()
-	if r.agent.cleanupResidences[r.id] == r {
-		r.release = release
-	}
-	r.agent.mu.Unlock()
-}
-
 func (r *agentCleanupResidence) setRoot(root string) {
 	r.agent.mu.Lock()
 	if r.agent.cleanupResidences[r.id] == r {
@@ -66,23 +58,50 @@ func (r *agentCleanupResidence) setRoot(root string) {
 	r.agent.mu.Unlock()
 }
 
-func (r *agentCleanupResidence) recordBoundary(err error) {
+func (r *agentCleanupResidence) beginPrepare() {
 	r.agent.mu.Lock()
 	if r.agent.cleanupResidences[r.id] == r {
-		r.boundaryErr = errors.Join(r.boundaryErr, err)
+		r.opaque = true
 	}
 	r.agent.mu.Unlock()
+}
+
+func (r *agentCleanupResidence) setPrepared() {
+	r.agent.mu.Lock()
+	if r.agent.cleanupResidences[r.id] == r {
+		r.prepared = true
+		r.opaque = false
+	}
+	r.agent.mu.Unlock()
+}
+
+func (r *agentCleanupResidence) setRetryable() {
+	r.agent.mu.Lock()
+	if r.agent.cleanupResidences[r.id] == r && !r.opaque {
+		r.retryable = true
+	}
+	r.agent.mu.Unlock()
+}
+
+func (r *agentCleanupResidence) retainsOpaqueTree() bool {
+	r.agent.mu.Lock()
+	defer r.agent.mu.Unlock()
+
+	return r.agent.cleanupResidences[r.id] == r && r.opaque
 }
 
 func (r *agentCleanupResidence) finalize() error {
 	r.agent.mu.Lock()
 	root := r.root
-	boundaryErr := r.boundaryErr
-	releaseTaken := r.releaseTaken
+	opaque := r.opaque
 	r.agent.mu.Unlock()
 
-	if !amp.ProcessContainmentComplete(boundaryErr) {
-		return boundaryErr
+	if opaque {
+		return ErrContainmentIncomplete
+	}
+
+	if reclaimErr := r.reclaim(); reclaimErr != nil {
+		return reclaimErr
 	}
 
 	var removeErr error
@@ -90,25 +109,42 @@ func (r *agentCleanupResidence) finalize() error {
 		removeErr = removeSessionDir(root)
 	}
 
-	if removeErr != nil || releaseTaken {
+	if removeErr != nil {
 		return removeErr
 	}
 
-	r.agent.mu.Lock()
-	if r.agent.cleanupResidences[r.id] != r || r.releaseTaken {
-		r.agent.mu.Unlock()
+	return nil
+}
 
+func (r *agentCleanupResidence) reclaim() error {
+	reclaimCtx, cancel := context.WithTimeout(context.Background(), defaultNativeCommandTimeout)
+	reclaimErr := r.reclaimWithContext(reclaimCtx)
+
+	cancel()
+
+	return reclaimErr
+}
+
+func (r *agentCleanupResidence) reclaimWithContext(ctx context.Context) error {
+	r.agent.mu.Lock()
+	root := r.root
+	prepared := r.prepared
+	r.agent.mu.Unlock()
+
+	if !prepared || root == "" {
 		return nil
 	}
 
-	r.releaseTaken = true
-	release := r.release
-	r.release = nil
-	r.agent.mu.Unlock()
+	reclaimErr := r.agent.reclaimNativeTree(ctx, root)
+	if reclaimErr != nil {
+		r.setRetryable()
 
-	if release != nil {
-		release()
+		return reclaimErr
 	}
+
+	r.agent.mu.Lock()
+	r.prepared = false
+	r.agent.mu.Unlock()
 
 	return nil
 }
@@ -126,13 +162,15 @@ func (a *Agent) retryCleanupResidences(ctx context.Context) {
 
 	residences := make([]*agentCleanupResidence, 0, len(a.cleanupResidences))
 	for _, residence := range a.cleanupResidences {
-		residences = append(residences, residence)
+		if residence.retryable {
+			residences = append(residences, residence)
+		}
 	}
 	a.mu.Unlock()
 
 	for _, residence := range residences {
 		cleanupErr := invokeShutdownStep(residence.finalize)
-		if cleanupErr == nil {
+		if cleanupErr == nil && !residence.retainsOpaqueTree() {
 			a.clearCleanupResidence(residence)
 
 			continue
@@ -167,79 +205,16 @@ func (a *Agent) runStartupWithProbe(
 	probe func(context.Context, *amp.Client) (string, error),
 ) (returnErr error) {
 	a.retryCleanupResidences(ctx)
-
-	cleanupResidence, err := a.reserveCleanupResidence()
-	if err != nil {
-		return err
-	}
-
-	scratchRelease, err := reserveScratchRoot(ctx, a.options.RuntimeResourceHooks, RuntimeResourceDiscovery)
-	if err != nil {
-		a.clearCleanupResidence(cleanupResidence)
-
-		return err
-	}
-
-	cleanupResidence.setRelease(scratchRelease)
-
-	var residence startupProbeResidence
-
-	defer func() {
-		if !amp.ProcessContainmentComplete(returnErr) {
-			cleanupResidence.recordBoundary(returnErr)
-
-			return
-		}
-
-		cleanupErr := cleanupResidence.finalize()
-		if cleanupErr == nil {
-			a.clearCleanupResidence(cleanupResidence)
-		}
-
-		returnErr = errors.Join(returnErr, cleanupErr)
-	}()
-
-	parent, err := ensureScratchParent(a.options.ScratchDir)
-	if err != nil {
-		return err
-	}
-
-	residence, err = materializeStartupProbeResidence(parent)
-	if err != nil {
-		cleanupResidence.setRoot(residence.root)
-
-		return err
-	}
-
-	cleanupResidence.setRoot(residence.root)
-
-	if err := handoffGeneratedNativeTree(residence.root, a.options.ProcessIsolation); err != nil {
-		return fmt.Errorf("handoff Amp startup probe residence: %w", err)
-	}
-
-	// The probe environment is the static one: the ordinary or isolation base
-	// the native boundary supplies, the agent-scoped WithEnv phase, the named
-	// operation values the authenticated method probes need, and the
-	// adapter-managed probe residence last. The session's raw PATH is absent.
-	probeEnv := composeEnv(
-		a.options.Env,
-		operationSessionEnv(sessionEnv),
-		managedSessionEnv(residence.home, residence.config, residence.cache, residence.data, residence.state),
-	)
-
 	options := amp.Options{
-		CLIPath:                    a.options.ExecutablePath,
-		Cwd:                        cwd,
-		SettingsFile:               residence.settingsFile,
-		Env:                        probeEnv,
-		ResolutionEnv:              composeEnv(a.options.Env),
-		MCPConfigPath:              residence.mcpFile,
-		MaxLineBytes:               a.options.runtime.maxJSONLineBytes,
-		OnGoroutinePanic:           a.onNativeGoroutinePanic,
-		NewProcessSnapshotObserver: a.newProcessSnapshotObserver,
-		WritableRoot:               residence.root,
+		CLIPath:       a.options.ExecutablePath,
+		Cwd:           cwd,
+		Env:           composeEnv(a.options.Env, operationSessionEnv(sessionEnv)),
+		ResolutionEnv: composeEnv(a.options.Env),
+		NewProbeClient: func(probeCtx context.Context) (*amp.Client, func() error, error) {
+			return a.newPreparedProbeClient(probeCtx, cwd, sessionEnv)
+		},
 	}
-	a.configureNativeClient(&options, RuntimeResourceDiscovery)
+	a.configureNativeClient(&options)
 
 	callbackCtx := withExactCallbackGeneration(ctx, "native:startup_probe")
 
@@ -253,6 +228,74 @@ func (a *Agent) runStartupWithProbe(
 	// The harness that just passed version and startup validation is the one
 	// every later launch runs, so resolution never happens again.
 	return a.retainHarnessPath(path)
+}
+
+func (a *Agent) newPreparedProbeClient(ctx context.Context, cwd string, sessionEnv map[string]string) (*amp.Client, func() error, error) {
+	cleanupResidence, err := a.reserveCleanupResidence()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	fail := func(cause error) (*amp.Client, func() error, error) {
+		cleanupResidence.setRetryable()
+
+		cleanupErr := cleanupResidence.finalize()
+		if cleanupErr == nil && !cleanupResidence.retainsOpaqueTree() {
+			a.clearCleanupResidence(cleanupResidence)
+		}
+
+		return nil, nil, errors.Join(cause, cleanupErr)
+	}
+
+	parent, err := a.ensureScratchParent()
+	if err != nil {
+		return fail(err)
+	}
+
+	residence, err := materializeStartupProbeResidence(parent)
+	cleanupResidence.setRoot(residence.root)
+
+	if err != nil {
+		return fail(err)
+	}
+
+	if a.options.hostAuthoritySupplied {
+		cleanupResidence.beginPrepare()
+	}
+
+	if err := a.prepareNativeTree(ctx, residence.root); err != nil {
+		return fail(fmt.Errorf("prepare Amp startup probe residence: %w", err))
+	}
+
+	if a.options.hostAuthoritySupplied {
+		cleanupResidence.setPrepared()
+	}
+
+	probeEnv := composeEnv(
+		a.options.Env,
+		operationSessionEnv(sessionEnv),
+		managedSessionEnv(residence.home, residence.config, residence.cache, residence.data, residence.state),
+	)
+	options := amp.Options{
+		CLIPath: a.options.ExecutablePath, Cwd: cwd, SettingsFile: residence.settingsFile,
+		Env: probeEnv, ResolutionEnv: composeEnv(a.options.Env), MCPConfigPath: residence.mcpFile,
+		MaxLineBytes: a.options.runtime.maxJSONLineBytes, OnGoroutinePanic: a.onNativeGoroutinePanic,
+		WritableRoot: residence.root,
+	}
+	a.configureNativeClient(&options)
+
+	cleanup := func() error {
+		cleanupResidence.setRetryable()
+
+		cleanupErr := cleanupResidence.finalize()
+		if cleanupErr == nil {
+			a.clearCleanupResidence(cleanupResidence)
+		}
+
+		return cleanupErr
+	}
+
+	return amp.NewClient(a.log, options), cleanup, nil
 }
 
 func materializeStartupProbeResidence(parent string) (startupProbeResidence, error) {

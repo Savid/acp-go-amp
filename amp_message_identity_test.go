@@ -302,6 +302,7 @@ func TestTranscriptIdentityStateFailsClosed(t *testing.T) {
 		SessionID:       "T-agent-thread",
 		NativeSessionID: "T-agent-thread",
 		Cwd:             cwd,
+		Env:             map[string]string{},
 	})
 	require.NoError(t, marshalErr)
 	require.NoError(t, baseStore.Replace(ctx, SessionKey{SessionID: "T-agent-thread"}, []SessionStoreReplacement{

@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"path/filepath"
 	"slices"
 	"testing"
 
@@ -182,11 +183,12 @@ func TestRelativeInputHandoffRootIsAConfigurationError(t *testing.T) {
 }
 
 func TestInputHandoffRootOption(t *testing.T) {
-	require.Equal(t, "/srv/handoff", applyOptions([]Option{WithInputHandoffRoot("/srv/handoff")}).InputHandoffRoot)
+	root := absTestPath("srv", "handoff")
+	require.Equal(t, root, applyOptions([]Option{WithInputHandoffRoot(root)}).InputHandoffRoot)
 	require.Empty(t, applyOptions(nil).InputHandoffRoot)
 	require.NoError(t, validateInputHandoffRoot(""))
-	require.NoError(t, validateInputHandoffRoot("/srv/handoff"))
-	require.Error(t, validateInputHandoffRoot("srv/handoff"))
+	require.NoError(t, validateInputHandoffRoot(root))
+	require.Error(t, validateInputHandoffRoot(filepath.Join("srv", "handoff")))
 }
 
 func sortedMetaKeys(meta map[string]any) []string {

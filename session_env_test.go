@@ -24,6 +24,18 @@ func simulateWindowsEnvironment(t *testing.T) {
 	runtimeGOOS = platformWindows
 }
 
+// simulateUnixEnvironment selects the Unix environment key identity for the
+// duration of a test, so a contract stated as "under the Unix identity" is
+// exercised on a Windows runner as well as on a Unix one.
+func simulateUnixEnvironment(t *testing.T) {
+	t.Helper()
+
+	original := runtimeGOOS
+	t.Cleanup(func() { runtimeGOOS = original })
+
+	runtimeGOOS = platformLinux
+}
+
 // childEnvironments reads every environment block the fake amp recorded, one
 // per spawned process.
 func childEnvironments(t *testing.T, state string) [][]string {
@@ -184,7 +196,6 @@ func TestWindowsSessionEnvironmentComposesOneCaseInsensitiveChain(t *testing.T) 
 	resp, err := agent.NewSession(ctx, NewSessionRequest(t.TempDir(), WithSessionAmpOptions(NewAmpOptions(
 		WithAmpEnv(map[string]string{
 			"PATH":         sessionPathDir,
-			"Home":         callerHome,
 			"Amp_Api_Key":  "session-key",
 			"Session_Only": "session-value",
 		}),
@@ -215,9 +226,9 @@ func TestWindowsSessionEnvironmentComposesOneCaseInsensitiveChain(t *testing.T) 
 		// A session value that is not a named operation value is the prompt's
 		// alone; a probe never sees one.
 		if run.isPrompt() {
-			// The residence phase is applied after every caller phase, so the
-			// isolated home stands even though both caller phases named HOME
-			// under a spelling that only Windows folds together.
+			// The residence phase is applied after the caller phase, so the
+			// isolated home stands even though the agent named HOME under a
+			// spelling that only Windows folds together.
 			requireChildEnv(t, run.Env, "HOME", managedHome)
 			requireChildEnv(t, run.Env, "SESSION_ONLY", "session-value")
 
@@ -274,6 +285,8 @@ func TestWindowsSessionEnvironmentGatesTheFoldedAPIKey(t *testing.T) {
 // order from which the delivered value could be derived.
 func TestAmbiguousEnvironmentKeysAreRefused(t *testing.T) {
 	ambiguous := map[string]string{"Path": "a", "PATH": "b"}
+
+	simulateUnixEnvironment(t)
 
 	if previous, key := ambiguousEnvKeys(ambiguous); previous != "" || key != "" {
 		t.Fatalf("Unix identity reported ambiguity: %q, %q", previous, key)
@@ -342,6 +355,8 @@ func TestOperationSessionEnvNamesOnlyTheOperationValues(t *testing.T) {
 		"Amp_Api_Key":  "folded",
 		"SESSION_ONLY": "value",
 	}
+
+	simulateUnixEnvironment(t)
 
 	unix := operationSessionEnv(session)
 	if len(unix) != 2 || unix["AMP_API_KEY"] != "key" || unix["AMP_URL"] != "https://amp.example" {

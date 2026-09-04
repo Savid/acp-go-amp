@@ -128,12 +128,13 @@ type ampManifest struct {
 	// NativeSessionID is the server-side Amp thread id. It is empty until the
 	// session's first prompt turn creates the thread and the wrapper adopts
 	// the id from the stream-json init frame.
-	NativeSessionID    string `json:"nativeSessionId,omitempty"`
-	Cwd                string `json:"cwd"`
-	Title              string `json:"title,omitempty"`
-	Mode               string `json:"mode,omitempty"`
-	UpdatedAtUnixMilli int64  `json:"updatedAtUnixMilli"`
-	CreatedAtUnixMilli int64  `json:"createdAtUnixMilli"`
+	NativeSessionID    string            `json:"nativeSessionId,omitempty"`
+	Cwd                string            `json:"cwd"`
+	Title              string            `json:"title,omitempty"`
+	Mode               string            `json:"mode,omitempty"`
+	Env                map[string]string `json:"env"`
+	UpdatedAtUnixMilli int64             `json:"updatedAtUnixMilli"`
+	CreatedAtUnixMilli int64             `json:"createdAtUnixMilli"`
 }
 
 type agentSession struct {
@@ -154,12 +155,16 @@ type agentSession struct {
 	// receives: the static agent base, the named operation values, and the
 	// adapter-managed residence, with no session PATH.
 	env                   map[string]string
+	sessionEnv            map[string]string
 	operationEnv          map[string]string
 	rawEvents             bool
 	rawEventMu            sync.Mutex
 	rawEventSeq           atomic.Int64
 	settingsDir           string
 	settingsFile          string
+	mcpConfigFile         string
+	nativeTreePrepared    bool
+	nativeTreeOpaque      bool
 	scratchRootRelease    func()
 	closed                bool
 	poisonCause           string
@@ -236,6 +241,14 @@ type sessionPersistenceFence struct {
 	changed    bool
 }
 
+type sessionReplacementState struct {
+	nativeID    string
+	title       string
+	createdUnix int64
+	updatedUnix int64
+	rawEventSeq int64
+}
+
 type sessionTeardownFlight struct {
 	generation uint64
 	done       chan struct{}
@@ -250,15 +263,10 @@ func newAgentSession(ctx context.Context, agent *Agent, id acp.SessionId, cwd st
 
 	now := time.Now().UnixMilli()
 
-	scratchRelease, err := reserveScratchRoot(ctx, agent.options.RuntimeResourceHooks, RuntimeResourceSession)
-	if err != nil {
-		return nil, err
-	}
-
 	session := &agentSession{
 		agent:              agent,
 		id:                 id,
-		scratchRootRelease: scratchRelease,
+		scratchRootRelease: func() {},
 		turn:               make(chan struct{}, 1),
 	}
 	agent.retainCleanupOwner(id, session, agentCleanupConstructing)
@@ -270,14 +278,14 @@ func newAgentSession(ctx context.Context, agent *Agent, id acp.SessionId, cwd st
 		}
 
 		cleanupErr := session.finalizeScratch(nil, nil)
-		if cleanupErr == nil {
+		if cleanupErr == nil && !session.retainsOpaqueTree() {
 			agent.clearCleanupOwner(id, session)
 		}
 
 		err = errors.Join(err, cleanupErr)
 	}()
 
-	parent, err := ensureScratchParent(agent.options.ScratchDir)
+	parent, err := agent.ensureScratchParent()
 	if err != nil {
 		return nil, err
 	}
@@ -296,8 +304,8 @@ func newAgentSession(ctx context.Context, agent *Agent, id acp.SessionId, cwd st
 
 	stateDir := filepath.Join(dir, "xdg-state")
 	for _, path := range []string{homeDir, configDir, cacheDir, dataDir, stateDir, filepath.Join(configDir, "amp")} {
-		if err := mkdirAll(path, 0o700); err != nil {
-			return nil, fmt.Errorf("create amp isolated home: %w", err)
+		if mkdirErr := mkdirAll(path, 0o700); mkdirErr != nil {
+			return nil, fmt.Errorf("create amp isolated home: %w", mkdirErr)
 		}
 	}
 
@@ -307,17 +315,32 @@ func newAgentSession(ctx context.Context, agent *Agent, id acp.SessionId, cwd st
 	// per-session file store, because the keystore item it would otherwise move
 	// to is keyed by hostname alone and shared by every session on the machine.
 	settingsFile := filepath.Join(configDir, "amp", "settings.json")
-	if err := writeFile(settingsFile, amp.AuthSettingsDocument(), 0o600); err != nil {
-		return nil, fmt.Errorf("write amp settings file: %w", err)
+	if writeErr := writeFile(settingsFile, amp.AuthSettingsDocument(), 0o600); writeErr != nil {
+		return nil, fmt.Errorf("write amp settings file: %w", writeErr)
 	}
 
-	if err := writeSeedFiles(homeDir, agent.options.SeedFiles); err != nil {
-		return nil, err
+	if seedErr := writeSeedFiles(homeDir, agent.options.SeedFiles); seedErr != nil {
+		return nil, seedErr
 	}
 
-	if err := handoffGeneratedNativeTree(dir, agent.options.ProcessIsolation); err != nil {
-		return nil, err
+	mcpFile := filepath.Join(dir, "mcp.json")
+
+	mcpDocument := mcpConfigJSON
+	if mcpDocument == "" {
+		mcpDocument = "{}\n"
 	}
+
+	if writeErr := writeFile(mcpFile, []byte(mcpDocument), 0o600); writeErr != nil {
+		return nil, fmt.Errorf("write amp MCP config: %w", writeErr)
+	}
+
+	session.nativeTreeOpaque = agent.options.hostAuthoritySupplied
+	if err := agent.prepareNativeTree(ctx, dir); err != nil {
+		return nil, fmt.Errorf("prepare amp session residence: %w", err)
+	}
+
+	session.nativeTreePrepared = agent.options.hostAuthoritySupplied
+	session.nativeTreeOpaque = false
 
 	mode := meta.options.Mode
 	if mode == "" {
@@ -342,9 +365,11 @@ func newAgentSession(ctx context.Context, agent *Agent, id acp.SessionId, cwd st
 	session.additionalDirectories = append([]string(nil), additionalDirs...)
 	session.mcpConfigJSON = mcpConfigJSON
 	session.env = env
+	session.sessionEnv = composeEnv(meta.options.Env)
 	session.operationEnv = operationEnv
 	session.rawEvents = meta.rawEvent
 	session.settingsFile = settingsFile
+	session.mcpConfigFile = mcpFile
 	agent.retainCleanupOwner(id, session, agentCleanupPrepared)
 
 	constructed = true
@@ -352,28 +377,34 @@ func newAgentSession(ctx context.Context, agent *Agent, id acp.SessionId, cwd st
 	return session, nil
 }
 
+func (s *agentSession) retainsOpaqueTree() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.nativeTreeOpaque
+}
+
 // client is the session's non-prompt client: thread export, thread delete, and
 // account login run on the static operation environment.
 func (s *agentSession) client() *amp.Client {
-	return s.clientWithEnv(s.operationEnv, "", RuntimeResourceSession)
+	return s.clientWithEnv(s.operationEnv, "")
 }
 
-func (s *agentSession) clientWithEnv(env map[string]string, mcpConfigPath string, kind RuntimeResourceKind) *amp.Client {
+func (s *agentSession) clientWithEnv(env map[string]string, mcpConfigPath string) *amp.Client {
 	options := amp.Options{
-		CLIPath:                    s.agent.options.ExecutablePath,
-		Cwd:                        s.cwd,
-		SettingsFile:               s.settingsFile,
-		Env:                        env,
-		ResolutionEnv:              composeEnv(s.agent.options.Env),
-		ResolvedExecutable:         s.agent.retainedHarnessPath(),
-		Mode:                       s.mode,
-		MCPConfigPath:              mcpConfigPath,
-		MaxLineBytes:               s.agent.options.runtime.maxJSONLineBytes,
-		OnGoroutinePanic:           s.agent.onNativeGoroutinePanic,
-		NewProcessSnapshotObserver: s.agent.newProcessSnapshotObserver,
-		WritableRoot:               s.settingsDir,
+		CLIPath:            s.agent.options.ExecutablePath,
+		Cwd:                s.cwd,
+		SettingsFile:       s.settingsFile,
+		Env:                env,
+		ResolutionEnv:      composeEnv(s.agent.options.Env),
+		ResolvedExecutable: s.agent.retainedHarnessPath(),
+		Mode:               s.mode,
+		MCPConfigPath:      mcpConfigPath,
+		MaxLineBytes:       s.agent.options.runtime.maxJSONLineBytes,
+		OnGoroutinePanic:   s.agent.onNativeGoroutinePanic,
+		WritableRoot:       s.settingsDir,
 	}
-	s.agent.configureNativeClient(&options, kind)
+	s.agent.configureNativeClient(&options)
 
 	return amp.NewClient(s.agent.log, options)
 }
@@ -432,7 +463,7 @@ func (s *agentSession) interruptState(ctx context.Context, state *promptTurnStat
 	cancelCtx, cancel := context.WithTimeout(interruptCtx, timeout+s.agent.options.runtime.nativeCloseTurnWait)
 	defer cancel()
 
-	return turn.Interrupt(cancelCtx, timeout)
+	return turn.Interrupt(cancelCtx)
 }
 
 // admitPrompt publishes one prompt as the session's active turn. Admission takes
@@ -645,6 +676,45 @@ func (s *agentSession) Close(ctx context.Context) (err error) {
 	}
 
 	return s.finalizeScratch(settlement.runtimeErr, settlement.boundaryErr)
+}
+
+// closeForReplacement settles an installed predecessor through the same
+// containment and durable rungs as session/close, but leaves logical map and
+// gauge ownership with the caller so it can publish a successor under the same
+// ACP session id without an addressable gap or slot churn.
+func (s *agentSession) closeForReplacement(ctx context.Context) (err error) {
+	ctx, flight, err := s.beginTeardown(ctx)
+	if err != nil {
+		return err
+	}
+	defer s.finishTeardownOnReturn(flight)
+
+	return s.closeInstalledRung(ctx)
+}
+
+func (s *agentSession) closeInstalledRung(ctx context.Context) error {
+	settlement := s.settleCloseRung(ctx)
+	if fenceErr := s.fencePersistenceForClose(ctx); fenceErr != nil {
+		return errors.Join(settlement.runtimeErr, fenceErr)
+	}
+
+	if !amp.ProcessContainmentComplete(settlement.boundaryErr) {
+		return errors.Join(settlement.runtimeErr, settlement.boundaryErr)
+	}
+
+	if commitErr := s.commitCloseRung(ctx); commitErr != nil {
+		return errors.Join(settlement.runtimeErr, commitErr)
+	}
+
+	if terminalErr := s.deliverPendingTerminal(ctx); terminalErr != nil {
+		return errors.Join(settlement.runtimeErr, terminalErr)
+	}
+
+	if settlement.runtimeErr != nil {
+		return settlement.runtimeErr
+	}
+
+	return s.finalizeScratch(nil, settlement.boundaryErr)
 }
 
 // closeAtShutdown is the ladder embedded shutdown runs. It carries the same
@@ -970,9 +1040,34 @@ func (s *agentSession) finalizeScratch(runtimeErr, boundaryErr error) error {
 		return runtimeErr
 	}
 
+	s.mu.Lock()
+	prepared := s.nativeTreePrepared
+	opaque := s.nativeTreeOpaque
+	root := s.settingsDir
+	s.mu.Unlock()
+
+	if opaque {
+		return errors.Join(runtimeErr, boundaryErr, ErrContainmentIncomplete)
+	}
+
+	if prepared {
+		reclaimCtx, cancel := context.WithTimeout(context.WithoutCancel(context.Background()), defaultNativeCommandTimeout)
+		reclaimErr := s.agent.reclaimNativeTree(reclaimCtx, root)
+
+		cancel()
+
+		if reclaimErr != nil {
+			return errors.Join(runtimeErr, reclaimErr)
+		}
+
+		s.mu.Lock()
+		s.nativeTreePrepared = false
+		s.mu.Unlock()
+	}
+
 	var removeErr error
-	if s.settingsDir != "" {
-		removeErr = removeSessionDir(s.settingsDir)
+	if root != "" {
+		removeErr = removeSessionDir(root)
 	}
 
 	if removeErr == nil {
@@ -1091,6 +1186,7 @@ func (s *agentSession) manifest() ampManifest {
 		Cwd:                s.cwd,
 		Title:              s.title,
 		Mode:               s.mode,
+		Env:                cloneStringMap(s.sessionEnv),
 		UpdatedAtUnixMilli: s.updatedUnix,
 		CreatedAtUnixMilli: s.createdUnix,
 	}
@@ -1103,6 +1199,30 @@ func (s *agentSession) nativeSessionID() string {
 	defer s.mu.Unlock()
 
 	return s.nativeID
+}
+
+func (s *agentSession) replacementState() sessionReplacementState {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return sessionReplacementState{
+		nativeID:    s.nativeID,
+		title:       s.title,
+		createdUnix: s.createdUnix,
+		updatedUnix: s.updatedUnix,
+		rawEventSeq: s.rawEventSeq.Load(),
+	}
+}
+
+func (s *agentSession) applyReplacementState(state sessionReplacementState) {
+	s.mu.Lock()
+	s.nativeID = state.nativeID
+	s.title = state.title
+	s.createdUnix = state.createdUnix
+	s.updatedUnix = state.updatedUnix
+	s.mu.Unlock()
+
+	s.rawEventSeq.Store(state.rawEventSeq)
 }
 
 // persistAfterTurn durably commits the manifest plus the full transcript in one

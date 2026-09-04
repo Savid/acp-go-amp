@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 )
 
 // ProviderCredentialType selects one variant of the closed credential union.
@@ -105,39 +104,8 @@ func (credential *ProviderCredential) UnmarshalJSON(data []byte) error {
 // strictCredentialFields walks the object once so a duplicate key is rejected
 // rather than silently winning.
 func strictCredentialFields(data []byte) (map[string]json.RawMessage, error) {
-	decoder := json.NewDecoder(bytes.NewReader(data))
-
-	token, err := decoder.Token()
-	if err != nil || token != json.Delim('{') {
-		return nil, errProviderCredentialInvalid
-	}
-
-	fields := map[string]json.RawMessage{}
-
-	for decoder.More() {
-		keyToken, err := decoder.Token()
-		if err != nil {
-			return nil, errProviderCredentialInvalid
-		}
-
-		key, _ := keyToken.(string)
-		if _, duplicate := fields[key]; duplicate {
-			return nil, errProviderCredentialInvalid
-		}
-
-		var value json.RawMessage
-		if err := decoder.Decode(&value); err != nil {
-			return nil, errProviderCredentialInvalid
-		}
-
-		fields[key] = value
-	}
-
-	if _, err := decoder.Token(); err != nil {
-		return nil, errProviderCredentialInvalid
-	}
-
-	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+	fields, err := strictJSONObjectFields(data)
+	if err != nil {
 		return nil, errProviderCredentialInvalid
 	}
 
@@ -174,7 +142,7 @@ type authCredentialResult struct {
 // the key is long-lived and non-rotating, so there is no harvest cycle — and a
 // slot that answers nothing fails closed rather than reporting absence.
 func (p *providerAuth) credential(ctx context.Context, params json.RawMessage) (any, error) {
-	session, flow, err := p.addressedFlowLeg(params)
+	_, flow, err := p.addressedFlowLeg(params)
 	if err != nil {
 		return nil, err
 	}
@@ -208,10 +176,6 @@ func (p *providerAuth) credential(ctx context.Context, params json.RawMessage) (
 		}
 
 		return providerCredentialResult(flow, secret), nil
-	}
-
-	if storeErr := session.authFileStore(); storeErr != nil {
-		return nil, p.failHarvest(flow, authCauseNativeVeto)
 	}
 
 	p.mu.Lock()

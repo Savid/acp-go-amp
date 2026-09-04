@@ -12,11 +12,6 @@ const (
 	ampOptionsKey       = "options"
 	metaOutputSchemaKey = "outputSchema"
 	metaEnabledKey      = "enabled"
-
-	// metaRouteKey is the family literal Amp deliberately does not implement. It
-	// is named here anyway: a builder refuses a caller's collision with a reserved
-	// key whether or not this adapter would have read it.
-	metaRouteKey = "acp-go.dev/route"
 )
 
 // SessionRequestOption configures embedded-Go ACP session lifecycle requests.
@@ -307,15 +302,9 @@ func (cfg sessionRequestConfig) additionalDirectoriesClone() []string {
 	return append([]string(nil), cfg.additionalDirectories...)
 }
 
-// reservedFamilyLiterals is the closed set of family-global `acp-go.dev/*` keys.
-// Each one is versioned, carries exactly the fields the family fixes, and is
-// written by the adapter or read from a place no caller `_meta` map reaches.
-// Amp advertises no route capability and still refuses the route literal by
-// name: a reserved key is never ignored because this adapter would not have read
-// it anyway.
+// reservedFamilyLiterals is the closed set of family-global keys Amp uses.
 func reservedFamilyLiterals() []string {
 	return []string{
-		metaRouteKey,
 		metaMediaEnvelopeKey,
 		metaHandoffKey,
 		lifecycle.MetaKey,

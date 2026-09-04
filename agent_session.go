@@ -3,7 +3,6 @@ package ampacp
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"log/slog"
 	"maps"
@@ -23,7 +22,7 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (r
 	if err != nil {
 		return acp.NewSessionResponse{}, err
 	}
-	defer func() { finishCall(err) }()
+	defer finishPublicCall(&err, finishCall)
 
 	ctx, finish := a.observe.StartACPRequest(ctx, acp.AgentMethodSessionNew)
 	defer func() { finish(err) }()
@@ -48,10 +47,11 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (r
 		return acp.NewSessionResponse{}, err
 	}
 
-	readinessStarted := time.Now()
-	startErr := a.ensureNewSessionStartup(ctx, params.Cwd, meta)
-	observeRuntimeStartupStage(ctx, a.options.RuntimeResourceHooks, RuntimeResourceDiscovery, RuntimeStartupReadiness, readinessStarted, startErr)
+	if retryErr := a.retryCleanupOwners(ctx); retryErr != nil {
+		return acp.NewSessionResponse{}, retryErr
+	}
 
+	startErr := a.ensureNewSessionStartup(ctx, params.Cwd, meta)
 	if startErr != nil {
 		return acp.NewSessionResponse{}, startErr
 	}
@@ -99,7 +99,7 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 	if err != nil {
 		return acp.LoadSessionResponse{}, err
 	}
-	defer func() { finishCall(err) }()
+	defer finishPublicCall(&err, finishCall)
 
 	ctx, finish := a.observe.StartACPRequest(ctx, acp.AgentMethodSessionLoad)
 	defer func() { finish(err) }()
@@ -134,7 +134,7 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 	if err != nil {
 		return acp.ResumeSessionResponse{}, err
 	}
-	defer func() { finishCall(err) }()
+	defer finishPublicCall(&err, finishCall)
 
 	ctx, finish := a.observe.StartACPRequest(ctx, acp.AgentMethodSessionResume)
 	defer func() { finish(err) }()
@@ -182,7 +182,7 @@ func (a *Agent) ListSessions(ctx context.Context, params acp.ListSessionsRequest
 	if err != nil {
 		return acp.ListSessionsResponse{}, err
 	}
-	defer func() { finishCall(err) }()
+	defer finishPublicCall(&err, finishCall)
 
 	ctx, finish := a.observe.StartACPRequest(ctx, acp.AgentMethodSessionList)
 	defer func() { finish(err) }()
@@ -340,7 +340,7 @@ func (a *Agent) Prompt(ctx context.Context, params acp.PromptRequest) (resp acp.
 	if err != nil {
 		return acp.PromptResponse{}, err
 	}
-	defer func() { finishCall(err) }()
+	defer finishPublicCall(&err, finishCall)
 
 	ctx, finishReq := a.observe.StartACPRequest(ctx, acp.AgentMethodSessionPrompt)
 	defer func() { finishReq(err) }()
@@ -376,7 +376,7 @@ func (a *Agent) Cancel(ctx context.Context, params acp.CancelNotification) (err 
 	if err != nil {
 		return err
 	}
-	defer func() { finishCall(err) }()
+	defer finishPublicCall(&err, finishCall)
 
 	ctx, finish := a.observe.StartACPRequest(ctx, acp.AgentMethodSessionCancel)
 	defer func() { finish(err) }()
@@ -401,7 +401,7 @@ func (a *Agent) CloseSession(ctx context.Context, params acp.CloseSessionRequest
 	if err != nil {
 		return acp.CloseSessionResponse{}, err
 	}
-	defer func() { finishCall(err) }()
+	defer finishPublicCall(&err, finishCall)
 
 	ctx, finish := a.observe.StartACPRequest(ctx, acp.AgentMethodSessionClose)
 	defer func() { finish(err) }()
@@ -423,7 +423,7 @@ func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDe
 	if err != nil {
 		return acp.UnstableDeleteSessionResponse{}, err
 	}
-	defer func() { finishCall(err) }()
+	defer finishPublicCall(&err, finishCall)
 
 	ctx, finish := a.observe.StartACPRequest(ctx, acp.AgentMethodSessionDelete)
 	defer func() { finish(err) }()
@@ -628,7 +628,7 @@ func (a *Agent) prepareDeleteOwner(
 		a,
 		id,
 		manifest.Cwd,
-		parsedSessionMeta{options: AmpOptions{Mode: manifest.Mode}},
+		parsedSessionMeta{options: AmpOptions{Mode: manifest.Mode, Env: cloneStringMap(manifest.Env)}},
 		"",
 		nil,
 	)
@@ -750,7 +750,7 @@ func (a *Agent) SetSessionConfigOption(ctx context.Context, params acp.SetSessio
 	if err != nil {
 		return acp.SetSessionConfigOptionResponse{}, err
 	}
-	defer func() { finishCall(err) }()
+	defer finishPublicCall(&err, finishCall)
 
 	ctx, finish := a.observe.StartACPRequest(ctx, acp.AgentMethodSessionSetConfigOption)
 	defer func() { finish(err) }()
@@ -784,9 +784,15 @@ func (a *Agent) SetSessionConfigOption(ctx context.Context, params acp.SetSessio
 		return acp.SetSessionConfigOptionResponse{}, unsupportedField(fieldValue)
 	}
 
-	session, err := a.session(params.ValueId.SessionId)
+	ctx, use, err := a.beginSessionUse(ctx, params.ValueId.SessionId)
 	if err != nil {
 		return acp.SetSessionConfigOptionResponse{}, err
+	}
+	defer a.finishSessionUse(params.ValueId.SessionId, use)
+
+	session := use.session
+	if session == nil {
+		return acp.SetSessionConfigOptionResponse{}, unknownSessionError()
 	}
 
 	if err := session.setConfig(ctx, params.ValueId.ConfigId, params.ValueId.Value); err != nil {
@@ -801,7 +807,7 @@ func (a *Agent) SetSessionMode(ctx context.Context, params acp.SetSessionModeReq
 	if err != nil {
 		return acp.SetSessionModeResponse{}, err
 	}
-	defer func() { finishCall(err) }()
+	defer finishPublicCall(&err, finishCall)
 
 	_, finish := a.observe.StartACPRequest(ctx, acp.AgentMethodSessionSetMode)
 	defer func() { finish(err) }()
@@ -852,10 +858,15 @@ func (a *Agent) loadOrResume(ctx context.Context, sessionID acp.SessionId, cwd s
 		return nil, nil, false, nil, err
 	}
 
-	readinessStarted := time.Now()
-	startErr := a.ensureStartup(ctx, cwd, meta)
-	observeRuntimeStartupStage(ctx, a.options.RuntimeResourceHooks, RuntimeResourceDiscovery, RuntimeStartupReadiness, readinessStarted, startErr)
+	replaceActive := false
+	if session := use.session; session != nil {
+		meta, replaceActive, err = session.normalizeActiveRequest(meta, cwd, mcpConfig, additionalDirs)
+		if err != nil {
+			return nil, nil, false, nil, err
+		}
+	}
 
+	startErr := a.ensureStartup(ctx, cwd, meta)
 	if startErr != nil {
 		return nil, nil, false, nil, startErr
 	}
@@ -864,15 +875,26 @@ func (a *Agent) loadOrResume(ctx context.Context, sessionID acp.SessionId, cwd s
 		return nil, nil, false, nil, useErr
 	}
 
-	if session := use.session; session != nil {
-		transcript, activeErr := a.loadActiveSession(ctx, sessionID, use, session, meta, cwd, mcpConfig, additionalDirs)
+	if active := use.session; active != nil {
+		if replaceActive {
+			replacement, transcript, replaceErr := a.replaceActiveSession(ctx, sessionID, use, active, meta, cwd, mcpConfig, additionalDirs)
+			if replaceErr != nil {
+				return nil, nil, false, nil, replaceErr
+			}
+
+			keepUse = true
+
+			return replacement, transcript, false, use, nil
+		}
+
+		transcript, activeErr := a.loadActiveSession(ctx, sessionID, use, active, meta, cwd, mcpConfig, additionalDirs)
 		if activeErr != nil {
 			return nil, nil, false, nil, activeErr
 		}
 
 		keepUse = true
 
-		return session, transcript, false, use, nil
+		return active, transcript, false, use, nil
 	}
 
 	session, transcript, coldErr := a.loadColdSession(ctx, sessionID, use, cwd, meta, mcpConfig, additionalDirs)
@@ -883,6 +905,185 @@ func (a *Agent) loadOrResume(ctx context.Context, sessionID acp.SessionId, cwd s
 	keepUse = true
 
 	return session, transcript, true, use, nil
+}
+
+func (a *Agent) replaceActiveSession(
+	ctx context.Context,
+	id acp.SessionId,
+	use *agentSessionUse,
+	predecessor *agentSession,
+	meta parsedSessionMeta,
+	cwd string,
+	mcpConfig string,
+	additionalDirs []string,
+) (_ *agentSession, _ []SessionStoreEntry, err error) {
+	if beginErr := a.beginActiveReplacement(id, use, predecessor); beginErr != nil {
+		return nil, nil, beginErr
+	}
+	defer a.finishActiveReplacement(id, use)
+
+	if closeErr := predecessor.closeForReplacement(ctx); closeErr != nil {
+		return nil, nil, closeErr
+	}
+
+	var successor *agentSession
+
+	installed := false
+	defer func() {
+		if installed {
+			return
+		}
+
+		if successor != nil {
+			err = errors.Join(err, a.cleanupUninstalledSession(id, use, successor))
+		}
+
+		retired, retireErr := a.retireFailedActiveReplacement(id, use, predecessor)
+		err = errors.Join(err, retireErr)
+
+		if retired {
+			a.observe.AddActiveSession(ctx, -1)
+		}
+	}()
+
+	if boundary := a.options.runtime.afterReplacementPredecessorClosed; boundary != nil {
+		boundary(predecessor)
+	}
+
+	if validationErr := a.validateActiveReplacement(id, use, predecessor); validationErr != nil {
+		return nil, nil, validationErr
+	}
+
+	state := predecessor.replacementState()
+
+	successor, err = newLifecycleAgentSession(ctx, a, id, cwd, meta, mcpConfig, additionalDirs)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	successor.applyReplacementState(state)
+
+	transcript, err := successor.loadTranscript(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	successor.setTranscriptFrameCount(len(transcript))
+
+	if validationErr := a.validateActiveReplacement(id, use, predecessor); validationErr != nil {
+		return nil, nil, validationErr
+	}
+
+	if continuableErr := successor.verifyContinuable(ctx); continuableErr != nil {
+		return nil, nil, continuableErr
+	}
+
+	if validationErr := a.validateActiveReplacement(id, use, predecessor); validationErr != nil {
+		return nil, nil, validationErr
+	}
+
+	if persistErr := successor.persistAfterTurn(ctx, nil); persistErr != nil {
+		return nil, nil, persistErr
+	}
+
+	if publishErr := a.publishActiveReplacement(id, use, predecessor, successor); publishErr != nil {
+		return nil, nil, publishErr
+	}
+
+	installed = true
+
+	a.reopenProviderAuth(id)
+
+	return successor, transcript, nil
+}
+
+func (a *Agent) beginActiveReplacement(id acp.SessionId, use *agentSessionUse, predecessor *agentSession) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if use == nil || a.sessionUses[id] != use || use.session != predecessor ||
+		a.sessions[id] != predecessor || a.isDeletedLocked(id) || a.sessionFlights[id] != nil {
+		return unknownSessionError()
+	}
+
+	use.replacing = true
+
+	return nil
+}
+
+func (a *Agent) validateActiveReplacement(id acp.SessionId, use *agentSessionUse, predecessor *agentSession) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if use == nil || a.sessionUses[id] != use || !use.replacing || use.session != predecessor ||
+		a.sessions[id] != predecessor || a.isDeletedLocked(id) || a.sessionFlights[id] != nil {
+		return unknownSessionError()
+	}
+
+	return nil
+}
+
+func (a *Agent) publishActiveReplacement(id acp.SessionId, use *agentSessionUse, predecessor, successor *agentSession) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if use == nil || a.sessionUses[id] != use || !use.replacing || use.session != predecessor ||
+		a.sessions[id] != predecessor || a.isDeletedLocked(id) || a.sessionFlights[id] != nil {
+		return unknownSessionError()
+	}
+
+	a.sessions[id] = successor
+	use.session = successor
+	use.replacing = false
+
+	a.clearCleanupOwnerLocked(id, successor)
+
+	return nil
+}
+
+func (a *Agent) finishActiveReplacement(id acp.SessionId, use *agentSessionUse) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if use != nil && a.sessionUses[id] == use {
+		use.replacing = false
+	}
+}
+
+// retireFailedActiveReplacement converts a fully closed predecessor into the
+// same cold state a successful session/close leaves. Keeping that wrapper in
+// the active map would strand future recovery on a fenced, removed residence.
+// A teardown flight already published for this use owns retirement instead.
+func (a *Agent) retireFailedActiveReplacement(id acp.SessionId, use *agentSessionUse, predecessor *agentSession) (bool, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if use == nil || a.sessionUses[id] != use || use.session != predecessor {
+		return false, acp.NewInternalError(map[string]any{jsonFieldError: "replacement retirement ownership changed"})
+	}
+
+	if flight := a.sessionFlights[id]; flight != nil {
+		if flight.use != use || (flight.session != nil && flight.session != predecessor) {
+			return false, acp.NewInternalError(map[string]any{jsonFieldError: wrapperOwnershipChanged})
+		}
+
+		use.replacing = false
+
+		return false, nil
+	}
+
+	if a.sessions[id] != predecessor {
+		return false, acp.NewInternalError(map[string]any{jsonFieldError: "replacement retirement ownership changed"})
+	}
+
+	delete(a.sessions, id)
+
+	use.session = nil
+	use.replacing = false
+
+	a.clearCleanupOwnerLocked(id, predecessor)
+
+	return true, nil
 }
 
 // validateLoadRequest runs before active/cold selection so an installed session
@@ -958,6 +1159,13 @@ func (a *Agent) loadColdSession(ctx context.Context, sessionID acp.SessionId, us
 		meta.options.Mode = manifest.Mode
 	}
 
+	carrierChanged := false
+	if meta.optionFields.env {
+		carrierChanged = !maps.Equal(composeEnv(meta.options.Env), manifest.Env)
+	} else {
+		meta.options.Env = cloneStringMap(manifest.Env)
+	}
+
 	session, err := newLifecycleAgentSession(ctx, a, sessionID, cwd, meta, mcpConfig, additionalDirs)
 	if err != nil {
 		return nil, nil, err
@@ -994,6 +1202,16 @@ func (a *Agent) loadColdSession(ctx context.Context, sessionID acp.SessionId, us
 
 	if useErr := a.validateSessionUse(sessionID, use, session); useErr != nil {
 		return nil, nil, a.failPreparedLoad(sessionID, use, session, useErr)
+	}
+
+	if carrierChanged {
+		if err := session.persistAfterTurn(ctx, nil); err != nil {
+			return nil, nil, a.failPreparedLoad(sessionID, use, session, err)
+		}
+
+		if useErr := a.validateSessionUse(sessionID, use, session); useErr != nil {
+			return nil, nil, a.failPreparedLoad(sessionID, use, session, useErr)
+		}
 	}
 
 	// The entry check is not the last word. Preparation reads the store, starts
@@ -1033,7 +1251,12 @@ func (a *Agent) publishColdSession(sessionID acp.SessionId, use *agentSessionUse
 		return unknownSessionError()
 	}
 
-	if len(a.sessions) >= a.maxActiveSessions() {
+	cleanupOwners := a.cleanupOwnerCountLocked()
+	if _, owned := a.cleanupOwnerForSessionLocked(sessionID, session); owned {
+		cleanupOwners--
+	}
+
+	if len(a.sessions)+cleanupOwners >= a.maxActiveSessions() {
 		return backpressureError("active_sessions")
 	}
 
@@ -1510,41 +1733,11 @@ func (a *Agent) removeSession(ctx context.Context, sessionID acp.SessionId, sess
 	}
 	defer session.finishTeardownOnReturn(wrapperFlight)
 
-	settlement := session.settleCloseRung(ctx)
-	if fenceErr := session.fencePersistenceForClose(ctx); fenceErr != nil {
-		return errors.Join(settlement.runtimeErr, fenceErr)
-	}
-
-	// Same order a prompt settles in: the containment boundary is proven before
-	// anything durable is written. An unproven boundary keeps the exact installed
-	// wrapper addressable, including the settings tree and scratch reservation a
-	// surviving descendant may still use.
-	if !amp.ProcessContainmentComplete(settlement.boundaryErr) {
-		return errors.Join(settlement.runtimeErr, settlement.boundaryErr)
-	}
-	// A prompt settlement's failed Replace is an owed rung, not a permanent
-	// teardown failure. The close-owned retry discharges it when the store has
-	// healed; a retry that still fails leaves the same wrapper installed.
-	if commitErr := session.commitCloseRung(ctx); commitErr != nil {
-		return errors.Join(settlement.runtimeErr, commitErr)
-	}
-
-	if terminalErr := session.deliverPendingTerminal(ctx); terminalErr != nil {
-		return errors.Join(settlement.runtimeErr, terminalErr)
-	}
-
-	// Containment and terminal-delivery failures have no close-owned retry rung.
-	// They fail this attempt and retain ownership so a later close can re-evaluate
-	// the exact wrapper rather than returning an error after eviction.
-	if settlement.runtimeErr != nil {
-		return settlement.runtimeErr
-	}
-
-	// Local cleanup is part of ownership settlement. The active map keeps the
-	// exact pointer and its gauge until directory removal and scratch release have
-	// both succeeded.
-	if cleanupErr := session.finalizeScratch(settlement.runtimeErr, settlement.boundaryErr); cleanupErr != nil {
-		return cleanupErr
+	// The shared installed-wrapper rung keeps session/close and carrier
+	// replacement identical through containment, durable commit, terminal
+	// delivery, and local cleanup. A refusal leaves this exact map owner in place.
+	if closeErr := session.closeInstalledRung(ctx); closeErr != nil {
+		return closeErr
 	}
 
 	a.mu.Lock()
@@ -1601,16 +1794,47 @@ func (a *Agent) loadManifest(ctx context.Context, sessionID acp.SessionId) (ampM
 		return ampManifest{}, unknownSessionError()
 	}
 
-	var manifest ampManifest
-	if err := json.Unmarshal(entries[len(entries)-1], &manifest); err != nil {
-		return ampManifest{}, acp.NewInternalError(map[string]any{jsonFieldError: err.Error()})
-	}
-
-	if manifest.Format != SessionStoreFormat || manifest.SessionID != string(sessionID) || !validNativeSessionID(manifest.NativeSessionID) {
+	manifest, ok := manifestFromStoreEntry(entries[len(entries)-1])
+	if !ok || manifest.SessionID != string(sessionID) {
 		return ampManifest{}, acp.NewInternalError(map[string]any{jsonFieldError: "invalid amp session manifest"})
 	}
 
 	return manifest, nil
+}
+
+func (s *agentSession) normalizeActiveRequest(meta parsedSessionMeta, cwd string, mcpConfig string, additionalDirs []string) (parsedSessionMeta, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.cwd != cwd {
+		return meta, false, mismatchField("cwd")
+	}
+
+	if !slices.Equal(s.additionalDirectories, additionalDirs) {
+		return meta, false, mismatchField("additionalDirectories")
+	}
+
+	if s.mcpConfigJSON != mcpConfig {
+		return meta, false, mismatchField("mcpServers")
+	}
+
+	if !meta.optionFields.env {
+		meta.options.Env = cloneStringMap(s.sessionEnv)
+	}
+
+	if meta.optionFields.mode && s.mode != meta.options.Mode {
+		return meta, false, mismatchField(optionModeKey)
+	}
+
+	if !meta.optionFields.mode {
+		meta.options.Mode = s.mode
+	}
+
+	if !meta.rawEventField {
+		meta.rawEvent = s.rawEvents
+	}
+
+	return meta, !maps.Equal(s.sessionEnv, composeEnv(meta.options.Env)), nil
 }
 
 func (s *agentSession) applyActiveRequest(meta parsedSessionMeta, cwd string, mcpConfig string, additionalDirs []string) error {
@@ -1629,7 +1853,7 @@ func (s *agentSession) applyActiveRequest(meta parsedSessionMeta, cwd string, mc
 		return mismatchField("mcpServers")
 	}
 
-	if !maps.Equal(activeRequestEnv(s.env), activeRequestEnv(composeEnv(s.agent.options.Env, meta.options.Env))) {
+	if !maps.Equal(s.sessionEnv, composeEnv(meta.options.Env)) {
 		return mismatchField(optionEnvKey)
 	}
 
@@ -1652,7 +1876,7 @@ func (a *Agent) reserveSessionSlot() error {
 		return acp.NewInvalidRequest(map[string]any{jsonFieldError: agentClosedMessage})
 	}
 
-	if len(a.sessions)+a.pending >= a.maxActiveSessions() {
+	if len(a.sessions)+a.pending+a.cleanupOwnerCountLocked() >= a.maxActiveSessions() {
 		return backpressureError("active_sessions")
 	}
 
@@ -1677,6 +1901,10 @@ func (a *Agent) session(id acp.SessionId) (*agentSession, error) {
 	// A tombstoned or teardown-owned session is wire-indistinguishable from one
 	// that never existed. The flight check also makes a Store.Delete callback
 	// re-entering CloseSession fail closed instead of waiting on its caller.
+	if use := a.sessionUses[id]; use != nil && use.replacing {
+		return nil, unknownSessionError()
+	}
+
 	if _, deleted := a.deleted[id]; deleted || a.sessionFlights[id] != nil {
 		return nil, unknownSessionError()
 	}
@@ -1694,6 +1922,10 @@ func (a *Agent) sessionForCancel(id acp.SessionId) (*agentSession, error) {
 	defer a.mu.Unlock()
 
 	if _, deleted := a.deleted[id]; deleted {
+		return nil, unknownSessionError()
+	}
+
+	if use := a.sessionUses[id]; use != nil && use.replacing {
 		return nil, unknownSessionError()
 	}
 
@@ -1834,12 +2066,21 @@ func (a *Agent) cleanupOwnerIDs() []acp.SessionId {
 	return ids
 }
 
+func (a *Agent) cleanupOwnerCountLocked() int {
+	count := 0
+	for _, owners := range a.cleanupOwners {
+		count += len(owners)
+	}
+
+	return count
+}
+
 func (a *Agent) retryCleanupOwners(ctx context.Context) error {
 	return a.retryCleanupOwnersExcept(ctx, "")
 }
 
 func (a *Agent) retryCleanupOwnersExcept(ctx context.Context, except acp.SessionId) error {
-	var boundaryErr error
+	var retryErr error
 
 	for _, id := range a.cleanupOwnerIDs() {
 		if id == except {
@@ -1849,13 +2090,13 @@ func (a *Agent) retryCleanupOwnersExcept(ctx context.Context, except acp.Session
 		if err := a.retryCleanupOwner(ctx, id); err != nil {
 			a.log.DebugContext(ctx, "retry amp session cleanup failed", slog.String(jsonFieldSessionID, string(id)), slog.String("failure", cleanupFailureClass(err)))
 
-			if errors.Is(err, ErrProcessContainmentIncomplete) {
-				boundaryErr = errors.Join(boundaryErr, err)
+			if containmentIncomplete(err) || errors.Is(err, ErrNativeTreeBusy) {
+				retryErr = errors.Join(retryErr, err)
 			}
 		}
 	}
 
-	return boundaryErr
+	return retryErr
 }
 
 func (a *Agent) retryCleanupOwner(ctx context.Context, id acp.SessionId) error {
@@ -1938,7 +2179,7 @@ func (a *Agent) storedManifest(ctx context.Context, id acp.SessionId) (ampManife
 
 const missingAPIKeyMessage = "AMP_API_KEY is not set: amp sessions run in an " +
 	"isolated home where amp login credentials are unavailable; set AMP_API_KEY " +
-	"in the process environment, ProcessIsolation.BaseEnvironment, WithEnv, or " +
+	"in the host native environment, WithEnv, or " +
 	"session env options"
 
 func (a *Agent) ensureNewSessionStartup(ctx context.Context, cwd string, meta parsedSessionMeta) error {
@@ -1967,8 +2208,8 @@ func (a *Agent) ensureStartup(ctx context.Context, cwd string, meta parsedSessio
 }
 
 func (a *Agent) nativeEnvironmentBase() map[string]string {
-	if a.options.ProcessIsolation != nil {
-		return a.options.ProcessIsolation.BaseEnvironment
+	if a.options.hostAuthoritySupplied {
+		return a.nativeEnvironment
 	}
 
 	return a.ordinaryEnvironment

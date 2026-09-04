@@ -41,20 +41,19 @@ fail closed. Foreign metadata namespaces are ignored.
 
 ## Environment composition
 
-The prompt child's environment is composed in phases: the process environment or
-`ProcessIsolation.BaseEnvironment`, then `WithEnv`, then `options.env`, then the
-adapter-managed isolated `HOME` and `XDG_*` roots and the trace carrier. A later
-phase replaces an earlier value, so the managed residence cannot be redirected
-by any caller value and the session's `options.env` owns the whole raw `PATH`
-the prompt process runs with.
+The prompt child's environment is composed in phases: `NativeEnvironment` from
+the supplied host authority, or the ordinary process environment when no
+authority is supplied; then `WithEnv`, `options.env`, the adapter-managed
+`HOME` and `XDG_*` roots, and the trace carrier. A later phase replaces an
+earlier value, so the managed residence cannot be redirected by any caller
+value and the session's `options.env` owns the whole raw `PATH` the prompt
+process runs with.
 
 The `amp` executable is resolved and version-probed before any session exists,
-against the static base alone — the process environment or
-`ProcessIsolation.BaseEnvironment` plus `WithEnv`. The exact absolute file that
-passed validation is the file every later child runs, so a directory named by a
-session `PATH` can never select the harness. Children that are not prompts — the
+against the static base alone — the authority's `NativeEnvironment`, or the
+ordinary process environment, plus `WithEnv`. Children that are not prompts —
 startup probes, thread export, thread delete, and account login — run on that
-same static base plus the adapter-managed residence and the session's
+same static base plus their adapter-managed residence and the session's
 `AMP_API_KEY` and `AMP_URL`. Every other `options.env` value, the raw `PATH`
 among them, reaches the prompt child alone.
 
@@ -152,7 +151,7 @@ this adapter actually enforces on inbound media:
   native document representation.
 
 The block is always present, and it is independent of every other
-advertisement. `acp-go.dev/handoff` is added, as `{"versions": [1]}`, only when
+advertisement. `acp-go.dev/handoff` is added, as `{"version": 1}`, only when
 `WithInputHandoffRoot` is set; its absence is how a host learns that its option
 never reached this adapter.
 
@@ -169,51 +168,47 @@ alongside `acp-go.dev/mediaEnvelope`, `acp-go.dev/handoff`, and
 namespace, a reserved literal is never ignored: every surface either reads it or
 rejects it.
 
-### Negotiation
+### Capability
 
 The host offers on `InitializeRequest._meta`, carrying exactly one member:
 
 ```json
-{"acp-go.dev/lifecycle": {"versions": [1]}}
+{"acp-go.dev/lifecycle": {"version": 1}}
 ```
 
-The adapter places its negotiated `acp-go.dev/lifecycle` answer on
+The adapter places its `acp-go.dev/lifecycle` answer on
 `InitializeResponse._meta` — the response's own top-level `_meta`, never inside
-`agentCapabilities._meta`. The answer describes the active configuration and is
-resolved from the same code path that enforces containment:
+`agentCapabilities._meta`. Ordinary same-identity execution answers with no
+authoritative quiescence claim:
 
 ```json
 {
   "acp-go.dev/lifecycle": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": false,
-    "authoritativeQuiescence": true,
-    "quiescenceSource": "process-containment",
+    "authoritativeQuiescence": false,
     "activityKinds": []
   }
 }
 ```
 
-| Field | Value | Why |
-|---|---|---|
-| `versions` | `[1]` | The intersection of the offer and the versions this adapter implements. An empty intersection omits the whole key rather than answering with an empty array. |
-| `updatesOutsidePrompt` | always `false` | A prompt is one short-lived `amp` process. Nothing survives it, so there is no channel between prompts. |
-| `authoritativeQuiescence` | `true` only under Linux process isolation | Only the isolation boundary enumerates the whole contained descendant set, so only it can prove vacancy. |
-| `quiescenceSource` | `process-containment`, present exactly when the line above is `true` | Ordinary same-identity execution and the Darwin best-effort opt-in prove a weaker boundary, and a weaker boundary is never promoted. |
-| `activityKinds` | always `[]` | This adapter reports no owned background work, so it emits no `activity_update` at all. |
+With `WithHostAuthority`, the same answer sets
+`authoritativeQuiescence` to `true` and includes
+`"quiescenceSource": "process-containment"`. Amp emits no activity kinds in
+either mode.
 
-A truthfully degenerate answer is a correct answer, not a gap. A malformed
-offer — a non-object, a missing or non-integer `versions`, or any additional
-member — is rejected with `-32602` naming the exact path, for example
-`{"error": "unsupported", "field": "_meta[\"acp-go.dev/lifecycle\"].versions"}`.
-Only the answer is ordered: an offer may list its versions in any order and is
-intersected rather than refused. With no offer at all, the response carries no
-lifecycle member and the connection has no lifecycle surface: no envelope, no
-correlation read, no lifecycle fact.
+The offer is strict: `version` must be the integer `1`, with no additional
+member. The answer's proven-fact members are required, its activity array is
+duplicate-free, and its quiescence source is present exactly when the answer is
+authoritative. Malformed or trailing input is rejected with `-32602` naming the
+exact path, for example
+`{"error": "unsupported", "field": "_meta[\"acp-go.dev/lifecycle\"].version"}`.
+With no offer, the response carries no lifecycle member and the connection has
+no lifecycle surface: no envelope, correlation read, or lifecycle event.
 
 ### The prompt correlation value
 
-While version 1 is negotiated, every `session/prompt` carries:
+When version 1 is enabled, every `session/prompt` carries:
 
 ```json
 {"version": 1, "submission": {"submissionId": "opaque", "clientNonce": "opaque", "runId": "optional"}}
@@ -241,9 +236,10 @@ sequence space, and entities:
    `limit`, `failed`) and, on every outcome but `failed`, the truthful stop
    reason. No ACP v1 stop reason names a failure, so a failed cycle records its
    outcome and states none; the v1 error carries the cause instead.
-5. `quiescence_update` — only where the containment boundary actually proved an
-   empty descendant set, carrying the watermark that proof covers and a barrier
-   naming the contained native root.
+5. `quiescence_update` — emitted only under `WithHostAuthority`, once the native
+   process handle's `Wait` proves the whole process tree settled, carrying the
+   watermark that proof covers. A non-authoritative answer states no boundary
+   fact, so its incarnation ends at the terminal `idle`.
 
 The contained process exit fences the stream; the next prompt opens a new one.
 Sequences are claimed before delivery is attempted, so a lost event leaves a
@@ -253,8 +249,8 @@ detectable gap rather than a silently contiguous stream.
 session whose incarnation never opened, and it emits nothing on either: the
 terminal state was reported by whatever fenced the stream, and a turn recorded
 as `failed` is never restated as cancelled by the close that follows it. The
-containment proof is unconditional and already ran inside the prompt, so a close
-that finds an unproven boundary still fails.
+containment boundary is unconditional and already settled inside the prompt, so
+a close that finds an uncertain boundary still fails.
 
 The durable commit ran inside the prompt too, but a settlement whose commit
 failed keeps its frames rather than dropping them, so `session/close` carries the
@@ -281,7 +277,7 @@ its stream before the response. The one exception is a settlement that cannot
 complete: when the containment boundary or the durable commit itself fails, the
 prompt fails with that error and emits **no** terminal `idle` — a boundary must
 never claim a foreground prefix the store does not hold. The exact terminal
-notifications remain pending; a close may first repair durability and then
+notifications remain pending; a close may first restore durability and then
 retransmit them with their original stream/sequence identities. No later prompt
 is admitted while that terminal proof is pending.
 

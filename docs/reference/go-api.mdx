@@ -1,215 +1,33 @@
 ---
 title: Go API
-description: Entry points, options, and request builders for embedding the adapter, indexed to pkg.go.dev.
+description: Entry points and options for embedding the adapter.
 ---
 
-Import the module and drive it with `Serve` or `NewAgent`. The authoritative,
-always-current signatures live on
-[pkg.go.dev](https://pkg.go.dev/github.com/savid/acp-go-amp); this page indexes
-the surface rather than repeating godoc.
+## Host authority
+
+Use `NewAgent` or `Serve`. `WithHostAuthority` enables managed execution:
 
 ```go
-import ampacp "github.com/savid/acp-go-amp"
-```
-
-## Entry points
-
-| Symbol | Purpose |
-|---|---|
-| `ampacp.NewAgent(opts ...Option) *Agent` | Construct an agent you drive directly. |
-| `ampacp.Serve(ctx, input, output, opts ...Option) error` | Serve ACP over the given streams. |
-
-`ErrProcessContainmentIncomplete` is the stable `errors.Is` discriminator for
-an incomplete selected containment boundary. `Serve` preserves an
-`Agent.Close` error carrying this sentinel even when the stream loop would
-otherwise return normally or with context cancellation. A host that receives
-it must retain or quarantine resources the native process may still reach.
-
-Omitting `WithProcessIsolation` uses ordinary portable execution as the
-adapter's current identity, root or non-root. This reports `shared_identity`
-and makes no descendant-inventory or whole-tree quiescence claim. Explicit
-process isolation is Linux-only and uses an authoritative per-command
-subreaper, including for descendants detached with `setsid(2)`. The explicit
-`WithDarwinBestEffortContainment` option selects bounded process-group cleanup,
-not authoritative descendant containment: a detached descendant can survive,
-markers can be scrubbed, an empty correlation scan is not proof of absence,
-and signalling a numeric PGID has a reuse/collateral-signal race. Other
-platforms continue to support ordinary execution while refusing explicit
-process isolation. `WithDarwinBestEffortContainment` and
-`WithProcessIsolation` are mutually exclusive. `Agent.ContainmentMode()` and
-`RuntimeResourceHooks.ObserveContainment` report `authoritative`,
-`shared_identity`, `best_effort`, or `unavailable`.
-
-`shared_identity` means ordinary non-authoritative current-identity execution.
-It creates no UID authority record, acquires no isolation capability, and does not publish
-provider-descendant snapshots. Per-session HOME/XDG roots and direct child
-lifecycle ownership remain in effect.
-
-## Common options
-
-| Option | Purpose |
-|---|---|
-| `WithExecutablePath` | Native `amp` executable path. |
-| `WithProcessIsolation` | Optional Linux-only hardening: a non-root UID/GID and complete replacement environment for native Amp commands. The embedded supervisor must be trusted root and the target identity must be distinct; only Amp receives the target identity, with supplementary groups cleared. Invalid or unsupported explicit policy fails closed with no ordinary fallback. Omitting the option launches native work ordinarily as the current identity, root or non-root. |
-| `WithScratchDir` | Sole parent for all ephemeral on-disk scratch (per-session isolated `HOME`/XDG directories and the startup/discovery probes' isolated `HOME`/XDG/settings/MCP residence). Empty falls back to the system temp directory; created `0700` when missing. |
-| `WithInputHandoffRoot` | Absolute read root for the local handoff input form. Read-only, so it is not a materialization root. Unset rejects every handoff-form block. See [Handoff read root](#handoff-read-root). |
-| `WithProviderAuthRoot` | Absolute durable directory holding the values-free provider-auth ledger. Unset, or unusable, leaves every `_amp/auth/*` method unadvertised. Hosted sign-in runs on Darwin and Linux behind a per-executable audit; Windows and unaudited builds refuse it with `unsupported_variant` before native login, and manual API-key material remains available everywhere. See [Authentication](/docs/features/authentication#broker-an-account). |
-| `WithProviderAuthDirectHome` | Unsupported: `disconnect` releases only the ledger slot a connection owns and reads no operator home, so there is nothing for an exact-home consent gate to authorize. A non-empty value rejects at session start. |
-| `WithHome` | Unsupported: Amp has no native config/auth root. Kept on the surface for symmetry; a non-empty value rejects at session start. Use `WithScratchDir`. |
-| `WithDefaultModel` | Accepted for symmetry; non-empty values reject at session start. |
-| `WithEnv` | Environment overlaid on the sanitized ordinary environment, or on `ProcessIsolation.BaseEnvironment` when explicit isolation is configured (e.g. `AMP_API_KEY`). It is also the only caller phase that takes part in executable resolution and the version and startup probes. Session `_meta.amp.options.env` overlays it for the prompt child; see [Environment composition](/docs/reference/meta#environment-composition). |
-| `WithSessionStore` | Durable mirror; see [Session store](/docs/features/session-store). |
-| `WithSessionStoreLoadTimeout` | Bound on every store read (default `10s`); writes use a fixed `60s` bound. |
-| `WithConcurrencyLimits` | Caps on concurrent native work. |
-| `WithImageLimits` | Sets decoded byte limits per input image, prompt, output image, and tool-call content array. |
-| `WithSeedFiles` | Relative-path → contents written into each session's isolated native `HOME` before `amp` launches. See [Seed files](/docs/features/models-config#seed-files). Accepted but inert for model routing — Amp is locked to its hosted backend. |
-| `WithTurnTimeout` | Optional per-turn deadline (default `0`, no deadline); on expiry the turn fails with `cause: "timeout"`. |
-| `WithRuntimeResourceHooks` | Host admission hooks for native roots and adapter scratch roots. |
-| `WithDarwinBestEffortContainment` | Darwin-only explicit opt-in to bounded process-group cleanup with escaped-descendant and PGID-reuse limitations. Invalid on other platforms and mutually exclusive with `WithProcessIsolation`. |
-| `WithTracerProvider`, `WithMeterProvider`, `WithTextMapPropagator`, `WithLogger` | Observability providers. |
-
-`ProcessIsolation.IdentityLock` and `ProcessIsolation.AuthorityDomain`
-optionally accept opaque host capabilities with `Duplicate() (*os.File, error)`
-for the already-held canonical UID lock and shared `domain.lock` lease. Each
-capability keeps ownership of its original descriptor; caller-owned duplicates
-reach only the trusted supervisor, which validates the named inodes, held locks,
-and strict matching domain record and protects them with checked `FD_CLOEXEC`.
-Set both fields together for
-host-borrowed authority or leave both nil for standalone domain, disposition,
-and UID-lock acquisition. A mixed nil/non-nil pair fails closed. Native
-processes receive neither capability nor descriptor.
-
-## Image limits
-
-`ImageLimits` has four `int64` decoded-byte fields:
-
-| Field | Default |
-|---|---|
-| `MaxInputBytesPerImage` | 6 MiB |
-| `MaxInputBytesPerPrompt` | 6 MiB |
-| `MaxOutputBytesPerImage` | 6 MiB |
-| `MaxOutputBytesPerToolCall` | 6 MiB |
-
-Embedded hosts set all four decoded-byte policies together:
-
-```go
-limits := ampacp.ImageLimits{
-	MaxInputBytesPerImage:     6 * 1024 * 1024,
-	MaxInputBytesPerPrompt:    6 * 1024 * 1024,
-	MaxOutputBytesPerImage:    6 * 1024 * 1024,
-	MaxOutputBytesPerToolCall: 6 * 1024 * 1024,
-}
-
-agent := ampacp.NewAgent(ampacp.WithImageLimits(limits))
-```
-
-Zero disables the corresponding adapter policy limit; Amp's 921,600-byte
-input envelope, 8,000-pixel dimension envelope, and the ACP frame bound still
-apply. Negative values reject initialization. The input fields are what
-`initialize` publishes as `acp-go.dev/mediaEnvelope`
-([Meta](/docs/reference/meta#advertised-capabilities)), so a configured limit
-change is visible to hosts at boot. See
-[Models and config](/docs/features/models-config#image-input) for input
-validation and errors, and [Updates](/docs/reference/updates#image-tool-content)
-for output mapping and failures.
-
-## Handoff read root
-
-`WithInputHandoffRoot(dir string)` enables the local handoff input form for a
-co-located host: an image block may arrive with empty `data`, a `file://` URI
-under `dir`, and a digest envelope, and the adapter reads and verifies those
-bytes instead of decoding embedded base64.
-
-```go
-agent := ampacp.NewAgent(ampacp.WithInputHandoffRoot("/var/lib/host/handoff"))
-```
-
-The path must be absolute; a relative value fails initialization and every
-session start. The directory is a **read** root — the adapter never writes,
-moves, or removes anything beneath it, so it neither materializes state nor
-competes with `WithScratchDir`. Unset is the default and rejects every
-handoff-form block with `invalid_handoff` while withholding the
-`acp-go.dev/handoff` advertisement. See
-[Models and config](/docs/features/models-config#local-handoff-input) for the
-wire shape and verdicts.
-
-## Amp per-session options
-
-`AmpOptions` carries per-session Amp settings (also expressible as
-`_meta.amp.options`):
-
-| Field | Behavior |
-|---|---|
-| `Env` | Per-session environment overrides. |
-| `Mode` | Amp's mode, which selects its model. `low`, `medium`, `high`, and `ultra` are advertised; any mode is accepted and forwarded to Amp. Left empty it states no selection and the session takes the advertised default; a wire request that sends `mode` as an empty string names no mode and is rejected. |
-| `Model`, `OutputSchema` | Present for API symmetry; rejected when supplied. |
-
-## Request builders
-
-Helpers construct ACP requests for the session lifecycle, prompts, config
-options, and MCP server declarations. See [ACP methods](/docs/reference/acp-methods)
-for the method surface they target and [MCP](/docs/features/mcp) for a wiring
-example.
-
-| Builder | Purpose |
-|---|---|
-| `NewSessionRequest` / `LoadSessionRequest` / `ResumeSessionRequest` | Session lifecycle requests (plus a delete request). |
-| `TextPromptRequest` / `PromptRequest` | Prompt requests from text or content blocks. |
-| `CancelRequest` | Structural session cancellation request; Amp has no elicitation route envelope. |
-| `SetConfigOptionRequest` / `SetModelRequest` | Config-option updates. |
-| `StdioMCPServer` / `HTTPMCPServer` | Accepted MCP server declarations, attached with `WithSessionMCPServers`. |
-
-The prompt builders take `(sessionID, turnNonce, ...)`. Amp has no elicitation
-surface and does not advertise or stamp `acp-go.dev/route`, so it intentionally
-ignores the nonce and `CancelRequest` remains structural.
-
-`RuntimeResourceHooks` supplies `AcquireNativeRoot`, `ReserveScratchRoot`,
-`ObserveProcess`, `ObserveProcessSnapshot`, `ObserveStartupStage`, and
-`ObserveContainment`.
-Admission callbacks receive `runtime`, `session`, `prompt`, or `discovery`; nil
-callbacks keep standalone use unbounded. Before any startup/discovery child,
-Amp reserves and materializes one target-owned isolated HOME/XDG/settings/MCP
-residence under `WithScratchDir`; it removes the residence and releases the
-scratch reservation only after containment proof, retaining both on incomplete
-containment. Amp also reserves each per-session settings root before creation
-and acquires a native permit for every startup probe, thread command, and prompt
-process before launch. Amp is lockless, so it never reports home-lock
-supervisors. Provider-descendant snapshots are emitted only
-under authoritative containment and are suppressed for the entire Darwin
-best-effort lifetime, including zero. Startup observations name `spawn`,
-`readiness`, `configuration`, or `session` and carry the stage error; `session`
-marks the thread-creating first-prompt spawn, `spawn` the continue spawn of
-later prompts.
-
-## Provider auth types
-
-The provider-auth surface exports one closed credential union. Its variant
-pointer is non-nil in a valid value and `type` selects it; decoding is strict
-about unknown fields, duplicate fields, and empty required strings.
-
-```go
-type ProviderCredentialType string
-
-const ProviderCredentialAPI ProviderCredentialType = "api"
-
-type ProviderAPICredential struct {
-    Key      string            `json:"key"`
-    Metadata map[string]string `json:"metadata,omitempty"`
-}
-
-type ProviderCredential struct {
-    Type ProviderCredentialType
-    API  *ProviderAPICredential
+type HostAuthority interface {
+    NativeEnvironment() map[string]string
+    PrepareNativeTree(context.Context, string) error
+    ReclaimNativeTree(context.Context, string) error
+    StartNative(context.Context, NativeRequest) (NativeProcess, error)
 }
 ```
 
-Amp brokers one opaque account key, so `api` is the only variant its legs
-reach, the only one it emits, and the only one `UnmarshalJSON` accepts. Amp
-accepts no credential injection, so no binding type crosses this surface.
-`AuthMethodsMethod`,
-`AuthAuthorizeMethod`, `AuthCallbackMethod`, `AuthStatusMethod`,
-`AuthCancelMethod`, `AuthInventoryMethod`, `AuthCredentialMethod`, and
-`AuthDisconnectMethod` are the exported method-name constants.
+`NativeProcess` exposes host stdin/stdout/stderr, `Wait`, and `Revoke`.
+`NativeRequest` carries executable, arguments, environment, and working
+directory; `NativeResult` carries exit code, signal, and revoked state.
 
-Values of these types are secret material: never render one into a log, an
-error, or a diagnostic surface.
+The sentinels are `ErrHostAuthorityUnavailable`,
+`ErrContainmentIncomplete`, and `ErrNativeTreeBusy`. Supplied nil or unusable
+authority fails before mutation or launch. Omitted authority uses ordinary
+same-identity execution.
+
+## Options
+
+Important options include `WithExecutablePath`, `WithScratchDir`,
+`WithInputHandoffRoot`, `WithProviderAuthRoot`, `WithEnv`,
+`WithSeedFiles`, `WithSessionStore`, `WithConcurrencyLimits`,
+and `WithImageLimits` (including `MaxOutputBytesPerToolCall`).

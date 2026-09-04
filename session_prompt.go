@@ -5,8 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -273,7 +271,7 @@ func (s *promptTurnState) awaitSettlement(ctx context.Context) promptSettlement 
 
 		return s.settlement
 	case <-ctx.Done():
-		return promptSettlement{containmentErr: fmt.Errorf("%w: wait for active Amp turn cleanup: %v", amp.ErrProcessContainmentIncomplete, ctx.Err())}
+		return promptSettlement{containmentErr: fmt.Errorf("%w: wait for active Amp turn cleanup: %v", amp.ErrContainmentIncomplete, ctx.Err())}
 	}
 }
 
@@ -405,18 +403,6 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (ac
 	ctx = withCallbackProvenance(ctx, s.agent, state)
 	continueCtx = withCallbackProvenance(continueCtx, s.agent, state)
 
-	configurationStarted := time.Now()
-	mcpConfigPath, err := s.writePromptMCPConfig()
-	observeRuntimeStartupStage(continueCtx, s.agent.options.RuntimeResourceHooks, RuntimeResourcePrompt, RuntimeStartupConfiguration, configurationStarted, err)
-
-	if err != nil {
-		return acp.PromptResponse{}, err
-	}
-
-	if mcpConfigPath != "" {
-		defer func() { _ = os.Remove(mcpConfigPath) }()
-	}
-
 	// One prompt is one contained process, so one prompt is one incarnation: the
 	// snapshot opening it is the first lifecycle-bearing notification inside the
 	// prompt, and it precedes acceptance.
@@ -430,7 +416,7 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (ac
 	// environment under the platform key identity, so a caller-supplied
 	// traceparent spelling can never displace the propagated context.
 	promptEnv := composeEnv(s.env, s.agent.observe.InjectTraceEnv(continueCtx, nil))
-	promptClient := s.clientWithEnv(promptEnv, mcpConfigPath, RuntimeResourcePrompt)
+	promptClient := s.clientWithEnv(promptEnv, s.mcpConfigFile)
 
 	turn, err := s.launchNativeTurn(continueCtx, promptClient, input)
 	if err != nil {
@@ -451,7 +437,7 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (ac
 		if !amp.ProcessContainmentComplete(err) {
 			state.completeSettlement(promptSettlement{containmentErr: err})
 
-			return acp.PromptResponse{}, unsettled(classifyNativePromptError(err))
+			return acp.PromptResponse{}, unsettled(errors.Join(classifyNativePromptError(err), err))
 		}
 
 		if state.isCancelled() {
@@ -492,14 +478,12 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (ac
 // remote thread. Later prompts continue the adopted thread.
 func (s *agentSession) launchNativeTurn(ctx context.Context, client *amp.Client, input any) (*amp.Turn, error) {
 	nativeID := s.nativeSessionID()
-	spawnStarted := time.Now()
 
 	if nativeID == "" {
 		callbackCtx := withExactCallbackGeneration(ctx, "native:execute_thread")
 		turn, err := invokeOwnedPair(func() (*amp.Turn, error) {
 			return s.agent.options.runtime.executeThread(callbackCtx, client, input)
 		})
-		observeRuntimeStartupStage(ctx, s.agent.options.RuntimeResourceHooks, RuntimeResourcePrompt, RuntimeStartupSession, spawnStarted, err)
 
 		return turn, err
 	}
@@ -508,7 +492,6 @@ func (s *agentSession) launchNativeTurn(ctx context.Context, client *amp.Client,
 	turn, err := invokeOwnedPair(func() (*amp.Turn, error) {
 		return s.agent.options.runtime.continueThread(callbackCtx, client, nativeID, input)
 	})
-	observeRuntimeStartupStage(ctx, s.agent.options.RuntimeResourceHooks, RuntimeResourcePrompt, RuntimeStartupSpawn, spawnStarted, err)
 
 	return turn, err
 }
@@ -588,14 +571,11 @@ func (s *agentSession) settlePrompt(
 	}()
 
 	settleCtx = withExactCallbackGeneration(settleCtx, "native:settle_turn")
-	proof, closeErr := invokeOwnedPair(func() (amp.ContainmentProof, error) {
-		return s.agent.options.runtime.settleTurn(turn)
+	_, closeErr := invokeOwnedPair(func() (struct{}, error) {
+		return struct{}{}, s.agent.options.runtime.settleTurn(turn)
 	})
 	s.recordScratchContainment(closeErr)
-	// Vacancy is readable only from a boundary that completed. An enumeration
-	// taken after an incomplete containment describes a tree the supervisor lost,
-	// so it proves nothing and the next incarnation opens without a claim.
-	s.recordVacancy(proof.Vacant() && amp.ProcessContainmentComplete(closeErr))
+	s.recordVacancy(s.agent.options.hostAuthoritySupplied && amp.ProcessContainmentComplete(closeErr))
 	contained = amp.ProcessContainmentComplete(closeErr)
 
 	// Settlement is what the completion latch publishes: the boundary's own
@@ -613,7 +593,7 @@ func (s *agentSession) settlePrompt(
 		return acp.PromptResponse{}, unsettled(errors.Join(result.err, closeErr))
 	}
 
-	terminal, closeErr = incarnation.terminalDelivery(lifecycleOutcomeFor(result.response, result.err), proof)
+	terminal, closeErr = incarnation.terminalDelivery(lifecycleOutcomeFor(result.response, result.err), s.agent.options.hostAuthoritySupplied)
 	if closeErr != nil {
 		settlement.deliveryErr = closeErr
 
@@ -652,25 +632,24 @@ func (s *agentSession) settlePrompt(
 func (s *agentSession) containPromptPanic(state *promptTurnState) promptSettlement {
 	turn := state.currentTurn()
 	if turn == nil {
-		boundaryErr := fmt.Errorf("%w: native prompt panicked before publishing its turn handle", amp.ErrProcessContainmentIncomplete)
+		boundaryErr := fmt.Errorf("%w: native prompt panicked before publishing its turn handle", amp.ErrContainmentIncomplete)
 		s.recordScratchContainment(boundaryErr)
 		s.recordVacancy(false)
 
 		return promptSettlement{containmentErr: boundaryErr, deliveryErr: errAgentGoroutinePanic}
 	}
 
-	proof, boundaryErr := s.settleTurnAfterPanic(turn)
+	boundaryErr := s.settleTurnAfterPanic(turn)
 	s.recordScratchContainment(boundaryErr)
-	s.recordVacancy(proof.Vacant() && amp.ProcessContainmentComplete(boundaryErr))
+	s.recordVacancy(s.agent.options.hostAuthoritySupplied && amp.ProcessContainmentComplete(boundaryErr))
 
 	return promptSettlement{containmentErr: boundaryErr, deliveryErr: errAgentGoroutinePanic}
 }
 
-func (s *agentSession) settleTurnAfterPanic(turn *amp.Turn) (proof amp.ContainmentProof, err error) {
+func (s *agentSession) settleTurnAfterPanic(turn *amp.Turn) (err error) {
 	defer func() {
 		if recover() != nil {
-			proof = amp.ContainmentProof{}
-			err = fmt.Errorf("%w: panic while containing native prompt", amp.ErrProcessContainmentIncomplete)
+			err = fmt.Errorf("%w: panic while containing native prompt", amp.ErrContainmentIncomplete)
 		}
 	}()
 
@@ -865,28 +844,6 @@ func assistantStopReason(msg amp.Message) string {
 	}
 
 	return assistant.StopReason
-}
-
-func (s *agentSession) writePromptMCPConfig() (string, error) {
-	if s.mcpConfigJSON == "" {
-		return "", nil
-	}
-
-	path := filepath.Join(s.settingsDir, "mcp.json")
-
-	var err error
-
-	if s.agent == nil || s.agent.options.ProcessIsolation == nil || s.agent.options.testOnlyNoCredential {
-		err = os.WriteFile(path, []byte(s.mcpConfigJSON), 0o600)
-	} else {
-		err = writeNativeOwnedFile(path, []byte(s.mcpConfigJSON), s.agent.options.ProcessIsolation)
-	}
-
-	if err != nil {
-		return "", fmt.Errorf("write amp MCP config: %w", err)
-	}
-
-	return path, nil
 }
 
 // resolveTurnDeadline maps a fired WithTurnTimeout deadline to a terminal
@@ -1493,7 +1450,7 @@ func isNativeMissingError(err error) bool {
 		return false
 	}
 
-	if errors.Is(err, amp.ErrProcessContainmentIncomplete) {
+	if errors.Is(err, amp.ErrContainmentIncomplete) {
 		return false
 	}
 

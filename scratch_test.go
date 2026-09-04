@@ -37,8 +37,8 @@ func TestEnsureScratchParent(t *testing.T) {
 	if err != nil || !info.IsDir() {
 		t.Fatalf("nested scratch not created as dir: info=%#v err=%v", info, err)
 	}
-	if perm := info.Mode().Perm(); perm != 0o700 {
-		t.Fatalf("nested scratch perm = %o, want 700", perm)
+	if perm, want := info.Mode().Perm(), hostDirPerm(0o700); perm != want {
+		t.Fatalf("nested scratch perm = %o, want %o", perm, want)
 	}
 
 	fileParent := filepath.Join(t.TempDir(), "regular-file")

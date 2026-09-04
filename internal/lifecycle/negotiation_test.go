@@ -9,8 +9,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func offerMeta(versions any) map[string]any {
-	return map[string]any{MetaKey: map[string]any{fieldVersions: versions}}
+func offerMeta(version any) map[string]any {
+	return map[string]any{MetaKey: map[string]any{fieldVersion: version}}
 }
 
 // TestDecodeOfferReportsAnAbsentOffer pins that the host asking for nothing is
@@ -21,11 +21,11 @@ func TestDecodeOfferReportsAnAbsentOffer(t *testing.T) {
 	offer, offered, refusal := DecodeOffer(nil)
 	require.Nil(t, refusal)
 	require.False(t, offered)
-	require.Empty(t, offer.Versions)
+	require.Zero(t, offer.Version)
 }
 
 // TestDecodeOfferStrictness pins that every refusal names the exact member path,
-// and that versions is validated on every offer whatever the version.
+// and that version is validated on every offer.
 func TestDecodeOfferStrictness(t *testing.T) {
 	t.Parallel()
 
@@ -36,15 +36,15 @@ func TestDecodeOfferStrictness(t *testing.T) {
 	}{
 		{"non-object", map[string]any{MetaKey: []any{1.0}}, MetaPath},
 		{"unknown member", map[string]any{MetaKey: map[string]any{
-			fieldVersions: []any{1.0}, "activityKinds": []any{},
-		}}, MetaPath + ".activityKinds"},
-		{"missing versions", map[string]any{MetaKey: map[string]any{}}, MetaPath + ".versions"},
-		{"empty versions", offerMeta([]any{}), MetaPath + ".versions"},
-		{"non-array versions", offerMeta(1.0), MetaPath + ".versions"},
-		{"fractional version", offerMeta([]any{1.5}), MetaPath + ".versions"},
-		{"unrepresentable version", offerMeta([]any{1e300}), MetaPath + ".versions"},
-		{"string version", offerMeta([]any{"1"}), MetaPath + ".versions"},
-		{"unparsable number", offerMeta([]any{json.Number("one")}), MetaPath + ".versions"},
+			fieldVersion: 1.0, "vendorExtension": true,
+		}}, MetaPath + ".vendorExtension"},
+		{"missing version", map[string]any{MetaKey: map[string]any{}}, MetaPath + ".version"},
+		{"array version", offerMeta([]any{1.0}), MetaPath + ".version"},
+		{"fractional version", offerMeta(1.5), MetaPath + ".version"},
+		{"unrepresentable version", offerMeta(1e300), MetaPath + ".version"},
+		{"unsupported version", offerMeta(2.0), MetaPath + ".version"},
+		{"string version", offerMeta("1"), MetaPath + ".version"},
+		{"unparsable number", offerMeta(json.Number("one")), MetaPath + ".version"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -58,23 +58,12 @@ func TestDecodeOfferStrictness(t *testing.T) {
 	}
 }
 
-// TestOfferAnswerIntersects pins that the answer is the common set, that only the
-// answer is ordered, and that an empty intersection answers nothing at all.
-func TestOfferAnswerIntersects(t *testing.T) {
+// TestOfferAnswerRequiresVersionOne pins the exact scalar handshake.
+func TestOfferAnswerRequiresVersionOne(t *testing.T) {
 	t.Parallel()
 
-	proven := Negotiated{ActivityKinds: []ActivityKind{}}
-
-	answer, common := Offer{Versions: []int{1, 1, 2}}.Answer(proven)
-	require.True(t, common)
-	require.Equal(t, []int{1}, answer.Versions, "the intersection is duplicate-free")
-
-	answer, common = Offer{Versions: []int{2, 1}}.Answer(proven)
-	require.True(t, common)
-	require.Equal(t, []int{1}, answer.Versions, "an unordered offer is intersected, not refused")
-
-	_, common = Offer{Versions: []int{2, 3}}.Answer(proven)
-	require.False(t, common)
+	answer := (Offer{Version: Version}).Answer(Negotiated{})
+	require.Equal(t, Version, answer.Version)
 }
 
 // TestDecodeOfferReadsEveryIntegerSpelling pins that a decoded wire float64, an
@@ -83,11 +72,11 @@ func TestOfferAnswerIntersects(t *testing.T) {
 func TestDecodeOfferReadsEveryIntegerSpelling(t *testing.T) {
 	t.Parallel()
 
-	for _, versions := range []any{[]any{1.0}, []any{1}, []any{json.Number("1")}} {
-		offer, offered, refusal := DecodeOffer(offerMeta(versions))
+	for _, version := range []any{1.0, 1, json.Number("1")} {
+		offer, offered, refusal := DecodeOffer(offerMeta(version))
 		require.Nil(t, refusal)
 		require.True(t, offered)
-		require.Equal(t, []int{1}, offer.Versions)
+		require.Equal(t, 1, offer.Version)
 	}
 }
 
@@ -128,7 +117,7 @@ func correlationMeta(value any) map[string]any {
 func TestDecodePromptCorrelationRequiresTheKeyWhileNegotiated(t *testing.T) {
 	t.Parallel()
 
-	negotiated := Negotiated{Versions: []int{Version}}
+	negotiated := Negotiated{Version: Version}
 
 	submission, refusal := DecodePromptCorrelation(nil, Negotiated{})
 	require.Nil(t, refusal)
@@ -148,7 +137,7 @@ func TestDecodePromptCorrelationRequiresTheKeyWhileNegotiated(t *testing.T) {
 func TestDecodePromptCorrelationStrictness(t *testing.T) {
 	t.Parallel()
 
-	negotiated := Negotiated{Versions: []int{Version}}
+	negotiated := Negotiated{Version: Version}
 	submission := map[string]any{"submissionId": "sub-1", "clientNonce": "non-1"}
 
 	for _, tc := range []struct {
@@ -197,7 +186,7 @@ func TestDecodePromptCorrelationStrictness(t *testing.T) {
 func TestDecodePromptCorrelationReadsTheWholeSubmission(t *testing.T) {
 	t.Parallel()
 
-	negotiated := Negotiated{Versions: []int{Version}}
+	negotiated := Negotiated{Version: Version}
 
 	submission, refusal := DecodePromptCorrelation(correlationMeta(map[string]any{
 		"version":    1.0,

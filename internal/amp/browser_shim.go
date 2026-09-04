@@ -6,10 +6,6 @@ import (
 	"strings"
 )
 
-// browserShimPrefix names every shim directory created beneath a scratch
-// parent.
-const browserShimPrefix = "acp-go-amp-browser-shim-"
-
 const (
 	browserShimPathEnv    = "PATH"
 	browserShimBrowserEnv = "BROWSER"
@@ -30,27 +26,6 @@ var browserLauncherNames = []string{
 	"x-www-browser",
 	"www-browser",
 	"sensible-browser",
-}
-
-// browserShim is a scratch directory of no-op launchers that shadows every
-// browser a native login leg would otherwise open on the operator's desktop.
-type browserShim struct {
-	dir string
-}
-
-// environ returns env with the shim ahead of PATH and BROWSER pointed at one of
-// its no-ops.
-func (s *browserShim) environ(env []string) []string {
-	return browserShimEnviron(env, s.dir)
-}
-
-// remove deletes the shim directory.
-func (s *browserShim) remove() error {
-	if s == nil {
-		return nil
-	}
-
-	return os.RemoveAll(s.dir)
 }
 
 // browserShimEnviron rewrites a child environment so dir precedes every other

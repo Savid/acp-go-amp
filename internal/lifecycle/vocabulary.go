@@ -1,6 +1,5 @@
 // Package lifecycle implements the `acp-go.dev/lifecycle` extension: the closed
-// event vocabulary, the strict wire decoder, and the reducer that validates one
-// ordered session lifecycle stream.
+// event vocabulary, strict wire decoder, and ordered stream reducer.
 //
 // The reducer is deliberately self-contained rather than shared. Independently
 // written reducers reaching the same verdict on the canonical fixture battery is
@@ -249,14 +248,9 @@ const (
 )
 
 // Negotiated carries the lifecycle facts one configuration proved at
-// `initialize`. Every field is a proven structured fact: an empty activity-kind
-// set and `UpdatesOutsidePrompt` false are truthful answers for a configuration
-// where nothing can outlive a contained prompt.
+// initialize. Every member is part of the connection's exact answer.
 type Negotiated struct {
-	// Versions is the non-empty intersection of the host's offer and the
-	// versions this configuration implements. The connection speaks the highest
-	// member.
-	Versions                []int          `json:"versions"`
+	Version                 int            `json:"version"`
 	UpdatesOutsidePrompt    bool           `json:"updatesOutsidePrompt"`
 	AuthoritativeQuiescence bool           `json:"authoritativeQuiescence"`
 	QuiescenceSource        ProofClass     `json:"quiescenceSource,omitempty"`
@@ -266,22 +260,15 @@ type Negotiated struct {
 // Present reports whether the configuration answered the lifecycle key at all.
 // An absent answer makes every envelope, correlation value, and lifecycle fact
 // illegal on the connection.
-func (n Negotiated) Present() bool { return len(n.Versions) > 0 }
+func (n Negotiated) Present() bool { return n.Version == Version }
 
-// SupportsVersion reports whether an envelope version is inside the negotiated
-// set.
-func (n Negotiated) SupportsVersion(version int) bool {
-	return slices.Contains(n.Versions, version)
-}
-
-// NegotiatedVersion is the single integer every envelope and correlation value
-// on the connection carries: the highest member of the intersection.
+// NegotiatedVersion is the integer every envelope and correlation value carries.
 func (n Negotiated) NegotiatedVersion() int {
 	if !n.Present() {
 		return 0
 	}
 
-	return slices.Max(n.Versions)
+	return Version
 }
 
 // DeclaresActivityKind reports whether the answer advertised an activity kind. A
@@ -290,17 +277,20 @@ func (n Negotiated) DeclaresActivityKind(kind ActivityKind) bool {
 	return slices.Contains(n.ActivityKinds, kind)
 }
 
-// Advertisement renders the answer for `InitializeResponse._meta`. The activity
-// kinds are always an array and never null, and `quiescenceSource` is present
-// exactly when a proof class was proven.
+// Advertisement renders the exact scalar answer and the configuration's proven
+// facts for `InitializeResponse._meta`.
 func (n Negotiated) Advertisement() map[string]any {
+	if !n.Present() {
+		return nil
+	}
+
 	kinds := make([]string, 0, len(n.ActivityKinds))
 	for _, kind := range n.ActivityKinds {
 		kinds = append(kinds, string(kind))
 	}
 
 	advertisement := map[string]any{
-		fieldVersions:                slices.Clone(n.Versions),
+		fieldVersion:                 Version,
 		fieldUpdatesOutsidePrompt:    n.UpdatesOutsidePrompt,
 		fieldAuthoritativeQuiescence: n.AuthoritativeQuiescence,
 		fieldActivityKinds:           kinds,

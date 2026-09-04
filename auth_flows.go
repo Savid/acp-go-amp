@@ -208,16 +208,6 @@ func (p *providerAuth) authorize(ctx context.Context, params json.RawMessage) (a
 		return nil, inputErr
 	}
 
-	// Manual material never enters Amp's native store. Hosted login does, so
-	// assert that store before minting an id or superseding any retained flow:
-	// a local-policy refusal must leave the owner's existing flow and durable
-	// lineage untouched.
-	if method.Type != authMethodTypeAPI {
-		if storeErr := session.authFileStore(); storeErr != nil {
-			return nil, authFailed(authCauseNativeVeto, request.providerID, request.method, "")
-		}
-	}
-
 	flowID, err := newAuthToken()
 	if err != nil {
 		return nil, authFailed(authCauseProcess, request.providerID, request.method, "")
@@ -416,13 +406,18 @@ func (p *providerAuth) mintPresentation(ctx context.Context, session *agentSessi
 		}, ""
 	}
 
-	client := session.client()
-	if !client.AuthDeploymentSupported() {
-		return authAuthorizeResult{}, authCauseUnsupportedVariant
+	client, cleanup, err := session.newAuthClient(ctx)
+	if err != nil {
+		if errors.Is(err, nativeamp.ErrBrowserLaunchUnsupported) {
+			return authAuthorizeResult{}, authCauseUnsupportedVariant
+		}
+
+		return authAuthorizeResult{}, authCauseProcess
 	}
 
 	login, err := authStartLogin(client, ctx)
 	if err != nil {
+		_ = cleanup()
 		// A launch the audit refused is a variant this adapter does not
 		// broker, not a native process failure: no child ever existed.
 		if errors.Is(err, nativeamp.ErrBrowserLaunchUnsupported) {
@@ -640,10 +635,6 @@ func (p *providerAuth) callback(ctx context.Context, params json.RawMessage) (an
 
 	if login == nil {
 		return nil, p.fail(flow, authCauseTransport, false)
-	}
-
-	if storeErr := session.authFileStore(); storeErr != nil {
-		return nil, p.fail(flow, authCauseNativeVeto, false)
 	}
 
 	releaseSlot, admitted := p.admitSlot(ctx, providerID)

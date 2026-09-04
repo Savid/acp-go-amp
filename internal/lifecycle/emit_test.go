@@ -12,7 +12,7 @@ import (
 // activity kind, and the process-containment proof class.
 func containedConfiguration() Negotiated {
 	return Negotiated{
-		Versions:                []int{Version},
+		Version:                 Version,
 		AuthoritativeQuiescence: true,
 		QuiescenceSource:        ProofClassProcessContainment,
 		ActivityKinds:           []ActivityKind{},
@@ -146,7 +146,7 @@ func TestEmitClaimsTheSequenceBeforeDelivery(t *testing.T) {
 func TestSnapshotStatesAnUnprovenBoundaryAsNotQuiescent(t *testing.T) {
 	t.Parallel()
 
-	degenerate := Negotiated{Versions: []int{Version}, ActivityKinds: []ActivityKind{}}
+	degenerate := Negotiated{Version: Version}
 
 	envelope, err := NewStream("strm-1", degenerate).Emit(SnapshotEvent("cyc-0", QuiescenceFact{}))
 	require.NoError(t, err)

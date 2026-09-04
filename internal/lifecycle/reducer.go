@@ -7,8 +7,7 @@ import (
 
 // Options configures a reducer.
 type Options struct {
-	// Negotiated are the lifecycle facts the source's configuration proved. The
-	// reducer refuses anything the configuration did not advertise.
+	// Negotiated is the lifecycle capability accepted for this stream.
 	Negotiated Negotiated
 }
 
@@ -19,10 +18,6 @@ type Options struct {
 // One reducer follows one session across incarnations. A snapshot bearing a new
 // stream identity supersedes the previous incarnation and starts a fresh
 // projection; every other event on a foreign or fenced stream is stale.
-//
-// The one advertised fact it cannot check is `updatesOutsidePrompt`: no fact on
-// the ordered stream expresses whether a prompt is in flight, so that obligation
-// belongs to the emitter's own configuration and to a transport-facing consumer.
 //
 // A Reducer is not safe for concurrent use; the owner of the stream serializes
 // reduction.

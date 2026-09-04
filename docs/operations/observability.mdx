@@ -25,15 +25,9 @@ with an error, the tail is included in the adapter error detail when available.
 Raw events can be enabled per session for stream-JSON diagnostics but are off by
 default — see [Raw events](/docs/features/raw-events).
 
-The `acp_go_amp.runtime.containment` gauge records one point with
-`containment=authoritative|shared_identity|best_effort|unavailable`. Ordinary
-execution without a process-isolation policy reports `shared_identity` on
-every supported platform. Explicit Linux isolation reports `authoritative`;
-Darwin's optional process-group mode reports `best_effort`. Darwin best-effort
-also emits an unconditional structured warning. `ObserveContainment` exposes
-the same mode to embedding hosts. Provider-descendant snapshots are published
-only for authoritative isolation and are suppressed for ordinary and
-best-effort execution, including zero.
+Host-authority failures retain their sentinel identity in returned errors, so
+operators can distinguish authority loss, uncertain containment, and a busy
+native tree without inspecting provider output.
 
 To map a specific failure signal to its cause, see
 [Troubleshooting](/docs/operations/troubleshooting).

@@ -10,7 +10,6 @@ import (
 	"slices"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -513,19 +512,10 @@ func TestFailedDeleteRetainsExactWrapperOwnership(t *testing.T) {
 		baseStore := NewInMemorySessionStore()
 		store := &fencedDeleteStore{SessionStore: baseStore}
 		scratch := testScratchDir(t)
-		reserved := 0
-		released := 0
 		agent := newTestAgent(
 			WithExecutablePath(path),
 			WithScratchDir(scratch),
 			WithSessionStore(store),
-			WithRuntimeResourceHooks(RuntimeResourceHooks{
-				ReserveScratchRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
-					reserved++
-
-					return func() { released++ }, nil
-				},
-			}),
 		)
 
 		created, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
@@ -534,11 +524,8 @@ func TestFailedDeleteRetainsExactWrapperOwnership(t *testing.T) {
 		require.NoError(t, err)
 		_, err = agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: created.SessionId})
 		require.NoError(t, err)
-		require.Equal(t, reserved, released)
-
 		_, err = agent.UnstableDeleteSession(t.Context(), DeleteSessionRequest(created.SessionId))
 		require.ErrorContains(t, err, "tombstone write refused")
-		require.Equal(t, reserved, released, "the private wrapper is released when no tombstone transfers ownership")
 		_, pending := agent.cleanupOwner(created.SessionId)
 		require.False(t, pending)
 		_, deleted := agent.isDeleted(created.SessionId)
@@ -1041,26 +1028,11 @@ func TestInitializeAdvertisesTheFamilyMediaEnvelope(t *testing.T) {
 	}, envelope)
 }
 
-// TestMediaEnvelopeIsNotConditionedOnRouteSupport pins that Amp advertises the
-// family media envelope while advertising no route surface at all, so a host must
-// never infer one from the other.
-func TestMediaEnvelopeIsNotConditionedOnRouteSupport(t *testing.T) {
+func TestRouteCapabilityScalar(t *testing.T) {
 	meta := initializeMeta(t)
 
 	require.NotContains(t, meta, "acp-go.dev/route")
 	require.Contains(t, meta, metaMediaEnvelopeKey)
-}
-
-func TestHandoffAdvertisementFollowsTheConfiguredReadRoot(t *testing.T) {
-	require.NotContains(t, initializeMeta(t), metaHandoffKey)
-
-	meta := initializeMeta(t, WithInputHandoffRoot(t.TempDir()))
-	require.Equal(t, []string{metaHandoffKey, metaMediaEnvelopeKey, ampMetaKey}, sortedMetaKeys(meta))
-	require.Equal(t, map[string]any{keyVersions: []int64{1}}, meta[metaHandoffKey])
-
-	encoded, err := json.Marshal(meta[metaHandoffKey])
-	require.NoError(t, err)
-	require.JSONEq(t, `{"versions":[1]}`, string(encoded))
 }
 
 // loadGate parks the first main-subpath Load after arming, once the underlying
@@ -1119,19 +1091,10 @@ func TestLoadRacingADeleteInstallsNothingAndLeaksNothing(t *testing.T) {
 		release:      make(chan struct{}),
 	}
 
-	var reserved, released atomic.Int64
-
 	agent := newTestAgent(
 		WithExecutablePath(path),
 		WithScratchDir(scratch),
 		WithSessionStore(store),
-		WithRuntimeResourceHooks(RuntimeResourceHooks{
-			ReserveScratchRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
-				reserved.Add(1)
-
-				return func() { released.Add(1) }, nil
-			},
-		}),
 	)
 	t.Cleanup(func() { _ = agent.Close() })
 
@@ -1189,8 +1152,6 @@ func TestLoadRacingADeleteInstallsNothingAndLeaksNothing(t *testing.T) {
 	main, storeErr := store.Load(ctx, SessionKey{SessionID: string(sessionID), Subpath: SessionStoreMainSubpath})
 	require.NoError(t, storeErr)
 	require.Empty(t, main, "the tombstone is the last word on a deleted session")
-
-	require.Equal(t, reserved.Load(), released.Load(), "the prepared replacement releases its scratch reservation")
 
 	sessionDirs, err := filepath.Glob(filepath.Join(scratch, "acp-go-amp-session-*"))
 	require.NoError(t, err)

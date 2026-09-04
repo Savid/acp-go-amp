@@ -29,8 +29,8 @@ const (
 
 // lifecycleOffer is the object a host stamps on initialize. It carries exactly
 // one member, and the decoded wire form of a JSON number is a float64.
-func lifecycleOffer(versions ...any) map[string]any {
-	return map[string]any{lifecycle.MetaKey: map[string]any{"versions": versions}}
+func lifecycleOffer(version any) map[string]any {
+	return map[string]any{lifecycle.MetaKey: map[string]any{"version": version}}
 }
 
 // lifecycleCorrelation is the value a host stamps on every session/prompt while
@@ -149,7 +149,7 @@ func reduceEmittedStream(t *testing.T, client *lifecycleClient, negotiated lifec
 // gives. Every test agent here runs the ordinary same-identity mode, which
 // proves no whole-tree vacancy.
 func negotiatedAnswer() lifecycle.Negotiated {
-	return lifecycle.Negotiated{Versions: []int{1}, ActivityKinds: []lifecycle.ActivityKind{}}
+	return lifecycle.Negotiated{Version: 1, ActivityKinds: []lifecycle.ActivityKind{}}
 }
 
 // lifecycleHarnessSource is a native harness whose terminal shape is selected by
@@ -215,7 +215,10 @@ func lifecycleHarness(t *testing.T) string {
 	source := filepath.Join(dir, "lifecycle_amp.go")
 	require.NoError(t, os.WriteFile(source, []byte(lifecycleHarnessSource), 0o600))
 
-	path := filepath.Join(dir, "amp")
+	// The name carries a platform-correct extension: a host that honours
+	// PATHEXT does not resolve an extensionless file as an executable, so a
+	// harness written without one is unreachable rather than merely unusual.
+	path := filepath.Join(dir, testExecutableName("amp"))
 
 	out, err := exec.Command("go", "build", "-o", path, source).CombinedOutput()
 	require.NoError(t, err, "build lifecycle harness: %s", out)
@@ -265,45 +268,30 @@ func lifecyclePrompt(sessionID acp.SessionId, text, submissionID, nonce string) 
 	return request
 }
 
-// TestLifecycleAnswerIsPerConfiguration pins the advertisement truth table. The
-// answer is resolved from the same code path that enforces containment, so a
-// configuration that cannot prove whole-tree vacancy advertises neither
-// authoritative quiescence nor a proof class.
-func TestLifecycleAnswerIsPerConfiguration(t *testing.T) {
-	for _, tc := range []struct {
-		name        string
-		mode        RuntimeContainmentMode
-		quiescence  bool
-		proofSource string
-	}{
-		{"authoritative", RuntimeContainmentAuthoritative, true, "process-containment"},
-		{"shared identity", RuntimeContainmentSharedIdentity, false, ""},
-		{"best effort", RuntimeContainmentBestEffort, false, ""},
-		{"unavailable", RuntimeContainmentUnavailable, false, ""},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			agent := newTestAgent()
-			agent.containmentMode = tc.mode
+// TestLifecycleAnswerIsExact pins the version-1 scalar advertisement and the
+// facts ordinary same-identity execution can prove.
+func TestLifecycleAnswerIsExact(t *testing.T) {
+	resp, err := newTestAgent().Initialize(t.Context(), acp.InitializeRequest{Meta: lifecycleOffer(1.0)})
+	require.NoError(t, err)
+	require.Equal(t, map[string]any{
+		"version":                 1,
+		"updatesOutsidePrompt":    false,
+		"authoritativeQuiescence": false,
+		"activityKinds":           []string{},
+	}, resp.Meta[lifecycle.MetaKey])
+}
 
-			resp, err := agent.Initialize(t.Context(), acp.InitializeRequest{Meta: lifecycleOffer(1.0)})
-			require.NoError(t, err)
-
-			answer, ok := resp.Meta[lifecycle.MetaKey].(map[string]any)
-			require.True(t, ok, "the answer rides the response's own _meta")
-			require.Equal(t, []int{1}, answer["versions"])
-			require.Equal(t, false, answer["updatesOutsidePrompt"])
-			require.Equal(t, []string{}, answer["activityKinds"])
-			require.Equal(t, tc.quiescence, answer["authoritativeQuiescence"])
-
-			if tc.proofSource == "" {
-				require.NotContains(t, answer, "quiescenceSource")
-
-				return
-			}
-
-			require.Equal(t, tc.proofSource, answer["quiescenceSource"])
-		})
-	}
+func TestLifecycleAuthorityAnswerIsAuthoritative(t *testing.T) {
+	agent := NewAgent(WithHostAuthority(newRecordingAuthority()))
+	resp, err := agent.Initialize(t.Context(), acp.InitializeRequest{Meta: lifecycleOffer(1.0)})
+	require.NoError(t, err)
+	require.Equal(t, map[string]any{
+		"version":                 1,
+		"updatesOutsidePrompt":    false,
+		"authoritativeQuiescence": true,
+		"quiescenceSource":        "process-containment",
+		"activityKinds":           []string{},
+	}, resp.Meta[lifecycle.MetaKey])
 }
 
 // TestLifecycleAnswerNeverRidesAgentCapabilities pins the placement: the answer
@@ -331,12 +319,12 @@ func TestLifecycleNoOfferExposesNoSurface(t *testing.T) {
 	require.Empty(t, client.envelopes(t))
 }
 
-// TestLifecycleUnsupportedOfferOmitsTheKey pins that an empty intersection omits
-// the whole key rather than answering with an empty array.
-func TestLifecycleUnsupportedOfferOmitsTheKey(t *testing.T) {
-	resp, err := newTestAgent().Initialize(t.Context(), acp.InitializeRequest{Meta: lifecycleOffer(2.0, 3.0)})
-	require.NoError(t, err)
-	require.NotContains(t, resp.Meta, lifecycle.MetaKey)
+// TestLifecycleUnsupportedOfferIsRefused pins the exact version scalar.
+func TestLifecycleUnsupportedOfferIsRefused(t *testing.T) {
+	_, err := newTestAgent().Initialize(t.Context(), acp.InitializeRequest{Meta: lifecycleOffer(2.0)})
+	var requestErr *acp.RequestError
+	require.ErrorAs(t, err, &requestErr)
+	require.Equal(t, invalidParamsCode, requestErr.Code)
 }
 
 // TestLifecycleOfferStrictness pins the one family literal this adapter
@@ -349,13 +337,12 @@ func TestLifecycleOfferStrictness(t *testing.T) {
 	}{
 		{"non-object", map[string]any{lifecycle.MetaKey: "v1"}, `_meta["acp-go.dev/lifecycle"]`},
 		{"unknown member", map[string]any{lifecycle.MetaKey: map[string]any{
-			"versions": []any{1.0}, "updatesOutsidePrompt": true,
-		}}, `_meta["acp-go.dev/lifecycle"].updatesOutsidePrompt`},
-		{"missing versions", map[string]any{lifecycle.MetaKey: map[string]any{}}, `_meta["acp-go.dev/lifecycle"].versions`},
-		{"empty versions", lifecycleOffer(), `_meta["acp-go.dev/lifecycle"].versions`},
-		{"non-integer version", lifecycleOffer(1.5), `_meta["acp-go.dev/lifecycle"].versions`},
-		{"non-numeric version", lifecycleOffer("1"), `_meta["acp-go.dev/lifecycle"].versions`},
-		{"non-array versions", map[string]any{lifecycle.MetaKey: map[string]any{"versions": 1.0}}, `_meta["acp-go.dev/lifecycle"].versions`},
+			"version": 1.0, "vendorExtension": true,
+		}}, `_meta["acp-go.dev/lifecycle"].vendorExtension`},
+		{"missing version", map[string]any{lifecycle.MetaKey: map[string]any{}}, `_meta["acp-go.dev/lifecycle"].version`},
+		{"array version", lifecycleOffer([]any{1.0}), `_meta["acp-go.dev/lifecycle"].version`},
+		{"non-integer version", lifecycleOffer(1.5), `_meta["acp-go.dev/lifecycle"].version`},
+		{"non-numeric version", lifecycleOffer("1"), `_meta["acp-go.dev/lifecycle"].version`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := newTestAgent().Initialize(t.Context(), acp.InitializeRequest{Meta: tc.offer})
@@ -489,9 +476,8 @@ func TestLifecycleSnapshotOpensAFullShapeSessionsPrompt(t *testing.T) {
 	require.Equal(t, lifecycle.OutcomeSuccess, state.Turns[0].Outcome)
 }
 
-// TestLifecycleOpensOneIncarnationPerPrompt pins the shape a configuration
-// answering updatesOutsidePrompt false owes: no channel exists between prompts,
-// so each prompt is a distinct stream with its own snapshot and sequence space.
+// TestLifecycleOpensOneIncarnationPerPrompt pins that each prompt is a distinct
+// stream with its own snapshot and sequence space.
 func TestLifecycleOpensOneIncarnationPerPrompt(t *testing.T) {
 	agent, client, sessionID := lifecycleAgent(t, lifecycleOffer(1.0))
 
@@ -1105,15 +1091,6 @@ func TestLifecycleSettlementOrder(t *testing.T) {
 		WithExecutablePath(lifecycleHarness(t)),
 		WithScratchDir(testScratchDir(t)),
 		WithSessionStore(orderingStore{SessionStore: NewInMemorySessionStore(), record: record}),
-		WithRuntimeResourceHooks(RuntimeResourceHooks{
-			AcquireNativeRoot: func(_ context.Context, kind RuntimeResourceKind) (func(), error) {
-				return func() {
-					if kind == RuntimeResourcePrompt {
-						record("containment")
-					}
-				}, nil
-			},
-		}),
 	})...)
 	t.Cleanup(func() { require.NoError(t, agent.Close()) })
 
@@ -1140,7 +1117,7 @@ func TestLifecycleSettlementOrder(t *testing.T) {
 	// minted so a mid-turn death can never leave a created server-side thread
 	// unrecorded, and it publishes the state already committed — no frame from the
 	// turn in flight. The turn own commit is the one the boundary precedes.
-	require.Equal(t, []string{"commit:0", "containment", "commit:3", "idle", "response"}, ledger)
+	require.Equal(t, []string{"commit:0", "commit:3", "idle", "response"}, ledger)
 }
 
 // TestLifecycleCancelPersistsWhatStreamed pins that a cancelled turn commits the
@@ -1152,17 +1129,19 @@ func TestLifecycleCancelPersistsWhatStreamed(t *testing.T) {
 	streamed := make(chan struct{})
 	client.onAgentChunk = func() { close(streamed) }
 
-	done := make(chan acp.PromptResponse, 1)
+	done := make(chan correctionResult[acp.PromptResponse], 1)
 
 	go func() {
 		resp, err := agent.Prompt(t.Context(), lifecyclePrompt(sessionID, "hang", "sub-1", "nonce-1"))
-		require.NoError(t, err)
-		done <- resp
+		done <- correctionResult[acp.PromptResponse]{value: resp, err: err}
 	}()
 
 	<-streamed
 	require.NoError(t, agent.Cancel(t.Context(), acp.CancelNotification{SessionId: sessionID}))
-	require.Equal(t, acp.StopReasonCancelled, (<-done).StopReason)
+
+	cancelled := receiveCorrection(t, done, "cancelled prompt result")
+	require.NoError(t, cancelled.err)
+	require.Equal(t, acp.StopReasonCancelled, cancelled.value.StopReason)
 
 	stored, err := agent.store.Load(t.Context(), SessionKey{SessionID: string(sessionID), Subpath: transcriptSubpath})
 	require.NoError(t, err)
@@ -1215,14 +1194,14 @@ func TestPromptRetainsAnIncompleteContainmentBoundary(t *testing.T) {
 	})...)
 	// A session whose boundary never completed is never released, so this agent
 	// reports the incomplete boundary for the rest of its life.
-	t.Cleanup(func() { require.ErrorIs(t, agent.Close(), nativeamp.ErrProcessContainmentIncomplete) })
+	t.Cleanup(func() { require.ErrorIs(t, agent.Close(), nativeamp.ErrContainmentIncomplete) })
 
 	client := &lifecycleClient{}
 	agent.setConnection(client)
-	agent.options.runtime.settleTurn = func(turn *nativeamp.Turn) (nativeamp.ContainmentProof, error) {
+	agent.options.runtime.settleTurn = func(turn *nativeamp.Turn) error {
 		_ = turn.Close()
 
-		return turn.ContainmentProof(), nativeamp.ErrProcessContainmentIncomplete
+		return nativeamp.ErrContainmentIncomplete
 	}
 
 	_, err := agent.Initialize(t.Context(), acp.InitializeRequest{Meta: lifecycleOffer(1.0)})
@@ -1232,7 +1211,8 @@ func TestPromptRetainsAnIncompleteContainmentBoundary(t *testing.T) {
 	require.NoError(t, err)
 
 	_, err = agent.Prompt(t.Context(), lifecyclePrompt(session.SessionId, "hello", "sub-1", "nonce-1"))
-	require.ErrorIs(t, err, nativeamp.ErrProcessContainmentIncomplete)
+	require.ErrorIs(t, err, nativeamp.ErrContainmentIncomplete)
+	require.ErrorIs(t, err, ErrContainmentIncomplete)
 	require.Equal(t, []string{"lifecycle_snapshot", "prompt_accepted", "state_update"}, client.eventTypes(t),
 		"no turn settles behind an unproven boundary")
 }
@@ -1498,7 +1478,7 @@ func TestIncompleteLaunchPublishesItsBoundaryOnTheLatch(t *testing.T) {
 	})...)
 	// The boundary never completed, so this agent reports it for the rest of its
 	// life and never releases the session's scratch.
-	t.Cleanup(func() { require.ErrorIs(t, agent.Close(), nativeamp.ErrProcessContainmentIncomplete) })
+	t.Cleanup(func() { require.ErrorIs(t, agent.Close(), nativeamp.ErrContainmentIncomplete) })
 
 	client := &lifecycleClient{}
 	agent.setConnection(client)
@@ -1519,20 +1499,21 @@ func TestIncompleteLaunchPublishesItsBoundaryOnTheLatch(t *testing.T) {
 		// or delete would find and wait on.
 		latch = session.activePromptState()
 
-		return nil, fmt.Errorf("%w: input delivery refused", nativeamp.ErrProcessContainmentIncomplete)
+		return nil, fmt.Errorf("%w: input delivery refused", nativeamp.ErrContainmentIncomplete)
 	}
 
 	_, err = agent.Prompt(t.Context(), lifecyclePrompt(created.SessionId, "hello", "sub-1", "nonce-1"))
 	require.Error(t, err)
+	require.ErrorIs(t, err, ErrContainmentIncomplete)
 	require.Equal(t, []string{"lifecycle_snapshot"}, client.eventTypes(t), "nothing was accepted")
 
 	require.NotNil(t, latch, "the prompt is admitted before it launches native work")
-	require.ErrorIs(t, latch.awaitCompletion(t.Context()), nativeamp.ErrProcessContainmentIncomplete,
+	require.ErrorIs(t, latch.awaitCompletion(t.Context()), nativeamp.ErrContainmentIncomplete,
 		"the latch carries the boundary this launch lost")
 
 	// The teardown every close and delete performs refuses to reclaim scratch
 	// state behind an unproven boundary.
-	require.ErrorIs(t, session.Close(t.Context()), nativeamp.ErrProcessContainmentIncomplete)
+	require.ErrorIs(t, session.Close(t.Context()), nativeamp.ErrContainmentIncomplete)
 	require.DirExists(t, session.settingsDir)
 }
 
@@ -1559,19 +1540,19 @@ func TestCloseEmitsNothingOnAFencedOrNeverOpenedIncarnation(t *testing.T) {
 	streamed := make(chan struct{})
 	client.onAgentChunk = func() { close(streamed) }
 
-	done := make(chan struct{})
+	done := make(chan correctionResult[acp.PromptResponse], 1)
 
 	go func() {
-		defer close(done)
-
 		resp, promptErr := agent.Prompt(t.Context(), lifecyclePrompt(prompted.SessionId, "hang", "sub-1", "nonce-1"))
-		require.NoError(t, promptErr)
-		require.Equal(t, acp.StopReasonCancelled, resp.StopReason)
+		done <- correctionResult[acp.PromptResponse]{value: resp, err: promptErr}
 	}()
 
 	<-streamed
 	require.NoError(t, agent.Cancel(t.Context(), acp.CancelNotification{SessionId: prompted.SessionId}))
-	<-done
+
+	cancelled := receiveCorrection(t, done, "cancelled prompt result")
+	require.NoError(t, cancelled.err)
+	require.Equal(t, acp.StopReasonCancelled, cancelled.value.StopReason)
 
 	fenced := client.eventTypes(t)
 	require.Equal(t,
@@ -1653,41 +1634,6 @@ func TestCloseNeverRewritesALossTerminalizedFailure(t *testing.T) {
 	require.Equal(t, stored, after, "the close's own commit rewrote no frame the failure committed")
 }
 
-// TestCancelCarriesNoRouteVerdictToPrecedeTheReservedKey pins this adapter's
-// structural exception to the refusal-precedence rule. Route validation precedes
-// the reserved-key refusal on every surface that carries both, and this adapter
-// carries only one: one short-lived process serves one prompt and there is no
-// elicitation surface, so `acp-go.dev/route` is neither advertised nor validated
-// and a cancel bearing it is applied. The lifecycle key is the single verdict a
-// cancel can produce here, and a cancel carrying both still reports it.
-func TestCancelCarriesNoRouteVerdictToPrecedeTheReservedKey(t *testing.T) {
-	agent, _, sessionID := lifecycleAgent(t, lifecycleOffer(1.0))
-
-	malformedRoute := map[string]any{"version": 99.0, "turnNonce": ""}
-
-	require.NoError(t, agent.Cancel(t.Context(), acp.CancelNotification{
-		SessionId: sessionID,
-		Meta:      map[string]any{"acp-go.dev/route": malformedRoute},
-	}), "this adapter validates no turn nonce, so a route envelope produces no verdict")
-
-	err := agent.Cancel(t.Context(), acp.CancelNotification{
-		SessionId: sessionID,
-		Meta: map[string]any{
-			"acp-go.dev/route": malformedRoute,
-			lifecycle.MetaKey:  map[string]any{"version": 1.0},
-		},
-	})
-
-	var requestErr *acp.RequestError
-
-	require.ErrorAs(t, err, &requestErr)
-	require.Equal(t, invalidParamsCode, requestErr.Code)
-
-	data, ok := requestErr.Data.(map[string]any)
-	require.True(t, ok)
-	require.Equal(t, lifecycle.MetaPath, data[jsonFieldField])
-}
-
 // TestLifecycleKeyRefusedBeforeExtensionMethodResolution pins the precedence on
 // the extension surface: the reserved key is answered before the method name is
 // resolved, so a method this adapter does not dispatch reports the key rather
@@ -1752,4 +1698,17 @@ func TestLifecycleKeyRefusedBeforeExtensionMethodResolution(t *testing.T) {
 	agent.mu.Unlock()
 	require.Empty(t, sessions)
 	require.Nil(t, agent.providerAuth)
+}
+
+func TestSetConfigOptionUseAdmissionResidualBranch(t *testing.T) {
+	agent := NewAgent()
+	id := acp.SessionId("T-config")
+	use := &agentSessionUse{done: make(chan struct{})}
+	agent.sessionUses[id] = use
+	_, err := agent.SetSessionConfigOption(residualCancelledContext(), acp.SetSessionConfigOptionRequest{ValueId: &acp.SetSessionConfigOptionValueId{
+		SessionId: id,
+		ConfigId:  "mode",
+		Value:     "medium",
+	}})
+	require.Error(t, err)
 }

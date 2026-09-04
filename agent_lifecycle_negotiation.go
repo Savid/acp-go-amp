@@ -8,18 +8,17 @@ import (
 )
 
 // negotiateLifecycle reads the host's `acp-go.dev/lifecycle` offer and answers
-// with the facts this connection's active configuration proved. It records the
-// answer as the contract for the whole connection: with no offer, or with no
-// common version, the key is omitted from the response and no envelope,
-// correlation read, or lifecycle fact exists on the connection at all.
+// with the exact capability this connection supports. It records the answer as
+// the contract for the whole connection: with no offer, the key is omitted from
+// the response and no envelope, correlation read, or lifecycle fact exists on
+// the connection at all.
 func (a *Agent) negotiateLifecycle(meta map[string]any) (map[string]any, error) {
 	offer, offered, refusal := lifecycle.DecodeOffer(meta)
 	if refusal != nil {
 		return nil, lifecycleParamError(refusal)
 	}
 
-	answer, common := offer.Answer(a.provenLifecycleFacts())
-	if !offered || !common {
+	if !offered {
 		a.retainNegotiatedLifecycle(lifecycle.Negotiated{})
 
 		// An omitted key and an empty answer are the same wire fact: the response
@@ -27,25 +26,23 @@ func (a *Agent) negotiateLifecycle(meta map[string]any) (map[string]any, error) 
 		return map[string]any{}, nil
 	}
 
+	answer := offer.Answer(a.provenLifecycleFacts())
+
 	a.retainNegotiatedLifecycle(answer)
 
 	return map[string]any{lifecycle.MetaKey: answer.Advertisement()}, nil
 }
 
-// provenLifecycleFacts states what this configuration can actually prove, read
-// from the same code path that enforces containment rather than from a
-// compiled-in constant.
-//
-// A prompt is one contained amp process and nothing survives it, so there is no
-// channel between prompts and no activity to report: `updatesOutsidePrompt` is
-// false and `activityKinds` is empty on every configuration. Only the
-// authoritative containment mode enumerates the whole descendant tree, so only
-// it proves vacancy and names the `process-containment` class; ordinary
-// same-identity execution and opted-in Darwin containment prove a weaker
-// boundary and a weaker boundary is never promoted.
+// provenLifecycleFacts states the facts this configuration can prove. Amp has
+// no activity channel between prompts. A supplied host authority additionally
+// proves whole-process-tree vacancy after Wait succeeds.
 func (a *Agent) provenLifecycleFacts() lifecycle.Negotiated {
-	proven := lifecycle.Negotiated{ActivityKinds: []lifecycle.ActivityKind{}}
-	if a.containmentMode.provesWholeTreeLifecycle() {
+	proven := lifecycle.Negotiated{
+		Version:       lifecycle.Version,
+		ActivityKinds: []lifecycle.ActivityKind{},
+	}
+
+	if a.options.hostAuthoritySupplied {
 		proven.AuthoritativeQuiescence = true
 		proven.QuiescenceSource = lifecycle.ProofClassProcessContainment
 	}
