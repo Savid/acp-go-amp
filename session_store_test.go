@@ -53,11 +53,21 @@ func TestInMemoryStoreReplaceAppendDelete(t *testing.T) {
 	}
 }
 
-// TestInMemoryStoreRefusesDuplicateReplacementKeys pins the generation rule: one
-// Replace states each key exactly once, so a key stated twice is refused by the
-// duplicated key's own name rather than resolved by slice order. The refusal is
-// the whole effect — the generation the store already holds is untouched.
-func TestInMemoryStoreRefusesDuplicateReplacementKeys(t *testing.T) {
+// TestInMemoryStoreRefusesForeignAndDuplicateReplacementKeys pins the two
+// generation rules a Replace enforces before it writes anything.
+//
+// Every Replace is one session's: a replacement key naming another session is
+// refused, because one session's generation may never rewrite or tombstone
+// another's rows. And one generation states each key exactly once: a key stated
+// twice would make slice position decide what the session holds, so it is
+// refused by the duplicated key's own name rather than resolved by last-write-
+// wins. Both errors name the offending {sessionId, subpath} in full — a subpath
+// alone does not identify a row.
+//
+// The refusal is the whole effect. Validation completes before the store takes
+// its lock, so nothing is written, nothing is deleted, nothing is tombstoned,
+// and the generation the store already holds stands untouched.
+func TestInMemoryStoreRefusesForeignAndDuplicateReplacementKeys(t *testing.T) {
 	ctx := context.Background()
 	store := NewInMemorySessionStore()
 	main := SessionKey{SessionID: "T-1", Subpath: SessionStoreMainSubpath}
@@ -72,11 +82,29 @@ func TestInMemoryStoreRefusesDuplicateReplacementKeys(t *testing.T) {
 		t.Fatalf("first generation: %v", err)
 	}
 
+	foreignMain := SessionKey{SessionID: "T-2", Subpath: SessionStoreMainSubpath}
+	foreignTranscript := SessionKey{SessionID: "T-2", Subpath: transcriptSubpath}
+
 	for _, testCase := range []struct {
 		name         string
 		replacements []SessionStoreReplacement
 		wantMessage  string
 	}{
+		{
+			name: "foreign session subpath",
+			replacements: []SessionStoreReplacement{
+				{Key: main, Entries: []SessionStoreEntry{manifest}},
+				{Key: foreignTranscript, Entries: []SessionStoreEntry{json.RawMessage(`{"type":"stolen"}`)}},
+			},
+			wantMessage: `replacement key {sessionId: "T-2", subpath: "transcript"} does not belong to session "T-1"`,
+		},
+		{
+			name: "foreign session main",
+			replacements: []SessionStoreReplacement{
+				{Key: foreignMain, Entries: []SessionStoreEntry{manifest}},
+			},
+			wantMessage: `replacement key {sessionId: "T-2", subpath: ""} does not belong to session "T-1"`,
+		},
 		{
 			name: "duplicate subpath",
 			replacements: []SessionStoreReplacement{
@@ -84,7 +112,7 @@ func TestInMemoryStoreRefusesDuplicateReplacementKeys(t *testing.T) {
 				{Key: transcript, Entries: []SessionStoreEntry{json.RawMessage(`{"type":"first"}`)}},
 				{Key: transcript, Entries: []SessionStoreEntry{json.RawMessage(`{"type":"last"}`)}},
 			},
-			wantMessage: `duplicate replacement subpath "transcript"`,
+			wantMessage: `duplicate replacement key {sessionId: "T-1", subpath: "transcript"}`,
 		},
 		{
 			name: "duplicate main",
@@ -92,7 +120,7 @@ func TestInMemoryStoreRefusesDuplicateReplacementKeys(t *testing.T) {
 				{Key: main, Entries: []SessionStoreEntry{manifest}},
 				{Key: main, Entries: []SessionStoreEntry{manifest}},
 			},
-			wantMessage: `duplicate replacement subpath ""`,
+			wantMessage: `duplicate replacement key {sessionId: "T-1", subpath: ""}`,
 		},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -103,6 +131,9 @@ func TestInMemoryStoreRefusesDuplicateReplacementKeys(t *testing.T) {
 		})
 	}
 
+	// Nothing a refused generation named was written: this session's own rows are
+	// exactly what the last accepted generation left, and the foreign session the
+	// refused keys named was never created.
 	entries, err := store.Load(ctx, transcript)
 	if err != nil {
 		t.Fatalf("load transcript: %v", err)
@@ -110,6 +141,35 @@ func TestInMemoryStoreRefusesDuplicateReplacementKeys(t *testing.T) {
 
 	if len(entries) != 1 || string(entries[0]) != string(committed) {
 		t.Fatalf("a refused generation changed the transcript: %s", entries)
+	}
+
+	mainEntries, err := store.Load(ctx, main)
+	if err != nil {
+		t.Fatalf("load main: %v", err)
+	}
+
+	if len(mainEntries) != 1 || string(mainEntries[0]) != string(manifest) {
+		t.Fatalf("a refused generation changed the manifest: %s", mainEntries)
+	}
+
+	for _, key := range []SessionKey{foreignMain, foreignTranscript} {
+		foreign, loadErr := store.Load(ctx, key)
+		if loadErr != nil {
+			t.Fatalf("load %v: %v", key, loadErr)
+		}
+
+		if len(foreign) != 0 {
+			t.Fatalf("a refused generation wrote to another session at %v: %s", key, foreign)
+		}
+	}
+
+	sessions, err := store.ListSessions(ctx)
+	if err != nil {
+		t.Fatalf("list sessions: %v", err)
+	}
+
+	if len(sessions) != 1 || sessions[0].SessionID != "T-1" {
+		t.Fatalf("a refused generation changed the session list: %#v", sessions)
 	}
 }
 

@@ -156,6 +156,13 @@ func (s *InMemorySessionStore) isTombstonedLocked(key SessionKey) bool {
 	return false
 }
 
+// replacementKeyName names one offending replacement key. A refusal is only
+// actionable if the caller can find the row it names, and a subpath alone does
+// not identify a row: the session id is the other half of the key.
+func replacementKeyName(key SessionKey) string {
+	return fmt.Sprintf("{sessionId: %q, subpath: %q}", key.SessionID, key.Subpath)
+}
+
 func (s *InMemorySessionStore) Replace(ctx context.Context, main SessionKey, replacements []SessionStoreReplacement) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -175,10 +182,17 @@ func (s *InMemorySessionStore) Replace(ctx context.Context, main SessionKey, rep
 
 	mainIncluded := false
 
+	// The whole generation is validated before the lock is taken, so a refused
+	// generation is refused before any write: nothing is deleted, nothing is
+	// tombstoned, and the generation the store already holds stands untouched.
 	next := make(map[SessionKey][]SessionStoreEntry, len(replacements))
 	for _, replacement := range replacements {
+		// Every Replace is one session's. A key naming another session would let
+		// one session's generation rewrite or tombstone another's rows, which no
+		// caller can have meant and no store may resolve on its behalf.
 		if replacement.Key.SessionID != main.SessionID {
-			return errors.New("replacement session id mismatch")
+			return fmt.Errorf("replacement key %s does not belong to session %q",
+				replacementKeyName(replacement.Key), main.SessionID)
 		}
 
 		// One generation states each key exactly once. A key stated twice makes
@@ -187,7 +201,7 @@ func (s *InMemorySessionStore) Replace(ctx context.Context, main SessionKey, rep
 		// caller's: the whole generation is refused by the duplicated key's name
 		// rather than resolved by last-write-wins.
 		if _, duplicate := next[replacement.Key]; duplicate {
-			return fmt.Errorf("duplicate replacement subpath %q", replacement.Key.Subpath)
+			return fmt.Errorf("duplicate replacement key %s", replacementKeyName(replacement.Key))
 		}
 
 		if replacement.Key == main {
