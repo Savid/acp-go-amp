@@ -2,6 +2,7 @@ package ampacp
 
 import (
 	"context"
+	"errors"
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-amp/internal/lifecycle"
@@ -61,7 +62,7 @@ func (s *agentSession) openPromptStream(ctx context.Context) (*promptStream, err
 
 	client := s.agent.connection()
 	if client == nil {
-		return nil, acp.NewInternalError(map[string]any{jsonFieldError: "lifecycle delivery unavailable"})
+		return nil, internalFailure(classLifecycleUnavailable)
 	}
 
 	incarnation := &promptStream{
@@ -192,10 +193,10 @@ func (p *promptStream) emit(ctx context.Context, event lifecycle.Event) error {
 func (p *promptStream) prepare(event lifecycle.Event) (acp.SessionNotification, error) {
 	envelope, err := p.stream.Emit(event)
 	if err != nil {
-		return acp.SessionNotification{}, acp.NewInternalError(map[string]any{
-			jsonFieldError: "amp_lifecycle_violation",
-			keyDetail:      err.Error(),
-		})
+		// The reducer's verdict is joined rather than sent: the wire keeps the
+		// closed token, and an embedding host and this adapter's log keep the
+		// violation that produced it.
+		return acp.SessionNotification{}, errors.Join(internalFailure(classLifecycleViolation), err)
 	}
 
 	return acp.SessionNotification{
@@ -207,7 +208,7 @@ func (p *promptStream) prepare(event lifecycle.Event) (acp.SessionNotification, 
 
 func (p *promptStream) deliver(ctx context.Context, notification acp.SessionNotification) error {
 	if p == nil || p.client == nil {
-		return acp.NewInternalError(map[string]any{jsonFieldError: "lifecycle delivery unavailable"})
+		return internalFailure(classLifecycleUnavailable)
 	}
 
 	// The envelope rides the notification's own `_meta`, beside sessionId and

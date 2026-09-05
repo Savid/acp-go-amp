@@ -95,7 +95,7 @@ func TestHostAuthorityUtilityResidualBranches(t *testing.T) {
 	require.True(t, detachedContextError(context.Canceled))
 
 	for _, boundary := range []error{ErrHostAuthorityUnavailable, ErrNativeTreeBusy, nativeamp.ErrContainmentIncomplete} {
-		require.Error(t, nativeInternalError(boundary))
+		require.Error(t, nativeInternalError(classNativeStartupFailed, boundary))
 	}
 	require.NoError(t, publicContainmentError(nil))
 }

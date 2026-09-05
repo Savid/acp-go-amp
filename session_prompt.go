@@ -332,7 +332,7 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (ac
 	}
 
 	if !amp.HasAPIKey(composeEnv(s.agent.nativeEnvironmentBase(), s.env)) {
-		return acp.PromptResponse{}, missingAPIKeyError()
+		return acp.PromptResponse{}, s.agent.missingAPIKeyError(ctx)
 	}
 
 	if err := s.ensureMirrorSynced(ctx); err != nil {
@@ -1122,7 +1122,7 @@ func (s *agentSession) validateFrameSessionID(ctx context.Context, msg amp.Messa
 		_ = s.interruptState(context.Background(), state)
 	}
 
-	return s.poison(fmt.Sprintf("native session_id drift: got %q, want %q", got, native))
+	return s.poison(ctx, causeNativeIDDrift, fmt.Sprintf("got %q, want %q", got, native))
 }
 
 // adoptNativeSessionID records the thread id amp minted for the session's
@@ -1138,7 +1138,7 @@ func (s *agentSession) adoptNativeSessionID(ctx context.Context, threadID string
 			_ = s.interruptState(context.Background(), state)
 		}
 
-		return s.poison(fmt.Sprintf("native session_id invalid: %v", err))
+		return s.poison(ctx, causeNativeIDInvalid, err.Error())
 	}
 
 	s.mu.Lock()
@@ -1425,9 +1425,13 @@ func classifyNativePromptError(err error) error {
 
 	msg := err.Error()
 	// A missing native thread is a wrapper-invariant condition (the server-side
-	// thread no longer exists), not a turn failure, and keeps its own shape.
+	// thread no longer exists), not a turn failure: the turn never ran, so it
+	// answers the unclassified internal token under its own class rather than
+	// amp_turn_failed. The native text stays in the log.
 	if isNativeMissingError(err) {
-		return acp.NewInternalError(map[string]any{jsonFieldError: "native_state_missing", keyDetail: msg})
+		// The native text is joined rather than sent: an embedding host and this
+		// adapter's own log keep the cause, and the wire keeps the closed token.
+		return errors.Join(internalFailure(classNativeStateMissing), err)
 	}
 
 	return turnFailure(nativeFailureCause(msg), msg)

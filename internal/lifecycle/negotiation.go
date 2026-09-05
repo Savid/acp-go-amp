@@ -10,6 +10,21 @@ import (
 // because they are read before any stream exists.
 const MetaPath = `_meta["` + MetaKey + `"]`
 
+// Verdict names which uniform refusal answers a lifecycle value. The two are
+// distinct facts a host reads from one field path and are never collapsed:
+// VerdictUnsupported names a value that is present and refused — a key on a
+// surface that does not carry one, a key on a connection that negotiated
+// nothing, or a malformed member — and VerdictMissing names the required key an
+// enabled connection's caller left out.
+type Verdict string
+
+const (
+	// VerdictUnsupported refuses a value that is present.
+	VerdictUnsupported Verdict = "unsupported"
+	// VerdictMissing refuses the absence of a required value.
+	VerdictMissing Verdict = "missing"
+)
+
 // ParamError refuses a negotiation or correlation value. It names the exact
 // member path so a host can tell which value it got wrong, and it is the one
 // family literal this adapter validates on `initialize` itself.
@@ -17,10 +32,12 @@ type ParamError struct {
 	// Field is the full request path, from MetaPath down to the offending
 	// member.
 	Field string
+	// Verdict is the uniform token the refusal answers with.
+	Verdict Verdict
 }
 
 // Error implements error.
-func (e *ParamError) Error() string { return "unsupported " + e.Field }
+func (e *ParamError) Error() string { return string(e.Verdict) + " " + e.Field }
 
 func paramError(members ...string) *ParamError {
 	field := MetaPath
@@ -28,7 +45,14 @@ func paramError(members ...string) *ParamError {
 		field += "." + member
 	}
 
-	return &ParamError{Field: field}
+	return &ParamError{Field: field, Verdict: VerdictUnsupported}
+}
+
+// missingError refuses an absent prompt correlation on an enabled connection.
+// The path is always the bare key: no member is at fault, because the host sent
+// no value at all.
+func missingError() *ParamError {
+	return &ParamError{Field: MetaPath, Verdict: VerdictMissing}
 }
 
 // Offer is the host's exact `initialize` capability value.
@@ -94,7 +118,10 @@ func DecodePromptCorrelation(meta map[string]any, negotiated Negotiated) (Submis
 	case !negotiated.Present():
 		return Submission{}, nil
 	case !present:
-		return Submission{}, paramError()
+		// The capability is enabled and the host forgot the key. That is a
+		// different fact from a key sent where it has no meaning, so it answers
+		// `missing` on the bare path rather than `unsupported`.
+		return Submission{}, missingError()
 	}
 
 	fields, ok := raw.(map[string]any)

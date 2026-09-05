@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"strconv"
 
 	"github.com/coder/acp-go-sdk"
@@ -70,7 +71,9 @@ func terminalAssistantMessageIdentity(sessionID acp.SessionId, entries []Session
 	for index, entry := range entries {
 		msg, err := amp.ParseJSONLine(entry)
 		if err != nil {
-			return "", err
+			// The durable transcript did not parse, so the entry session/resume
+			// found cannot be restored.
+			return "", errors.Join(restoreFailed(), err)
 		}
 
 		if messageID := assistantMessageIdentity(sessionID, index+1, msg); messageID != "" {

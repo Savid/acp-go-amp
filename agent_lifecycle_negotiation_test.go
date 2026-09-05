@@ -319,6 +319,58 @@ func TestLifecycleNoOfferExposesNoSurface(t *testing.T) {
 	require.Empty(t, client.envelopes(t))
 }
 
+// TestLifecycleAnswerBindsTheWholeConnection pins that the answer a connection
+// gave is not rewritten by a later initialize. Enabling version 1 obligates the
+// foreground stream for every session on the connection, so a second
+// negotiation that would withdraw or alter the answer is refused on the
+// lifecycle key while the sessions it was published for are still live.
+func TestLifecycleAnswerBindsTheWholeConnection(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		first  map[string]any
+		second map[string]any
+	}{
+		{"withdrawn", lifecycleOffer(1.0), nil},
+		{"introduced", nil, lifecycleOffer(1.0)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			agent := newTestAgent()
+
+			first, err := agent.Initialize(t.Context(), acp.InitializeRequest{Meta: tc.first})
+			require.NoError(t, err)
+
+			_, err = agent.Initialize(t.Context(), acp.InitializeRequest{Meta: tc.second})
+
+			var requestErr *acp.RequestError
+
+			require.ErrorAs(t, err, &requestErr)
+			require.Equal(t, invalidParamsCode, requestErr.Code)
+			require.Equal(t, map[string]any{
+				jsonFieldError: valUnsupported,
+				jsonFieldField: lifecycle.MetaPath,
+			}, requestErr.Data)
+
+			// The refused second negotiation changed nothing.
+			require.Equal(t, first.Meta[lifecycle.MetaKey] != nil, agent.negotiatedLifecycle().Present())
+		})
+	}
+}
+
+// TestLifecycleRepeatedIdenticalNegotiationIsAdmitted pins the other half: a
+// second initialize asserting the same answer states the same contract, so it
+// changes nothing and is not an error.
+func TestLifecycleRepeatedIdenticalNegotiationIsAdmitted(t *testing.T) {
+	agent := newTestAgent()
+
+	first, err := agent.Initialize(t.Context(), acp.InitializeRequest{Meta: lifecycleOffer(1.0)})
+	require.NoError(t, err)
+
+	second, err := agent.Initialize(t.Context(), acp.InitializeRequest{Meta: lifecycleOffer(1.0)})
+	require.NoError(t, err)
+	require.Equal(t, first.Meta[lifecycle.MetaKey], second.Meta[lifecycle.MetaKey])
+	require.True(t, agent.negotiatedLifecycle().Present())
+}
+
 // TestLifecycleUnsupportedOfferIsRefused pins the exact version scalar.
 func TestLifecycleUnsupportedOfferIsRefused(t *testing.T) {
 	_, err := newTestAgent().Initialize(t.Context(), acp.InitializeRequest{Meta: lifecycleOffer(2.0)})
@@ -559,37 +611,41 @@ func TestLifecyclePromptCorrelationStrictness(t *testing.T) {
 	agent, client, sessionID := lifecycleAgent(t, lifecycleOffer(1.0))
 
 	for _, tc := range []struct {
-		name  string
-		meta  map[string]any
-		field string
+		name    string
+		meta    map[string]any
+		field   string
+		verdict lifecycle.Verdict
 	}{
-		{"missing key", nil, `_meta["acp-go.dev/lifecycle"]`},
-		{"non-object", map[string]any{lifecycle.MetaKey: 1.0}, `_meta["acp-go.dev/lifecycle"]`},
+		// An enabled connection whose prompt carries no key at all is the one
+		// case that answers `missing`: the host forgot a required value rather
+		// than sending a refused one, and the two verdicts are never collapsed.
+		{"missing key", nil, `_meta["acp-go.dev/lifecycle"]`, lifecycle.VerdictMissing},
+		{"non-object", map[string]any{lifecycle.MetaKey: 1.0}, `_meta["acp-go.dev/lifecycle"]`, lifecycle.VerdictUnsupported},
 		{"unknown member", map[string]any{lifecycle.MetaKey: map[string]any{
 			"version": 1.0, "submission": map[string]any{"submissionId": "s", "clientNonce": "n"}, "streamId": "x",
-		}}, `_meta["acp-go.dev/lifecycle"].streamId`},
+		}}, `_meta["acp-go.dev/lifecycle"].streamId`, lifecycle.VerdictUnsupported},
 		{"unsupported version", map[string]any{lifecycle.MetaKey: map[string]any{
 			"version": 2.0, "submission": map[string]any{"submissionId": "s", "clientNonce": "n"},
-		}}, `_meta["acp-go.dev/lifecycle"].version`},
+		}}, `_meta["acp-go.dev/lifecycle"].version`, lifecycle.VerdictUnsupported},
 		{"missing version", map[string]any{lifecycle.MetaKey: map[string]any{
 			"submission": map[string]any{"submissionId": "s", "clientNonce": "n"},
-		}}, `_meta["acp-go.dev/lifecycle"].version`},
-		{"missing submission", map[string]any{lifecycle.MetaKey: map[string]any{"version": 1.0}}, `_meta["acp-go.dev/lifecycle"].submission`},
+		}}, `_meta["acp-go.dev/lifecycle"].version`, lifecycle.VerdictUnsupported},
+		{"missing submission", map[string]any{lifecycle.MetaKey: map[string]any{"version": 1.0}}, `_meta["acp-go.dev/lifecycle"].submission`, lifecycle.VerdictUnsupported},
 		{"unknown submission member", map[string]any{lifecycle.MetaKey: map[string]any{
 			"version": 1.0, "submission": map[string]any{"submissionId": "s", "clientNonce": "n", "turnId": "t"},
-		}}, `_meta["acp-go.dev/lifecycle"].submission.turnId`},
+		}}, `_meta["acp-go.dev/lifecycle"].submission.turnId`, lifecycle.VerdictUnsupported},
 		{"missing nonce", map[string]any{lifecycle.MetaKey: map[string]any{
 			"version": 1.0, "submission": map[string]any{"submissionId": "s"},
-		}}, `_meta["acp-go.dev/lifecycle"].submission.clientNonce`},
+		}}, `_meta["acp-go.dev/lifecycle"].submission.clientNonce`, lifecycle.VerdictUnsupported},
 		{"empty submission id", map[string]any{lifecycle.MetaKey: map[string]any{
 			"version": 1.0, "submission": map[string]any{"submissionId": "", "clientNonce": "n"},
-		}}, `_meta["acp-go.dev/lifecycle"].submission.submissionId`},
+		}}, `_meta["acp-go.dev/lifecycle"].submission.submissionId`, lifecycle.VerdictUnsupported},
 		{"non-string run id", map[string]any{lifecycle.MetaKey: map[string]any{
 			"version": 1.0, "submission": map[string]any{"submissionId": "s", "clientNonce": "n", "runId": 1.0},
-		}}, `_meta["acp-go.dev/lifecycle"].submission.runId`},
+		}}, `_meta["acp-go.dev/lifecycle"].submission.runId`, lifecycle.VerdictUnsupported},
 		{"over-bound identifier", map[string]any{lifecycle.MetaKey: map[string]any{
 			"version": 1.0, "submission": map[string]any{"submissionId": strings.Repeat("s", 4097), "clientNonce": "n"},
-		}}, `_meta["acp-go.dev/lifecycle"].submission.submissionId`},
+		}}, `_meta["acp-go.dev/lifecycle"].submission.submissionId`, lifecycle.VerdictUnsupported},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			request := TextPromptRequest(sessionID, "lifecycle-turn", "hello")
@@ -601,7 +657,7 @@ func TestLifecyclePromptCorrelationStrictness(t *testing.T) {
 
 			require.ErrorAs(t, err, &requestErr)
 			require.Equal(t, invalidParamsCode, requestErr.Code)
-			require.Equal(t, map[string]any{jsonFieldError: valUnsupported, jsonFieldField: tc.field}, requestErr.Data)
+			require.Equal(t, map[string]any{jsonFieldError: string(tc.verdict), jsonFieldField: tc.field}, requestErr.Data)
 		})
 	}
 
@@ -620,9 +676,12 @@ func TestLifecycleKeyRejectedWhenNotNegotiated(t *testing.T) {
 
 	require.ErrorAs(t, err, &requestErr)
 	require.Equal(t, invalidParamsCode, requestErr.Code)
-	data, ok := requestErr.Data.(map[string]any)
-	require.True(t, ok)
-	require.Equal(t, `_meta["acp-go.dev/lifecycle"]`, data[jsonFieldField])
+	// A key sent where the connection negotiated nothing is present and refused,
+	// so the verdict is `unsupported` on the bare path — never `missing`.
+	require.Equal(t, map[string]any{
+		jsonFieldError: valUnsupported,
+		jsonFieldField: `_meta["acp-go.dev/lifecycle"]`,
+	}, requestErr.Data)
 }
 
 // TestLifecycleStopReasonIsTheHarnessOwn pins that a turn stopped by a ceiling
@@ -799,13 +858,13 @@ func TestLifecycleKeyRefusedOnEverySurfaceThatNeverCarriesIt(t *testing.T) {
 
 	for method, call := range calls {
 		t.Run(method, func(t *testing.T) {
-			var requestErr *acp.RequestError
-
-			require.ErrorAs(t, call(), &requestErr)
-			require.Equal(t, invalidParamsCode, requestErr.Code)
-			data, ok := requestErr.Data.(map[string]any)
-			require.True(t, ok)
-			require.Equal(t, `_meta["acp-go.dev/lifecycle"]`, data[jsonFieldField])
+			// A key sent to a surface that carries none is present and refused,
+			// so the verdict is `unsupported` on the bare path. Only an enabled
+			// connection's prompt, missing the key entirely, answers `missing`.
+			requireInvalidParamsData(t, call(), map[string]any{
+				jsonFieldError: valUnsupported,
+				jsonFieldField: `_meta["acp-go.dev/lifecycle"]`,
+			})
 		})
 	}
 }
@@ -1711,4 +1770,38 @@ func TestSetConfigOptionUseAdmissionResidualBranch(t *testing.T) {
 		Value:     "medium",
 	}})
 	require.Error(t, err)
+}
+
+// TestUndecodableExtensionParamsAreRefusedAsAWhole pins the uniform
+// extension-params rejection. A body this adapter cannot parse holds no readable
+// `_meta` and names no method, so it fails as a whole on `params` — before the
+// reserved-key read and before method resolution, the same precedence the key's
+// own refusal takes.
+func TestUndecodableExtensionParamsAreRefusedAsAWhole(t *testing.T) {
+	agent := newTestAgent()
+	t.Cleanup(func() { require.NoError(t, agent.Close()) })
+
+	wholeParams := map[string]any{jsonFieldError: valUnsupported, jsonFieldField: authFieldParams}
+
+	for name, params := range map[string]json.RawMessage{
+		"truncated object": json.RawMessage(`{"sessionId":`),
+		"not an object":    json.RawMessage(`42`),
+		"trailing input":   json.RawMessage(`{} {}`),
+		"not json at all":  json.RawMessage(`not-json`),
+	} {
+		t.Run(name, func(t *testing.T) {
+			for _, method := range []string{ForkSessionMethod, RawEventMethod, "_amp/auth/methods", "_amp/no/such/method"} {
+				_, err := agent.HandleExtensionMethod(t.Context(), method, params)
+				requireInvalidParamsData(t, err, wholeParams)
+			}
+		})
+	}
+
+	// A decodable body still reaches the method it named.
+	_, err := agent.HandleExtensionMethod(t.Context(), "_amp/no/such/method", json.RawMessage(`{}`))
+
+	var requestErr *acp.RequestError
+
+	require.ErrorAs(t, err, &requestErr)
+	require.Equal(t, -32601, requestErr.Code)
 }

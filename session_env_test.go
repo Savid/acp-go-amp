@@ -264,11 +264,9 @@ func TestWindowsSessionEnvironmentGatesTheFoldedAPIKey(t *testing.T) {
 	unixAgent := newTestAgent(WithExecutablePath(path), WithScratchDir(testScratchDir(t)))
 	t.Cleanup(func() { _ = unixAgent.Close() })
 
-	if _, err := unixAgent.NewSession(context.Background(), request); err == nil {
-		t.Fatal("a differently spelled key satisfied the gate under the Unix key identity")
-	} else if !strings.Contains(err.Error(), "AMP_API_KEY is not set") {
-		t.Fatalf("NewSession error = %v, want the missing-key refusal", err)
-	}
+	_, unixErr := unixAgent.NewSession(context.Background(), request)
+	requireInternalErrorData(t, unixErr,
+		map[string]any{jsonFieldError: errorInvalidOptions, jsonFieldField: optionEnvKey})
 
 	simulateWindowsEnvironment(t)
 

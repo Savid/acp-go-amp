@@ -12,7 +12,10 @@ common symptoms to their causes and to the tests that pin each behavior.
 
 | Symptom | Likely cause | Where to look |
 |---|---|---|
-| Session start fails immediately | No `AMP_API_KEY` and no usable provider-auth broker | [Authentication](/docs/features/authentication) |
+| Session start fails immediately with `amp_invalid_options` (`field: "env"`) | No `AMP_API_KEY` and no usable provider-auth broker | [Authentication](/docs/features/authentication); the adapter log carries the full explanation the wire token replaces |
+| `initialize` or session start fails with `amp_invalid_options` and no `field` | The agent was constructed with several options it will not serve under | The joined Go error an embedding host receives names each one; see [ACP methods](/docs/reference/acp-methods#internal-errors-away-from-a-prompt-turn) |
+| `session/load` or `session/resume` fails with `amp_restore_failed` | The store entry will not restore — unreadable store, foreign manifest, unparsable transcript frame, or a native thread the harness will not hand back | The entry is left intact: repair the store or the harness and retry, or delete the session |
+| Every operation on one session fails with `amp_session_poisoned` | `cause: "native_session_id_drift"` — a turn reported a thread id the session is not bound to; `cause: "native_session_id_invalid"` — a first turn reported a malformed thread id | Only `session/close` and `session/delete` still work; open a fresh session |
 | First prompt fails immediately after a keyless auth bootstrap | The harvested key was not redelivered as `AMP_API_KEY` | Bind the credential through `WithEnv` or session env options before prompting |
 | Prompt fails with `amp_turn_failed` (`cause: "process_exit"`) | Native `amp` exited non-zero | `message` carries the exit status and stderr tail |
 | Prompt fails with `cause: "timeout"` | `WithTurnTimeout` deadline elapsed | Raise or unset the deadline; a timeout is a failure, not a cancel |
@@ -20,8 +23,11 @@ common symptoms to their causes and to the tests that pin each behavior.
 | Prompt is rejected with `field: "prompt.resource"` | An embedded resource blob that names no raster format is corrupt base64 or spends more than the decoded budget | Same `error` values and byte fields; the offending block is a resource block, not an image block |
 | Prompt fails with `stage: "image_output"` | The adapter's own image artifact store broke; `reason` is always `storage_failed` | Check the session store; an expired or corrupt replay artifact cannot be restored by retrying |
 | A tool call shows guidance text where an image was expected | The image was refused in place — undecodable, non-raster, oversize, mismatched media type, or an unreadable location | Follow the guidance in the tool content; the turn was not interrupted |
-| Prompt fails with `native_state_missing` | Server-side Amp thread is gone | Start a fresh session with `session/new`; a mirror cannot resurrect it |
-| Prompt blocked with `mirror_unsynced` | A prior store write failed | Restore the [session store](/docs/features/session-store) backend so the mirror can commit |
+| Prompt fails with `amp_internal_failure` (`class: "native_state_missing"`) | Server-side Amp thread is gone | Start a fresh session with `session/new`; a mirror cannot resurrect it |
+| Prompt blocked with `amp_internal_failure` (`class: "mirror_unsynced"`) | A prior store write failed | Restore the [session store](/docs/features/session-store) backend so the mirror can commit |
+| Session start fails with `amp_internal_failure` (`class: "native_startup_failed"`) | The `amp` binary is unreachable, below the version floor, or its thread list is unreadable | The adapter log carries the native reason; check the `-path` binary |
+| A `session/prompt` is rejected with `field: "_meta[\"acp-go.dev/lifecycle\"]"` and `error: "missing"` | The lifecycle capability is negotiated and the prompt carried no correlation value | Stamp the value on every prompt; see [Metadata](/docs/reference/meta#the-prompt-correlation-value) |
+| An `_amp/*` request is rejected with `field: "params"` | The params body could not be decoded, or failed validation as a whole | Send a well-formed params object; the refusal precedes method resolution |
 | Session start rejects an MCP server | Unsupported transport or bad field | [MCP](/docs/features/mcp) — only stdio and HTTP are accepted |
 | `_amp/session/fork` returns an error | Amp has no fork surface | Fork requests are always rejected |
 | Session start or resume rejects a model | Amp has no separate model option — `mode` selects the model | Remove the model option and choose a `mode`; the rejection is fail-closed |
@@ -31,17 +37,17 @@ common symptoms to their causes and to the tests that pin each behavior.
 
 Amp stores conversation threads on the server side, so the remote thread is the
 source of truth for continuation. When the thread behind a session no longer
-exists, the adapter surfaces one terminal `native_state_missing` error and
+exists, the adapter surfaces one terminal `native_state_missing` failure and
 records a durable tombstone for the lost state instead of silently rebuilding a
 thread from local transcript text. Loading a session verifies that any
 recorded native thread is still continuable: when the thread is gone, the load replays the
-local transcript for display only, and the next prompt fails with
-`native_state_missing`. Reproduced by `TestActiveLoadVerifiesContinuability`
+local transcript for display only, and the next prompt fails with `-32603`
+`{"error": "amp_internal_failure", "class": "native_state_missing"}`. Reproduced by `TestActiveLoadVerifiesContinuability`
 (`agent_session_test.go`) and `TestNativeMissingThreadAndDeleteFailureTombstone`
 (`agent_test.go`).
 
 <Note>
-`native_state_missing` is terminal for that session: the native thread no longer
+The `native_state_missing` class is terminal for that session: the native thread no longer
 exists, so continuation is impossible. Recovery is a fresh bootstrap — open a new
 session with `session/new` — not a retry of the same session.
 </Note>

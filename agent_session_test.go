@@ -230,9 +230,10 @@ func TestActiveLoadPropagatesContinuabilityFailure(t *testing.T) {
 	if _, err := agent.Prompt(ctx, TextPromptRequest(resp.SessionId, "test-turn", "seed thread")); err != nil {
 		t.Fatalf("seed prompt: %v", err)
 	}
-	if _, err := agent.LoadSession(ctx, LoadSessionRequest(resp.SessionId, cwd)); err == nil || !strings.Contains(err.Error(), "export failed") {
-		t.Fatalf("active LoadSession export failure = %v, want export failed", err)
-	}
+	// A store entry whose native thread the harness will not hand back is the
+	// uniform restore failure, and the native text never reaches the wire.
+	_, loadErr := agent.LoadSession(ctx, LoadSessionRequest(resp.SessionId, cwd))
+	requireInternalErrorData(t, loadErr, map[string]any{jsonFieldError: errorRestoreFailed})
 }
 
 func isMismatchField(err error, field string) bool {
@@ -255,9 +256,7 @@ func TestNewSessionFailsFastWithoutAPIKey(t *testing.T) {
 	t.Setenv("AMP_API_KEY", "")
 	agent := newTestAgent(WithScratchDir(testScratchDir(t)))
 	_, err := agent.NewSession(context.Background(), NewSessionRequest(t.TempDir()))
-	if err == nil || !strings.Contains(err.Error(), "AMP_API_KEY") {
-		t.Fatalf("missing key error = %v", err)
-	}
+	requireInternalErrorData(t, err, map[string]any{jsonFieldError: errorInvalidOptions, jsonFieldField: optionEnvKey})
 }
 
 func TestNewSessionFailsFastWithEmptyAPIKeyOverride(t *testing.T) {
@@ -267,9 +266,7 @@ func TestNewSessionFailsFastWithEmptyAPIKeyOverride(t *testing.T) {
 		WithEnv(map[string]string{"AMP_API_KEY": ""}),
 	)
 	_, err := agent.NewSession(context.Background(), NewSessionRequest(t.TempDir()))
-	if err == nil || !strings.Contains(err.Error(), "AMP_API_KEY") {
-		t.Fatalf("empty override error = %v", err)
-	}
+	requireInternalErrorData(t, err, map[string]any{jsonFieldError: errorInvalidOptions, jsonFieldField: optionEnvKey})
 }
 
 func TestNewSessionAcceptsProcessEnvAPIKey(t *testing.T) {
@@ -312,9 +309,8 @@ func TestKeylessProviderAuthBootstrapPromptFailsBeforeNativeWork(t *testing.T) {
 		t.Fatalf("keyless bootstrap native calls = %#v, want version probe only", beforePrompt)
 	}
 
-	if _, promptErr := agent.Prompt(context.Background(), TextPromptRequest(resp.SessionId, "turn-1", "hello")); promptErr == nil || !strings.Contains(promptErr.Error(), "AMP_API_KEY") {
-		t.Fatalf("Prompt error = %v, want missing AMP_API_KEY", promptErr)
-	}
+	_, promptErr := agent.Prompt(context.Background(), TextPromptRequest(resp.SessionId, "turn-1", "hello"))
+	requireInternalErrorData(t, promptErr, map[string]any{jsonFieldError: errorInvalidOptions, jsonFieldField: optionEnvKey})
 
 	session, err := agent.session(resp.SessionId)
 	if err != nil {
@@ -347,10 +343,10 @@ func TestKeylessProviderAuthBootstrapChecksNativeReadiness(t *testing.T) {
 		}
 	})
 
+	// The version floor is an operator fact: it is logged, and the wire says only
+	// the closed startup class.
 	_, err := agent.NewSession(context.Background(), NewSessionRequest(t.TempDir()))
-	if err == nil || !strings.Contains(err.Error(), "below required") {
-		t.Fatalf("NewSession error = %v, want native version rejection", err)
-	}
+	requireInternalErrorData(t, err, map[string]any{jsonFieldError: errorInternalFailure, keyClass: classNativeStartupFailed})
 }
 
 func TestLoadAndResumeRemainCredentialGatedWithProviderAuth(t *testing.T) {
@@ -399,10 +395,7 @@ func TestLoadAndResumeRemainCredentialGatedWithProviderAuth(t *testing.T) {
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			err := load()
-			if err == nil || !strings.Contains(err.Error(), "AMP_API_KEY") {
-				t.Fatalf("error = %v, want missing AMP_API_KEY", err)
-			}
+			requireInternalErrorData(t, load(), map[string]any{jsonFieldError: errorInvalidOptions, jsonFieldField: optionEnvKey})
 		})
 	}
 }
@@ -4474,7 +4467,8 @@ func TestPendingTerminalAndRetainedSettlementDefensiveBranches(t *testing.T) {
 	t.Run("readiness and shutdown predicates", func(t *testing.T) {
 		session := &agentSession{agent: newTestAgent(), id: "T-ready-terminal", turn: make(chan struct{}, 1)}
 		session.pendingTerminal = &promptTerminalDelivery{}
-		require.ErrorContains(t, session.ready(), "terminal lifecycle delivery pending")
+		requireInternalErrorData(t, session.ready(),
+			map[string]any{jsonFieldError: errorInternalFailure, keyClass: classTerminalDeliveryPending})
 		session.pendingTerminal = nil
 		settlementErr := errors.New("retained settlement failure")
 		session.promptSettlement.deliveryErr = settlementErr
@@ -4557,7 +4551,8 @@ func TestPersistenceCommitOwnershipMutationFailsClosed(t *testing.T) {
 		session.mu.Unlock()
 	}
 
-	require.ErrorContains(t, session.replacePersistenceCommit(t.Context(), flight, commit), "persistence ownership changed")
+	requireInternalErrorData(t, session.replacePersistenceCommit(t.Context(), flight, commit),
+		map[string]any{jsonFieldError: errorInternalFailure, keyClass: classOwnershipChanged})
 }
 
 func TestCleanupFailureClassificationAndMissingDeliveryAreFixed(t *testing.T) {
@@ -4568,7 +4563,8 @@ func TestCleanupFailureClassificationAndMissingDeliveryAreFixed(t *testing.T) {
 	require.Equal(t, "deadline", cleanupFailureClass(context.DeadlineExceeded))
 	require.Equal(t, "cleanup_failed", cleanupFailureClass(errors.New("secret callback detail")))
 
-	require.ErrorContains(t, (&promptStream{}).deliver(t.Context(), acp.SessionNotification{}), "lifecycle delivery unavailable")
+	requireInternalErrorData(t, (&promptStream{}).deliver(t.Context(), acp.SessionNotification{}),
+		map[string]any{jsonFieldError: errorInternalFailure, keyClass: classLifecycleUnavailable})
 }
 
 func TestLastWordShutdownContainsDetachedSessionCleanupPanic(t *testing.T) {
@@ -4617,7 +4613,7 @@ func TestSettlementPreparationAndPanicContainmentDefensiveBranches(t *testing.T)
 	}
 	state := newPromptTurnState()
 	_, err := session.settlePrompt(t.Context(), &amp.Turn{}, state, incarnation, promptResult{})
-	require.ErrorContains(t, err, "amp_lifecycle_violation")
+	requireInternalErrorData(t, err, map[string]any{jsonFieldError: errorInternalFailure, keyClass: classLifecycleViolation})
 	require.Error(t, state.awaitSettlement(t.Context()).deliveryErr)
 
 	agent.options.runtime.settleTurn = func(*amp.Turn) error {

@@ -54,8 +54,10 @@ history. The transcript mirror and canonical image records exist to replay
 display updates on load — not to recreate native state. Continuation always
 requires the live server-side Amp thread and `AMP_API_KEY`; if the thread is
 gone, load still replays local history but the next prompt returns a terminal
-`native_state_missing` error. See
-[Session store](/docs/features/session-store) for the durability boundary.
+`-32603` `{"error": "amp_internal_failure", "class": "native_state_missing"}`.
+See [Session store](/docs/features/session-store) for the durability boundary and
+[ACP methods](/docs/reference/acp-methods#internal-errors-away-from-a-prompt-turn)
+for the closed token vocabulary.
 
 ## Mirror commit ordering
 

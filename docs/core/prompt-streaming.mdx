@@ -38,6 +38,24 @@ load replay stable without modifying native mirror bytes.
 The `usage_update` `size` field carries Amp's native `usage.max_tokens`
 verbatim (a model-scale value Amp reports), or `0` when absent.
 
+### Assistant text is append-only
+
+`agent_message_chunk` and `agent_thought_chunk` are append-only deltas: a client
+renders a turn's assistant text as the in-order concatenation of every chunk it
+received, so no chunk repeats text the turn already streamed.
+
+Amp streams one `assistant` frame per native message, and each text block in a
+frame becomes exactly one chunk, in native order. The terminal `result` frame
+carries the whole assembled answer in its `result` field, and this adapter reads
+that field for **failure text only** — never as content — so a turn whose result
+repeats the streamed text still publishes that text exactly once. A turn holding
+a single assistant message yields exactly one chunk; a turn holding several
+yields each message once. `TestAssistantTextIsAppendOnly` replays the native
+fixtures in `testdata/stream-json/` and pins all three cases.
+
+The rule binds text only. Agent images ride one chunk each, and
+`tool_call_update.content` is a whole-array replacement by ACP definition.
+
 No slash commands are advertised. Text like `/review` remains ordinary prompt
 text and is sent to Amp unchanged.
 
@@ -84,6 +102,13 @@ a process exit, the decode/read error for a transport fault, or `result.error`
 falling back to `result.result` for a provider error) — never a fixed
 placeholder. The session stays addressable and retriable after such a failure; a
 follow-up `session/prompt` re-drives the turn.
+
+`amp_turn_failed` is the **prompt turn's** envelope and the only `-32603` shape
+that carries native text. Every `-32603` away from a prompt turn — and a prompt
+refused before its turn starts, such as one addressed to a poisoned session or to
+a session whose native thread is gone — carries a closed `amp_`-prefixed token
+with no `message` member at all. See
+[ACP methods](/docs/reference/acp-methods#internal-errors-away-from-a-prompt-turn).
 
 An image the adapter will not ship is refused in place: fixed guidance takes
 the image's position in that tool call's own content and the turn keeps

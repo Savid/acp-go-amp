@@ -72,3 +72,63 @@ closed `cause` enum and no native message text. See
 
 No slash commands are advertised. Slash-prefixed text remains normal prompt
 content.
+
+## Uniform rejections
+
+These inbound shapes are refused identically wherever they appear, always as
+JSON-RPC `-32602`:
+
+| Shape | Rejection |
+| --- | --- |
+| A relative `cwd` on `session/new`, `session/load`, `session/resume`, or `_amp/session/fork` | `{"error": "unsupported", "field": "cwd"}`, before any native process or store entry exists |
+| A relative entry in `additionalDirectories` | `{"error": "unsupported", "field": "additionalDirectories[N]"}` |
+| An `_amp/*` request whose params cannot be decoded, or fail validation as a whole | `{"error": "unsupported", "field": "params"}`; when one member is at fault, `field` names that member |
+| A `session/prompt` content block this adapter does not support, or an empty prompt | `{"error": "unsupported", "field": "prompt"}` |
+| An SSE or ACP MCP server | `{"error": "unsupported", "field": "mcpServers[N]", "server": "<name>"}` |
+| An MCP entry declaring no transport | `{"error": "no_transport", "field": "mcpServers[N]"}` |
+| A session-scoped method against an unknown, unloaded, or tombstoned session id | `{"error": "unknown session", "field": "sessionId"}` |
+| The reserved lifecycle key on a surface that carries none | `{"error": "unsupported", "field": "_meta[\"acp-go.dev/lifecycle\"]"}` |
+| No lifecycle prompt correlation while the capability is enabled | `{"error": "missing", "field": "_meta[\"acp-go.dev/lifecycle\"]"}` |
+
+`unsupported` names a value that is present and refused; `missing` names a value
+the contract requires and the caller left out. The two are never collapsed. See
+[Metadata](/docs/reference/meta#the-prompt-correlation-value).
+
+## Internal errors away from a prompt turn
+
+Every `-32603` this adapter answers on a surface that is **not** a prompt turn
+carries exactly one closed, `amp_`-prefixed token in `data.error`. The JSON-RPC
+`message` stays the constant `Internal error`, and `data` never carries a
+`message` member, a Go error string, or Amp's own output: the prose that produced
+the failure is logged and joined onto the Go error an embedding host receives.
+
+| `data.error` | Condition | Additional members |
+| --- | --- | --- |
+| `amp_invalid_options` | The agent holds an option set it will not serve under. `NewAgent` returns no error, so the verdict arrives on `initialize` and on every session-establishing entry point. | Optional `field` naming the refused option. Today only `"env"` — no `AMP_API_KEY` on any environment layer and no provider-auth ledger to mint one. Several refused options at once carry no `field`. |
+| `amp_restore_failed` | `session/load` or `session/resume` found a store entry it could not restore: an unreadable store, a manifest that is not this adapter's, a transcript frame that will not parse, or a native thread the harness would not hand back. The entry is neither deleted nor tombstoned. | none |
+| `amp_session_poisoned` | The session's native thread identity is one this adapter cannot bind to, so every operation but `session/close` and `session/delete` is refused for the session's life. | `cause`: `native_session_id_drift` or `native_session_id_invalid` |
+| `amp_internal_failure` | Everything the tokens above do not classify. | Optional `class` (see below) |
+
+`amp_internal_failure` carries one of these closed `class` values, or none:
+
+| `class` | Condition |
+| --- | --- |
+| `handler_failed` | An error reached the connection boundary without a shape of its own. |
+| `ownership_changed` | A session, flight, use, or persistence ownership check lost its race to a concurrent close, delete, or replacement. |
+| `cleanup_pending` | A session id whose previous residence has not finished releasing its local state. |
+| `session_id_generation_failed` | The adapter could not mint a session id. |
+| `native_startup_failed` | The harness validation probe failed — a version below the floor, an unreachable binary, an unreadable thread list. |
+| `containment_incomplete` | A native process tree the adapter could not prove vacant. |
+| `native_state_missing` | The server-side Amp thread no longer exists, so the session has nothing to continue. |
+| `terminal_delivery_pending` | The session still owes its terminal lifecycle delivery. |
+| `lifecycle_delivery_unavailable` | A lifecycle event with no client connection to deliver it on. |
+| `lifecycle_violation` | An emitted lifecycle envelope this adapter's own reducer refused. |
+| `transcript_frame_drift` | The durable transcript's frame count disagrees with what the session committed. |
+| `image_artifact_replacement_failed` | The image-artifact half of a durable commit could not be built. |
+| `mirror_unsynced` | The session holds frames the store would not take. |
+
+This adapter runs one short-lived `amp` process per prompt and multiplexes no
+shared native runtime, so `amp_runtime_unavailable` has no condition to name here
+and is never emitted. A **prompt turn** that fails keeps its own envelope,
+`amp_turn_failed` — see
+[Prompt and streaming](/docs/core/prompt-streaming#turn-failures-and-timeouts).

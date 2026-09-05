@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
+	"github.com/stretchr/testify/require"
 )
 
 func TestMCPConfig(t *testing.T) {
@@ -60,4 +61,50 @@ func TestValidateOptionalAbsolutePath(t *testing.T) {
 	}
 	rel := "relative/path"
 	requireInvalidParamsData(t, validateOptionalAbsolutePath("cwd", &rel), map[string]any{jsonFieldError: valUnsupported, jsonFieldField: "cwd"})
+}
+
+// TestRelativeCwdIsRefusedOnEverySessionEstablishingSurface pins the uniform
+// relative-`cwd` rejection. The refusal lands before any native process or store
+// entry exists, and it never substitutes a token of this adapter's own or a
+// message-shaped data object.
+func TestRelativeCwdIsRefusedOnEverySessionEstablishingSurface(t *testing.T) {
+	t.Setenv("AMP_API_KEY", "conformance-key")
+
+	agent := newTestAgent(WithScratchDir(testScratchDir(t)), WithSessionStore(NewInMemorySessionStore()))
+	t.Cleanup(func() { require.NoError(t, agent.Close()) })
+
+	relative := "relative/workspace"
+
+	for name, call := range map[string]func() error{
+		"session/new": func() error {
+			_, err := agent.NewSession(t.Context(), acp.NewSessionRequest{Cwd: relative})
+
+			return err
+		},
+		"session/load": func() error {
+			_, err := agent.LoadSession(t.Context(), acp.LoadSessionRequest{SessionId: "T-absent", Cwd: relative})
+
+			return err
+		},
+		"session/resume": func() error {
+			_, err := agent.ResumeSession(t.Context(), acp.ResumeSessionRequest{SessionId: "T-absent", Cwd: relative})
+
+			return err
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			requireInvalidParamsData(t, call(), map[string]any{
+				jsonFieldError: valUnsupported,
+				jsonFieldField: "cwd",
+			})
+		})
+	}
+
+	// ForkSessionMethod is refused by name on this adapter, so no `cwd` of any
+	// spelling reaches a fork: the surface exists and answers its own refusal.
+	_, forkErr := agent.HandleExtensionMethod(t.Context(), ForkSessionMethod, json.RawMessage(`{"cwd":"relative/workspace"}`))
+	requireInvalidParamsData(t, forkErr, map[string]any{
+		jsonFieldError: valUnsupported,
+		jsonFieldField: ForkSessionMethod,
+	})
 }

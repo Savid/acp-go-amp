@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
@@ -74,22 +75,19 @@ const (
 	envXDGDataHome   = "XDG_DATA_HOME"
 	envXDGStateHome  = "XDG_STATE_HOME"
 
-	valUnsupported              = "unsupported"
-	valNoTransport              = "no_transport"
-	valText                     = "text"
-	valImage                    = "image"
-	valBase64                   = "base64"
-	valHTTP                     = "http"
-	valHTTPS                    = "https"
-	valUser                     = "user"
-	valRequired                 = "required"
-	valDuplicate                = "duplicate"
-	valAmbiguous                = "ambiguous"
-	valMismatch                 = "mismatch"
-	reasonUnserializable        = "unserializable"
-	deleteOwnershipChanged      = "delete ownership changed"
-	wrapperOwnershipChanged     = "session wrapper ownership changed"
-	persistenceOwnershipChanged = "persistence ownership changed"
+	valUnsupported       = "unsupported"
+	valNoTransport       = "no_transport"
+	valText              = "text"
+	valImage             = "image"
+	valBase64            = "base64"
+	valHTTP              = "http"
+	valHTTPS             = "https"
+	valUser              = "user"
+	valRequired          = "required"
+	valDuplicate         = "duplicate"
+	valAmbiguous         = "ambiguous"
+	valMismatch          = "mismatch"
+	reasonUnserializable = "unserializable"
 
 	modeLow    = "low"
 	modeMedium = "medium"
@@ -533,13 +531,20 @@ func (s *agentSession) clearActivePrompt(state *promptTurnState) {
 	}
 }
 
-func (s *agentSession) poison(cause string) error {
+// poison marks the session unusable and answers the uniform poisoned refusal.
+// cause is one of this adapter's two documented closed tokens; the detail that
+// produced it is logged rather than sent, because a wire cause is a token a host
+// switches on and never native prose.
+func (s *agentSession) poison(ctx context.Context, cause, detail string) error {
+	s.agent.log.ErrorContext(ctx, "session poisoned",
+		slog.String("session_id", string(s.id)), slog.String(keyCause, cause), slog.String(keyDetail, detail))
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	s.poisonCause = cause
 
-	return acp.NewInternalError(map[string]any{jsonFieldError: cause})
+	return sessionPoisoned(cause)
 }
 
 // closeSettlement is what a close proved before anything is reclaimed: the error
@@ -1127,7 +1132,7 @@ func (s *agentSession) verifyContinuable(ctx context.Context) error {
 
 	if exportErr != nil {
 		if !amp.ProcessContainmentComplete(exportErr) {
-			return nativeInternalError(exportErr)
+			return nativeInternalError(classContainmentIncomplete, exportErr)
 		}
 
 		if isNativeMissingError(exportErr) {
@@ -1138,7 +1143,13 @@ func (s *agentSession) verifyContinuable(ctx context.Context) error {
 			return nil
 		}
 
-		return nativeInternalError(exportErr)
+		// The probe reached a contained harness that would not hand this entry's
+		// thread back, which is exactly a store entry that will not restore. The
+		// entry stays: nothing here deletes or tombstones it.
+		s.agent.log.WarnContext(ctx, "session restore probe failed",
+			slog.String("session_id", string(s.id)), slog.String(jsonFieldError, exportErr.Error()))
+
+		return joinNativeBoundary(restoreFailed(), exportErr)
 	}
 
 	return nil
@@ -1149,11 +1160,11 @@ func (s *agentSession) ready() error {
 	defer s.mu.Unlock()
 
 	if s.poisonCause != "" {
-		return acp.NewInternalError(map[string]any{jsonFieldError: s.poisonCause})
+		return sessionPoisoned(s.poisonCause)
 	}
 
 	if s.nativeMissingCause != "" {
-		return acp.NewInternalError(map[string]any{jsonFieldError: "native_state_missing", keyDetail: s.nativeMissingCause})
+		return internalFailure(classNativeStateMissing)
 	}
 
 	if s.scratchContainmentErr != nil {
@@ -1161,7 +1172,7 @@ func (s *agentSession) ready() error {
 	}
 
 	if s.pendingTerminal != nil {
-		return acp.NewInternalError(map[string]any{jsonFieldError: "terminal lifecycle delivery pending"})
+		return internalFailure(classTerminalDeliveryPending)
 	}
 
 	if err := errors.Join(s.promptSettlement.containmentErr, s.promptSettlement.deliveryErr); err != nil {
@@ -1253,7 +1264,7 @@ func (s *agentSession) persistAfterTurnKind(ctx context.Context, transcript []Se
 
 func (s *agentSession) persistOwned(ctx context.Context, flight *sessionPersistenceFlight, transcript []SessionStoreEntry) error {
 	if !s.persistenceFlightCurrent(flight) {
-		return acp.NewInternalError(map[string]any{jsonFieldError: persistenceOwnershipChanged})
+		return internalFailure(classOwnershipChanged)
 	}
 
 	s.mu.Lock()
@@ -1324,11 +1335,11 @@ func (s *agentSession) persistOwned(ctx context.Context, flight *sessionPersiste
 	if len(fullTranscript) != persistedFrames {
 		s.retainUnsynced(pending)
 
-		return acp.NewInternalError(map[string]any{
-			jsonFieldError: "amp transcript frame count drift",
-			"got":          len(fullTranscript),
-			"want":         persistedFrames,
-		})
+		s.agent.log.ErrorContext(ctx, "transcript frame count drift",
+			slog.String("session_id", string(s.id)),
+			slog.Int("got", len(fullTranscript)), slog.Int("want", persistedFrames))
+
+		return internalFailure(classTranscriptDrift)
 	}
 
 	if len(pending) > 0 {
@@ -1345,7 +1356,10 @@ func (s *agentSession) persistOwned(ctx context.Context, flight *sessionPersiste
 	if err != nil {
 		s.retainUnsynced(pending)
 
-		return acp.NewInternalError(map[string]any{jsonFieldError: err.Error()})
+		s.agent.log.ErrorContext(ctx, "image artifact replacement failed",
+			slog.String("session_id", string(s.id)), slog.String(jsonFieldError, err.Error()))
+
+		return internalFailure(classArtifactReplacement)
 	}
 
 	replacements := make([]SessionStoreReplacement, 0, 2+len(artifactReplacements))
@@ -1393,14 +1407,14 @@ func (s *agentSession) replacePersistenceCommit(ctx context.Context, flight *ses
 	}
 
 	if !s.persistenceFlightCurrent(flight) {
-		return acp.NewInternalError(map[string]any{jsonFieldError: persistenceOwnershipChanged})
+		return internalFailure(classOwnershipChanged)
 	}
 
 	s.mu.Lock()
 	if s.persistenceCommit != commit {
 		s.mu.Unlock()
 
-		return acp.NewInternalError(map[string]any{jsonFieldError: persistenceOwnershipChanged})
+		return internalFailure(classOwnershipChanged)
 	}
 
 	s.persistenceCommit = nil
@@ -1627,10 +1641,7 @@ func (s *agentSession) ensureMirrorSyncedKind(ctx context.Context, kind sessionP
 	}
 
 	if err := s.persistAfterTurnKind(ctx, nil, kind); err != nil {
-		return errors.Join(
-			acp.NewInternalError(map[string]any{jsonFieldError: "mirror_unsynced", keyDetail: err.Error()}),
-			err,
-		)
+		return errors.Join(internalFailure(classMirrorUnsynced), err)
 	}
 
 	return nil

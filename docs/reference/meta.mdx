@@ -216,8 +216,20 @@ When version 1 is enabled, every `session/prompt` carries:
 
 It is read and validated before dispatch, so a prompt this adapter cannot
 correlate writes no frame to the harness. `submissionId` and `clientNonce` are
-echoed verbatim on the acceptance event. With the extension not negotiated the
-key must be absent, and a present one is rejected the same way.
+echoed verbatim on the acceptance event.
+
+One field path answers three distinct facts, and the two verdicts are never
+collapsed:
+
+| Case | Rejection |
+| --- | --- |
+| The capability is enabled and the prompt carries no key | `{"error": "missing", "field": "_meta[\"acp-go.dev/lifecycle\"]"}` |
+| The value is malformed — a non-object, an unsupported version, an empty or over-bound identifier, an unknown member | `{"error": "unsupported", "field": "_meta[\"acp-go.dev/lifecycle\"].<member path>"}` |
+| The key is present but the connection negotiated nothing | `{"error": "unsupported", "field": "_meta[\"acp-go.dev/lifecycle\"]"}` |
+
+`missing` says the host forgot a required value and should send it; `unsupported`
+on the bare path says the host sent the key where it has no meaning and should
+stop sending it there. Both are `-32602`, and both fire before dispatch.
 
 ### One incarnation per prompt
 
@@ -300,8 +312,9 @@ ever emitted. Every other inbound surface — `session/new`, `session/load`,
 `session/resume`, `session/close`, `session/delete`, `session/list`,
 `session/set_mode`, `session/set_config_option` in either variant, `logout`,
 `authenticate`, `_amp/auth/*`, and
-`_amp/session/fork` — rejects the key with `-32602` naming
-`_meta["acp-go.dev/lifecycle"]`. A `session/cancel` carrying it
+`_amp/session/fork` — rejects the key with `-32602`
+`{"error": "unsupported", "field": "_meta[\"acp-go.dev/lifecycle\"]"}` on the
+bare path: the key is present where it has no meaning, which is never `missing`. A `session/cancel` carrying it
 fails closed before the native interrupt and the cancel is never applied; being
 a notification it carries no response frame, so that refusal is wire-silent.
 
@@ -311,6 +324,12 @@ because the request was going to be refused anyway, so a `session/set_mode`
 carrying the key answers `-32602` naming it, and so does the boolean
 `session/set_config_option` variant this adapter otherwise rejects on its
 discriminator.
+
+An `_amp/*` request whose params cannot be decoded at all is refused before the
+key is read, because a body this adapter cannot parse holds no readable `_meta`
+and names no method: it answers `-32602`
+`{"error": "unsupported", "field": "params"}` as a whole. When one member is at
+fault instead, the rejection names that member.
 
 Extension methods are judged the same way and before their names are resolved
 at all. An `_`-prefixed method this adapter does not dispatch answers `-32601

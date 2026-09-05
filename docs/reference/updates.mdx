@@ -115,5 +115,6 @@ the session; image-bearing frames are sanitized, and every raw notification is
 diagnostic and capped at 64 KiB. See [Raw events](/docs/features/raw-events).
 
 If the server-side thread is missing during continuation, the prompt returns a
-single terminal internal error with `native_state_missing` in the error data
-rather than any update stream. See [Session store](/docs/features/session-store).
+single terminal `-32603`
+`{"error": "amp_internal_failure", "class": "native_state_missing"}` rather than
+any update stream. See [Session store](/docs/features/session-store).

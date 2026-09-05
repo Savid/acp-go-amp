@@ -471,9 +471,11 @@ func authParamFields(raw json.RawMessage, allowed ...string) (map[string]json.Ra
 
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 
+	// A body that is not a params object at all fails as a whole, which is the
+	// uniform extension-params rejection rather than a value verdict on a member.
 	token, err := decoder.Token()
 	if err != nil || token != json.Delim('{') {
-		return nil, invalidAuthField(authFieldParams)
+		return nil, unsupportedField(authFieldParams)
 	}
 
 	fields := make(map[string]json.RawMessage, len(allowed))
@@ -481,7 +483,7 @@ func authParamFields(raw json.RawMessage, allowed ...string) (map[string]json.Ra
 	for decoder.More() {
 		keyToken, err := decoder.Token()
 		if err != nil {
-			return nil, invalidAuthField(authFieldParams)
+			return nil, unsupportedField(authFieldParams)
 		}
 
 		key, _ := keyToken.(string)
@@ -502,11 +504,11 @@ func authParamFields(raw json.RawMessage, allowed ...string) (map[string]json.Ra
 	}
 
 	if _, err := decoder.Token(); err != nil {
-		return nil, invalidAuthField(authFieldParams)
+		return nil, unsupportedField(authFieldParams)
 	}
 
 	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
-		return nil, invalidAuthField(authFieldParams)
+		return nil, unsupportedField(authFieldParams)
 	}
 
 	return fields, nil

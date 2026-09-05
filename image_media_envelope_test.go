@@ -175,9 +175,10 @@ func TestRelativeInputHandoffRootIsAConfigurationError(t *testing.T) {
 
 	// The host built the agent, not the caller, so the refusal is a server fault.
 	_, err := agent.Initialize(t.Context(), acp.InitializeRequest{})
-	requireInternalErrorData(t, err, map[string]any{
-		jsonFieldError: "input handoff root must be an absolute path",
-	})
+	// The construction verdict names no field: this agent refuses its whole
+	// option set at once, and the reason stays on the joined Go error.
+	requireInternalErrorData(t, err, map[string]any{jsonFieldError: errorInvalidOptions})
+	require.ErrorContains(t, err, "input handoff root must be an absolute path")
 
 	require.Error(t, agent.validateSessionStartOptions(AmpOptions{}))
 }

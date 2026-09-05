@@ -107,8 +107,16 @@ The manifest stores the complete session environment so a cold load does not
 ask the caller to resend it. Treat the store as secret-bearing whenever the
 session environment contains `AMP_API_KEY` or another credential.
 
-If the thread is deleted or unavailable, session/load can replay the local transcript for display, but a subsequent prompt fails with one terminal `native_state_missing` error — the adapter does not rebuild a thread from transcript text, because that would lose native state.
+If the thread is deleted or unavailable, session/load can replay the local transcript for display, but a subsequent prompt fails with one terminal `-32603` `{"error": "amp_internal_failure", "class": "native_state_missing"}` — the adapter does not rebuild a thread from transcript text, because that would lose native state.
+
+A store entry `session/load` or `session/resume` finds but cannot restore — an
+unreadable store, a manifest that is not this adapter's, a transcript frame that
+will not parse, or a native thread the harness will not hand back — fails that
+request with `-32603` `{"error": "amp_restore_failed"}`. The entry is left
+exactly as it was: a failed restore deletes and tombstones nothing, so the
+session can be loaded again once the store or the harness is repaired.
 
 If a store write fails after a settled turn, the adapter keeps the frames in
-memory and blocks the next prompt with a `mirror_unsynced` error until the write
+memory and blocks the next prompt with `-32603`
+`{"error": "amp_internal_failure", "class": "mirror_unsynced"}` until the write
 succeeds, so the mirror never silently diverges from what Amp produced.

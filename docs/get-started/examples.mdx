@@ -29,6 +29,7 @@ calls `session/load` so the stored frames are replayed for display.
 Loading replays the local transcript for display only — it does not resurrect
 the Amp thread. The follow-up prompt continues the *original server-side* Amp
 thread, so that thread must still exist and `AMP_API_KEY` must be set. If the
-server-side thread is gone, the prompt returns a terminal
-`native_state_missing` error. See [Session store](/docs/features/session-store).
+server-side thread is gone, the prompt returns a terminal `-32603`
+`{"error": "amp_internal_failure", "class": "native_state_missing"}`. See
+[Session store](/docs/features/session-store).
 </Warning>

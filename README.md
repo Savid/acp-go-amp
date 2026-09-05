@@ -156,7 +156,8 @@ rejects at session start.
   resend it.
 - Native continuation requires the live server-side Amp thread and
   `AMP_API_KEY`; when it is gone, `session/load` still replays local display
-  history and a later prompt returns the `native_state_missing` terminal error.
+  history and a later prompt returns a terminal `-32603`
+  `{"error": "amp_internal_failure", "class": "native_state_missing"}`.
 - Optional sanitized Amp stream notifications through `_amp/rawEvent`, plus
   OpenTelemetry telemetry that records no prompt or tool secrets by default.
 
