@@ -67,6 +67,10 @@ func (a *recordingAuthority) PrepareNativeTree(_ context.Context, root string) e
 	return nil
 }
 
+func (a *recordingAuthority) WriteNativeAppendLog(context.Context, string, [][]byte) error {
+	return ErrHostAuthorityUnavailable
+}
+
 func (a *recordingAuthority) ReadNativeAppendLog(ctx context.Context, path string, offset uint64) ([][]byte, error) {
 	if a.readAppendLog == nil {
 		return nil, nil
