@@ -64,7 +64,9 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (r
 	if err != nil {
 		a.releaseSessionSlot("")
 
-		return acp.NewSessionResponse{}, acp.NewInternalError(map[string]any{jsonFieldError: err.Error()})
+		a.log.ErrorContext(ctx, "session id generation failed", slog.String(jsonFieldError, err.Error()))
+
+		return acp.NewSessionResponse{}, internalFailure(classSessionIDFailed)
 	}
 
 	session, err := newLifecycleAgentSession(ctx, a, acp.SessionId(sessionID), params.Cwd, meta, mcpConfig, params.AdditionalDirectories)
@@ -546,7 +548,7 @@ func (a *Agent) deleteOwnerSnapshot(id acp.SessionId, flight *agentSessionFlight
 	defer a.mu.Unlock()
 
 	if a.sessionFlights[id] != flight || a.sessionFlights[id].generation != flight.generation {
-		return nil, false, false, acp.NewInternalError(map[string]any{jsonFieldError: deleteOwnershipChanged})
+		return nil, false, false, internalFailure(classOwnershipChanged)
 	}
 
 	_, tombstoned := a.deleted[id]
@@ -666,10 +668,7 @@ func (a *Agent) prepareDeleteOwner(
 		return winnerSession, false, cleanupErr
 	}
 
-	return nil, false, errors.Join(
-		acp.NewInternalError(map[string]any{jsonFieldError: deleteOwnershipChanged}),
-		cleanupErr,
-	)
+	return nil, false, errors.Join(internalFailure(classOwnershipChanged), cleanupErr)
 }
 
 func (a *Agent) writeDeleteTombstone(ctx context.Context, id acp.SessionId) error {
@@ -732,7 +731,7 @@ func (a *Agent) validateSessionFlight(id acp.SessionId, flight *agentSessionFlig
 
 	current := a.sessionFlights[id]
 	if current != flight || current.generation != flight.generation || current.session != owner {
-		return acp.NewInternalError(map[string]any{jsonFieldError: deleteOwnershipChanged})
+		return internalFailure(classOwnershipChanged)
 	}
 
 	return nil
@@ -1059,12 +1058,12 @@ func (a *Agent) retireFailedActiveReplacement(id acp.SessionId, use *agentSessio
 	defer a.mu.Unlock()
 
 	if use == nil || a.sessionUses[id] != use || use.session != predecessor {
-		return false, acp.NewInternalError(map[string]any{jsonFieldError: "replacement retirement ownership changed"})
+		return false, internalFailure(classOwnershipChanged)
 	}
 
 	if flight := a.sessionFlights[id]; flight != nil {
 		if flight.use != use || (flight.session != nil && flight.session != predecessor) {
-			return false, acp.NewInternalError(map[string]any{jsonFieldError: wrapperOwnershipChanged})
+			return false, internalFailure(classOwnershipChanged)
 		}
 
 		use.replacing = false
@@ -1073,7 +1072,7 @@ func (a *Agent) retireFailedActiveReplacement(id acp.SessionId, use *agentSessio
 	}
 
 	if a.sessions[id] != predecessor {
-		return false, acp.NewInternalError(map[string]any{jsonFieldError: "replacement retirement ownership changed"})
+		return false, internalFailure(classOwnershipChanged)
 	}
 
 	delete(a.sessions, id)
@@ -1244,7 +1243,7 @@ func (a *Agent) publishColdSession(sessionID acp.SessionId, use *agentSessionUse
 			if flight.session == nil {
 				flight.session = session
 			} else if flight.session != session {
-				return acp.NewInternalError(map[string]any{jsonFieldError: wrapperOwnershipChanged})
+				return internalFailure(classOwnershipChanged)
 			}
 		}
 
@@ -1313,7 +1312,7 @@ func (a *Agent) beginSessionUse(ctx context.Context, id acp.SessionId) (context.
 		if len(a.cleanupOwners[id]) != 0 {
 			a.mu.Unlock()
 
-			return nil, nil, acp.NewInternalError(map[string]any{jsonFieldError: "session cleanup pending"})
+			return nil, nil, internalFailure(classCleanupPending)
 		}
 
 		a.nextSessionGeneration++
@@ -1383,7 +1382,7 @@ func (a *Agent) validateSessionUse(id acp.SessionId, use *agentSessionUse, expec
 
 	current := a.sessionUses[id]
 	if use == nil || current != use || current.generation != use.generation || current.session != expect {
-		return acp.NewInternalError(map[string]any{jsonFieldError: "session use ownership changed"})
+		return internalFailure(classOwnershipChanged)
 	}
 
 	if a.isDeletedLocked(id) {
@@ -1396,12 +1395,12 @@ func (a *Agent) validateSessionUse(id acp.SessionId, use *agentSessionUse, expec
 		}
 
 		if flight.session != nil && expect != nil && flight.session != expect {
-			return acp.NewInternalError(map[string]any{jsonFieldError: wrapperOwnershipChanged})
+			return internalFailure(classOwnershipChanged)
 		}
 	}
 
 	if active := a.sessions[id]; active != nil && active != expect {
-		return acp.NewInternalError(map[string]any{jsonFieldError: wrapperOwnershipChanged})
+		return internalFailure(classOwnershipChanged)
 	}
 
 	return nil
@@ -1588,7 +1587,7 @@ func (a *Agent) joinSessionFlightUse(ctx context.Context, id acp.SessionId, flig
 	if a.sessionFlights[id] != flight || a.sessionFlights[id].generation != flight.generation {
 		a.mu.Unlock()
 
-		return acp.NewInternalError(map[string]any{jsonFieldError: "session ownership changed"})
+		return internalFailure(classOwnershipChanged)
 	}
 
 	if flight.session == nil {
@@ -1599,7 +1598,7 @@ func (a *Agent) joinSessionFlightUse(ctx context.Context, id acp.SessionId, flig
 		a.mu.Unlock()
 		a.finishSessionFlight(id, flight)
 
-		return acp.NewInternalError(map[string]any{jsonFieldError: wrapperOwnershipChanged})
+		return internalFailure(classOwnershipChanged)
 	}
 
 	if flight.session == nil {
@@ -1746,7 +1745,7 @@ func (a *Agent) removeSession(ctx context.Context, sessionID acp.SessionId, sess
 	if currentFlight != flight || currentFlight.generation != flight.generation || a.sessions[sessionID] != session {
 		a.mu.Unlock()
 
-		return acp.NewInternalError(map[string]any{jsonFieldError: "close ownership changed"})
+		return internalFailure(classOwnershipChanged)
 	}
 
 	delete(a.sessions, sessionID)
@@ -1787,7 +1786,7 @@ func (a *Agent) loadManifest(ctx context.Context, sessionID acp.SessionId) (ampM
 
 	entries, err := a.store.Load(loadCtx, SessionKey{SessionID: string(sessionID), Subpath: SessionStoreMainSubpath})
 	if err != nil {
-		return ampManifest{}, err
+		return ampManifest{}, errors.Join(restoreFailed(), err)
 	}
 
 	if len(entries) == 0 {
@@ -1796,7 +1795,7 @@ func (a *Agent) loadManifest(ctx context.Context, sessionID acp.SessionId) (ampM
 
 	manifest, ok := manifestFromStoreEntry(entries[len(entries)-1])
 	if !ok || manifest.SessionID != string(sessionID) {
-		return ampManifest{}, acp.NewInternalError(map[string]any{jsonFieldError: "invalid amp session manifest"})
+		return ampManifest{}, restoreFailed()
 	}
 
 	return manifest, nil
@@ -2188,7 +2187,7 @@ func (a *Agent) ensureNewSessionStartup(ctx context.Context, cwd string, meta pa
 	}
 
 	if a.providerAuth == nil {
-		return missingAPIKeyError()
+		return a.missingAPIKeyError(ctx)
 	}
 
 	return a.ensureStartupWithProbe(
@@ -2201,7 +2200,7 @@ func (a *Agent) ensureNewSessionStartup(ctx context.Context, cwd string, meta pa
 
 func (a *Agent) ensureStartup(ctx context.Context, cwd string, meta parsedSessionMeta) error {
 	if !amp.HasAPIKey(composeEnv(a.nativeEnvironmentBase(), a.options.Env, meta.options.Env)) {
-		return missingAPIKeyError()
+		return a.missingAPIKeyError(ctx)
 	}
 
 	return a.ensureStartupWithProbe(ctx, cwd, meta.options.Env, a.options.runtime.startupProbe)
@@ -2215,8 +2214,15 @@ func (a *Agent) nativeEnvironmentBase() map[string]string {
 	return a.ordinaryEnvironment
 }
 
-func missingAPIKeyError() error {
-	return acp.NewInternalError(map[string]any{jsonFieldError: missingAPIKeyMessage})
+// missingAPIKeyError is the construction verdict for an agent holding no way to
+// authenticate amp: no AMP_API_KEY on any environment layer and no provider-auth
+// ledger to mint one. It names the option that would carry the credential, and
+// the explanation stays in the log and in the package documentation rather than
+// on the wire.
+func (a *Agent) missingAPIKeyError(ctx context.Context) error {
+	a.log.ErrorContext(ctx, missingAPIKeyMessage)
+
+	return invalidOptions(optionEnvKey)
 }
 
 func (a *Agent) maxActiveSessions() int {
@@ -2257,7 +2263,9 @@ func (s *agentSession) replayTranscriptEntries(ctx context.Context, entries []Se
 	for index, entry := range entries {
 		msg, err := amp.ParseJSONLine(entry)
 		if err != nil {
-			return err
+			// A frame the parser refuses is an unreplayable store entry, which is
+			// the restore verdict rather than an unclassified failure.
+			return errors.Join(restoreFailed(), err)
 		}
 
 		messageID := assistantMessageIdentity(s.id, index+1, msg)
@@ -2271,6 +2279,11 @@ func (s *agentSession) replayTranscriptEntries(ctx context.Context, entries []Se
 	return nil
 }
 
+// loadTranscript reads the durable transcript a load or resume replays. A store
+// that will not hand the entries back is an entry this adapter cannot restore,
+// so the refusal is the uniform restore verdict; the store's own error stays
+// joined for an embedding host and is never rendered on the wire. The entry is
+// left exactly as it was: a failed restore deletes and tombstones nothing.
 func (s *agentSession) loadTranscript(ctx context.Context) ([]SessionStoreEntry, error) {
 	if s.agent.store == nil {
 		return nil, nil
@@ -2279,7 +2292,12 @@ func (s *agentSession) loadTranscript(ctx context.Context) ([]SessionStoreEntry,
 	loadCtx, cancel := s.agent.sessionStoreLoadContext(ctx)
 	defer cancel()
 
-	return s.agent.store.Load(loadCtx, SessionKey{SessionID: string(s.id), Subpath: transcriptSubpath})
+	entries, err := s.agent.store.Load(loadCtx, SessionKey{SessionID: string(s.id), Subpath: transcriptSubpath})
+	if err != nil {
+		return nil, errors.Join(restoreFailed(), err)
+	}
+
+	return entries, nil
 }
 
 // advertisedModes is the menu a host renders, not a gate a value has to pass:

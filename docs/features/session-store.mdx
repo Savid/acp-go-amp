@@ -40,10 +40,7 @@ under a separate fixed `60s` bound.
 Each turn publishes the manifest, full transcript, and current image records
 together in one `Replace` generation. Every turn does: a cancelled, failed, or
 timed-out turn commits the frames it already streamed, so what the store holds
-never diverges from what the client was shown. A generation states each key
-exactly once — the shipped store refuses a duplicated key by name rather than
-letting slice order decide that row, and a store over another backend owes the
-same refusal. The commit runs after the turn
+never diverges from what the client was shown. The commit runs after the turn
 process containment boundary completes and before the terminal state the host
 sees, so no settled turn claims a prefix the store does not hold. It also runs
 on a context detached from the prompt request, so cancelling the request ends
@@ -54,6 +51,31 @@ stored carrier. An explicit changed bearer or `PATH` is a resume boundary: the
 old residence is contained and reclaimed before a successor residence is
 prepared and published under the same logical session id. Settings files and
 provider-auth residence contents are never written to the store.
+
+### What a `Replace` generation may state
+
+Two rules bound every generation, and the shipped `InMemorySessionStore`
+enforces both **before it writes anything** — validation completes before the
+store takes its lock, so a refused generation deletes nothing, tombstones
+nothing, and leaves the generation the store already holds exactly as it was.
+
+- **Every `Replace` is one session's.** A replacement key whose `SessionID`
+  differs from `main.SessionID` is refused, because one session's generation may
+  never rewrite or tombstone another session's rows.
+- **A generation states each key exactly once.** A duplicated
+  `{SessionID, Subpath}` is refused rather than resolved by slice order: if
+  position decided the row, the generation would not say what the caller wanted.
+
+Both errors name the offending key in full — `{sessionId: "…", subpath: "…"}` —
+because a subpath alone does not identify a row:
+
+```
+replacement key {sessionId: "T-2", subpath: "transcript"} does not belong to session "T-1"
+duplicate replacement key {sessionId: "T-1", subpath: "transcript"}
+```
+
+A store implemented over another backend owes both refusals on the same terms,
+and owes them before its first write.
 
 The first turn of a session publishes one additional generation the moment Amp
 reports the thread it just created: the manifest plus the state already
@@ -107,8 +129,16 @@ The manifest stores the complete session environment so a cold load does not
 ask the caller to resend it. Treat the store as secret-bearing whenever the
 session environment contains `AMP_API_KEY` or another credential.
 
-If the thread is deleted or unavailable, session/load can replay the local transcript for display, but a subsequent prompt fails with one terminal `native_state_missing` error — the adapter does not rebuild a thread from transcript text, because that would lose native state.
+If the thread is deleted or unavailable, session/load can replay the local transcript for display, but a subsequent prompt fails with one terminal `-32603` `{"error": "amp_internal_failure", "class": "native_state_missing"}` — the adapter does not rebuild a thread from transcript text, because that would lose native state.
+
+A store entry `session/load` or `session/resume` finds but cannot restore — an
+unreadable store, a manifest that is not this adapter's, a transcript frame that
+will not parse, or a native thread the harness will not hand back — fails that
+request with `-32603` `{"error": "amp_restore_failed"}`. The entry is left
+exactly as it was: a failed restore deletes and tombstones nothing, so the
+session can be loaded again once the store or the harness is repaired.
 
 If a store write fails after a settled turn, the adapter keeps the frames in
-memory and blocks the next prompt with a `mirror_unsynced` error until the write
+memory and blocks the next prompt with `-32603`
+`{"error": "amp_internal_failure", "class": "mirror_unsynced"}` until the write
 succeeds, so the mirror never silently diverges from what Amp produced.

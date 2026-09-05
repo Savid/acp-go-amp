@@ -1389,9 +1389,7 @@ func TestConsumerHeldBearerCarriesAcrossAgentRebuild(t *testing.T) {
 
 	// Dropping the consumer-held bearer cannot reuse the stored session.
 	_, err = build("").LoadSession(ctx, LoadSessionRequest(resp.SessionId, cwd))
-	if err == nil || !strings.Contains(err.Error(), "AMP_API_KEY is not set") {
-		t.Fatalf("load without the consumer-held bearer = %v, want the missing-key refusal", err)
-	}
+	requireInternalErrorData(t, err, map[string]any{jsonFieldError: errorInvalidOptions, jsonFieldField: optionEnvKey})
 }
 
 // TestAgentCloseCommitsRetainedUnsyncedFrames proves the shutdown ladder carries

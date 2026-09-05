@@ -3,6 +3,9 @@ package ampacp
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -1422,4 +1425,137 @@ func TestPromptSettlementTimeoutResidualBranch(t *testing.T) {
 	state := &promptTurnState{completed: make(chan struct{})}
 	settlement := state.awaitSettlement(residualCancelledContext())
 	require.ErrorIs(t, settlement.containmentErr, amp.ErrContainmentIncomplete)
+}
+
+// streamingHarnessTemplate is a fake amp whose stdout is one fixture file, byte
+// for byte. The path is baked in at build time rather than passed through the
+// environment, because a session runs its harness on a composed environment this
+// adapter owns. The fixtures hold real amp stream-json frames, so what they
+// prove about chunking is what the shipping CLI produces.
+const streamingHarnessTemplate = `package main
+
+import (
+	"io"
+	"os"
+)
+
+func main() {
+	for _, arg := range os.Args[1:] {
+		if arg == "version" {
+			os.Stdout.WriteString("0.0.1784765892-gfake\n")
+			return
+		}
+
+		// The startup probe proves a missing thread is refused before it trusts
+		// this binary, and proves the thread list is readable.
+		if arg == "T-00000000-0000-0000-0000-000000000000" {
+			os.Stderr.WriteString("Thread not found\n")
+			os.Exit(1)
+		}
+
+		if arg == "list" {
+			os.Stdout.WriteString("[]\n")
+			return
+		}
+	}
+
+	_, _ = io.ReadAll(os.Stdin)
+
+	fixture, err := os.ReadFile(%q)
+	if err != nil {
+		os.Stderr.WriteString(err.Error())
+		os.Exit(1)
+	}
+
+	os.Stdout.Write(fixture)
+}
+`
+
+// streamingHarness builds a fake amp that replays exactly one fixture.
+func streamingHarness(t *testing.T, fixture string) string {
+	t.Helper()
+
+	path, err := filepath.Abs(filepath.Join("testdata", "stream-json", fixture))
+	require.NoError(t, err)
+	require.FileExists(t, path)
+
+	dir := t.TempDir()
+
+	source := filepath.Join(dir, "streaming_amp.go")
+	require.NoError(t, os.WriteFile(source, fmt.Appendf(nil, streamingHarnessTemplate, path), 0o600))
+
+	binary := filepath.Join(dir, testExecutableName("amp"))
+
+	out, buildErr := exec.Command("go", "build", "-o", binary, source).CombinedOutput()
+	require.NoError(t, buildErr, "build streaming harness: %s", out)
+
+	return binary
+}
+
+// streamedText replays a native fixture through a real prompt and returns the
+// text of every agent_message_chunk the turn published, in delivery order.
+func streamedText(t *testing.T, fixture string) []string {
+	t.Helper()
+
+	t.Setenv("AMP_API_KEY", "conformance-key")
+
+	client := &lifecycleClient{}
+
+	agent := NewAgent(testContainmentOptions([]Option{
+		WithExecutablePath(streamingHarness(t, fixture)),
+		WithScratchDir(testScratchDir(t)),
+	})...)
+	t.Cleanup(func() { require.NoError(t, agent.Close()) })
+
+	agent.setConnection(client)
+
+	session, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
+	require.NoError(t, err)
+
+	_, err = agent.Prompt(t.Context(), TextPromptRequest(session.SessionId, "stream-turn", "hello"))
+	require.NoError(t, err)
+
+	chunks := make([]string, 0)
+
+	for _, update := range client.snapshot() {
+		if chunk := update.Update.AgentMessageChunk; chunk != nil && chunk.Content.Text != nil {
+			chunks = append(chunks, chunk.Content.Text.Text)
+		}
+	}
+
+	return chunks
+}
+
+// TestAssistantTextIsAppendOnly pins the append-only rule on this adapter's own
+// native frames: a client renders a turn as the in-order concatenation of every
+// chunk, so no chunk may repeat text the turn already streamed.
+//
+// Amp's terminal `result` frame carries the whole assembled answer, and this
+// adapter reads that field for failure text only — never as content — so a
+// fixture whose result repeats the streamed text still yields the text exactly
+// once. A fixture with a single assistant message and no further frames is the
+// deltas-free case and yields exactly one chunk.
+func TestAssistantTextIsAppendOnly(t *testing.T) {
+	t.Run("terminal frame repeating the streamed text adds nothing", func(t *testing.T) {
+		chunks := streamedText(t, "repeated-terminal-result.jsonl")
+
+		const final = "Hello, world."
+
+		require.Equal(t, []string{"Hello, ", "world."}, chunks, "each native message contributes once, in native order")
+		require.Equal(t, final, strings.Join(chunks, ""), "the concatenation is the final text")
+		require.Equal(t, 1, strings.Count(strings.Join(chunks, ""), final), "the final text appears exactly once")
+	})
+
+	t.Run("a deltas-free fixture yields exactly one chunk", func(t *testing.T) {
+		chunks := streamedText(t, "single-terminal-message.jsonl")
+
+		require.Equal(t, []string{"The whole answer arrives at once."}, chunks)
+	})
+
+	t.Run("a multi-message turn yields each message once", func(t *testing.T) {
+		chunks := streamedText(t, "multi-message-turn.jsonl")
+
+		require.Equal(t, []string{"First. ", "Second. ", "Third."}, chunks)
+		require.Equal(t, "First. Second. Third.", strings.Join(chunks, ""))
+	})
 }

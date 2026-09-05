@@ -8,15 +8,11 @@ import (
 	"github.com/coder/acp-go-sdk"
 )
 
-func nativeInternalError(err error) error {
-	requestErr := acp.NewInternalError(map[string]any{jsonFieldError: err.Error()})
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||
-		containmentIncomplete(err) ||
-		errors.Is(err, ErrHostAuthorityUnavailable) || errors.Is(err, ErrNativeTreeBusy) {
-		return errors.Join(requestErr, publicContainmentError(err))
-	}
-
-	return requestErr
+// nativeInternalError renders a failed native command as the uniform
+// unclassified internal failure under the caller's documented class. The native
+// text never reaches the wire; it stays on the joined Go error and in the log.
+func nativeInternalError(class string, err error) error {
+	return joinNativeBoundary(internalFailure(class), err)
 }
 
 func cleanupFailureClass(err error) string {

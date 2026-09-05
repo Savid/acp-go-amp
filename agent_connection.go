@@ -222,7 +222,9 @@ func requestError(ctx context.Context, err error) *acp.RequestError {
 		return reqErr
 	}
 
-	return acp.NewInternalError(map[string]any{jsonFieldError: err.Error()})
+	// Nothing above gave this failure a shape, so it answers the unclassified
+	// token. The Go text stays in the connection log rather than on the wire.
+	return internalFailure(classHandlerFailed)
 }
 
 func (a *Agent) setConnection(conn agentClient) {

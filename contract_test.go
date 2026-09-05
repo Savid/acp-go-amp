@@ -315,14 +315,13 @@ func TestClientBackpressureAndSessionIDDrift(t *testing.T) {
 	if _, loadErr := driftAgent.LoadSession(context.Background(), LoadSessionRequest("T-agent-thread", driftCwd)); loadErr != nil {
 		t.Fatalf("LoadSession drift: %v", loadErr)
 	}
+	// A poisoned session answers the closed token and its documented cause, and
+	// keeps answering it: the drifting thread ids stay in the log.
+	poisoned := map[string]any{jsonFieldError: errorSessionPoisoned, keyCause: causeNativeIDDrift}
 	_, err = driftAgent.Prompt(context.Background(), TextPromptRequest("T-agent-thread", "test-turn", "x"))
-	if err == nil || !strings.Contains(err.Error(), "native session_id drift") {
-		t.Fatalf("drift prompt error = %v", err)
-	}
+	requireInternalErrorData(t, err, poisoned)
 	_, err = driftAgent.Prompt(context.Background(), TextPromptRequest("T-agent-thread", "test-turn", "again"))
-	if err == nil || !strings.Contains(err.Error(), "native session_id drift") {
-		t.Fatalf("poisoned prompt error = %v", err)
-	}
+	requireInternalErrorData(t, err, poisoned)
 
 	adoptPath, _ := fakeAgentAmpPath(t, "bad-adopt")
 	adoptAgent := newTestAgent(WithExecutablePath(adoptPath), WithScratchDir(testScratchDir(t)))
@@ -331,9 +330,7 @@ func TestClientBackpressureAndSessionIDDrift(t *testing.T) {
 		t.Fatalf("NewSession adopt: %v", err)
 	}
 	_, err = adoptAgent.Prompt(context.Background(), TextPromptRequest(adoptResp.SessionId, "test-turn", "x"))
-	if err == nil || !strings.Contains(err.Error(), "native session_id invalid") {
-		t.Fatalf("invalid adopted id prompt error = %v", err)
-	}
+	requireInternalErrorData(t, err, map[string]any{jsonFieldError: errorSessionPoisoned, keyCause: causeNativeIDInvalid})
 }
 
 func TestDeleteOrderingRetryAndManifestShape(t *testing.T) {
@@ -731,26 +728,28 @@ func TestPathHomeContinuabilityAndStartup(t *testing.T) {
 	if _, err := missingAgent.LoadSession(context.Background(), LoadSessionRequest("T-agent-thread", missingCwd)); err != nil {
 		t.Fatalf("load missing native thread should replay mirror: %v", err)
 	}
-	if _, err := missingAgent.Prompt(context.Background(), TextPromptRequest("T-agent-thread", "test-turn", "x")); err == nil || !strings.Contains(err.Error(), "native_state_missing") {
-		t.Fatalf("native missing prompt error = %v", err)
-	}
+	_, missingErr := missingAgent.Prompt(context.Background(), TextPromptRequest("T-agent-thread", "test-turn", "x"))
+	requireInternalErrorData(t, missingErr,
+		map[string]any{jsonFieldError: errorInternalFailure, keyClass: classNativeStateMissing})
 
 	badVersionPath, _ := fakeAgentAmpPath(t, "bad-version")
-	if _, err := newTestAgent(WithExecutablePath(badVersionPath), WithScratchDir(testScratchDir(t))).NewSession(context.Background(), NewSessionRequest(t.TempDir())); err == nil || !strings.Contains(err.Error(), "below required") {
-		t.Fatalf("bad version startup error = %v", err)
-	}
+	_, badVersionErr := newTestAgent(WithExecutablePath(badVersionPath), WithScratchDir(testScratchDir(t))).
+		NewSession(context.Background(), NewSessionRequest(t.TempDir()))
+	requireInternalErrorData(t, badVersionErr,
+		map[string]any{jsonFieldError: errorInternalFailure, keyClass: classNativeStartupFailed})
 	probeListFailPath, _ := fakeAgentAmpPath(t, "probe-list-fail")
-	if _, err := newTestAgent(WithExecutablePath(probeListFailPath), WithScratchDir(testScratchDir(t))).NewSession(context.Background(), NewSessionRequest(t.TempDir())); err == nil || !strings.Contains(err.Error(), "threads list --json probe failed") {
-		t.Fatalf("probe list failure startup error = %v", err)
-	}
+	_, probeListErr := newTestAgent(WithExecutablePath(probeListFailPath), WithScratchDir(testScratchDir(t))).
+		NewSession(context.Background(), NewSessionRequest(t.TempDir()))
+	requireInternalErrorData(t, probeListErr,
+		map[string]any{jsonFieldError: errorInternalFailure, keyClass: classNativeStartupFailed})
 
 	exportFailPath, _ := fakeAgentAmpPath(t, "export-fail")
 	exportFailStore := NewInMemorySessionStore()
 	exportFailCwd := t.TempDir()
 	putStoredSession(t, exportFailStore, "T-agent-thread", exportFailCwd, nil)
-	if _, err := newTestAgent(WithExecutablePath(exportFailPath), WithScratchDir(testScratchDir(t)), WithSessionStore(exportFailStore)).LoadSession(context.Background(), LoadSessionRequest("T-agent-thread", exportFailCwd)); err == nil || !strings.Contains(err.Error(), "export failed") {
-		t.Fatalf("load export failure = %v", err)
-	}
+	_, exportFailErr := newTestAgent(WithExecutablePath(exportFailPath), WithScratchDir(testScratchDir(t)), WithSessionStore(exportFailStore)).
+		LoadSession(context.Background(), LoadSessionRequest("T-agent-thread", exportFailCwd))
+	requireInternalErrorData(t, exportFailErr, map[string]any{jsonFieldError: errorRestoreFailed})
 	if _, err := newTestAgent(WithExecutablePath("/does/not/exist"), WithScratchDir(testScratchDir(t)), WithSessionStore(exportFailStore)).LoadSession(context.Background(), LoadSessionRequest("T-agent-thread", exportFailCwd)); err == nil {
 		t.Fatal("load startup failure accepted")
 	}

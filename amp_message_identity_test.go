@@ -292,7 +292,7 @@ func TestTranscriptIdentityStateFailsClosed(t *testing.T) {
 	require.NoError(t, driftStore.Append(ctx, SessionKey{SessionID: "T-drift", Subpath: transcriptSubpath}, []SessionStoreEntry{json.RawMessage(`{"type":"result"}`)}))
 	driftSession := &agentSession{agent: newTestAgent(WithSessionStore(driftStore)), id: "T-drift"}
 	err = driftSession.persistAfterTurn(ctx, nil)
-	require.ErrorContains(t, err, "amp transcript frame count drift")
+	requireInternalErrorData(t, err, map[string]any{jsonFieldError: errorInternalFailure, keyClass: classTranscriptDrift})
 
 	path, _ := fakeAgentAmpPath(t, "")
 	cwd := t.TempDir()

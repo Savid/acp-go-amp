@@ -379,17 +379,19 @@ func TestProviderAuthDirectHomeIsRejectedFailClosed(t *testing.T) {
 func TestAuthLegsRejectAClosedRequestObject(t *testing.T) {
 	fixture := newAuthFixture(t, "login")
 
-	if _, err := authParamFields(json.RawMessage(`[]`), authFieldSessionID); err == nil {
-		t.Fatal("a non-object body was accepted")
-	}
+	// A body that is not a params object at all fails as a whole, which is the
+	// uniform extension-params rejection naming `params` — never a value verdict
+	// on a member the caller never wrote.
+	wholeParams := map[string]any{jsonFieldError: valUnsupported, jsonFieldField: authFieldParams}
 
-	if _, err := authParamFields(json.RawMessage(`{"a":1`), "a"); err == nil {
-		t.Fatal("a truncated object was accepted")
-	}
+	_, nonObjectErr := authParamFields(json.RawMessage(`[]`), authFieldSessionID)
+	requireInvalidParamsData(t, nonObjectErr, wholeParams)
 
-	if _, err := authParamFields(json.RawMessage(`{} trailing`), "a"); err == nil {
-		t.Fatal("trailing content was accepted")
-	}
+	_, truncatedErr := authParamFields(json.RawMessage(`{"a":1`), "a")
+	requireInvalidParamsData(t, truncatedErr, wholeParams)
+
+	_, trailingErr := authParamFields(json.RawMessage(`{} trailing`), "a")
+	requireInvalidParamsData(t, trailingErr, wholeParams)
 
 	if _, err := authParamFields(json.RawMessage(`{"a":1,"a":2}`), "a"); err == nil {
 		t.Fatal("a duplicate field was accepted")

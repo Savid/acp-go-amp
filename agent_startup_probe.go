@@ -192,7 +192,12 @@ func (a *Agent) ensureStartupWithProbe(
 	probe func(context.Context, *amp.Client) (string, error),
 ) error {
 	if err := a.runStartupWithProbe(ctx, cwd, sessionEnv, probe); err != nil {
-		return nativeInternalError(err)
+		// The native reason — a version below the floor, an unreachable binary —
+		// is the operator's, not the host's: it is logged, and the wire carries
+		// only the closed class token.
+		a.log.ErrorContext(ctx, "amp startup probe failed", slog.String(jsonFieldError, err.Error()))
+
+		return nativeInternalError(classNativeStartupFailed, err)
 	}
 
 	return nil

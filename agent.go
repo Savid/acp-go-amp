@@ -70,6 +70,10 @@ type Agent struct {
 	// the contract for the connection: with no answer present there is no
 	// envelope, no correlation read, and no lifecycle fact at all.
 	lifecycle lifecycle.Negotiated
+	// lifecycleAnswered records that the connection's one answer has been
+	// given. The answer binds the whole connection, so it is written once and
+	// never rewritten by a later initialize.
+	lifecycleAnswered bool
 
 	// harnessMu guards harnessPath, the exact absolute amp binary the version
 	// and startup probes validated against the static base. Every child this
@@ -425,19 +429,20 @@ func invokeShutdownStep(step func() error) (err error) {
 }
 
 // optionsError reports every construction-time option failure as one uniform
-// internal error, or nil when all of them validated. The code is -32603 because
-// the caller's params are fine — the embedding host built an agent that cannot
-// serve anything — and the data carries only the joined prose because no wire
-// field is at fault to name. Both the handshake and session establishment
-// report it, because an embedded host can open a session and prompt without
-// ever calling initialize.
+// construction verdict, or nil when all of them validated. The code is -32603
+// because the caller's params are fine — the embedding host built an agent that
+// cannot serve anything. The verdict names no field: this agent refuses its
+// whole option set at once rather than one option at a time, and the reasons
+// stay on the joined Go error an embedding host receives. Both the handshake and
+// session establishment report it, because an embedded host can open a session
+// and prompt without ever calling initialize.
 func (a *Agent) optionsError() error {
 	configurationErr := errors.Join(a.activeLimitErr, a.configurationErr)
 	if configurationErr == nil {
 		return nil
 	}
 
-	return errors.Join(acp.NewInternalError(map[string]any{jsonFieldError: configurationErr.Error()}), configurationErr)
+	return errors.Join(invalidOptions(""), configurationErr)
 }
 
 func (a *Agent) Initialize(ctx context.Context, params acp.InitializeRequest) (resp acp.InitializeResponse, err error) {

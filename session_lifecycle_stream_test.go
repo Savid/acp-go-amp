@@ -33,7 +33,7 @@ func lifecycleStreamSession(t *testing.T, answer lifecycle.Negotiated, conn agen
 	t.Helper()
 
 	agent := newTestAgent()
-	agent.retainNegotiatedLifecycle(answer)
+	require.NoError(t, agent.retainNegotiatedLifecycle(answer))
 
 	if conn != nil {
 		agent.setConnection(conn)
@@ -95,7 +95,7 @@ func TestPromptStreamWithoutAConnectionFailsExplicitly(t *testing.T) {
 
 	incarnation, err := session.openPromptStream(t.Context())
 	require.Nil(t, incarnation)
-	require.ErrorContains(t, err, "lifecycle delivery unavailable")
+	requireInternalErrorData(t, err, map[string]any{jsonFieldError: errorInternalFailure, keyClass: classLifecycleUnavailable})
 }
 
 // TestPromptStreamFailsThePromptOnAnEmissionFailure pins that a stream this
@@ -150,7 +150,8 @@ func TestPromptStreamRefusesAnEventItCannotSupport(t *testing.T) {
 
 	data, ok := requestErr.Data.(map[string]any)
 	require.True(t, ok)
-	require.Equal(t, "amp_lifecycle_violation", data[jsonFieldError])
+	require.Equal(t, errorInternalFailure, data[jsonFieldError])
+	require.Equal(t, classLifecycleViolation, data[keyClass])
 	require.Len(t, client.envelopes(t), 1, "a refused event is never published")
 }
 
@@ -179,10 +180,11 @@ func TestFencedIncarnationPublishesNothingFurther(t *testing.T) {
 
 	require.ErrorAs(t, err, &requestErr)
 
+	// The violation the reducer named is logged, never sent: the wire carries the
+	// closed token and its class alone.
 	data, ok := requestErr.Data.(map[string]any)
 	require.True(t, ok)
-	require.Equal(t, "amp_lifecycle_violation", data[jsonFieldError])
-	require.Contains(t, data[keyDetail], string(lifecycle.ViolationStaleStream))
+	require.Equal(t, map[string]any{jsonFieldError: errorInternalFailure, keyClass: classLifecycleViolation}, data)
 	require.Len(t, client.envelopes(t), published, "a fenced incarnation publishes nothing")
 
 	var absent *promptStream

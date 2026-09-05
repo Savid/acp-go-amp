@@ -81,9 +81,11 @@ stdio or embed the agent directly in Go.
   the last word on its sessions, so the failure is fail-closed on the commit
   alone — every session still releases its settings and scratch state, because
   no later close exists to release it.
-- One `Replace` states each key exactly once. A key stated twice is refused by
-  that key's own name, because slice order is not a caller's decision about
-  which state the row holds.
+- Every `Replace` is one session's, and states each key exactly once. A key
+  naming another session, and a duplicated `{SessionID, Subpath}`, are both
+  refused before any write, by the offending key's own full name: one session's
+  generation never rewrites another's rows, and slice order is not a caller's
+  decision about which state a row holds.
 - The session store enforces tombstone finality itself. Over a key `Delete`
   tombstoned, `Append` and `Replace` both write nothing, clear nothing, and
   return success; an adapter-level deletion marker is not a substitute for a

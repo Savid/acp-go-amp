@@ -1,0 +1,4 @@
+{"type":"system","subtype":"init","cwd":"/tmp/project","session_id":"T-00000000-0000-4000-8000-00000000str1","tools":["Read"],"mcp_servers":[]}
+{"type":"assistant","message":{"content":[{"type":"text","text":"Hello, "}]},"session_id":"T-00000000-0000-4000-8000-00000000str1"}
+{"type":"assistant","message":{"content":[{"type":"text","text":"world."}],"stop_reason":"end_turn"},"session_id":"T-00000000-0000-4000-8000-00000000str1"}
+{"type":"result","subtype":"success","is_error":false,"result":"Hello, world.","session_id":"T-00000000-0000-4000-8000-00000000str1"}
