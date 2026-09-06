@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
@@ -519,14 +521,16 @@ func validateContainmentOptions(options Options) error {
 	return validateEnvironment(options.Env)
 }
 
+// validateEnvironment applies the session name rule to the static Agent-scoped
+// environment. A refusal fails Agent construction.
 func validateEnvironment(environment map[string]string) error {
-	for key := range environment {
-		if invalidEnvName(key) {
+	for _, key := range slices.Sorted(maps.Keys(environment)) {
+		if invalidEnvName(key) || strings.IndexByte(environment[key], 0) >= 0 {
 			return fmt.Errorf("environment key %q is not a valid variable name", key)
 		}
 
-		if strings.HasPrefix(strings.ToUpper(key), privateEnvPrefix) {
-			return fmt.Errorf("environment key %q uses the reserved %s prefix", key, privateEnvPrefix)
+		if blockedAgentEnvKey(key) {
+			return fmt.Errorf("environment key %q is reserved", key)
 		}
 	}
 

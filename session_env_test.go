@@ -330,6 +330,16 @@ func TestInvalidEnvironmentNamesAreRefused(t *testing.T) {
 			t.Fatalf("agent env key %q = %v, want a refusal", key, err)
 		}
 
+		for _, reserved := range []string{"NODE_OPTIONS", "BASH_ENV", "ENV", "LD_PRELOAD", "DYLD_INSERT_LIBRARIES", "acp_go_amp_internal_x"} {
+			reservedAgent := NewAgent(WithEnv(map[string]string{reserved: "x"}))
+			t.Cleanup(func() { _ = reservedAgent.Close() })
+
+			_, err = reservedAgent.NewSession(context.Background(), NewSessionRequest(t.TempDir()))
+			if err == nil || !strings.Contains(err.Error(), "is reserved") {
+				t.Fatalf("agent env key %q = %v, want a refusal", reserved, err)
+			}
+		}
+
 		sessionAgent := NewAgent(WithScratchDir(testScratchDir(t)))
 		t.Cleanup(func() { _ = sessionAgent.Close() })
 
@@ -526,7 +536,7 @@ func TestValidateAmpSessionMetaMirrorsTheSessionParser(t *testing.T) {
 	).Meta()))
 	requireInvalidParamsData(t, ValidateAmpSessionMeta(NewAmpOptions(WithAmpModel("gpt")).Meta()), map[string]any{
 		jsonFieldError: valUnsupported,
-		jsonFieldField: optionModelKey,
+		jsonFieldField: ampModelOptionPath,
 	})
 	requireInvalidParamsData(t, ValidateAmpSessionMeta(map[string]any{ampMetaKey: map[string]any{"extra": true}}), map[string]any{
 		jsonFieldError: valUnsupported,

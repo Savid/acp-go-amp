@@ -30,7 +30,7 @@ func (a *Agent) validateSessionStartOptions(options AmpOptions) error {
 	}
 
 	if a.options.DefaultModel != "" {
-		return unsupportedField(optionModelKey)
+		return unsupportedField(ampModelOptionPath)
 	}
 
 	return validateAmpSessionOptions(options)
@@ -41,11 +41,11 @@ func (a *Agent) validateSessionStartOptions(options AmpOptions) error {
 // both fail closed on every session-establishing request.
 func validateAmpSessionOptions(options AmpOptions) error {
 	if options.Model != "" {
-		return unsupportedField(optionModelKey)
+		return unsupportedField(ampModelOptionPath)
 	}
 
 	if options.OutputSchema != nil {
-		return unsupportedField(metaOutputSchemaKey)
+		return unsupportedField(ampOutputSchemaOptionPath)
 	}
 
 	return validateSessionEnv(options.Env, ampEnvOptionPath)

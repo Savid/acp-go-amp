@@ -10,7 +10,9 @@ import (
 )
 
 const (
-	ampEnvOptionPath = "_meta.amp.options." + optionEnvKey
+	ampEnvOptionPath          = "_meta.amp.options." + optionEnvKey
+	ampModelOptionPath        = "_meta.amp.options." + optionModelKey
+	ampOutputSchemaOptionPath = "_meta.amp.options." + metaOutputSchemaKey
 
 	envNodeOptionsKey = "NODE_OPTIONS"
 	envBashEnvKey     = "BASH_ENV"
@@ -147,15 +149,14 @@ func ambiguousEnvKeys(env map[string]string) (string, string) {
 	return "", ""
 }
 
-// blockedSessionEnvKey reports whether a session env key names a variable the
-// adapter refuses to hand a prompt process. The private adapter namespace is
-// refused under every spelling. The managed residence roots and the loader,
-// node, and shell injection names are read by the native process under an
-// exact platform spelling, so those compare through the platform identity.
-// PATH is absent: a session's complete raw PATH is amp's one search-path
-// carrier.
-func blockedSessionEnvKey(key string) bool {
-	if strings.HasPrefix(strings.ToUpper(key), privateEnvPrefix) || managedSessionEnvKey(key) {
+// blockedAgentEnvKey reports whether a caller-supplied env key names a
+// variable the adapter refuses on every surface: its private namespace under
+// every spelling, and the loader, node, and shell injection names under the
+// platform identity. PATH is absent on both surfaces: the agent-scoped
+// environment establishes the base search path and a session's complete raw
+// PATH is amp's one session carrier.
+func blockedAgentEnvKey(key string) bool {
+	if strings.HasPrefix(strings.ToUpper(key), privateEnvPrefix) {
 		return true
 	}
 
@@ -165,6 +166,13 @@ func blockedSessionEnvKey(key string) bool {
 	default:
 		return strings.HasPrefix(name, "LD_") || strings.HasPrefix(name, "DYLD_")
 	}
+}
+
+// blockedSessionEnvKey additionally refuses the managed residence roots. They
+// are rebuilt for each live wrapper, so a session value naming one would write
+// a manifest that recovery must reject.
+func blockedSessionEnvKey(key string) bool {
+	return blockedAgentEnvKey(key) || managedSessionEnvKey(key)
 }
 
 // validateSessionEnv checks a session environment in sorted key order, so the

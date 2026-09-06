@@ -32,8 +32,8 @@ on every surface it can reach.
 |---|---|
 | `options.env` | Map of environment overrides, including the session's complete raw `PATH`. Blocked names are listed below. |
 | `options.mode` | Any Amp mode; `low`, `medium`, `high`, `ultra` are advertised. No mode is refused here — the value reaches Amp's `-m` flag unchanged. The key may be omitted, which takes the advertised default, but a key present with an empty string names no mode and fails with the uniform unsupported error. |
-| `options.model` | Present for symmetry; any value fails with the uniform unsupported error. |
-| `options.outputSchema` | Present for symmetry; any presence fails with the uniform unsupported error. |
+| `options.model` | Present for symmetry; any value fails with the uniform unsupported error at `_meta.amp.options.model`. |
+| `options.outputSchema` | Present for symmetry; any presence fails with the uniform unsupported error at `_meta.amp.options.outputSchema`. |
 | `rawEvent.enabled` | `true` to stream `_amp/rawEvent` for the session. |
 
 Unknown keys under `_meta.amp`, `_meta.amp.rawEvent`, or `_meta.amp.options`

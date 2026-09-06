@@ -78,7 +78,7 @@ func parseAmpOptionsWithPresence(value any) (AmpOptions, ampOptionFields, error)
 		case optionModelKey:
 			model, ok := value.(string)
 			if !ok {
-				return options, fields, unsupportedField("_meta.amp.options.model")
+				return options, fields, unsupportedField(ampModelOptionPath)
 			}
 
 			options.Model = model
@@ -102,7 +102,7 @@ func parseAmpOptionsWithPresence(value any) (AmpOptions, ampOptionFields, error)
 				return options, fields, unsupportedField(ampEnvOptionPath)
 			}
 		case metaOutputSchemaKey:
-			return options, fields, unsupportedField("_meta.amp.options.outputSchema")
+			return options, fields, unsupportedField(ampOutputSchemaOptionPath)
 		case optionModeKey:
 			fields.mode = true
 
