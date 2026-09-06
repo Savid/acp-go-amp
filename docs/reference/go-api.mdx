@@ -35,3 +35,6 @@ Important options include `WithExecutablePath`, `WithScratchDir`,
 `WithInputHandoffRoot`, `WithProviderAuthRoot`, `WithEnv`,
 `WithSeedFiles`, `WithSessionStore`, `WithConcurrencyLimits`,
 and `WithImageLimits` (including `MaxOutputBytesPerToolCall`).
+`ValidateAmpSessionMeta(meta)` returns the refusal a session-establishing
+request carrying that `_meta` map would receive, or nil, without an agent;
+see [Metadata](/docs/reference/meta).

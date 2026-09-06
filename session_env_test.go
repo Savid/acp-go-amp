@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/savid/acp-go-amp/internal/amp"
+	"github.com/stretchr/testify/require"
 )
 
 // simulateWindowsEnvironment selects the Windows environment key identity for
@@ -411,4 +412,124 @@ func TestComposeEnvAppliesPhasesInOrder(t *testing.T) {
 	if len(active) != 2 || active["PATH"] != "session" || active["KEEP"] != "base" {
 		t.Fatalf("active request env = %#v", active)
 	}
+}
+
+func envMeta(env map[string]any) map[string]any {
+	return map[string]any{ampMetaKey: map[string]any{ampOptionsKey: map[string]any{optionEnvKey: env}}}
+}
+
+func TestSessionEnvAcceptsEveryStructurallyValidName(t *testing.T) {
+	simulateUnixEnvironment(t)
+
+	env := map[string]any{
+		"https_proxy":   "",
+		"no_proxy":      "",
+		"PATH":          "/session/bin:/usr/bin",
+		"WAGIE_API_URL": "http://127.0.0.1:1",
+		"BASH_FUNC_x%%": "() { :; }",
+		"env":           "/not/the/shell/init",
+		"ld_preload":    "/not/the/loader",
+		"home":          "/not/the/managed/root",
+	}
+
+	require.NoError(t, ValidateAmpSessionMeta(envMeta(env)))
+
+	parsed, err := parseSessionMeta(envMeta(env))
+	require.NoError(t, err)
+	require.Len(t, parsed.options.Env, len(env))
+	require.Equal(t, "", parsed.options.Env["https_proxy"])
+}
+
+func TestSessionEnvRefusesStructurallyInvalidEntries(t *testing.T) {
+	tests := []struct {
+		name string
+		env  map[string]any
+		key  string
+	}{
+		{"empty name", map[string]any{"": "x"}, ""},
+		{"name carries an equals sign", map[string]any{"A=B": "x"}, "A=B"},
+		{"name carries a NUL", map[string]any{"A\x00B": "x"}, "A\x00B"},
+		{"value carries a NUL", map[string]any{"A": "x\x00y"}, "A"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			requireInvalidParamsData(t, ValidateAmpSessionMeta(envMeta(test.env)), map[string]any{
+				jsonFieldError: valUnsupported,
+				jsonFieldField: ampEnvOptionPath + "." + test.key,
+			})
+		})
+	}
+}
+
+func TestSessionEnvRefusesBlockedNamesUnderThePlatformIdentity(t *testing.T) {
+	blocked := []string{"NODE_OPTIONS", "BASH_ENV", "ENV", "LD_PRELOAD", "DYLD_INSERT_LIBRARIES", envHome, envXDGConfigHome}
+
+	for _, simulate := range []func(*testing.T){simulateUnixEnvironment, simulateWindowsEnvironment} {
+		simulate(t)
+
+		for _, key := range blocked {
+			requireInvalidParamsData(t, ValidateAmpSessionMeta(envMeta(map[string]any{key: "x"})), map[string]any{
+				jsonFieldError: valUnsupported,
+				jsonFieldField: ampEnvOptionPath + "." + key,
+			})
+		}
+
+		for _, key := range []string{privateEnvPrefix + "TOKEN", "acp_go_amp_internal_token"} {
+			requireInvalidParamsData(t, ValidateAmpSessionMeta(envMeta(map[string]any{key: "x"})), map[string]any{
+				jsonFieldError: valUnsupported,
+				jsonFieldField: ampEnvOptionPath + "." + key,
+			})
+		}
+	}
+
+	simulateWindowsEnvironment(t)
+
+	for _, key := range []string{"Node_Options", "bash_env", "env", "ld_preload", "home", "xdg_state_home"} {
+		requireInvalidParamsData(t, ValidateAmpSessionMeta(envMeta(map[string]any{key: "x"})), map[string]any{
+			jsonFieldError: valUnsupported,
+			jsonFieldField: ampEnvOptionPath + "." + key,
+		})
+	}
+}
+
+func TestSessionEnvReportsTheFirstKeyInSortedOrder(t *testing.T) {
+	simulateUnixEnvironment(t)
+
+	requireInvalidParamsData(t, ValidateAmpSessionMeta(envMeta(map[string]any{
+		"ZZ_LAST":   "x\x00y",
+		"AA_FIRST=": "x",
+		"MM_MID":    "x",
+	})), map[string]any{
+		jsonFieldError: valUnsupported,
+		jsonFieldField: ampEnvOptionPath + ".AA_FIRST=",
+	})
+}
+
+func TestSessionEnvRefusesTwoSpellingsOfOneWindowsVariable(t *testing.T) {
+	env := map[string]any{"Https_Proxy": "a", "https_proxy": "b"}
+
+	simulateUnixEnvironment(t)
+	require.NoError(t, ValidateAmpSessionMeta(envMeta(env)))
+
+	simulateWindowsEnvironment(t)
+	requireInvalidParamsData(t, ValidateAmpSessionMeta(envMeta(env)), map[string]any{
+		jsonFieldError: valAmbiguous,
+		jsonFieldField: ampEnvOptionPath + ".https_proxy",
+	})
+}
+
+func TestValidateAmpSessionMetaMirrorsTheSessionParser(t *testing.T) {
+	require.NoError(t, ValidateAmpSessionMeta(nil))
+	require.NoError(t, ValidateAmpSessionMeta(NewAmpOptions(
+		WithAmpEnv(map[string]string{"https_proxy": "", "PATH": "/session/bin", "WAGIE_API_TOKEN": "bearer"}),
+	).Meta()))
+	requireInvalidParamsData(t, ValidateAmpSessionMeta(NewAmpOptions(WithAmpModel("gpt")).Meta()), map[string]any{
+		jsonFieldError: valUnsupported,
+		jsonFieldField: optionModelKey,
+	})
+	requireInvalidParamsData(t, ValidateAmpSessionMeta(map[string]any{ampMetaKey: map[string]any{"extra": true}}), map[string]any{
+		jsonFieldError: valUnsupported,
+		jsonFieldField: "_meta.amp.extra",
+	})
 }

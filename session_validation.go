@@ -33,6 +33,13 @@ func (a *Agent) validateSessionStartOptions(options AmpOptions) error {
 		return unsupportedField(optionModelKey)
 	}
 
+	return validateAmpSessionOptions(options)
+}
+
+// validateAmpSessionOptions applies the refusals that depend on the request
+// alone. Amp advertises no model option and no native structured output, so
+// both fail closed on every session-establishing request.
+func validateAmpSessionOptions(options AmpOptions) error {
 	if options.Model != "" {
 		return unsupportedField(optionModelKey)
 	}
@@ -41,20 +48,7 @@ func (a *Agent) validateSessionStartOptions(options AmpOptions) error {
 		return unsupportedField(metaOutputSchemaKey)
 	}
 
-	for key := range options.Env {
-		if invalidEnvName(key) || strings.HasPrefix(strings.ToUpper(key), privateEnvPrefix) || managedSessionEnvKey(key) {
-			return unsupportedField("_meta.amp.options.env." + key)
-		}
-	}
-
-	if _, key := ambiguousEnvKeys(options.Env); key != "" {
-		return acp.NewInvalidParams(map[string]any{
-			jsonFieldError: valAmbiguous,
-			jsonFieldField: "_meta.amp.options.env." + key,
-		})
-	}
-
-	return nil
+	return validateSessionEnv(options.Env, ampEnvOptionPath)
 }
 
 // validateOptionalAbsolutePath rejects a present-but-relative filter path with

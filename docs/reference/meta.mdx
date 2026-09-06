@@ -30,7 +30,7 @@ on every surface it can reach.
 
 | Field | Accepted values |
 |---|---|
-| `options.env` | Map of environment overrides, including the session's complete raw `PATH`. |
+| `options.env` | Map of environment overrides, including the session's complete raw `PATH`. Blocked names are listed below. |
 | `options.mode` | Any Amp mode; `low`, `medium`, `high`, `ultra` are advertised. No mode is refused here — the value reaches Amp's `-m` flag unchanged. The key may be omitted, which takes the advertised default, but a key present with an empty string names no mode and fails with the uniform unsupported error. |
 | `options.model` | Present for symmetry; any value fails with the uniform unsupported error. |
 | `options.outputSchema` | Present for symmetry; any presence fails with the uniform unsupported error. |
@@ -38,6 +38,20 @@ on every surface it can reach.
 
 Unknown keys under `_meta.amp`, `_meta.amp.rawEvent`, or `_meta.amp.options`
 fail closed. Foreign metadata namespaces are ignored.
+
+Session `env` names are checked in sorted key order on every establishing
+request, so the first refusal is the same each time. A key is accepted when
+it is non-empty and free of `=` and NUL and its value is free of NUL; case is
+not a rule, so `https_proxy` and `HTTPS_PROXY` are two ordinary variables.
+Blocked names fail as `{"error":"unsupported","field":"_meta.amp.options.env.<key>"}`
+naming the key exactly as sent: `NODE_OPTIONS`, `BASH_ENV`, `ENV`, any `LD_` or `DYLD_` prefix, `HOME`, the XDG cache, config, data, and state roots, and `ACP_GO_AMP_INTERNAL_*`. `PATH` is accepted: it is the session's search-path carrier. All but the adapter's own
+namespace compare through the platform identity, exact on Unix and
+case-insensitive on Windows; the adapter namespace is refused under every
+spelling. Two keys that resolve to one variable under that identity fail as
+`{"error":"ambiguous","field":"_meta.amp.options.env.<later key in sorted order>"}`.
+An empty value is delivered as `KEY=`. `ValidateAmpSessionMeta` runs this
+parsing on a `_meta` map without an agent, so a host can check a request
+before sending it.
 
 ## Environment composition
 

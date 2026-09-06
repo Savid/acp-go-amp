@@ -91,7 +91,7 @@ func parseAmpOptionsWithPresence(value any) (AmpOptions, ampOptionFields, error)
 				for k, v := range env {
 					str, ok := v.(string)
 					if !ok {
-						return options, fields, unsupportedField("_meta.amp.options.env." + k)
+						return options, fields, unsupportedField(ampEnvOptionPath + "." + k)
 					}
 
 					options.Env[k] = str
@@ -99,7 +99,7 @@ func parseAmpOptionsWithPresence(value any) (AmpOptions, ampOptionFields, error)
 			case map[string]string:
 				options.Env = cloneStringMap(env)
 			default:
-				return options, fields, unsupportedField("_meta.amp.options.env")
+				return options, fields, unsupportedField(ampEnvOptionPath)
 			}
 		case metaOutputSchemaKey:
 			return options, fields, unsupportedField("_meta.amp.options.outputSchema")

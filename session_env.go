@@ -5,7 +5,16 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-amp/internal/amp"
+)
+
+const (
+	ampEnvOptionPath = "_meta.amp.options." + optionEnvKey
+
+	envNodeOptionsKey = "NODE_OPTIONS"
+	envBashEnvKey     = "BASH_ENV"
+	envShellEnvKey    = "ENV"
 )
 
 // canonicalEnvKey is the environment-variable identity the target platform
@@ -136,4 +145,66 @@ func ambiguousEnvKeys(env map[string]string) (string, string) {
 	}
 
 	return "", ""
+}
+
+// blockedSessionEnvKey reports whether a session env key names a variable the
+// adapter refuses to hand a prompt process. The private adapter namespace is
+// refused under every spelling. The managed residence roots and the loader,
+// node, and shell injection names are read by the native process under an
+// exact platform spelling, so those compare through the platform identity.
+// PATH is absent: a session's complete raw PATH is amp's one search-path
+// carrier.
+func blockedSessionEnvKey(key string) bool {
+	if strings.HasPrefix(strings.ToUpper(key), privateEnvPrefix) || managedSessionEnvKey(key) {
+		return true
+	}
+
+	switch name := canonicalEnvKey(key); name {
+	case envNodeOptionsKey, envBashEnvKey, envShellEnvKey:
+		return true
+	default:
+		return strings.HasPrefix(name, "LD_") || strings.HasPrefix(name, "DYLD_")
+	}
+}
+
+// validateSessionEnv checks a session environment in sorted key order, so the
+// first refusal is the same on every call. A key that cannot be a variable
+// name, a value carrying a NUL, and a blocked name each fail as unsupported at
+// the key exactly as the host sent it. Two keys that name one variable under
+// the platform identity fail as ambiguous at the later key: a Go map carries
+// no order, so the value such a map would deliver is unknowable.
+func validateSessionEnv(env map[string]string, path string) error {
+	seen := make(map[string]struct{}, len(env))
+
+	for _, key := range slices.Sorted(maps.Keys(env)) {
+		if invalidEnvName(key) || strings.IndexByte(env[key], 0) >= 0 || blockedSessionEnvKey(key) {
+			return unsupportedField(path + "." + key)
+		}
+
+		identity := canonicalEnvKey(key)
+		if _, duplicate := seen[identity]; duplicate {
+			return ambiguousField(path + "." + key)
+		}
+
+		seen[identity] = struct{}{}
+	}
+
+	return nil
+}
+
+func ambiguousField(path string) error {
+	return acp.NewInvalidParams(map[string]any{jsonFieldError: valAmbiguous, jsonFieldField: path})
+}
+
+// ValidateAmpSessionMeta reports the refusal a session/new, session/load, or
+// session/resume request carrying meta receives from this package's _meta.amp
+// parsing, or nil when the vendor namespace is accepted. Refusals that depend
+// on how an Agent was constructed are not part of it.
+func ValidateAmpSessionMeta(meta map[string]any) error {
+	parsed, err := parseSessionMeta(meta)
+	if err != nil {
+		return err
+	}
+
+	return validateAmpSessionOptions(parsed.options)
 }
