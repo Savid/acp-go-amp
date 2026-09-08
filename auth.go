@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"path/filepath"
@@ -340,6 +339,10 @@ func (s *agentSession) authDataHome() string {
 }
 
 func (s *agentSession) newAuthClient(ctx context.Context) (*nativeamp.Client, func() error, error) {
+	if s.agent.options.hostAuthoritySupplied {
+		return nil, nil, nativeamp.ErrBrowserLaunchUnsupported
+	}
+
 	preflightOptions := nativeamp.Options{
 		CLIPath:            s.agent.options.ExecutablePath,
 		Cwd:                s.cwd,
@@ -396,18 +399,6 @@ func (s *agentSession) newAuthClient(ctx context.Context) (*nativeamp.Client, fu
 	browserShim, err := nativeamp.MaterializeBrowserShim(filepath.Join(residence.root, "browser-shim"))
 	if err != nil {
 		return fail(err)
-	}
-
-	if s.agent.options.hostAuthoritySupplied {
-		cleanupResidence.beginPrepare()
-	}
-
-	if err := s.agent.prepareNativeTree(ctx, residence.root); err != nil {
-		return fail(fmt.Errorf("prepare Amp auth residence: %w", err))
-	}
-
-	if s.agent.options.hostAuthoritySupplied {
-		cleanupResidence.setPrepared()
 	}
 
 	env := composeEnv(s.operationEnv, managedSessionEnv(residence.home, residence.config, residence.cache, residence.data, residence.state))

@@ -3,6 +3,7 @@ package lifecycle
 import (
 	"encoding/json"
 	"math"
+	"strings"
 )
 
 // MetaPath is the request path a rejection names. Negotiation and correlation
@@ -40,12 +41,14 @@ type ParamError struct {
 func (e *ParamError) Error() string { return string(e.Verdict) + " " + e.Field }
 
 func paramError(members ...string) *ParamError {
-	field := MetaPath
+	var field strings.Builder
+	field.WriteString(MetaPath)
+
 	for _, member := range members {
-		field += "." + member
+		field.WriteString("." + member)
 	}
 
-	return &ParamError{Field: field, Verdict: VerdictUnsupported}
+	return &ParamError{Field: field.String(), Verdict: VerdictUnsupported}
 }
 
 // missingError refuses an absent prompt correlation on an enabled connection.
@@ -68,6 +71,10 @@ func DecodeOffer(meta map[string]any) (Offer, bool, *ParamError) {
 	raw, present := meta[MetaKey]
 	if !present {
 		return Offer{}, false, nil
+	}
+
+	if refusal, ok := raw.(*ParamError); ok {
+		return Offer{}, false, refusal
 	}
 
 	fields, ok := raw.(map[string]any)
@@ -124,6 +131,10 @@ func DecodePromptCorrelation(meta map[string]any, negotiated Negotiated) (Submis
 		return Submission{}, missingError()
 	}
 
+	if refusal, ok := raw.(*ParamError); ok {
+		return Submission{}, refusal
+	}
+
 	fields, ok := raw.(map[string]any)
 	if !ok {
 		return Submission{}, paramError()
@@ -164,8 +175,8 @@ const intRangeFloor = float64(math.MinInt)
 // Integrality alone does not make a float an integer. A magnitude no int holds —
 // 1e300 — is its own truncation and still names no integer, so a float64 must
 // also fall inside the range that converts exactly. Nothing lexical is available
-// to judge instead: the SDK pre-decodes `_meta` to map[string]any, so no lexeme
-// survives to this reader and the value itself is the whole evidence.
+// to judge for an embedded float. Wire decoding preserves json.Number before
+// the SDK's map representation can round the original value.
 func integerValue(raw any) (int, bool) {
 	switch value := raw.(type) {
 	case float64:
@@ -179,7 +190,7 @@ func integerValue(raw any) (int, bool) {
 	case json.Number:
 		number, err := value.Int64()
 
-		return int(number), err == nil
+		return int(number), err == nil && int64(int(number)) == number
 	default:
 		return 0, false
 	}

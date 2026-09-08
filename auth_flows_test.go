@@ -126,14 +126,9 @@ func TestAuthorizeRefusesUnsupportedLoginPlatformsBeforeNativeMint(t *testing.T)
 	}
 }
 
-func TestManagedAuthorizeAuditsBeforeAuthResidenceMaterialization(t *testing.T) {
+func TestManagedAuthorizeRejectsLoginBeforeNativeAllocation(t *testing.T) {
 	authority := newRecordingAuthority()
 	fixture := newAuthFixture(t, "login", WithHostAuthority(authority))
-
-	original := authCheckLoginSafety
-	want := nativeamp.ErrBrowserLaunchUnsupported
-	authCheckLoginSafety = func(*nativeamp.Client, context.Context) error { return want }
-	t.Cleanup(func() { authCheckLoginSafety = original })
 
 	authority.mu.Lock()
 	eventsBefore := append([]string(nil), authority.events...)
@@ -144,7 +139,10 @@ func TestManagedAuthorizeAuditsBeforeAuthResidenceMaterialization(t *testing.T) 
 	fixture.agent.mu.Unlock()
 
 	_, err := fixture.authorize("connection-1", "request-1")
-	requireAuthCause(t, err, authCauseUnsupportedVariant)
+	failure := authFailure(t, err)
+	if failure[jsonFieldError] != authValueInvalid || failure[jsonFieldField] != authFieldMethod {
+		t.Fatalf("authorize = %#v, want invalid method", failure)
+	}
 
 	authority.mu.Lock()
 	eventsAfter := append([]string(nil), authority.events...)

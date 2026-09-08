@@ -6,7 +6,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -219,7 +218,7 @@ func TestStartAuthLoginReportsAStartFailure(t *testing.T) {
 		}
 	})
 
-	t.Run("managed start", func(t *testing.T) {
+	t.Run("managed login is unsupported", func(t *testing.T) {
 		want := errors.New("managed start refused")
 		started := false
 		client := newTestClient(t, nil, Options{
@@ -234,20 +233,8 @@ func TestStartAuthLoginReportsAStartFailure(t *testing.T) {
 
 		_, err := client.StartAuthLogin(t.Context())
 
-		// Windows materialises no launcher shim, so a brokered login is refused
-		// on the platform fact before any native child exists. That refusal is
-		// this platform's whole answer here and it stands in front of the start
-		// failure every other platform reports.
-		if runtime.GOOS == windowsPlatform {
-			if !errors.Is(err, ErrBrowserLaunchUnsupported) || started {
-				t.Fatalf("StartAuthLogin = %v (started %t), want the unneutralisable-browser refusal", err, started)
-			}
-
-			return
-		}
-
-		if !errors.Is(err, want) {
-			t.Fatalf("StartAuthLogin = %v, want %v", err, want)
+		if !errors.Is(err, ErrBrowserLaunchUnsupported) || started {
+			t.Fatalf("StartAuthLogin = %v (started %t), want unsupported browser launch without starting a child", err, started)
 		}
 	})
 }

@@ -137,6 +137,8 @@ func TestAuthLoginSafetyRefusalPrecedesCommandConstruction(t *testing.T) {
 			want := errors.New("unsafe browser launch")
 			options := Options{CLIPath: path, Cwd: t.TempDir()}
 			if managed {
+				want = ErrBrowserLaunchUnsupported
+				options.CLIPath = "authority-owned-amp"
 				options.StartNative = func(context.Context, NativeRequest) (NativeProcess, error) {
 					t.Fatal("managed login started before its safety audit")
 
@@ -146,11 +148,17 @@ func TestAuthLoginSafetyRefusalPrecedesCommandConstruction(t *testing.T) {
 
 			client := newTestClient(t, nil, options)
 			client.checkAuthLoginSafety = func(got string) error {
+				if managed {
+					t.Fatal("managed selector inspected locally")
+				}
 				if got != path {
 					t.Fatalf("safety-audit path = %q, want %q", got, path)
 				}
 
 				return want
+			}
+			if err := client.CheckAuthLoginSafety(t.Context()); !errors.Is(err, want) {
+				t.Fatalf("CheckAuthLoginSafety = %v, want %v", err, want)
 			}
 
 			if _, err := client.StartAuthLogin(t.Context()); !errors.Is(err, want) {

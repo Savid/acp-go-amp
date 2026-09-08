@@ -6,7 +6,25 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
+
+func TestManagedCatalogRetainsOnlyManualAPIKey(t *testing.T) {
+	authority := newRecordingAuthority()
+	fixture := newAuthFixture(t, "", WithHostAuthority(authority), WithExecutablePath("authority-owned-amp"))
+	var catalog authMethodsResult
+	require.NoError(t, fixture.call(AuthMethodsMethod, map[string]any{authFieldSessionID: string(fixture.session.id)}, &catalog))
+	require.Equal(t, []authMethodEntry{{ID: authMethodAPIKey, Type: authMethodTypeAPI, Label: authMethodAPIKeyLabel}}, catalog.Providers[authProviderID])
+	before := len(authority.events)
+	_, err := fixture.authorize("connection", "request")
+	requireInvalidParamsData(t, err, map[string]any{"error": "invalid", "field": authFieldMethod})
+	manual := fixture.mustAuthorizeMethod("connection", authMethodAPIKey)
+	require.NoError(t, fixture.callbackMethod(manual.FlowID, authMethodAPIKey, manualAmpKeyCanary))
+	credential := harvestAuthCredential(t, fixture, manual.FlowID)
+	require.Equal(t, manualAmpKeyCanary, credential.Credential.API.Key)
+	require.Len(t, authority.events, before, "manual flow performs no native work")
+}
 
 func TestMethodsPublishesHostedAndManualAccountMethods(t *testing.T) {
 	fixture := newAuthFixture(t, "login")
@@ -72,7 +90,7 @@ func TestMethodsFailsClosedWithNoEntropy(t *testing.T) {
 }
 
 func TestBuildAuthCatalogOmitsAnEntryThatViolatesItsLabelBound(t *testing.T) {
-	methods, entries := buildAuthCatalog()
+	methods, entries := buildAuthCatalog(false)
 	if len(methods) != 1 || len(methods[authProviderID]) != 2 || len(entries) != 1 || len(entries[authProviderID]) != 2 {
 		t.Fatalf("catalog = %#v/%#v", methods, entries)
 	}
@@ -90,7 +108,7 @@ func TestBuildAuthCatalogOmitsAnEntryThatViolatesItsLabelBound(t *testing.T) {
 			}
 		}
 
-		methods, entries := buildAuthCatalog()
+		methods, entries := buildAuthCatalog(false)
 		if len(methods[authProviderID]) != 1 || len(entries[authProviderID]) != 1 || entries[authProviderID][0].ID != authMethodAPIKey {
 			t.Fatalf("label %q produced %#v/%#v", bad, methods, entries)
 		}

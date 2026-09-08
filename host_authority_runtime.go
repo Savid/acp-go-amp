@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"reflect"
+	"maps"
 	"time"
 
 	"github.com/coder/acp-go-sdk"
@@ -12,17 +12,7 @@ import (
 )
 
 func hostAuthorityNil(authority HostAuthority) bool {
-	if authority == nil {
-		return true
-	}
-
-	value := reflect.ValueOf(authority)
-	switch value.Kind() {
-	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
-		return value.IsNil()
-	default:
-		return false
-	}
+	return interfaceValueNil(authority)
 }
 
 func readHostEnvironment(authority HostAuthority) (environment map[string]string, err error) {
@@ -60,11 +50,13 @@ func (a *Agent) prepareNativeTree(ctx context.Context, root string) (err error) 
 
 	defer func() {
 		if recover() != nil {
-			err = authorityBoundaryError(ErrHostAuthorityUnavailable)
+			err = ErrHostAuthorityUnavailable
 		}
 
 		if err != nil {
-			err = authorityBoundaryError(err)
+			// Prepare has no non-mutating refusal: every failed attempt leaves
+			// the tree opaque, even if its cause is busy or cancellation.
+			err = errors.Join(err, ErrContainmentIncomplete, nativeamp.ErrContainmentIncomplete)
 		}
 
 		a.recordAuthorityFailure(err)
@@ -103,7 +95,7 @@ func (a *Agent) reclaimNativeTree(ctx context.Context, root string) (err error) 
 }
 
 func (a *Agent) recordAuthorityFailure(err error) {
-	if a == nil || err == nil || errors.Is(err, ErrNativeTreeBusy) || detachedContextError(err) {
+	if a == nil || err == nil || detachedContextError(err) {
 		return
 	}
 
@@ -120,9 +112,7 @@ func (a *Agent) recordAuthorityFailure(err error) {
 	var sessions map[acp.SessionId]*agentSession
 	if firstLoss {
 		sessions = make(map[acp.SessionId]*agentSession, len(a.sessions))
-		for id, session := range a.sessions {
-			sessions[id] = session
-		}
+		maps.Copy(sessions, a.sessions)
 	}
 	a.mu.Unlock()
 

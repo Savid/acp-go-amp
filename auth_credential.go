@@ -142,7 +142,7 @@ type authCredentialResult struct {
 // the key is long-lived and non-rotating, so there is no harvest cycle — and a
 // slot that answers nothing fails closed rather than reporting absence.
 func (p *providerAuth) credential(ctx context.Context, params json.RawMessage) (any, error) {
-	_, flow, err := p.addressedFlowLeg(params)
+	session, flow, err := p.addressedFlowLeg(params)
 	if err != nil {
 		return nil, err
 	}
@@ -175,7 +175,7 @@ func (p *providerAuth) credential(ctx context.Context, params json.RawMessage) (
 			return nil, p.failHarvest(flow, authCauseHarvestFailed)
 		}
 
-		return providerCredentialResult(flow, secret), nil
+		return p.deliverCredential(session, flow, secret)
 	}
 
 	p.mu.Lock()
@@ -192,7 +192,7 @@ func (p *providerAuth) credential(ctx context.Context, params json.RawMessage) (
 	// that has already happened.
 	p.closeLogin(flow)
 
-	return providerCredentialResult(flow, secret), nil
+	return p.deliverCredential(session, flow, secret)
 }
 
 // takeFlowCredential consumes manual material after the harvest claim has
@@ -212,13 +212,25 @@ func (p *providerAuth) takeFlowCredential(flow *authFlow) (string, bool) {
 	return secret, true
 }
 
-func providerCredentialResult(flow *authFlow, secret string) authCredentialResult {
+// deliverCredential orders secret delivery against flow supersession and
+// session teardown. Those paths may retire a completed flow while its native
+// read or residence cleanup is in flight; the harvest claim alone cannot prove
+// the flow still belongs to this session lifetime.
+func (p *providerAuth) deliverCredential(session *agentSession, flow *authFlow, secret string) (any, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.byID[flow.id] != flow || session.lifetimeEnded() ||
+		(flow.state != authStateAuthenticated && flow.state != authStateSaved) {
+		return nil, authFailed(authCauseFlowState, flow.providerID, flow.method.ID, flow.id)
+	}
+
 	return authCredentialResult{
 		ConnectionID:      flow.connectionID,
 		Revision:          flow.revision,
 		BindingGeneration: flow.bindingGeneration,
 		Credential:        ProviderCredential{Type: ProviderCredentialAPI, API: &ProviderAPICredential{Key: secret}},
-	}
+	}, nil
 }
 
 // claimHarvest admits the one harvest a completed flow allows and holds the

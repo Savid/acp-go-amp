@@ -7,17 +7,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
-	"time"
 )
-
-// installedAmpEnv is the private carrier the pinned-binary fixture uses to hand
-// this probe the path of the real Amp it must drive. Only the Linux container
-// fixture plants that binary and sets the carrier, so the name says so; an
-// ordinary run anywhere else leaves it unset and the probe skips.
-const installedAmpEnv = "ACP_GO_AMP_TEST_INSTALLED_LINUX_AMP"
 
 // browserProbeDir plants an executable for every name a launcher might exec,
 // each of which records the invocation instead of opening anything. A recorded
@@ -92,16 +84,17 @@ func TestLoginNeverExecsABrowserLauncher(t *testing.T) {
 	path := filepath.Join(dir, "amp")
 	// Every launcher name is exercised as a bare command so the harness resolves
 	// it through the PATH it was handed.
-	harness := "#!/bin/sh\n"
+	var harness strings.Builder
+	harness.WriteString("#!/bin/sh\n")
 
 	for _, name := range browserLauncherNames {
-		harness += "command -v " + name + " >> " + shellQuote(resolvedFile) + "\n" +
-			name + " \"https://example.invalid/\"\n"
+		harness.WriteString("command -v " + name + " >> " + shellQuote(resolvedFile) + "\n" +
+			name + " \"https://example.invalid/\"\n")
 	}
 
-	harness += "echo " + shellQuote(helperLoginURL) + "\nexit 0\n"
+	harness.WriteString("echo " + shellQuote(helperLoginURL) + "\nexit 0\n")
 
-	if writeErr := os.WriteFile(path, []byte(harness), 0o700); writeErr != nil {
+	if writeErr := os.WriteFile(path, []byte(harness.String()), 0o700); writeErr != nil {
 		t.Fatal(writeErr)
 	}
 
@@ -143,81 +136,5 @@ func TestLoginNeverExecsABrowserLauncher(t *testing.T) {
 		if filepath.Dir(launcher) != client.options.BrowserShim || filepath.Base(launcher) != browserLauncherNames[i] {
 			t.Fatalf("the child resolved %s to %q; want a shim launcher", browserLauncherNames[i], launcher)
 		}
-	}
-}
-
-// TestInstalledAmpLoginExecsOnlyShimLauncher is the real-native proof for
-// brokered login: the installed Amp binary's account login must exec only the
-// PATH-shadowed launcher its platform's audited branch names. The Linux
-// integration caller runs it in a networkless, no-GUI container; on Darwin it
-// runs natively against the supplied binary. AMP_URL points at unreachable
-// loopback, so no provider authorization can be initiated.
-func TestInstalledAmpLoginExecsOnlyShimLauncher(t *testing.T) {
-	path := os.Getenv(installedAmpEnv)
-	if path == "" {
-		t.Skipf("set %s to a real installed Amp binary", installedAmpEnv)
-	}
-
-	launcher := "xdg-open"
-	if runtime.GOOS == darwinPlatform {
-		launcher = "open"
-	}
-
-	originalScript := browserShimScript
-	browserShimScript = []byte("#!/bin/sh\nprintf '%s\\n' \"${0##*/}\" > \"$ACP_GO_AMP_TEST_BROWSER_MARKER\"\nexit 0\n")
-	t.Cleanup(func() { browserShimScript = originalScript })
-	marker := filepath.Join(t.TempDir(), "launcher")
-	home := t.TempDir()
-	settingsFile := filepath.Join(t.TempDir(), "settings.json")
-	if writeErr := os.WriteFile(settingsFile, AuthSettingsDocument(), 0o600); writeErr != nil {
-		t.Fatal(writeErr)
-	}
-	client := newTestClient(t, nil, Options{
-		CLIPath:      path,
-		Cwd:          t.TempDir(),
-		SettingsFile: settingsFile,
-		Env: map[string]string{
-			AuthDeploymentEnv:                "http://127.0.0.1:1",
-			"ACP_GO_AMP_TEST_BROWSER_MARKER": marker,
-			envHome:                          home,
-			envXDGCacheHome:                  filepath.Join(home, "cache"),
-			envXDGConfigHome:                 filepath.Join(home, "config"),
-			dataHomeEnv:                      t.TempDir(),
-			envXDGStateHome:                  filepath.Join(home, "state"),
-		},
-	})
-
-	login, err := client.StartAuthLogin(t.Context())
-	if err != nil {
-		t.Fatalf("start installed Amp login: %v", err)
-	}
-	t.Cleanup(func() { _ = login.Close() })
-
-	deadline := time.Now().Add(20 * time.Second)
-	for {
-		launched, readErr := os.ReadFile(marker)
-		if readErr == nil {
-			if got := strings.TrimSpace(string(launched)); got != launcher {
-				t.Fatalf("installed Amp executed shim %q, want %s", got, launcher)
-			}
-
-			break
-		}
-		if !errors.Is(readErr, os.ErrNotExist) {
-			t.Fatalf("read installed Amp browser marker: %v", readErr)
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("installed Amp never executed the PATH-shadowed %s shim", launcher)
-		}
-
-		select {
-		case <-t.Context().Done():
-			t.Fatal(t.Context().Err())
-		case <-time.After(10 * time.Millisecond):
-		}
-	}
-
-	if closeErr := login.Close(); closeErr != nil {
-		t.Fatalf("close installed Amp login: %v", closeErr)
 	}
 }

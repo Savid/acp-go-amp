@@ -3,6 +3,7 @@ package amp
 import (
 	"context"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -76,9 +77,7 @@ func newTestProbeClient(t *testing.T, logger *slog.Logger, options Options) *Cli
 	}
 
 	env := make(map[string]string, len(options.Env)+5)
-	for key, value := range options.Env {
-		env[key] = value
-	}
+	maps.Copy(env, options.Env)
 	env[envHome] = filepath.Join(root, "home")
 	env[envXDGConfigHome] = filepath.Join(root, "xdg-config")
 	env[envXDGCacheHome] = filepath.Join(root, "xdg-cache")

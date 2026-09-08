@@ -5,15 +5,30 @@ description: Supply AMP_API_KEY or broker an Amp account.
 
 ## API key
 
-Set `AMP_API_KEY` for authenticated turns. The adapter scrubs it from login.
+Set `AMP_API_KEY` in the live environment, `WithEnv`, or session env options for
+authenticated turns. Session env values are persisted in the session manifest.
+The adapter scrubs `AMP_API_KEY` from hosted login processes.
 
 ## Provider account login
 
-With `WithProviderAuthRoot`, eight session-scoped `_amp/auth/*` methods are
-advertised, including `_amp/auth/credential`. Hosted login runs through host
-authority in its own prepared residence. Darwin and Linux audit the exact
-configured Amp executable before that residence or its browser shim is
-materialized, and the launch repeats the same fail-closed audit in managed and
-ordinary modes. `Wait` settles the process, reclaim precedes the secret read,
-and the credential is returned once. The values-free ledger stores no
+`WithProviderAuthRoot` enables a keyless bootstrap session and eight
+session-scoped `_amp/auth/*` methods. A host can broker hosted login or submit
+an API key with the `api-key` method. See the
+[method reference](/docs/reference/acp-methods#provider-auth-methods) for
+request and result shapes.
+
+Harvest `_amp/auth/credential` once, then redeliver the returned value as
+`AMP_API_KEY` through a session load or resume environment before prompting.
+Harvest checks that the flow still owns its session before returning a secret;
+closing or superseding the flow during harvest invalidates delivery.
+
+With `WithHostAuthority`, the catalog offers only `api-key`; hosted `login`
+is refused before executable inspection or residence creation. The authority
+interface cannot attest the launched executable's browser mediation.
+
+Ordinary hosted login uses its own isolated residence. Darwin and Linux audit
+the exact configured Amp executable before that residence or its browser shim
+is materialized, and the launch repeats the same fail-closed audit. `Wait`
+settles the process before the secret read.
+The values-free ledger stores no
 credential and disconnect performs no Amp-side mutation.

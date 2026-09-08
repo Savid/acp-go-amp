@@ -161,9 +161,9 @@ func rejectLifecycleMetaParams(params json.RawMessage) error {
 		Meta map[string]any `json:"_meta"` //nolint:tagliatelle // ACP fixes this reserved field name.
 	}
 
-	if err := json.Unmarshal(params, &carrier); err != nil {
+	if err := json.Unmarshal(lifecycle.MaskWireMeta(params, lifecycle.MetaKey), &carrier); err != nil {
 		return unsupportedField(authFieldParams)
 	}
 
-	return rejectLifecycleMeta(carrier.Meta)
+	return rejectLifecycleMeta(lifecycle.PreserveWireMeta(params, carrier.Meta))
 }

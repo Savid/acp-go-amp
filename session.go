@@ -626,9 +626,8 @@ func (s *agentSession) settleCloseRung(ctx context.Context) closeSettlement {
 // request's and bounded by the store's own read and write bounds, so a host that
 // walked away from the close does not decide whether the frames land.
 //
-// A session fenced for delete commits nothing here: the retry is a no-op on it,
-// because Replace clears the tombstone of every key it lists and a commit landing
-// after the tombstone would durably resurrect the row.
+// A session fenced for delete commits nothing here: deletion owns its durable
+// boundary, and a close owes no replacement for state being removed.
 func (s *agentSession) commitOnClose(ctx context.Context) error {
 	commitCtx, cancelCommit := context.WithTimeout(
 		context.WithoutCancel(ctx),

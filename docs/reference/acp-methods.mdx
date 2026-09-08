@@ -58,7 +58,7 @@ outside that shape is invalid params naming `connectionId`. Every other failure
 is JSON-RPC `-32000`
 carrying `{"error": "amp_auth_failed", "cause": ..., "retryable": ...}` with a
 closed `cause` enum and no native message text. See
-[Authentication](/docs/features/authentication#broker-an-account).
+[Authentication](/docs/features/authentication#provider-account-login).
 
 ## Unsupported and rejected
 
@@ -105,7 +105,7 @@ the failure is logged and joined onto the Go error an embedding host receives.
 | `data.error` | Condition | Additional members |
 | --- | --- | --- |
 | `amp_invalid_options` | The agent holds an option set it will not serve under. `NewAgent` returns no error, so the verdict arrives on `initialize` and on every session-establishing entry point. | Optional `field` naming the refused option. Today only `"env"` — no `AMP_API_KEY` on any environment layer and no provider-auth ledger to mint one. Several refused options at once carry no `field`. |
-| `amp_restore_failed` | `session/load` or `session/resume` found a store entry it could not restore: an unreadable store, a manifest that is not this adapter's, a transcript frame that will not parse, or a native thread the harness would not hand back. The entry is neither deleted nor tombstoned. | none |
+| `amp_restore_failed` | `session/load` or `session/resume` found a store entry it could not restore: an unreadable store, a foreign manifest, an unparsable transcript, a native restore failure, or an unavailable image artifact during load replay. The entry is neither deleted nor tombstoned. | none |
 | `amp_session_poisoned` | The session's native thread identity is one this adapter cannot bind to, so every operation but `session/close` and `session/delete` is refused for the session's life. | `cause`: `native_session_id_drift` or `native_session_id_invalid` |
 | `amp_internal_failure` | Everything the tokens above do not classify. | Optional `class` (see below) |
 

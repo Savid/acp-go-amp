@@ -3,6 +3,7 @@ package ampacp
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 )
 
 // scratchParent resolves the parent directory for all ephemeral on-disk
@@ -28,5 +29,56 @@ func ensureScratchParent(dir string) (string, error) {
 }
 
 func (a *Agent) ensureScratchParent() (string, error) {
+	if a.options.hostAuthoritySupplied && a.options.InputHandoffRoot != "" {
+		return a.ensureManagedScratchParent()
+	}
+
 	return ensureScratchParent(a.options.ScratchDir)
+}
+
+func (a *Agent) ensureManagedScratchParent() (string, error) {
+	m := &a.handoff
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.initialized {
+		return m.scratch, nil
+	}
+
+	parent, err := ensureScratchParent(a.options.ScratchDir)
+	if err != nil {
+		return "", err
+	}
+
+	parent, err = filepath.EvalSymlinks(parent)
+	if err != nil {
+		return "", err
+	}
+
+	parent, err = filepath.Abs(parent)
+	if err != nil {
+		return "", err
+	}
+
+	m.scratch, m.initialized = parent, true
+	m.failure = &handoffError{value: imageErrorPathNotAllowed, message: handoffRootUnopenableMessage}
+
+	readPath, err := filepath.EvalSymlinks(a.options.InputHandoffRoot)
+	if err != nil {
+		return parent, nil
+	}
+	// Compare directory identities along both ancestor chains, not path spelling.
+	disjoint, err := disjointDirectories(parent, readPath)
+	if err != nil || !disjoint {
+		return parent, nil
+	}
+
+	root, err := os.OpenRoot(readPath)
+	if err != nil {
+		return parent, nil
+	}
+
+	m.root, m.failure = root, nil
+
+	return parent, nil
 }

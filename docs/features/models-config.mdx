@@ -13,8 +13,7 @@ option, because on Amp the mode *is* the model selection.
 |---|---|---|
 | `mode` | `low`, `medium`, `high`, `ultra` | `-m` |
 
-The advertised values are the ones the shipping Amp CLI documents. That list is
-a menu, not a gate: the adapter keeps no value list of its own, so whatever you
+The adapter advertises the values above as a menu, not a gate: whatever you
 set travels to `-m` unchanged and Amp alone decides whether it will run it. Set
 the mode per session through `_meta.amp.options` (`AmpOptions.Mode`) or update it
 with `session/set_config_option` — both doors behave identically, and neither
@@ -35,7 +34,7 @@ states no mode takes the advertised default, `medium`.
 
 Being advertised is not a promise that your account may run it. Which modes an
 Amp account is entitled to depends on its plan, and the adapter advertises the
-documented set rather than anything account-specific, so treat the list as the
+configured menu rather than anything account-specific, so treat the list as the
 shape of the option and the read-back below as the truth about a given turn.
 
 ### Effective mode read-back
@@ -54,8 +53,9 @@ There is no ACP model config option for Amp, and `mode` is the reason. On Amp a
 mode selects the model the turn runs on, together with the system prompt and the
 tool set that come with it — choosing a mode is choosing a model, so a second
 selector would be a second name for the same knob. A non-empty
-`WithDefaultModel`, `AmpOptions.Model`, or `_meta.amp.options.model` fails session
-start with the uniform unsupported error naming field `model`.
+`WithDefaultModel` fails session start naming field `model`. A non-empty
+`AmpOptions.Model` or `_meta.amp.options.model` is refused at
+`_meta.amp.options.model`.
 
 ## Image input
 
@@ -82,13 +82,11 @@ type names a raster format is validated as an image, and a blob that names any
 other type still has to be valid base64 and still spends the per-image and
 per-prompt budget on the bytes it decodes to, even though those bytes never
 reach the prompt: a blob Amp has no native representation for is reduced to its
-URI and declared media type. A blob that
-names no raster format reports its rejection as `field: "prompt.resource"`,
-since the block a host has to fix is a resource block; everything held to the
-image gates reports `field: "prompt.image"`. A declared
-media type is matched case-insensitively and without parameters, so
-`IMAGE/PNG` and `image/png; charset=binary` are held to the image gates rather
-than treated as an untyped resource.
+URI and declared media type. Refusals name the inbound block type:
+`field: "prompt.resource"` for resources and `field: "prompt.image"` for images.
+Resource routing recognizes raster media types case-insensitively and without
+parameters, so `IMAGE/PNG` and `image/png; charset=binary` reach the image gates.
+The exact input allowlist still applies and rejects those spellings.
 
 ### Local handoff input
 
@@ -158,12 +156,9 @@ envelopes always apply, regardless of configuration:
 - at most 921,600 decoded bytes per image
 - at most 8,000 pixels in either dimension
 
-The byte envelope tracks how Amp stores a thread rather than any published
-per-image maximum: messages land in a backing store that caps one commit at
-1,310,720 bytes of dirty data and an image is stored as inline base64, so
-921,600 decoded bytes is 300 of the 320 available four-kilobyte pages. Because
-the cap is per commit, a long thread has less headroom than a fresh one — treat
-921,600 as the bound that holds for a fresh thread. See
+These conservative adapter bounds are based on observed native failures,
+not a published per-image service guarantee. Native acceptance can depend on
+the surrounding thread; continued-thread headroom remains unproven. See
 [Troubleshooting](/docs/operations/troubleshooting#image-failures).
 
 Crossing a configured byte limit returns `too_large`; crossing a native
@@ -194,15 +189,13 @@ carries a `message` naming the real cause:
 | `error` | Meaning |
 |---|---|
 | `invalid_handoff` | the block is malformed as a block: no read root configured, a missing, non-object, unknown-field, wrong-version, bad-digest or bad-size envelope, or a URI that is absent, unparsable, not `file://`, remote-hosted, or not absolute |
-| `path_not_allowed` | the path lies outside the read root, is reached through a symlink the root refuses (any absolute symlink, or one leading out of the root), or does not name a regular file |
-| `missing_file` | the path is inside the root but absent, unopenable, or unreadable — the expected outcome when a host cleans up early |
+| `path_not_allowed` | the path lies outside the read root, cannot be opened within it, is reached through a refused symlink, or does not name a regular file |
+| `missing_file` | the file is absent, cannot be inspected or read after opening, or its read context was cancelled |
 | `handoff_digest_mismatch` | the file's byte count or sha256 disagrees with the envelope; the adapter fails closed and never falls back to another transport |
 
-`path_not_allowed` and `missing_file` also exist as image *output* `reason`
-values on the `-32603` `amp_turn_failed` envelope. The JSON-RPC error code tells
-the two apart: as a `-32602` `error` value the token describes a host-supplied
-inbound handoff path, and as a `reason` it describes an Amp-returned outbound
-artifact path.
+Unusable image output locations are refused with fixed tool-content guidance.
+They do not produce these inbound handoff errors or end the turn. See
+[Output refusals](/docs/reference/updates#output-refusals-and-failures).
 
 ### Advertised media envelope
 
@@ -213,8 +206,8 @@ spending a turn on it. See
 ## Seed Files
 
 `WithSeedFiles(map[string]string)` maps relative paths to file contents that the
-adapter writes into a session's resolved native root before the short-lived
-`amp threads` process launches, so the native CLI can read them as its own
+adapter writes into a session's resolved native root before the prompt
+process launches, so the native CLI can read them as its own
 on-disk state.
 
 - **Anchor** — the per-session isolated `HOME` that `amp` runs with. The adapter

@@ -3,6 +3,7 @@ package lifecycle
 import (
 	"encoding/json"
 	"math"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -45,6 +46,7 @@ func TestDecodeOfferStrictness(t *testing.T) {
 		{"unsupported version", offerMeta(2.0), MetaPath + ".version"},
 		{"string version", offerMeta("1"), MetaPath + ".version"},
 		{"unparsable number", offerMeta(json.Number("one")), MetaPath + ".version"},
+		{"32-bit wrap to one", offerMeta(json.Number("4294967297")), MetaPath + ".version"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -101,10 +103,28 @@ func TestIntegerValueRequiresExactRepresentability(t *testing.T) {
 		require.False(t, ok, "%v names no int", refused)
 	}
 
-	for _, accepted := range []float64{0, 1, -1, float64(math.MinInt)} {
+	for _, accepted := range []float64{0, 1, -1, float64(math.MinInt), math.Trunc(math.Nextafter(-float64(math.MinInt), 0))} {
 		value, ok := integerValue(accepted)
 		require.True(t, ok, "%v names an int", accepted)
 		require.Equal(t, int(accepted), value)
+	}
+}
+
+// JSON integers must fit the target int, including when this suite executes on 386.
+func TestIntegerValueJSONTargetBounds(t *testing.T) {
+	t.Parallel()
+
+	for _, want := range []int{math.MinInt, math.MaxInt, 0, 1} {
+		got, ok := integerValue(json.Number(strconv.Itoa(want)))
+		require.True(t, ok)
+		require.Equal(t, want, got)
+	}
+
+	upper := strconv.FormatUint(uint64(math.MaxInt)+1, 10)
+	lower := "-" + strconv.FormatUint(uint64(math.MaxInt)+2, 10)
+	for _, raw := range []string{upper, lower, "1.5", "9223372036854775808"} {
+		_, ok := integerValue(json.Number(raw))
+		require.False(t, ok, "%s must not narrow into an int", raw)
 	}
 }
 

@@ -26,7 +26,6 @@ type recordingAuthority struct {
 	lockOnPrepare  bool
 	inspectPrepare func(string) error
 	inspectReclaim func(string) error
-	readAppendLog  func(context.Context, string, uint64) ([][]byte, error)
 	prepareErr     error
 	startErr       error
 	startPanic     bool
@@ -71,12 +70,8 @@ func (a *recordingAuthority) WriteNativeAppendLog(context.Context, string, [][]b
 	return ErrHostAuthorityUnavailable
 }
 
-func (a *recordingAuthority) ReadNativeAppendLog(ctx context.Context, path string, offset uint64) ([][]byte, error) {
-	if a.readAppendLog == nil {
-		return nil, nil
-	}
-
-	return a.readAppendLog(ctx, path, offset)
+func (a *recordingAuthority) ReadNativeAppendLog(context.Context, string, uint64) ([][]byte, error) {
+	return nil, ErrHostAuthorityUnavailable
 }
 
 func (a *recordingAuthority) ReclaimNativeTree(_ context.Context, root string) error {
@@ -164,8 +159,8 @@ func (a *recordingAuthority) StartNative(_ context.Context, request NativeReques
 
 func environmentRoot(environment []string) string {
 	for _, entry := range environment {
-		if strings.HasPrefix(entry, "HOME=") {
-			return filepath.Dir(strings.TrimPrefix(entry, "HOME="))
+		if after, ok := strings.CutPrefix(entry, "HOME="); ok {
+			return filepath.Dir(after)
 		}
 	}
 
@@ -312,40 +307,6 @@ func TestHostAuthorityManagedLaunchTrace(t *testing.T) {
 		root := strings.TrimPrefix(events[index], "prepare:")
 		require.Equal(t, []string{"prepare:" + root, "start:" + root, "wait:" + root, "reclaim:" + root}, events[index:index+4])
 	}
-}
-
-func TestHostAuthorityReadNativeAppendLogDelegatesAndGuardsPanic(t *testing.T) {
-	authority := newRecordingAuthority()
-	callCtx := t.Context()
-	want := [][]byte{[]byte("first"), []byte("second")}
-	authority.readAppendLog = func(ctx context.Context, path string, offset uint64) ([][]byte, error) {
-		require.Same(t, callCtx, ctx)
-		require.Equal(t, "/native/append.log", path)
-		require.Equal(t, uint64(17), offset)
-
-		return want, nil
-	}
-
-	agent := NewAgent(WithHostAuthority(authority))
-	var options nativeamp.Options
-	agent.configureNativeClient(&options)
-	records, err := options.ReadNativeAppendLog(callCtx, "/native/append.log", 17)
-	require.NoError(t, err)
-	require.Equal(t, want, records)
-
-	wantErr := errors.New("read refused")
-	authority.readAppendLog = func(context.Context, string, uint64) ([][]byte, error) { return nil, wantErr }
-	records, err = options.ReadNativeAppendLog(callCtx, "/native/append.log", 17)
-	require.Nil(t, records)
-	require.ErrorIs(t, err, wantErr)
-
-	authority.readAppendLog = func(context.Context, string, uint64) ([][]byte, error) {
-		panic("read append log panic")
-	}
-	records, err = options.ReadNativeAppendLog(callCtx, "/native/append.log", 17)
-	require.Nil(t, records)
-	require.ErrorIs(t, err, ErrHostAuthorityUnavailable)
-	require.NotErrorIs(t, err, ErrContainmentIncomplete)
 }
 
 func TestManagedStartupProbeCacheIsAuthorityScoped(t *testing.T) {
@@ -510,19 +471,50 @@ func TestHostAuthorityUnusableStdioFailedSettlementRetainsTree(t *testing.T) {
 }
 
 func TestHostAuthorityFailedPrepareRetainsOpaqueTree(t *testing.T) {
-	want := errors.New("prepare outcome uncertain")
-	authority := newRecordingAuthority()
-	authority.prepareErr = want
-	agent := NewAgent(WithHostAuthority(authority), WithScratchDir(t.TempDir()))
+	for _, cause := range []error{
+		ErrNativeTreeBusy, context.Canceled, context.DeadlineExceeded,
+		errors.New("prepare outcome uncertain"), ErrHostAuthorityUnavailable,
+	} {
+		t.Run(cause.Error(), func(t *testing.T) {
+			authority := newRecordingAuthority()
+			var roots []string
+			authority.inspectPrepare = func(root string) error {
+				roots = append(roots, root)
+				require.NoError(t, os.WriteFile(filepath.Join(root, "authority-marker"), []byte("owned"), 0o600))
+				if cause == ErrHostAuthorityUnavailable {
+					panic("prepare callback panicked")
+				}
 
-	_, err := newAgentSession(t.Context(), agent, "session", t.TempDir(), parsedSessionMeta{}, "", nil)
-	require.ErrorIs(t, err, want)
-	require.ErrorIs(t, err, ErrContainmentIncomplete)
-	require.Len(t, authority.events, 1)
-	root := strings.TrimPrefix(authority.events[0], "prepare:")
-	_, statErr := os.Stat(root)
-	require.NoError(t, statErr, "a failed Prepare result leaves the attempted tree opaque and retained")
-	require.Zero(t, authority.reclaimCalls)
+				return cause
+			}
+			agent := NewAgent(WithHostAuthority(authority), WithScratchDir(t.TempDir()))
+
+			_, err := newAgentSession(t.Context(), agent, "session", t.TempDir(), parsedSessionMeta{}, "", nil)
+			require.ErrorIs(t, err, cause)
+			require.ErrorIs(t, err, ErrContainmentIncomplete)
+			require.ErrorIs(t, err, nativeamp.ErrContainmentIncomplete)
+			require.Len(t, roots, 1)
+			_, statErr := os.Stat(roots[0])
+			require.NoError(t, statErr, "a failed Prepare leaves the attempted tree opaque")
+			require.Zero(t, authority.reclaimCalls)
+
+			// Every failed prepare fences both tree preparation and native admission.
+			require.ErrorIs(t, agent.lifecycleContainmentErr, ErrContainmentIncomplete)
+			require.ErrorIs(t, agent.prepareNativeTree(t.Context(), t.TempDir()), cause)
+			require.Len(t, roots, 1)
+			var options nativeamp.Options
+			agent.configureNativeClient(&options)
+			_, err = options.StartNative(t.Context(), nativeamp.NativeRequest{Executable: "logical-amp"})
+			require.ErrorIs(t, err, cause)
+			require.ErrorIs(t, err, ErrContainmentIncomplete)
+			require.Empty(t, authority.events)
+			require.ErrorIs(t, agent.Close(), ErrContainmentIncomplete)
+			marker, readErr := os.ReadFile(filepath.Join(roots[0], "authority-marker"))
+			require.NoError(t, readErr)
+			require.Equal(t, "owned", string(marker), "failed preparation remains untouched through shutdown")
+			require.Zero(t, authority.reclaimCalls)
+		})
+	}
 }
 
 func TestHostAuthorityFailedPrepareQuarantinesAtCapacity(t *testing.T) {

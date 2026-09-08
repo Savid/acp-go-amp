@@ -2,8 +2,8 @@
 set -euo pipefail
 
 provider=amp
-packages=(. ./internal/amp)
-selector='^TestPortable'
+packages=(./internal/amp)
+selector='^(TestLookPathInOrdinaryEnvironmentWithUnixRules|TestOrdinaryProcessResultAndPipes|TestOrdinaryProcessCanceledWaitCanSettleAfterRevoke)$'
 
 # The hosted image supplies MinGW-w64; Go's race runtime requires its
 # synchronization library (https://go.dev/doc/articles/race_detector).

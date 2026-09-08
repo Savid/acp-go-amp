@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -307,7 +307,7 @@ func TestRawEventCrossSessionIsolation(t *testing.T) {
 		wg.Add(1)
 		go func(session *agentSession) {
 			defer wg.Done()
-			for i := 0; i < perSessionCount; i++ {
+			for range perSessionCount {
 				if err := session.emitRawEvent(ctx, "stream-json", fakeAmpMessage{raw: map[string]any{"type": "x"}}); err != nil {
 					t.Errorf("emit for %s: %v", session.id, err)
 				}
@@ -325,7 +325,7 @@ func TestRawEventCrossSessionIsolation(t *testing.T) {
 		t.Fatalf("sessions seen = %d, want 2", len(perSession))
 	}
 	for id, sequences := range perSession {
-		sort.Slice(sequences, func(i, j int) bool { return sequences[i] < sequences[j] })
+		slices.Sort(sequences)
 		for i, sequence := range sequences {
 			if sequence != int64(i+1) {
 				t.Fatalf("session %s sequence = %v, want contiguous 1..%d", id, sequences, perSessionCount)

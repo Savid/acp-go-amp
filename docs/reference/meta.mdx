@@ -4,9 +4,9 @@ description: The _meta.amp metadata the adapter accepts on requests, emits on up
 ---
 
 Lifecycle requests carry Amp-owned settings under the `_meta.amp` namespace.
-Unknown keys fail closed; foreign vendor namespaces are ignored. The reserved
-`acp-go.dev/*` literals are never foreign: each one is either read or rejected
-on every surface it can reach.
+Unknown keys fail closed; foreign vendor namespaces are ignored. Metadata
+builders refuse all reserved `acp-go.dev/*` literals; their wire handling is
+described below.
 
 ## Request metadata
 
@@ -32,8 +32,8 @@ on every surface it can reach.
 |---|---|
 | `options.env` | Map of environment overrides, including the session's complete raw `PATH`. Blocked names are listed below. |
 | `options.mode` | Any Amp mode; `low`, `medium`, `high`, `ultra` are advertised. No mode is refused here — the value reaches Amp's `-m` flag unchanged. The key may be omitted, which takes the advertised default, but a key present with an empty string names no mode and fails with the uniform unsupported error. |
-| `options.model` | Present for symmetry; any value fails with the uniform unsupported error at `_meta.amp.options.model`. |
-| `options.outputSchema` | Present for symmetry; any presence fails with the uniform unsupported error at `_meta.amp.options.outputSchema`. |
+| `options.model` | Unsupported; omit it. A non-empty selection or a non-string value fails at `_meta.amp.options.model`. |
+| `options.outputSchema` | Unsupported; any presence fails at `_meta.amp.options.outputSchema`. |
 | `rawEvent.enabled` | `true` to stream `_amp/rawEvent` for the session. |
 
 Unknown keys under `_meta.amp`, `_meta.amp.rawEvent`, or `_meta.amp.options`
@@ -63,9 +63,10 @@ earlier value, so the managed residence cannot be redirected by any caller
 value and the session's `options.env` owns the whole raw `PATH` the prompt
 process runs with.
 
-The `amp` executable is resolved and version-probed before any session exists,
-against the static base alone — the authority's `NativeEnvironment`, or the
-ordinary process environment, plus `WithEnv`. Children that are not prompts —
+Ordinary execution resolves and retains the `amp` executable against the
+captured process environment plus `WithEnv`. Managed execution passes its
+logical selector to the authority. Both version-probe before admitting a
+session. Children that are not prompts —
 startup probes, thread export, thread delete, and account login — run on that
 same static base plus their adapter-managed residence and the session's
 `AMP_API_KEY` and `AMP_URL`. Every other `options.env` value, the raw `PATH`
@@ -176,11 +177,10 @@ ignored; cancellation remains structurally scoped by `sessionId`.
 
 ## Session lifecycle
 
-`acp-go.dev/lifecycle` is the fourth reserved literal this adapter handles,
-alongside `acp-go.dev/mediaEnvelope`, `acp-go.dev/handoff`, and
-`acp-go.dev/route` — the one it deliberately does not implement. Unlike a vendor
-namespace, a reserved literal is never ignored: every surface either reads it or
-rejects it.
+`acp-go.dev/lifecycle` is reserved alongside `acp-go.dev/mediaEnvelope`,
+`acp-go.dev/handoff`, and `acp-go.dev/route`. Metadata request builders reject
+all four caller keys. The lifecycle reader accepts or refuses its literal on
+each dispatched surface; Amp implements no route reader.
 
 ### Capability
 
@@ -267,45 +267,26 @@ sequence space, and entities:
    watermark that proof covers. A non-authoritative answer states no boundary
    fact, so its incarnation ends at the terminal `idle`.
 
-The contained process exit fences the stream; the next prompt opens a new one.
-Sequences are claimed before delivery is attempted, so a lost event leaves a
-detectable gap rather than a silently contiguous stream.
+Settlement runs on a context detached from the request: native terminal and
+containment proof, durable commit, then terminal `idle`. The foreground response
+is released at that boundary. Optional authoritative quiescence and stream
+fencing complete the separate latch that close and delete await; blocking or
+failing quiescence cannot rewrite the foreground result.
+Sequences are claimed before delivery is attempted; retries retain their
+original identities.
 
-`session/close` therefore always meets a stream that is already fenced, or a
-session whose incarnation never opened, and it emits nothing on either: the
-terminal state was reported by whatever fenced the stream, and a turn recorded
-as `failed` is never restated as cancelled by the close that follows it. The
-containment boundary is unconditional and already settled inside the prompt, so
-a close that finds an uncertain boundary still fails.
+Failed containment or commit fails the prompt and emits no terminal `idle`.
+Retained frames and terminal notifications remain pending, and no later prompt
+is admitted while terminal delivery is pending. `session/close` retries the
+commit and delivery before eviction. A failed commit leaves the session
+addressable and reclaims nothing. A session fenced for delete owes no commit
+there. Close emits nothing for a stream already fenced or never opened.
 
-The durable commit ran inside the prompt too, but a settlement whose commit
-failed keeps its frames rather than dropping them, so `session/close` carries the
-same commit as its own rung: it retries the retained frames on a detached context
-before the session stops being addressable. A close that cannot land them fails
-and reclaims nothing — the session keeps its identity and its frames, and the
-close is retried once the store is back. A session already fenced for delete
-commits nothing there, because the tombstone is the last write to that row.
-
-`Agent.Close` owes the same rung. A commit a wire close would have made is made
-there too, or reported as the store's refusal — never dropped with the wrapper.
-A shutdown attempt is the last word: it boundedly joins and contains its owned
-wrappers, releases local state where containment permits, removes every callable
-ownership path, and memoizes its exact success or failure. A later `Agent.Close`
-only observes that result and repeats no native, persistence, or cleanup command.
-An unresolved native deletion is retried only while its isolated operation
-state remains intact. If shutdown must release that state after the retry also
-fails, the classified deletion failure is retained permanently; later shutdown
-calls cannot turn it into success or repeat the command from a released home.
-
-Settlement runs on a context detached from the request's, so a cancelled prompt
-still commits the frames it streamed, states its terminal boundary, and fences
-its stream before the response. The one exception is a settlement that cannot
-complete: when the containment boundary or the durable commit itself fails, the
-prompt fails with that error and emits **no** terminal `idle` — a boundary must
-never claim a foreground prefix the store does not hold. The exact terminal
-notifications remain pending; a close may first restore durability and then
-retransmit them with their original stream/sequence identities. No later prompt
-is admitted while that terminal proof is pending.
+`Agent.Close` also attempts the durable rung and reports its failure, but
+shutdown is final: it releases local state where containment permits, removes
+callable ownership paths, and memoizes the result. Later calls repeat no native,
+store, or cleanup operation. A failed native deletion remains failed when its
+operation residence has been released.
 
 The outcome a settled turn recorded is the one its ACP response states. A cancel
 landing while a turn is already failing does not turn that failure into a
@@ -324,7 +305,7 @@ patches already carry are unaffected.
 Amp has no permission or elicitation surface, so no action correlation value is
 ever emitted. Every other inbound surface — `session/new`, `session/load`,
 `session/resume`, `session/close`, `session/delete`, `session/list`,
-`session/set_mode`, `session/set_config_option` in either variant, `logout`,
+`session/set_config_option` in either variant, `logout`,
 `authenticate`, `_amp/auth/*`, and
 `_amp/session/fork` — rejects the key with `-32602`
 `{"error": "unsupported", "field": "_meta[\"acp-go.dev/lifecycle\"]"}` on the
@@ -332,11 +313,10 @@ bare path: the key is present where it has no meaning, which is never `missing`.
 fails closed before the native interrupt and the cancel is never applied; being
 a notification it carries no response frame, so that refusal is wire-silent.
 
-`session/set_mode` does not exist on this adapter and answers `-32601 method not
-found`. The refusal above is judged first: a reserved literal is never ignored
-because the request was going to be refused anyway, so a `session/set_mode`
-carrying the key answers `-32602` naming it, and so does the boolean
-`session/set_config_option` variant this adapter otherwise rejects on its
+`session/set_mode` does not exist on this adapter's wire dispatch and always
+answers `-32601 method not found`. The direct Go `SetSessionMode` method checks
+the lifecycle key before returning method-not-found. The dispatched boolean
+`session/set_config_option` variant checks the key before refusing its
 discriminator.
 
 An `_amp/*` request whose params cannot be decoded at all is refused before the

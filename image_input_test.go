@@ -23,7 +23,7 @@ func TestImagePromptValidationAcceptsPortableFormats(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			data := imageFixture(t, test.name)
 			block := acp.ImageBlock(base64.StdEncoding.EncodeToString(data), test.mimeType)
-			block.Image.Uri = acp.Ptr("https://invalid.example/ignored")
+			block.Image.Uri = new("https://invalid.example/ignored")
 
 			input, err := promptInputWithPolicy(t.Context(), []acp.ContentBlock{block}, defaultPolicy())
 			if err != nil {
@@ -410,7 +410,7 @@ func TestEmbeddedImageResourceUsesPromptImageBudget(t *testing.T) {
 		acp.ResourceBlock(acp.EmbeddedResourceResource{
 			BlobResourceContents: &acp.BlobResourceContents{
 				Blob:     encoded,
-				MimeType: acp.Ptr(imageMIMEPNG),
+				MimeType: new(imageMIMEPNG),
 				Uri:      "file:///ignored.png",
 			},
 		}),

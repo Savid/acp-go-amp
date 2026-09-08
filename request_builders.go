@@ -136,7 +136,7 @@ func WithSessionMeta(meta map[string]any) SessionRequestOption {
 }
 
 // WithSessionOutputSchema sets Amp structured-output schema for a session
-// lifecycle request.
+// lifecycle request. Amp refuses this field.
 func WithSessionOutputSchema(schema map[string]any) SessionRequestOption {
 	return func(cfg *sessionRequestConfig) {
 		mergeAmpOptionsMeta(cfg, map[string]any{metaOutputSchemaKey: cloneAnyMap(schema)})
@@ -147,7 +147,8 @@ func WithSessionOutputSchema(schema map[string]any) SessionRequestOption {
 func WithSessionRawEvents(enabled bool) SessionRequestOption {
 	return func(cfg *sessionRequestConfig) {
 		ampMeta := ensureAmpMeta(cfg)
-		ampMeta[metaRawEventKey] = map[string]any{metaEnabledKey: enabled}
+		rawEvent, _ := metadataObject(ampMeta[metaRawEventKey])
+		ampMeta[metaRawEventKey] = mergeAnyMap(rawEvent, map[string]any{metaEnabledKey: enabled})
 	}
 }
 
@@ -302,9 +303,11 @@ func (cfg sessionRequestConfig) additionalDirectoriesClone() []string {
 	return append([]string(nil), cfg.additionalDirectories...)
 }
 
-// reservedFamilyLiterals is the closed set of family-global keys Amp uses.
+// reservedFamilyLiterals is the closed set of family-global keys. Route remains
+// reserved for caller metadata even though Amp does not implement routing.
 func reservedFamilyLiterals() []string {
 	return []string{
+		"acp-go.dev/route",
 		metaMediaEnvelopeKey,
 		metaHandoffKey,
 		lifecycle.MetaKey,
@@ -320,7 +323,7 @@ func reservedFamilyLiterals() []string {
 // than an error, and the three quieter options are all worse: merging or
 // overwriting lets a host speak for the family under a name the family owns,
 // and dropping the key leaves the host believing metadata rode that never did.
-// A caller never writes one of these four names legitimately, so this is a
+// A caller never writes one of these names legitimately, so this is a
 // construction defect, deterministic and caught by the first call.
 func rejectReservedFamilyMeta(builder string, meta map[string]any) {
 	for _, literal := range reservedFamilyLiterals() {
@@ -340,8 +343,8 @@ func mergeAnyMap(base map[string]any, overlay map[string]any) map[string]any {
 	}
 
 	for key, value := range overlay {
-		if valueMap, ok := value.(map[string]any); ok {
-			if existing, ok := merged[key].(map[string]any); ok {
+		if valueMap, ok := metadataObject(value); ok {
+			if existing, ok := metadataObject(merged[key]); ok {
 				merged[key] = mergeAnyMap(existing, valueMap)
 
 				continue
@@ -352,6 +355,24 @@ func mergeAnyMap(base map[string]any, overlay map[string]any) map[string]any {
 	}
 
 	return merged
+}
+
+// metadataObject recognizes JSON objects and the string maps accepted by the
+// embedded session environment API, so either representation merges by member.
+func metadataObject(value any) (map[string]any, bool) {
+	switch typed := value.(type) {
+	case map[string]any:
+		return typed, true
+	case map[string]string:
+		object := make(map[string]any, len(typed))
+		for key, value := range typed {
+			object[key] = value
+		}
+
+		return object, true
+	default:
+		return nil, false
+	}
 }
 
 func ensureAmpMeta(cfg *sessionRequestConfig) map[string]any {
@@ -371,15 +392,8 @@ func ensureAmpMeta(cfg *sessionRequestConfig) map[string]any {
 func mergeAmpOptionsMeta(cfg *sessionRequestConfig, values map[string]any) {
 	ampMeta := ensureAmpMeta(cfg)
 
-	options, _ := ampMeta[ampOptionsKey].(map[string]any)
-	if options == nil {
-		options = map[string]any{}
-		ampMeta[ampOptionsKey] = options
-	}
-
-	for key, value := range values {
-		options[key] = value
-	}
+	options, _ := metadataObject(ampMeta[ampOptionsKey])
+	ampMeta[ampOptionsKey] = mergeAnyMap(options, values)
 }
 
 func ampOptionsPayload(options AmpOptions) map[string]any {

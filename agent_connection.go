@@ -1,16 +1,19 @@
 package ampacp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
 
 	"github.com/coder/acp-go-sdk"
+	"github.com/savid/acp-go-amp/internal/lifecycle"
 )
 
 // agentClient is the client-facing connection surface the agent emits through.
@@ -160,7 +163,13 @@ func localNotification[Req any, ReqPtr localAgentParams[Req]](
 
 func decodeLocalAgentParams[Req any, ReqPtr localAgentParams[Req]](params json.RawMessage) (Req, *acp.RequestError) {
 	var value Req
-	if err := json.Unmarshal(params, &value); err != nil {
+
+	masked := lifecycle.MaskWireMeta(params, lifecycle.MetaKey)
+	if _, prompt := any(&value).(*acp.PromptRequest); prompt {
+		masked = maskPromptHandoffMeta(masked)
+	}
+
+	if err := json.Unmarshal(masked, &value); err != nil {
 		return value, acp.NewInvalidParams(map[string]any{jsonFieldError: err.Error()})
 	}
 
@@ -168,7 +177,90 @@ func decodeLocalAgentParams[Req any, ReqPtr localAgentParams[Req]](params json.R
 		return value, acp.NewInvalidParams(map[string]any{jsonFieldError: err.Error()})
 	}
 
+	preserveLocalLifecycleMeta(params, &value)
+
+	if prompt, ok := any(&value).(*acp.PromptRequest); ok {
+		preservePromptHandoffMeta(params, prompt)
+	}
+
 	return value, nil
+}
+
+func preserveLocalLifecycleMeta(params json.RawMessage, value any) {
+	// Config-option requests are the SDK's union; the other typed requests
+	// carry their metadata directly on the request struct.
+	if option, ok := value.(*acp.SetSessionConfigOptionRequest); ok {
+		if option.Boolean != nil {
+			option.Boolean.Meta = lifecycle.PreserveWireMeta(params, option.Boolean.Meta)
+		}
+
+		if option.ValueId != nil {
+			option.ValueId.Meta = lifecycle.PreserveWireMeta(params, option.ValueId.Meta)
+		}
+
+		return
+	}
+
+	field := reflect.ValueOf(value).Elem().FieldByName("Meta")
+	if field.IsValid() {
+		meta, _ := field.Interface().(map[string]any)
+		field.Set(reflect.ValueOf(lifecycle.PreserveWireMeta(params, meta)))
+	}
+}
+
+func maskPromptHandoffMeta(params json.RawMessage) json.RawMessage {
+	return lifecycle.RewriteWireObject(params, func(name string, raw json.RawMessage) json.RawMessage {
+		if !strings.EqualFold(name, "prompt") {
+			return raw
+		}
+
+		var blocks []json.RawMessage
+		if json.Unmarshal(raw, &blocks) != nil {
+			return raw
+		}
+
+		for index, block := range blocks {
+			var kind struct {
+				Type string `json:"type"`
+			}
+			if json.Unmarshal(block, &kind) == nil && kind.Type == valImage {
+				blocks[index] = lifecycle.MaskWireMeta(block, metaHandoffKey)
+			}
+		}
+
+		encoded, _ := json.Marshal(blocks)
+
+		return encoded
+	})
+}
+
+func preservePromptHandoffMeta(params json.RawMessage, prompt *acp.PromptRequest) {
+	var original struct {
+		Prompt []json.RawMessage `json:"prompt"`
+	}
+
+	_ = json.Unmarshal(params, &original)
+
+	for index, block := range prompt.Prompt {
+		if block.Image == nil {
+			continue
+		}
+
+		var carrier struct {
+			Meta map[string]json.RawMessage `json:"_meta"` //nolint:tagliatelle // ACP metadata field.
+		}
+
+		_ = json.Unmarshal(original.Prompt[index], &carrier)
+		if raw, present := carrier.Meta[metaHandoffKey]; present {
+			decoder := json.NewDecoder(bytes.NewReader(raw))
+			decoder.UseNumber()
+
+			var value any
+
+			_ = decoder.Decode(&value)
+			block.Image.Meta[metaHandoffKey] = value
+		}
+	}
 }
 
 func (c *localAgentConnection) SessionUpdate(ctx context.Context, params acp.SessionNotification) error {

@@ -1137,7 +1137,7 @@ func TestListSessionsMergePaginationAndCwd(t *testing.T) {
 // ordering helper compares by UpdatedAt then SessionId.
 func TestPaginateSessionInfosCursorEdges(t *testing.T) {
 	infos := make([]acp.SessionInfo, 0, listSessionsPageSize+2)
-	for i := 0; i < listSessionsPageSize+2; i++ {
+	for i := range listSessionsPageSize + 2 {
 		infos = append(infos, acp.SessionInfo{SessionId: acp.SessionId(fmt.Sprintf("T-%03d", i))})
 	}
 
@@ -1173,6 +1173,52 @@ func TestPaginateSessionInfosCursorEdges(t *testing.T) {
 	}
 	if compareSessionInfos(acp.SessionInfo{SessionId: "T-a"}, acp.SessionInfo{SessionId: "T-a"}) != 0 {
 		t.Fatal("identical infos not equal")
+	}
+}
+
+func TestListSessionsOrdersFractionalTimestampsChronologically(t *testing.T) {
+	store := NewInMemorySessionStore()
+	base := time.Date(2026, time.September, 8, 0, 0, 0, 0, time.UTC).UnixMilli()
+	want := []acp.SessionId{"T-next-second", "T-fraction-long", "T-fraction-short", "T-whole-second"}
+	for index, delta := range []int64{1000, 101, 100, 0} {
+		key := SessionKey{SessionID: string(want[index])}
+		require.NoError(t, store.Append(t.Context(), key, []SessionStoreEntry{[]byte(`{}`)}))
+		store.updatedAt[key] = base + delta
+	}
+
+	agent := newTestAgent(WithSessionStore(store))
+	response, err := agent.ListSessions(t.Context(), ListSessionsRequest())
+	require.NoError(t, err)
+	got := make([]acp.SessionId, 0, len(response.Sessions))
+	for _, session := range response.Sessions {
+		got = append(got, session.SessionId)
+	}
+	require.Equal(t, want, got)
+}
+
+func TestLoadSessionUnreplayableContentUsesRestoreFailure(t *testing.T) {
+	for name, frame := range map[string]string{
+		"missing image artifact": `{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"TU-image","content":[{"type":"_amp_image_artifact","ref":"_artifacts/images/missing.json"}]}]}}`,
+		"null frame":             `null`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			path, _ := fakeAgentAmpPath(t, "")
+			store := NewInMemorySessionStore()
+			cwd := t.TempDir()
+			const id = "T-restore"
+			transcript := []SessionStoreEntry{json.RawMessage(frame)}
+			putStoredSession(t, store, id, cwd, transcript)
+			agent := newTestAgent(WithExecutablePath(path), WithScratchDir(testScratchDir(t)), WithSessionStore(store))
+
+			_, err := agent.LoadSession(t.Context(), LoadSessionRequest(id, cwd))
+			requireInternalErrorData(t, err, map[string]any{jsonFieldError: errorRestoreFailed})
+			retained, err := store.Load(t.Context(), SessionKey{SessionID: id, Subpath: transcriptSubpath})
+			require.NoError(t, err)
+			require.Equal(t, transcript, retained)
+			listed, err := store.ListSessions(t.Context())
+			require.NoError(t, err)
+			require.Len(t, listed, 1)
+		})
 	}
 }
 

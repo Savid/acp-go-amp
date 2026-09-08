@@ -271,17 +271,16 @@ func (a *Agent) ListSessions(ctx context.Context, params acp.ListSessionsRequest
 // compareSessionInfos orders merged session infos newest UpdatedAt first, then
 // by SessionId, so cursor pagination walks a deterministic sequence.
 func compareSessionInfos(left, right acp.SessionInfo) int {
-	l := ""
+	var l, r time.Time
 	if left.UpdatedAt != nil {
-		l = *left.UpdatedAt
+		l, _ = time.Parse(time.RFC3339Nano, *left.UpdatedAt)
 	}
 
-	r := ""
 	if right.UpdatedAt != nil {
-		r = *right.UpdatedAt
+		r, _ = time.Parse(time.RFC3339Nano, *right.UpdatedAt)
 	}
 
-	if byTime := strings.Compare(r, l); byTime != 0 {
+	if byTime := r.Compare(l); byTime != 0 {
 		return byTime
 	}
 

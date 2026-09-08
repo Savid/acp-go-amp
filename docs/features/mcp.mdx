@@ -17,7 +17,7 @@ which servers Amp can use.
 | SSE | Rejected. |
 | ACP | Rejected. |
 | entry with no transport | Rejected. |
-| entry with an empty server name | Rejected. |
+| entry with an empty, whitespace-only, or duplicate server name | Rejected. |
 
 A rejection is an invalid-params error naming the offending server index or
 field, raised during session start rather than mid-turn.
@@ -42,5 +42,6 @@ req := ampacp.NewSessionRequest(cwd,
 The adapter renders those two servers into a mode-`0600` file inside the
 adapter-owned session settings directory and passes only its path through
 `--mcp-config`. Header values therefore do not appear in process arguments. The
-file is removed after the prompt process exits. See the
+file is reused across prompts in that session residence and removed when the
+residence is reclaimed by close, delete, replacement, or agent shutdown. See the
 [Go API](/docs/reference/go-api) for the builder signatures.

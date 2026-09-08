@@ -108,7 +108,7 @@ func (p *providerAuth) methods(_ context.Context, params json.RawMessage) (any, 
 		return nil, sessionErr
 	}
 
-	methods, entries := buildAuthCatalog()
+	methods, entries := buildAuthCatalog(p.agent.options.hostAuthoritySupplied)
 	if len(methods) == 0 {
 		return nil, authFailed(authCauseNativeVeto, "", "", "")
 	}
@@ -129,12 +129,16 @@ func (p *providerAuth) methods(_ context.Context, params json.RawMessage) (any, 
 // buildAuthCatalog applies the label bound entry by entry. An invalid entry is
 // omitted rather than truncated. The methods leg fails closed only when none
 // survive.
-func buildAuthCatalog() (map[string][]authCatalogMethod, map[string][]authMethodEntry) {
+func buildAuthCatalog(managed bool) (map[string][]authCatalogMethod, map[string][]authMethodEntry) {
 	pinned := pinnedAuthCatalog()
 	methods := make([]authCatalogMethod, 0, len(pinned))
 	entries := make([]authMethodEntry, 0, len(pinned))
 
 	for _, method := range pinned {
+		if managed && method.ID == authMethodLogin {
+			continue
+		}
+
 		label, ok := authDisplayText(method.Label, authMaxLabelBytes)
 		if !ok {
 			continue

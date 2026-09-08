@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -56,11 +57,21 @@ type promptTurnState struct {
 	// settlement records the boundary rung that failed. Close can discharge an
 	// owed durable rung by retrying it; containment and delivery failures remain
 	// failures until a later teardown proves its own complete boundary.
-	settlement   promptSettlement
-	cancelled    chan struct{}
-	completed    chan struct{}
-	cancelOnce   sync.Once
-	completeOnce sync.Once
+	settlement     promptSettlement
+	cancelled      chan struct{}
+	completed      chan struct{}
+	cancelOnce     sync.Once
+	completeOnce   sync.Once
+	foreground     chan promptForegroundResult
+	foregroundOnce sync.Once
+}
+
+// The foreground result is immutable once commit and idle have completed.
+// A later settlement failure belongs to the full completion latch.
+type promptForegroundResult struct {
+	response  acp.PromptResponse
+	err       error
+	recovered any
 }
 
 // promptSettlement separates the boundary rungs a prompt can leave owed. The
@@ -90,10 +101,14 @@ func (d *promptTerminalDelivery) deliver(ctx context.Context) error {
 		return nil
 	}
 
+	return d.deliverThrough(ctx, len(d.notifications))
+}
+
+func (d *promptTerminalDelivery) deliverThrough(ctx context.Context, count int) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	for d.next < len(d.notifications) {
+	for d.next < min(count, len(d.notifications)) {
 		if beforeDelivery := d.stream.session.agent.options.runtime.beforeTerminalDelivery; beforeDelivery != nil {
 			beforeDelivery(d.notifications[d.next])
 		}
@@ -105,7 +120,7 @@ func (d *promptTerminalDelivery) deliver(ctx context.Context) error {
 		d.next++
 	}
 
-	if d.stream != nil {
+	if d.stream != nil && d.next == len(d.notifications) {
 		d.stream.fence()
 	}
 
@@ -200,7 +215,14 @@ func (s promptSettlement) err() error {
 }
 
 func newPromptTurnState() *promptTurnState {
-	return &promptTurnState{cancelled: make(chan struct{}), completed: make(chan struct{})}
+	return &promptTurnState{
+		cancelled: make(chan struct{}), completed: make(chan struct{}),
+		foreground: make(chan promptForegroundResult, 1),
+	}
+}
+
+func (s *promptTurnState) publishForeground(result promptForegroundResult) {
+	s.foregroundOnce.Do(func() { s.foreground <- result })
 }
 
 func (s *promptTurnState) setTurn(turn *amp.Turn) {
@@ -326,7 +348,32 @@ type promptResult struct {
 	transcript []SessionStoreEntry
 }
 
+// Prompt returns the foreground outcome while the admitted owner retains the
+// turn lock and full completion latch through later quiescence and cleanup.
 func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (acp.PromptResponse, error) {
+	state := newPromptTurnState()
+
+	go func() {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				state.publishForeground(promptForegroundResult{recovered: recovered})
+				handleAgentGoroutinePanic(ctx, agentLogger(s.agent), "prompt settlement", nil, recovered)
+			}
+		}()
+
+		response, err := s.runPrompt(ctx, params, state)
+		state.publishForeground(promptForegroundResult{response: response, err: err})
+	}()
+
+	result := <-state.foreground
+	if result.recovered != nil {
+		panic(result.recovered)
+	}
+
+	return result.response, result.err
+}
+
+func (s *agentSession) runPrompt(ctx context.Context, params acp.PromptRequest, state *promptTurnState) (acp.PromptResponse, error) {
 	if err := s.ready(); err != nil {
 		return acp.PromptResponse{}, err
 	}
@@ -356,8 +403,6 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (ac
 	if err != nil {
 		return acp.PromptResponse{}, err
 	}
-
-	state := newPromptTurnState()
 
 	continueCtx, cancelContinue := context.WithCancel(ctx)
 	defer cancelContinue()
@@ -510,18 +555,11 @@ func (e unsettledPromptError) Unwrap() error { return e.err }
 // wire shape for the caller that reads it.
 func unsettled(err error) error { return unsettledPromptError{err: err} }
 
-// settlePrompt closes the turn in the one order the close-fenced proof class
-// binds: the native terminal is already past, so the whole-tree containment and
-// vacancy proof completes first, then the durable commit, then the terminal idle,
-// then the quiescence fact the completed proof produced, and only then the v1
-// response. A failed commit or an incomplete boundary fails the prompt and emits
-// no terminal idle, so no boundary claims a foreground prefix the store does not
-// hold and the incarnation ends unsettled for the next snapshot to state.
-//
-// Settlement runs on a context detached from the request's. A cancelled request
-// still gets its durable commit, its terminal boundary, and its fenced stream:
-// the cancellation ends the native turn, never the settlement of what that turn
-// already streamed.
+// settlePrompt owns containment, the durable commit, and terminal delivery on
+// a detached context. Commit plus idle publishes the foreground result; later
+// quiescence and stream fencing complete the latch close/delete must join.
+// Failed containment or commit emits no idle. Both terminal notifications keep
+// their original identities for an exact retry after a delivery failure.
 func (s *agentSession) settlePrompt(
 	ctx context.Context,
 	turn *amp.Turn,
@@ -614,10 +652,20 @@ func (s *agentSession) settlePrompt(
 
 	phase = promptSettlementPhaseDelivery
 
-	if deliveryErr := terminal.deliver(settleCtx); deliveryErr != nil {
+	if deliveryErr := terminal.deliverThrough(settleCtx, 1); deliveryErr != nil {
 		settlement.deliveryErr = deliveryErr
 
 		return acp.PromptResponse{}, unsettled(firstError(result.err, deliveryErr))
+	}
+
+	if len(terminal.notifications) > 1 {
+		state.publishForeground(promptForegroundResult{response: result.response, err: result.err})
+
+		if deliveryErr := terminal.deliver(settleCtx); deliveryErr != nil {
+			settlement.deliveryErr = deliveryErr
+
+			return acp.PromptResponse{}, unsettled(firstError(result.err, deliveryErr))
+		}
 	}
 
 	s.clearPendingTerminal(terminal)
@@ -907,6 +955,9 @@ func (s *agentSession) emitMessage(ctx context.Context, msg amp.Message, live bo
 						parent,
 						err,
 					)
+					if !live {
+						return errors.Join(restoreFailed(), err)
+					}
 
 					return err
 				}
@@ -1166,13 +1217,19 @@ type promptImagePolicy struct {
 	// handoffRoot is the host-supplied read root for the handoff input form.
 	// Empty rejects every handoff-form block.
 	handoffRoot string
+	managedRoot func() (*os.Root, *handoffError)
 }
 
 func (a *Agent) promptImagePolicy() promptImagePolicy {
-	return promptImagePolicy{
+	policy := promptImagePolicy{
 		limits:      a.options.ImageLimits,
 		handoffRoot: a.options.InputHandoffRoot,
 	}
+	if a.options.hostAuthoritySupplied {
+		policy.managedRoot = a.managedHandoffRoot
+	}
+
+	return policy
 }
 
 func promptInputWithPolicy(ctx context.Context, blocks []acp.ContentBlock, policy promptImagePolicy) (map[string]any, error) {
@@ -1182,7 +1239,7 @@ func promptInputWithPolicy(ctx context.Context, blocks []acp.ContentBlock, polic
 		return nil, acp.NewInvalidParams(map[string]any{jsonFieldError: valUnsupported, jsonFieldField: fieldPrompt})
 	}
 
-	imageBudget := imagePromptBudget{limits: policy.limits, handoffRoot: policy.handoffRoot}
+	imageBudget := imagePromptBudget{limits: policy.limits, handoffRoot: policy.handoffRoot, managedRoot: policy.managedRoot}
 
 	defer imageBudget.closeHandoffRoot()
 
@@ -1334,8 +1391,8 @@ func usageFromAmp(usage *amp.Usage) *acp.Usage {
 		OutputTokens: usage.OutputTokens,
 		TotalTokens:  total,
 	}
-	acpUsage.CachedReadTokens = acp.Ptr(usage.CacheReadInputTokens)
-	acpUsage.CachedWriteTokens = acp.Ptr(usage.CacheCreationInputTokens)
+	acpUsage.CachedReadTokens = new(usage.CacheReadInputTokens)
+	acpUsage.CachedWriteTokens = new(usage.CacheCreationInputTokens)
 
 	return acpUsage
 }

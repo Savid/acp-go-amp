@@ -79,7 +79,7 @@ func ordinaryWindowsExecutableExtensions(value string) []string {
 
 	var extensions []string
 
-	for _, extension := range strings.Split(value, ";") {
+	for extension := range strings.SplitSeq(value, ";") {
 		extension = strings.ToLower(strings.TrimSpace(extension))
 		if extension == "" {
 			continue
