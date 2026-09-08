@@ -50,3 +50,18 @@ A zero field disables that configured budget; Amp's smaller native input
 envelopes and the adapter's hard output bound still apply. See
 [Image input](/docs/features/models-config#image-input) and
 [Image output](/docs/reference/updates#image-tool-content).
+
+## Quota types
+
+`RateLimitsMethod` names `_amp/rateLimits`, dispatched through
+`Agent.HandleExtensionMethod`. `RateLimitsRequest` selects `providerId` and
+optional `sessionId`; `RateLimitsResponse` contains `providerId`, `availability`,
+optional `reason`, and `pools`. `RateLimitPool`, `RateLimitWindow`,
+`RateLimitBalance`, and `RateLimitMoney` describe the normalized observations.
+Optional numbers use pointers so measured zero remains present. See
+[Rate limits](/docs/reference/acp-methods#rate-limits) for selection and availability.
+
+`WithAmpDirectAPI(bool)` configures `Options.DirectAPI`, enabled by default.
+It controls the on-demand native account read and does not change prompt
+authentication. A measurement needs an addressed live session with a delivered
+`AMP_API_KEY`; the native command resolves that session's deployment and settings.

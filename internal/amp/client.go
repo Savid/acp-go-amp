@@ -90,6 +90,9 @@ type Options struct {
 	AfterNativeWait           func(context.Context) error
 	CleanupResidence          func() error
 	TestOnlyAuthLoginPlatform string
+	commandOutputLimit        int
+	commandValuesFree         bool
+	commandObservedAt         *time.Time
 }
 
 type Client struct {
@@ -520,12 +523,13 @@ func (c *Client) outputAtPath(ctx context.Context, path string, args ...string) 
 	stderrStream := process.Stderr()
 	_ = stdin.Close()
 
-	var stdout, stderr bytes.Buffer
+	stdout := commandCapture{limit: c.options.commandOutputLimit}
+	stderr := commandCapture{limit: c.options.commandOutputLimit}
 
-	readDone := make(chan struct{}, 2)
+	readDone := make(chan error, 2)
 
-	go func() { _, _ = io.Copy(&stdout, stdoutStream); readDone <- struct{}{} }()
-	go func() { _, _ = io.Copy(&stderr, stderrStream); readDone <- struct{}{} }()
+	go copyCommandStream(&stdout, stdoutStream, readDone, c.options.commandValuesFree)
+	go copyCommandStream(&stderr, stderrStream, readDone, c.options.commandValuesFree)
 
 	result, waitErr := process.Wait(ctx)
 	terminal := waitErr == nil
@@ -570,15 +574,26 @@ func (c *Client) outputAtPath(ctx context.Context, path string, args ...string) 
 		_ = stderrStream.Close()
 	}
 
-	<-readDone
-	<-readDone
+	readErr := errors.Join(<-readDone, <-readDone)
+
+	if c.options.commandObservedAt != nil {
+		*c.options.commandObservedAt = stdout.receivedAt
+	}
 
 	if reaped {
 		_ = stdoutStream.Close()
 		_ = stderrStream.Close()
 	}
 
+	if readErr != nil {
+		return nil, errors.Join(readErr, waitErr)
+	}
+
 	if waitErr != nil || result.ExitCode != 0 || result.Signal != 0 || result.Revoked {
+		if c.options.commandValuesFree {
+			return nil, errors.Join(errors.New("amp account read failed"), waitErr)
+		}
+
 		msg := strings.TrimSpace(stripANSI(stderr.String()))
 		if msg == "" {
 			msg = fmt.Sprintf("exit code %d signal %d", result.ExitCode, result.Signal)
@@ -587,7 +602,60 @@ func (c *Client) outputAtPath(ctx context.Context, path string, args ...string) 
 		return nil, errors.Join(fmt.Errorf("amp %s: %s", strings.Join(args, " "), msg), waitErr)
 	}
 
+	if stdout.truncated || stderr.truncated {
+		return nil, errors.New("amp command output limit exceeded")
+	}
+
 	return stdout.Bytes(), nil
+}
+
+// commandCapture drains a child while bounding retained bytes. Its explicit
+// Write prevents io.Copy from bypassing the bound through bytes.Buffer.ReadFrom.
+type commandCapture struct {
+	buffer     bytes.Buffer
+	limit      int
+	truncated  bool
+	receivedAt time.Time
+}
+
+func (c *commandCapture) Write(data []byte) (int, error) {
+	size := len(data)
+	if size > 0 {
+		c.receivedAt = time.Now().UTC()
+	}
+
+	if c.limit > 0 && size > c.limit-c.buffer.Len() {
+		data = data[:c.limit-c.buffer.Len()]
+		c.truncated = true
+	}
+
+	_, _ = c.buffer.Write(data)
+
+	return size, nil
+}
+
+func (c *commandCapture) String() string { return c.buffer.String() }
+func (c *commandCapture) Bytes() []byte  { return c.buffer.Bytes() }
+
+func copyCommandStream(destination io.Writer, source io.Reader, done chan<- error, valuesFree bool) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			if !valuesFree {
+				panic(recovered)
+			}
+
+			done <- ErrContainmentIncomplete
+		}
+	}()
+
+	_, err := io.Copy(destination, source)
+	if valuesFree && err != nil {
+		done <- errors.New("amp account output read failed")
+
+		return
+	}
+
+	done <- nil
 }
 
 func (c *Client) startNative(ctx context.Context, request NativeRequest) (NativeProcess, error) {

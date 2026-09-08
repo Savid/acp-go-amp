@@ -180,6 +180,7 @@ type agentSession struct {
 	turn               chan struct{}
 	cancelMu           sync.Mutex
 	activePrompt       *promptTurnState
+	quotaReads         map[*quotaReadLease]struct{}
 	persistMu          sync.Mutex
 	persistFlight      *sessionPersistenceFlight
 	persistGeneration  uint64
@@ -565,12 +566,13 @@ func (s *agentSession) settleClose(ctx context.Context) closeSettlement {
 	state := s.fenceAdmission()
 
 	s.closeProviderAuth()
+	quotaErr := s.settleQuotaReads(ctx)
 
 	if state != nil {
 		state.cancel()
 	}
 
-	err := s.interruptState(context.Background(), state)
+	err := errors.Join(quotaErr, s.interruptState(context.Background(), state))
 	completion := s.retainedPromptSettlement()
 
 	if state != nil {
@@ -799,12 +801,13 @@ func (s *agentSession) deleteOwned(ctx context.Context) error {
 	state := s.fenceAdmission()
 
 	s.closeProviderAuth()
+	quotaErr := s.settleQuotaReads(ctx)
 
 	if state != nil {
 		state.cancel()
 	}
 
-	interruptErr := s.interruptState(context.Background(), state)
+	interruptErr := errors.Join(quotaErr, s.interruptState(context.Background(), state))
 	s.recordScratchContainment(interruptErr)
 
 	boundaryErr := errors.Join(s.scratchContainmentError(), interruptErr)

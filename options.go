@@ -94,6 +94,7 @@ type Options struct {
 	// non-empty value is rejected at every session start.
 	ProviderAuthDirectHome string
 	Env                    map[string]string
+	DirectAPI              bool
 
 	Logger            *slog.Logger
 	TracerProvider    trace.TracerProvider
@@ -164,6 +165,7 @@ func applyOptions(opts []Option) Options {
 		AgentName:               defaultAgentName,
 		AgentTitle:              defaultAgentTitle,
 		AgentVersion:            defaultAgentVersion,
+		DirectAPI:               true,
 		SessionStoreLoadTimeout: defaultSessionStoreTimeout,
 		ImageLimits: ImageLimits{
 			MaxInputBytesPerImage:     defaultImageLimitBytes,
@@ -338,6 +340,14 @@ func WithDefaultModel(model string) Option {
 func WithEnv(env map[string]string) Option {
 	return func(options *Options) {
 		options.Env = cloneStringMap(env)
+	}
+}
+
+// WithAmpDirectAPI enables on-demand quota reads using the effective Amp API
+// key and native-resolved deployment. It defaults to true; false disables these reads.
+func WithAmpDirectAPI(enabled bool) Option {
+	return func(options *Options) {
+		options.DirectAPI = enabled
 	}
 }
 

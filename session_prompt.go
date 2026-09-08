@@ -448,6 +448,13 @@ func (s *agentSession) runPrompt(ctx context.Context, params acp.PromptRequest, 
 	ctx = withCallbackProvenance(ctx, s.agent, state)
 	continueCtx = withCallbackProvenance(continueCtx, s.agent, state)
 
+	// Admission gives prompts priority over account reads. The active prompt
+	// fences new quota children while every earlier quota handle is cancelled
+	// and joined before this incarnation can claim a vacant opening boundary.
+	if quotaErr := s.settleQuotaReads(ctx); quotaErr != nil {
+		return acp.PromptResponse{}, nativeInternalError(classContainmentIncomplete, quotaErr)
+	}
+
 	// One prompt is one contained process, so one prompt is one incarnation: the
 	// snapshot opening it is the first lifecycle-bearing notification inside the
 	// prompt, and it precedes acceptance.

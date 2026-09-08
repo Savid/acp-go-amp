@@ -159,6 +159,9 @@ docs-audit:
 	@rg -q 'flags.StringVar\(&providerAuthRoot, "provider-auth-root"' cmd/acp-go-amp/main.go
 	@rg -q 'flags.StringVar\(&providerAuthDirectHome, "provider-auth-direct-home"' cmd/acp-go-amp/main.go
 	@rg -q 'flags.BoolVar\(&debug, "debug"' cmd/acp-go-amp/main.go
+	@rg -q 'flags.BoolVar\(&ampDirectAPI, "amp-direct-api"' cmd/acp-go-amp/main.go
+	@rg -q 'amp-direct-api' docs/reference/cli.mdx
+	@rg -q 'WithAmpDirectAPI' docs/reference/go-api.mdx
 	@rg -q 'flags.BoolVar\(&showVersion, "version"' cmd/acp-go-amp/main.go
 	@rg -q 'local transcript restore is not native thread resurrection' README.md docs/features/session-store.mdx
 	@rg -q 'continuation requires the live server-side Amp thread and AMP_API_KEY' README.md docs/features/session-store.mdx

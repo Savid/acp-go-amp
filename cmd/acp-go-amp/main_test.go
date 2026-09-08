@@ -36,6 +36,7 @@ func TestRunPassesContractFlags(t *testing.T) {
 		"-home", "/tmp/amp",
 		"-model", "ignored",
 		"-scratch-dir", "/tmp/scratch",
+		"-amp-direct-api=false",
 		"-debug",
 	}, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil))
 
@@ -56,6 +57,9 @@ func TestRunPassesContractFlags(t *testing.T) {
 	}
 	if got.ScratchDir != "/tmp/scratch" {
 		t.Fatalf("ScratchDir = %q", got.ScratchDir)
+	}
+	if got.DirectAPI {
+		t.Fatal("-amp-direct-api=false did not disable native account reads")
 	}
 	if got.Logger == nil {
 		t.Fatal("Logger is nil")

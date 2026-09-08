@@ -33,6 +33,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 		providerAuthRoot       string
 		providerAuthDirectHome string
 		debug                  bool
+		ampDirectAPI           bool
 		showVersion            bool
 		seedFiles              = seedFileFlag{}
 	)
@@ -46,6 +47,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 	flags.StringVar(&providerAuthRoot, "provider-auth-root", "", "durable directory for the provider-auth ledger; without it no provider-auth method is advertised")
 	flags.StringVar(&providerAuthDirectHome, "provider-auth-direct-home", "", "unsupported: Amp's disconnect releases only the ledger slot a connection owns, so no leg acts on a canonical native home; a non-empty value is rejected at session start")
 	flags.BoolVar(&debug, "debug", false, "enable debug logging")
+	flags.BoolVar(&ampDirectAPI, "amp-direct-api", true, "enable on-demand quota reads with the effective Amp API key")
 	flags.BoolVar(&showVersion, "version", false, "print adapter version and exit")
 	flags.Var(&seedFiles, "seed-file", "seed file as <relpath>=<hostpath>, written into each session's isolated native root; repeatable")
 
@@ -113,6 +115,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 		ampacp.WithHome(home),
 		ampacp.WithDefaultModel(model),
 		ampacp.WithScratchDir(scratchDir),
+		ampacp.WithAmpDirectAPI(ampDirectAPI),
 		ampacp.WithProviderAuthRoot(providerAuthRoot),
 		ampacp.WithProviderAuthDirectHome(providerAuthDirectHome),
 		ampacp.WithLogger(logger),
