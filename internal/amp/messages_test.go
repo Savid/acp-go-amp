@@ -136,3 +136,9 @@ func TestParseHelpersCoverCoercions(t *testing.T) {
 		}
 	}
 }
+
+func TestParseJSONLineRejectsNull(t *testing.T) {
+	if msg, err := ParseJSONLine([]byte(`null`)); err == nil || msg != nil {
+		t.Fatalf("null frame = (%#v, %v), want a parse refusal", msg, err)
+	}
+}

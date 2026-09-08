@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"path/filepath"
 	"slices"
 	"sync"
@@ -81,6 +82,7 @@ type Agent struct {
 	// substitute a different harness later.
 	harnessMu   sync.Mutex
 	harnessPath string
+	handoff     managedHandoff
 }
 
 type agentSessionFlightKind uint8
@@ -322,9 +324,7 @@ func (a *Agent) closeAttempt() error {
 	a.mu.Lock()
 
 	sessions := make(map[acp.SessionId]*agentSession, len(a.sessions))
-	for id, session := range a.sessions {
-		sessions[id] = session
-	}
+	maps.Copy(sessions, a.sessions)
 
 	cleanupOwners := make(map[acp.SessionId][]agentCleanupOwner, len(a.cleanupOwners))
 	for id, owners := range a.cleanupOwners {
@@ -415,7 +415,7 @@ func (a *Agent) closeAttempt() error {
 		a.observe.AddActiveSession(context.Background(), -removed)
 	}
 
-	return publicContainmentError(closeErr)
+	return publicContainmentError(errors.Join(closeErr, a.closeManagedHandoff()))
 }
 
 func invokeShutdownStep(step func() error) (err error) {

@@ -48,7 +48,7 @@ func childEnvironments(t *testing.T, state string) [][]string {
 	}
 
 	blocks := make([][]string, 0, 4)
-	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+	for line := range strings.SplitSeq(strings.TrimSpace(string(data)), "\n") {
 		var entries []string
 		if err := json.Unmarshal([]byte(line), &entries); err != nil {
 			t.Fatalf("decode recorded child environment %q: %v", line, err)

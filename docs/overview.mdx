@@ -8,7 +8,7 @@ Protocol sessions directly onto Amp threads so an ACP host can drive Amp over
 stdio or embed the agent in a Go program with `ampacp.Serve`.
 
 The native boundary is the `amp` executable. The adapter does not run an HTTP
-service or a native UI; it launches one short-lived `amp threads` process per
+service or a native UI; it launches one short-lived `amp` process per
 prompt and streams the result back as ACP updates.
 
 ## What it maps
@@ -39,10 +39,11 @@ owns the ACP surface:
 
 ## What the adapter does not own
 
-Amp owns authentication, the model backend, and durable thread state on the
-server side. The adapter never logs in and never persists credentials, and it
-exposes no permission bridging, no adapter-owned model matrix, and no fork
-surface.
+Amp owns the model backend and server-side thread state. The optional
+[provider-auth broker](/docs/features/authentication) runs login in an isolated
+residence and returns a credential once. Broker material stays out of the
+session store, but session environment values are persisted and may contain
+credentials. The adapter exposes no permission bridge, model matrix, or fork.
 
 ## Where to go next
 

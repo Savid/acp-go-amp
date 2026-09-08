@@ -745,3 +745,57 @@ func TestManualAPIKeyCancelWinsAgainstClaimedHarvestFailure(t *testing.T) {
 		t.Fatalf("cancelled flow retained bytes/claim: %d/%v", retained, claimed)
 	}
 }
+
+func TestHostedCredentialRefusesRetiredFlowAfterReading(t *testing.T) {
+	for _, retire := range []string{"close", "supersede", "admission"} {
+		t.Run(retire, func(t *testing.T) {
+			fixture := newAuthFixture(t, "login")
+			authorized := fixture.mustAuthorize("connection-retired-harvest")
+			if err := fixture.callback(authorized.FlowID, "pasted-envelope"); err != nil {
+				t.Fatal(err)
+			}
+
+			originalRead := authReadSecret
+			read := make(chan struct{})
+			release := make(chan struct{})
+			authReadSecret = func(root string) (string, bool, error) {
+				secret, present, err := originalRead(root)
+				close(read)
+				<-release
+
+				return secret, present, err
+			}
+			t.Cleanup(func() { authReadSecret = originalRead })
+
+			type outcome struct {
+				result any
+				err    error
+			}
+			answered := make(chan outcome, 1)
+			params := fixture.rawParams(map[string]any{
+				authFieldSessionID: string(fixture.session.id), authFieldProviderID: authProviderID,
+				authFieldFlowID: authorized.FlowID,
+			})
+			go func() {
+				result, err := fixture.broker.credential(t.Context(), params)
+				answered <- outcome{result, err}
+			}()
+
+			<-read
+			switch retire {
+			case "close":
+				fixture.broker.closeSession(fixture.session.id)
+			case "supersede":
+				fixture.broker.supersede(authFlowKey{sessionID: fixture.session.id, providerID: authProviderID}, authReasonSuperseded)
+			case "admission":
+				fixture.session.fenceAdmission()
+			}
+			close(release)
+			got := <-answered
+			if got.result != nil {
+				t.Fatal("retired flow returned credential material")
+			}
+			requireAuthCause(t, got.err, authCauseFlowState)
+		})
+	}
+}

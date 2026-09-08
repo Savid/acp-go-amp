@@ -5,11 +5,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/coder/acp-go-sdk"
+	nativeamp "github.com/savid/acp-go-amp/internal/amp"
+	"github.com/savid/acp-go-amp/internal/lifecycle"
+	"github.com/stretchr/testify/require"
 )
 
 func TestLocalAgentConnectionHandleDispatch(t *testing.T) {
@@ -242,4 +248,146 @@ func TestLocalAgentConnectionAnswersAnHonoredNotification(t *testing.T) {
 	if reqErr != nil || resp != nil {
 		t.Fatalf("honored cancel = %#v, %#v", resp, reqErr)
 	}
+}
+
+// These requests go through Serve and the SDK transport with their original
+// duplicate members and number lexemes, rather than predecoded Go maps.
+func TestServePreservesOwnedLifecycleMetadata(t *testing.T) {
+	for _, tc := range []struct{ name, meta, field string }{
+		{"exact", `"_meta":{"acp-go.dev/lifecycle":{"version":1}}`, ""},
+		{"duplicate version", `"_meta":{"acp-go.dev/lifecycle":{"version":2,"version":1}}`, ".version"},
+		{"near integer", `"_meta":{"acp-go.dev/lifecycle":{"version":1.0000000000000001}}`, ".version"},
+		{"float overflow", `"_meta":{"acp-go.dev/lifecycle":{"version":1e400}}`, ".version"},
+		{"metadata alias", `"_META":{"acp-go.dev/lifecycle":{"version":1e400}}`, ".version"},
+		{"alias erasure", `"_META":{"acp-go.dev/lifecycle":{"version":2}},"_meta":null`, "root"},
+		{"int wrap", `"_meta":{"acp-go.dev/lifecycle":{"version":4294967297}}`, ".version"},
+		{"duplicate namespace", `"_meta":{"acp-go.dev/lifecycle":{"version":2},"acp-go.dev/lifecycle":{"version":1}}`, "root"},
+		{"erased envelope", `"_meta":{"acp-go.dev/lifecycle":{"version":2}},"_meta":null`, "root"},
+		{"foreign only", `"_meta":{"foreign":{"version":2,"version":1}},"_meta":{"foreign":1}`, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conn := lifecycleWireConnection(t, newTestAgent())
+			_, err := acp.SendRequest[json.RawMessage](conn, t.Context(), acp.AgentMethodInitialize,
+				json.RawMessage(`{"protocolVersion":1,`+tc.meta+`}`))
+			if tc.field == "" {
+				require.NoError(t, err)
+
+				return
+			}
+			field := lifecycle.MetaPath
+			if tc.field != "root" {
+				field += tc.field
+			}
+			requireInvalidParamsData(t, err, map[string]any{"error": "unsupported", "field": field})
+		})
+	}
+}
+
+func TestServeLifecycleCorrelationAndForbiddenSurfaces(t *testing.T) {
+	agent := newTestAgent(WithEnv(map[string]string{"AMP_API_KEY": "fake"}), WithScratchDir(t.TempDir()))
+	session, err := newAgentSession(t.Context(), agent, "wire-session", t.TempDir(), parsedSessionMeta{}, "", nil)
+	require.NoError(t, err)
+	agent.mu.Lock()
+	agent.activateSessionLocked(session)
+	agent.mu.Unlock()
+	conn := lifecycleWireConnection(t, agent)
+	_, err = acp.SendRequest[json.RawMessage](conn, t.Context(), acp.AgentMethodInitialize,
+		json.RawMessage(`{"protocolVersion":1,"_meta":{"acp-go.dev/lifecycle":{"version":1}}}`))
+	require.NoError(t, err)
+	for _, tc := range []struct{ name, meta, field, verdict string }{
+		{"duplicate submission", `"_meta":{"acp-go.dev/lifecycle":{"version":1,"submission":{"submissionId":"first","submissionId":"second","clientNonce":"nonce"}}}`, ".submission.submissionId", "unsupported"},
+		{"duplicate correlation", `"_meta":{"acp-go.dev/lifecycle":{"version":1,"submission":{},"submission":{"submissionId":"s","clientNonce":"n"}}}`, ".submission", "unsupported"},
+		{"near integer", `"_meta":{"acp-go.dev/lifecycle":{"version":1.0000000000000001}}`, ".version", "unsupported"},
+		{"overflow", `"_META":{"acp-go.dev/lifecycle":{"version":1e400}}`, ".version", "unsupported"},
+		{"erased", `"_meta":{"acp-go.dev/lifecycle":{"version":1}},"_meta":{}`, "", "unsupported"},
+		{"missing", `"_meta":{"foreign":true}`, "", "missing"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, promptErr := acp.SendRequest[json.RawMessage](conn, t.Context(), acp.AgentMethodSessionPrompt,
+				json.RawMessage(`{"sessionId":"wire-session","prompt":[],`+tc.meta+`}`))
+			requireInvalidParamsData(t, promptErr, map[string]any{"error": tc.verdict, "field": lifecycle.MetaPath + tc.field})
+		})
+	}
+	// A valid correlation reaches image validation without launching native work.
+	_, err = acp.SendRequest[json.RawMessage](conn, t.Context(), acp.AgentMethodSessionPrompt,
+		json.RawMessage(`{"sessionId":"wire-session","prompt":[{"type":"image","data":"","mimeType":"image/png"}],"_meta":{"acp-go.dev/lifecycle":{"version":1,"submission":{"submissionId":"s","clientNonce":"n"}},"foreign":{"x":1,"x":2}}}`))
+	var requestErr *acp.RequestError
+	require.ErrorAs(t, err, &requestErr)
+	require.Contains(t, requestErr.Error(), imageErrorMissingData)
+	for _, method := range []string{acp.AgentMethodSessionClose, "_amp/unknown"} {
+		_, err = acp.SendRequest[json.RawMessage](conn, t.Context(), method,
+			json.RawMessage(`{"sessionId":"wire-session","_meta":{"acp-go.dev/lifecycle":null},"_meta":{}}`))
+		requireInvalidParamsData(t, err, map[string]any{"error": "unsupported", "field": lifecycle.MetaPath})
+	}
+}
+
+func TestServeOwnedMetadataPreservesConstructionPrecedence(t *testing.T) {
+	conn := lifecycleWireConnection(t, newTestAgent(WithHostAuthority(nil)))
+	_, err := acp.SendRequest[json.RawMessage](conn, t.Context(), acp.AgentMethodInitialize,
+		json.RawMessage(`{"protocolVersion":1,"_meta":{"acp-go.dev/lifecycle":{"version":1e400}}}`))
+	var requestErr *acp.RequestError
+	require.ErrorAs(t, err, &requestErr)
+	require.Equal(t, -32603, requestErr.Code)
+}
+
+func TestServeHandoffNumbersRetainTheirExactValues(t *testing.T) {
+	root := t.TempDir()
+	agent := newTestAgent(WithEnv(map[string]string{"AMP_API_KEY": "fake"}), WithScratchDir(t.TempDir()), WithInputHandoffRoot(root))
+	session, err := newAgentSession(t.Context(), agent, "wire-image", t.TempDir(), parsedSessionMeta{}, "", nil)
+	require.NoError(t, err)
+	agent.mu.Lock()
+	agent.activateSessionLocked(session)
+	agent.mu.Unlock()
+	var launched atomic.Int64
+	agent.options.runtime.executeThread = func(context.Context, *nativeamp.Client, any) (*nativeamp.Turn, error) {
+		launched.Add(1)
+
+		return nil, errors.New("deterministic admission refusal")
+	}
+	conn := lifecycleWireConnection(t, agent)
+	_, err = acp.SendRequest[json.RawMessage](conn, t.Context(), acp.AgentMethodInitialize, json.RawMessage(`{"protocolVersion":1}`))
+	require.NoError(t, err)
+	uri, err := json.Marshal(fileURI(filepath.Join(root, "absent.png")))
+	require.NoError(t, err)
+	for _, tc := range []struct{ name, version, size, data, want string }{
+		{"version fraction", "1.0000000000000001", "1", "", handoffVersionInvalidMessage},
+		{"version overflow", "1e400", "1", "", handoffVersionInvalidMessage},
+		{"size fraction", "1", "1.0000000000000001", "", handoffSizeBytesInvalidMessage},
+		{"size underflow", "1", "-1e-400", "", handoffSizeBytesInvalidMessage},
+		{"size overflow", "1", "1e400", "", handoffSizeBytesInvalidMessage},
+		{"integral forms", "1.0", "1e0", "", handoffFileAbsentMessage},
+		{"duplicate allowed", `2,"version":1`, "1", "", handoffFileAbsentMessage},
+		{"embedded dominance", "1e400", "-1e-400", validPNGBase64, turnFailedError},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := fmt.Sprintf(`{"sessionId":"wire-image","prompt":[{"type":"image","mimeType":"image/png","data":%q,"uri":%s,"_META":{"acp-go.dev/handoff":{"version":%s,"sizeBytes":%s,"digest":%q}}}]}`, tc.data, uri, tc.version, tc.size, strings.Repeat("0", 64))
+			_, promptErr := acp.SendRequest[json.RawMessage](conn, t.Context(), acp.AgentMethodSessionPrompt, json.RawMessage(raw))
+			require.Error(t, promptErr)
+			require.Contains(t, promptErr.Error(), tc.want)
+		})
+	}
+	require.EqualValues(t, 1, launched.Load(), "only embedded data reaches the deterministic native boundary")
+}
+
+func lifecycleWireConnection(t *testing.T, agent *Agent) *acp.Connection {
+	t.Helper()
+	original := newAgentForServe
+	newAgentForServe = func(...Option) *Agent { return agent }
+	t.Cleanup(func() { newAgentForServe = original })
+	ctx, cancel := context.WithCancel(t.Context())
+	input, send := io.Pipe()
+	receive, output := io.Pipe()
+	done := make(chan error, 1)
+	go func() { done <- Serve(ctx, input, output) }()
+	conn := acp.NewConnection(func(context.Context, string, json.RawMessage) (any, *acp.RequestError) { return nil, nil }, send, receive)
+	t.Cleanup(func() {
+		cancel()
+		_ = send.Close()
+		_ = input.Close()
+		_ = output.Close()
+		_ = receive.Close()
+		_ = receiveCorrection(t, done, "Serve teardown")
+	})
+
+	return conn
 }

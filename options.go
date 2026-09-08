@@ -286,8 +286,11 @@ func WithScratchDir(dir string) Option {
 // be absolute.
 //
 // It is a read root only: the wrapper never writes, moves, or removes anything
-// under it, so it is not an ephemeral-materialization root and does not compete
-// with WithScratchDir. Leaving it unset withholds the handoff capability
+// under it. Managed execution pins its descriptor before preparation and
+// requires it to be disjoint from the entire WithScratchDir domain (or system
+// temp directory when omitted). The host must preserve directory identities and
+// disjointness, including mount aliases and native ancestor replacement, for
+// the Agent's lifetime. Leaving it unset withholds the handoff capability
 // advertisement at initialize and rejects every handoff-form block with the
 // uniform invalid_handoff input error.
 func WithInputHandoffRoot(dir string) Option {
@@ -412,9 +415,7 @@ func cloneStringMap(in map[string]string) map[string]string {
 	}
 
 	out := make(map[string]string, len(in))
-	for key, value := range in {
-		out[key] = value
-	}
+	maps.Copy(out, in)
 
 	return out
 }
@@ -497,6 +498,8 @@ func cloneAny(value any) any {
 	switch typed := value.(type) {
 	case map[string]any:
 		return cloneAnyMap(typed)
+	case map[string]string:
+		return cloneStringMap(typed)
 	case []any:
 		return cloneAnySlice(typed)
 	default:

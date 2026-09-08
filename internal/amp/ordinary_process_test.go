@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -22,6 +23,23 @@ func TestOrdinaryProcessHelper(t *testing.T) {
 	}
 
 	os.Exit(0)
+}
+
+func ownOrdinaryTestProcess(t *testing.T, process NativeProcess) *sync.WaitGroup {
+	t.Helper()
+	readers := &sync.WaitGroup{}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = process.Revoke(ctx)
+		_, _ = process.Wait(ctx)
+		_ = process.Stdin().Close()
+		_ = process.Stdout().Close()
+		_ = process.Stderr().Close()
+		readers.Wait()
+	})
+
+	return readers
 }
 
 func TestOrdinaryProcessResultAndPipes(t *testing.T) {
@@ -43,6 +61,7 @@ func TestOrdinaryProcessResultAndPipes(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	ownOrdinaryTestProcess(t, process)
 	_ = process.Stdin().Close()
 
 	// Wait runs before either stream is drained on purpose: what the child
@@ -132,9 +151,10 @@ func TestOrdinaryProcessCanceledWaitCanSettleAfterRevoke(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	readers := ownOrdinaryTestProcess(t, process)
 	_ = process.Stdin().Close()
-	go func() { _, _ = io.Copy(io.Discard, process.Stdout()) }()
-	go func() { _, _ = io.Copy(io.Discard, process.Stderr()) }()
+	readers.Go(func() { _, _ = io.Copy(io.Discard, process.Stdout()) })
+	readers.Go(func() { _, _ = io.Copy(io.Discard, process.Stderr()) })
 
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()

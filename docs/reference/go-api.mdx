@@ -5,22 +5,16 @@ description: Entry points and options for embedding the adapter.
 
 ## Host authority
 
-Use `NewAgent` or `Serve`. `WithHostAuthority` enables managed execution:
-
-```go
-type HostAuthority interface {
-    NativeEnvironment() map[string]string
-    PrepareNativeTree(context.Context, string) error
-    ReadNativeAppendLog(context.Context, string, uint64) ([][]byte, error)
-    WriteNativeAppendLog(context.Context, string, [][]byte) error
-    ReclaimNativeTree(context.Context, string) error
-    StartNative(context.Context, NativeRequest) (NativeProcess, error)
-}
-```
+Use `NewAgent` or `Serve`. `WithHostAuthority` enables managed execution through
+[HostAuthority](https://pkg.go.dev/github.com/savid/acp-go-amp#HostAuthority).
+`NativeEnvironment` supplies the base environment; `PrepareNativeTree` and
+`ReclaimNativeTree` bracket each isolated residence, and `StartNative` launches
+every native child. See [Run modes](/docs/get-started/run-modes) for environment
+overlays and an embedding example.
 
 `NativeProcess` exposes host stdin/stdout/stderr, `Wait`, and `Revoke`.
 The append-log members are part of the host interface; this adapter does not
-invoke them for provider state.
+invoke them: it mirrors Amp stream-JSON frames through `SessionStore`.
 `NativeRequest` carries executable, arguments, environment, and working
 directory; `NativeResult` carries exit code, signal, and revoked state.
 
@@ -40,3 +34,19 @@ request carrying that `_meta` map would receive, or nil, without an agent;
 see [Metadata](/docs/reference/meta).
 
 `WithEnv` is the static Agent-scoped environment. Names follow the session `env` rule with `PATH` allowed: a key is non-empty and free of `=` and NUL, the value is free of NUL, the injection names `NODE_OPTIONS`, `BASH_ENV`, `ENV`, and any `LD_` or `DYLD_` prefix are refused under the platform identity, the private adapter namespace is refused under every spelling, and two spellings of one Windows variable are refused; a refusal fails Agent construction.
+
+## Image limits
+
+`WithImageLimits` accepts `ImageLimits` with these decoded-byte budgets:
+
+| Field | Default |
+| --- | --- |
+| `MaxInputBytesPerImage` | 6 MiB |
+| `MaxInputBytesPerPrompt` | 6 MiB |
+| `MaxOutputBytesPerImage` | 6 MiB |
+| `MaxOutputBytesPerToolCall` | 6 MiB |
+
+A zero field disables that configured budget; Amp's smaller native input
+envelopes and the adapter's hard output bound still apply. See
+[Image input](/docs/features/models-config#image-input) and
+[Image output](/docs/reference/updates#image-tool-content).

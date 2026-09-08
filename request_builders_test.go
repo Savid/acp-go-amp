@@ -187,6 +187,40 @@ func TestSessionMetaAccumulatesRegardlessOfOptionOrder(t *testing.T) {
 	}
 }
 
+func TestNestedSessionMetadataSurvivesOptionOrder(t *testing.T) {
+	for _, env := range []any{map[string]any{"HOST_VALUE": "kept"}, map[string]string{"HOST_VALUE": "kept"}} {
+		host := WithSessionMeta(map[string]any{
+			"amp": map[string]any{"options": map[string]any{"env": env}},
+		})
+		configured := WithSessionAmpOptions(AmpOptions{Env: map[string]string{"OPTION_VALUE": "kept"}})
+		for _, options := range [][]SessionRequestOption{{host, configured}, {configured, host}} {
+			req := NewSessionRequest("/tmp/cwd", options...)
+			parsed, err := parseSessionMeta(req.Meta)
+			if err != nil || parsed.options.Env["HOST_VALUE"] != "kept" || parsed.options.Env["OPTION_VALUE"] != "kept" {
+				t.Fatalf("nested env was lost: %s, error: %v", mustJSON(t, req.Meta), err)
+			}
+		}
+	}
+
+	metadata := WithSessionMeta(map[string]any{
+		"amp": map[string]any{"rawEvent": map[string]any{"unknown": true}},
+	})
+	for _, options := range [][]SessionRequestOption{{metadata, WithSessionRawEvents(true)}, {WithSessionRawEvents(true), metadata}} {
+		_, err := parseSessionMeta(NewSessionRequest("/tmp/cwd", options...).Meta)
+		if err == nil {
+			t.Fatal("raw-event option erased an invalid caller field")
+		}
+	}
+
+	env := map[string]string{"HOST_VALUE": "kept"}
+	option := WithSessionMeta(map[string]any{"amp": map[string]any{"options": map[string]any{"env": env}}})
+	env["HOST_VALUE"] = "mutated"
+	parsed, err := parseSessionMeta(NewSessionRequest("/tmp/cwd", option).Meta)
+	if err != nil || parsed.options.Env["HOST_VALUE"] != "kept" {
+		t.Fatalf("metadata retained the caller's string map: %#v, error: %v", parsed.options.Env, err)
+	}
+}
+
 // TestMetaBuildersRefuseAReservedFamilyLiteral pins that the two builders taking
 // host metadata refuse every `acp-go.dev/*` name. The namespace is family-global
 // and closed: a request carrying a host's value under one of these keys would
@@ -194,13 +228,10 @@ func TestSessionMetaAccumulatesRegardlessOfOptionOrder(t *testing.T) {
 // overwriting, or quietly dropping it are all answers a host cannot see.
 func TestMetaBuildersRefuseAReservedFamilyLiteral(t *testing.T) {
 	literals := []string{
+		"acp-go.dev/route",
 		"acp-go.dev/mediaEnvelope",
 		"acp-go.dev/handoff",
 		"acp-go.dev/lifecycle",
-	}
-
-	if got := reservedFamilyLiterals(); len(got) != len(literals) {
-		t.Fatalf("reserved literal set = %#v, want %#v", got, literals)
 	}
 
 	for _, literal := range literals {

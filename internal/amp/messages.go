@@ -1,6 +1,9 @@
 package amp
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"errors"
+)
 
 const (
 	TypeSystem    = "system"
@@ -174,6 +177,10 @@ func ParseJSONLine(line []byte) (Message, error) {
 	var raw map[string]any
 	if err := json.Unmarshal(line, &raw); err != nil {
 		return nil, err
+	}
+
+	if raw == nil {
+		return nil, errors.New("amp stream frame must be a JSON object")
 	}
 
 	raw[rawJSONInternalKey] = string(line)

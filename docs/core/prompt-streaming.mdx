@@ -9,6 +9,14 @@ terminal result.
 
 ## The prompt process
 
+The first prompt creates the remote thread:
+
+```text
+amp --stream-json --stream-json-input -x
+```
+
+Later prompts continue the recorded thread:
+
 ```text
 amp threads continue <thread> --stream-json --stream-json-input -x
 ```

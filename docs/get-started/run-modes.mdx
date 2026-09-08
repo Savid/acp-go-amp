@@ -31,6 +31,15 @@ The authority is mandatory once supplied. An unavailable authority, unusable
 process streams, or uncertain containment fails closed without an ordinary
 launch fallback.
 
+`NativeEnvironment()` supplies the managed base environment. Ordinary execution
+uses the live process environment. `WithEnv` overlays that base, then the
+prompt's session environment overlays it, including a complete raw `PATH`.
+Other native operations receive only the session's `AMP_API_KEY` and `AMP_URL`
+over the static base. The adapter applies its fixed isolation values and
+scrubs `GOTRACEBACK`, `AMP_DISABLE_SECRET_REDACTION`, and private adapter
+variables before passing a sorted effective environment to the native process.
+Session values are persisted in the manifest for later load and resume.
+
 ## Flag and option equivalents
 
 | Flag | Go option |

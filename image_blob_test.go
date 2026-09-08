@@ -16,7 +16,7 @@ func blobResourceBlock(blob, mimeType string) acp.ContentBlock {
 	return acp.ResourceBlock(acp.EmbeddedResourceResource{
 		BlobResourceContents: &acp.BlobResourceContents{
 			Blob:     blob,
-			MimeType: acp.Ptr(mimeType),
+			MimeType: new(mimeType),
 			Uri:      "file:///doc.pdf",
 		},
 	})
@@ -276,7 +276,7 @@ func TestBlobResourceWithoutAMediaTypeStaysUntyped(t *testing.T) {
 // gate, whatever media type it declares.
 func TestResourceLinkCarriesNoBytesWhateverItDeclares(t *testing.T) {
 	link := acp.ResourceLinkBlock("shot", "file:///shot.png")
-	link.ResourceLink.MimeType = acp.Ptr("IMAGE/PNG")
+	link.ResourceLink.MimeType = new("IMAGE/PNG")
 
 	input, err := promptInputWithPolicy(t.Context(), []acp.ContentBlock{link}, defaultPolicy())
 	require.NoError(t, err)

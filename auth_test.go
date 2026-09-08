@@ -665,13 +665,13 @@ func TestNewAuthClientConstructionResidualFailures(t *testing.T) {
 	require.ErrorContains(t, err, "seed refused")
 	writeFile = originalWrite
 
-	authority := residualAuthority{environment: nativeamp.CaptureOrdinaryEnvironment(), prepareErr: errors.New("prepare refused")}
-	agent = newTestAgent(WithExecutablePath(path), WithScratchDir(testScratchDir(t)), WithHostAuthority(authority))
+	authority := newRecordingAuthority()
+	agent = newTestAgent(WithExecutablePath("logical-amp"), WithScratchDir(testScratchDir(t)), WithHostAuthority(authority))
 	_, _, err = newSession(agent).newAuthClient(t.Context())
-	require.ErrorContains(t, err, "prepare Amp auth residence")
+	require.ErrorIs(t, err, nativeamp.ErrBrowserLaunchUnsupported)
+	require.Empty(t, authority.events)
 
-	recording := newRecordingAuthority()
-	agent = newTestAgent(WithExecutablePath(path), WithScratchDir(testScratchDir(t)), WithHostAuthority(recording))
+	agent = newTestAgent(WithExecutablePath(path), WithScratchDir(testScratchDir(t)))
 	_, cleanup, err := newSession(agent).newAuthClient(t.Context())
 	require.NoError(t, err)
 	require.NoError(t, cleanup())

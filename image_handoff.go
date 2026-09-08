@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/coder/acp-go-sdk"
@@ -233,6 +234,10 @@ func (b *imagePromptBudget) declaredSizeVerdict(sizeBytes int64) *handoffError {
 // be opened is a deployment defect rather than a host cleaning a file up early,
 // so it is path_not_allowed.
 func (b *imagePromptBudget) handoffRootHandle() (*os.Root, *handoffError) {
+	if b.managedRoot != nil {
+		return b.managedRoot()
+	}
+
 	if b.root != nil {
 		return b.root, nil
 	}
@@ -300,20 +305,17 @@ func parsePromptHandoffEnvelope(meta map[string]any) (promptHandoffEnvelope, *ha
 	return promptHandoffEnvelope{digest: digest, sizeBytes: sizeBytes}, nil
 }
 
-// promptHandoffNumber reads an envelope numeric as a float64 whatever shape it
-// arrived in. A JSON number decodes to float64 under the pinned SDK and to
-// json.Number if the decoder is ever asked for one, and an in-process host
-// builds its own block metadata with a Go int. All three are the same number,
-// and reading them as a float64 is what keeps the range check off an int64
-// conversion whose out-of-range behaviour Go does not define.
+// promptHandoffNumber reads the version in the caller's numeric representation.
+// Wire numbers must be exact integers before conversion; embedded floats keep
+// their existing finite/integral validation at the version reader.
 func promptHandoffNumber(value any) (float64, bool) {
 	switch number := value.(type) {
 	case float64:
 		return number, true
 	case json.Number:
-		parsed, err := number.Float64()
+		parsed, ok := exactHandoffInteger(number)
 
-		return parsed, err == nil
+		return float64(parsed), ok
 	case int:
 		return float64(number), true
 	default:
@@ -321,15 +323,68 @@ func promptHandoffNumber(value any) (float64, bool) {
 	}
 }
 
-// promptHandoffSizeBytes validates a declared byte count entirely in float64,
-// before any int64 conversion: non-negative, integral, and strictly below 2^63.
+// promptHandoffSizeBytes preserves exact wire integers. Embedded floats are
+// checked before narrowing: non-negative, integral, and strictly below 2^63.
 func promptHandoffSizeBytes(value any) (int64, bool) {
+	if number, ok := value.(json.Number); ok {
+		size, valid := exactHandoffInteger(number)
+
+		return size, valid && size >= 0
+	}
+
 	size, ok := promptHandoffNumber(value)
 	if !ok || size < 0 || size != math.Trunc(size) || size >= handoffSizeBytesExclusiveMax {
 		return 0, false
 	}
 
 	return int64(size), true
+}
+
+// exactHandoffInteger accepts integral decimal/exponent forms without rounding
+// through float64 or allocating powers for an attacker-controlled exponent.
+func exactHandoffInteger(number json.Number) (int64, bool) {
+	raw := string(number)
+	if !json.Valid([]byte(raw)) {
+		return 0, false
+	}
+
+	negative := strings.HasPrefix(raw, "-")
+	raw = strings.TrimPrefix(raw, "-")
+	mantissa, exponent, hasExponent := strings.Cut(strings.ToLower(raw), "e")
+	whole, fraction, _ := strings.Cut(mantissa, ".")
+
+	digits := strings.TrimLeft(whole+fraction, "0")
+	if digits == "" {
+		return 0, true
+	}
+
+	var scale int64
+
+	if hasExponent {
+		var err error
+
+		scale, err = strconv.ParseInt(exponent, 10, 32)
+		if err != nil {
+			return 0, false
+		}
+	}
+
+	scale -= int64(len(fraction))
+	trimmed := strings.TrimRight(digits, "0")
+
+	scale += int64(len(digits) - len(trimmed))
+	if scale < 0 || scale > 19 || int64(len(trimmed))+scale > 19 {
+		return 0, false
+	}
+
+	integer := trimmed + strings.Repeat("0", int(scale))
+	if negative {
+		integer = "-" + integer
+	}
+
+	value, err := strconv.ParseInt(integer, 10, 64)
+
+	return value, err == nil
 }
 
 func isLowercaseHexDigest(digest string) bool {

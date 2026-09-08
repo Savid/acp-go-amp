@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -256,6 +257,12 @@ func (c *Client) CheckAuthLoginSafety(ctx context.Context) error {
 }
 
 func (c *Client) authLoginSafety(ctx context.Context) (string, error) {
+	// A managed executable is a host-owned selector. Local inspection cannot
+	// attest the executable the host launches or its browser mediation.
+	if c.options.StartNative != nil {
+		return "", ErrBrowserLaunchUnsupported
+	}
+
 	path, err := c.resolveExecutable(ctx, c.options.Cwd)
 	if err != nil {
 		return "", err
@@ -305,9 +312,7 @@ func composeEnvironmentMaps(phases ...map[string]string) map[string]string {
 	out := map[string]string{}
 
 	for _, phase := range phases {
-		for key, value := range phase {
-			out[key] = value
-		}
+		maps.Copy(out, phase)
 	}
 
 	return out

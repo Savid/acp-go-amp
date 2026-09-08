@@ -65,14 +65,13 @@ retain their native order.
 
 Output does not use the prompt-input format allowlist. A raster the adapter can
 structurally identify is emitted with its sniffed media type; BMP output is
-valid even though BMP prompt input is rejected. A native item presented as an
-image whose bytes are not a recognizable raster fails the turn with
-`reason: "not_a_raster"`.
+valid even though BMP prompt input is rejected. Unrecognizable image bytes are
+replaced with fixed guidance, as described below.
 
 ACP replaces `tool_call_update.content` as one collection, so every
 content-bearing update carries the tool call's complete current array. A
 status-only failed update omits content. Native tool failures retain failed
-status and any valid mapped content; an adapter image-mapping failure emits
+status and any valid mapped content. An artifact persistence failure emits
 failed status and terminates the prompt.
 
 `RawOutput` contains sanitized diagnostics: media type, dimensions, decoded
@@ -87,8 +86,9 @@ or per-tool-call limit, or a location that is neither inline bytes nor an
 `http(s)` link — is **recoverable**. Fixed guidance takes the image's place in
 that tool call's own content, saying what to do next without naming the
 location, size, media type, or operating-system error, and the turn keeps
-running. The same guidance is mirrored into the transcript, so it is still
-there on the next turn.
+running. The same guidance is mirrored for `session/load` display replay. Amp
+continues its server-side thread; the adapter does not inject this guidance
+into the model's conversation.
 
 Only the adapter's own artifact store breaking is turn-fatal. It returns
 `-32603` with the Amp turn envelope, `cause: "transport"`, and
@@ -107,6 +107,10 @@ Only the adapter's own artifact store breaking is turn-fatal. It returns
 The `reason` values are `invalid_base64`, `not_a_raster`, `media_type_mismatch`,
 `missing_file`, `path_not_allowed`, `too_large`, and `storage_failed`. Only
 `storage_failed` reaches this envelope; the rest are refused in place.
+
+During `session/load`, a missing, expired, corrupt, or mismatched artifact
+instead fails the request with `-32603` `{"error": "amp_restore_failed"}`.
+The stored session remains intact.
 
 ## Raw frames and errors
 

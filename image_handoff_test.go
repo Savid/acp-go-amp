@@ -67,7 +67,7 @@ func handoffBlock(path, mimeType string, data []byte) acp.ContentBlock {
 
 func handoffBlockWithEnvelope(path, mimeType string, envelope any) acp.ContentBlock {
 	block := acp.ImageBlock("", mimeType)
-	block.Image.Uri = acp.Ptr(fileURI(path))
+	block.Image.Uri = new(fileURI(path))
 
 	if envelope != nil {
 		block.Image.Meta = map[string]any{metaHandoffKey: envelope}
@@ -202,13 +202,13 @@ func TestHandoffFormSelection(t *testing.T) {
 			acp.ImageBlock("", imageMIMEPNG),
 			func() acp.ContentBlock {
 				remote := acp.ImageBlock("", imageMIMEPNG)
-				remote.Image.Uri = acp.Ptr("https://example.invalid/x.png")
+				remote.Image.Uri = new("https://example.invalid/x.png")
 
 				return remote
 			}(),
 			func() acp.ContentBlock {
 				unparsable := acp.ImageBlock("", imageMIMEPNG)
-				unparsable.Image.Uri = acp.Ptr("file://\x7f/x.png")
+				unparsable.Image.Uri = new("file://\x7f/x.png")
 
 				return unparsable
 			}(),
@@ -220,7 +220,7 @@ func TestHandoffFormSelection(t *testing.T) {
 
 	t.Run("a file uri alone is handoff intent", func(t *testing.T) {
 		block := acp.ImageBlock("", imageMIMEPNG)
-		block.Image.Uri = acp.Ptr(fileURI(path))
+		block.Image.Uri = new(fileURI(path))
 
 		_, err := promptInputWithPolicy(t.Context(), []acp.ContentBlock{block}, handoffPolicy(root, limits))
 		requireHandoffError(t, err, 0, imageErrorInvalidHandoff, handoffEnvelopeAbsentMessage)
@@ -421,11 +421,11 @@ func TestHandoffURIDefects(t *testing.T) {
 		message string
 	}{
 		{name: "absent", uri: nil, message: handoffURIAbsentMessage},
-		{name: "empty", uri: acp.Ptr(""), message: handoffURIAbsentMessage},
-		{name: "unparsable", uri: acp.Ptr("file://\x7f/x.png"), message: handoffURIUnparsableMessage},
-		{name: "remote scheme", uri: acp.Ptr("https://example.invalid/x.png"), message: handoffURISchemeMessage},
-		{name: "remote host", uri: acp.Ptr("file://remote.invalid/x.png"), message: handoffURIRemoteHostMessage},
-		{name: "relative path", uri: acp.Ptr("file:relative/x.png"), message: handoffURIRelativeMessage},
+		{name: "empty", uri: new(""), message: handoffURIAbsentMessage},
+		{name: "unparsable", uri: new("file://\x7f/x.png"), message: handoffURIUnparsableMessage},
+		{name: "remote scheme", uri: new("https://example.invalid/x.png"), message: handoffURISchemeMessage},
+		{name: "remote host", uri: new("file://remote.invalid/x.png"), message: handoffURIRemoteHostMessage},
+		{name: "relative path", uri: new("file:relative/x.png"), message: handoffURIRelativeMessage},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			block := acp.ImageBlock("", imageMIMEPNG)
@@ -448,7 +448,7 @@ func TestHandoffAcceptsLocalhostURIHost(t *testing.T) {
 	path := writeHandoffFile(t, root, "valid.png", data)
 
 	block := acp.ImageBlock("", imageMIMEPNG)
-	block.Image.Uri = acp.Ptr(fileURIWithHost(handoffURIHost, path))
+	block.Image.Uri = new(fileURIWithHost(handoffURIHost, path))
 	block.Image.Meta = map[string]any{metaHandoffKey: map[string]any{
 		handoffFieldVersion:   handoffVersion,
 		handoffFieldDigest:    handoffDigest(data),
@@ -515,7 +515,7 @@ func TestHandoffPathNotAllowed(t *testing.T) {
 		outside := writeHandoffFile(t, t.TempDir(), "secret.png", data)
 
 		block := acp.ImageBlock("", imageMIMEPNG)
-		block.Image.Uri = acp.Ptr(fileURI(root) + "/%2e%2e/" +
+		block.Image.Uri = new(fileURI(root) + "/%2e%2e/" +
 			filepath.Base(filepath.Dir(outside)) + "/secret.png")
 		block.Image.Meta = map[string]any{metaHandoffKey: map[string]any{
 			handoffFieldVersion:   handoffVersion,
@@ -1132,7 +1132,7 @@ func TestHandoffMessagesCarryNoObservedValues(t *testing.T) {
 	}
 
 	unparsable := acp.ImageBlock("", imageMIMEPNG)
-	unparsable.Image.Uri = acp.Ptr("file://\x7f/x.png")
+	unparsable.Image.Uri = new("file://\x7f/x.png")
 	unparsable.Image.Meta = map[string]any{metaHandoffKey: map[string]any{
 		handoffFieldVersion:   handoffVersion,
 		handoffFieldDigest:    handoffDigest(data),

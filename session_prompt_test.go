@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -504,7 +505,7 @@ func TestTurnFailureCancelWinsOnTimeoutCoincidence(t *testing.T) {
 	}
 
 	const iterations = 40
-	for i := 0; i < iterations; i++ {
+	for i := range iterations {
 		timeoutC := make(chan time.Time, 1)
 		created := make(chan struct{})
 		release := make(chan struct{})
@@ -580,9 +581,9 @@ func TestPromptResultForObserver(t *testing.T) {
 			InputTokens:       11,
 			OutputTokens:      22,
 			TotalTokens:       33,
-			CachedReadTokens:  acp.Ptr(4),
-			CachedWriteTokens: acp.Ptr(5),
-			ThoughtTokens:     acp.Ptr(6),
+			CachedReadTokens:  new(4),
+			CachedWriteTokens: new(5),
+			ThoughtTokens:     new(6),
 		},
 	}
 	got := promptResultForObserver(resp, nil, "")
@@ -819,18 +820,18 @@ func (l *settlementLedger) snapshot() []string {
 
 // settlementAgent opens an agent whose store is gated and whose client records
 // the terminal idle into the same ledger the commits write to.
-func settlementAgent(t *testing.T, ledger *settlementLedger) (*Agent, *gatedStore, *orderingClient, acp.SessionId) {
+func settlementAgent(t *testing.T, ledger *settlementLedger, extra ...Option) (*Agent, *gatedStore, *orderingClient, acp.SessionId) {
 	t.Helper()
 	t.Setenv("AMP_API_KEY", "conformance-key")
 
 	store := newGatedStore(ledger.record)
 	client := &orderingClient{record: ledger.record}
 
-	agent := NewAgent(testContainmentOptions([]Option{
+	agent := NewAgent(testContainmentOptions(append([]Option{
 		WithExecutablePath(lifecycleHarness(t)),
 		WithScratchDir(testScratchDir(t)),
 		WithSessionStore(store),
-	})...)
+	}, extra...))...)
 	agent.options.runtime.beforePersistenceReplace = store.beforeReplace
 	agent.options.runtime.beforeTerminalDelivery = func(notification acp.SessionNotification) {
 		if !isTerminalIdleNotification(notification) {
@@ -1558,4 +1559,126 @@ func TestAssistantTextIsAppendOnly(t *testing.T) {
 		require.Equal(t, []string{"First. ", "Second. ", "Third."}, chunks)
 		require.Equal(t, "First. Second. Third.", strings.Join(chunks, ""))
 	})
+}
+
+type quiescenceClient struct {
+	*orderingClient
+	fail atomic.Bool
+	err  error
+}
+
+func (c *quiescenceClient) SessionUpdate(ctx context.Context, notification acp.SessionNotification) error {
+	if isQuiescenceNotification(notification) && c.fail.Load() {
+		return c.err
+	}
+
+	return c.orderingClient.SessionUpdate(ctx, notification)
+}
+
+func isQuiescenceNotification(notification acp.SessionNotification) bool {
+	envelope, _ := notification.Meta[lifecycle.MetaKey].(map[string]any)
+	event, _ := envelope["event"].(map[string]any)
+
+	return event["type"] == "quiescence_update"
+}
+
+func TestPromptForegroundDoesNotWaitForQuiescence(t *testing.T) {
+	for _, tc := range []struct {
+		name, input                         string
+		fail, panicDelivery, cancel, delete bool
+	}{
+		{name: "close", input: "hello"},
+		{name: "delete", input: "hello", delete: true},
+		{name: "delivery failure", input: "hello", fail: true},
+		{name: "delivery panic", input: "hello", panicDelivery: true},
+		{name: "native failure", input: "provider-failure", fail: true},
+		{name: "cancelled", input: "hang", cancel: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ledger := &settlementLedger{}
+			agent, store, client, id := settlementAgent(t, ledger,
+				WithHostAuthority(newRecordingAuthority()), WithEnv(map[string]string{"AMP_API_KEY": "fake"}))
+			live, err := agent.session(id)
+			require.NoError(t, err)
+			outage := errors.New("quiescence unavailable")
+			gatedClient := &quiescenceClient{orderingClient: client, err: outage}
+			gatedClient.fail.Store(tc.fail)
+			agent.setConnection(gatedClient)
+			held, release := make(chan struct{}), make(chan struct{})
+			var unblock sync.Once
+			var first sync.Once
+			t.Cleanup(func() { unblock.Do(func() { close(release) }); gatedClient.fail.Store(false) })
+			agent.options.runtime.beforeTerminalDelivery = func(notification acp.SessionNotification) {
+				if isQuiescenceNotification(notification) {
+					first.Do(func() {
+						close(held)
+						<-release
+						if tc.panicDelivery {
+							panic("quiescence panic")
+						}
+					})
+				}
+			}
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			if tc.cancel {
+				client.onAgentChunk = cancel
+			}
+			foreground := make(chan promptForegroundResult, 1)
+			go func() {
+				response, promptErr := agent.Prompt(ctx, lifecyclePrompt(id, tc.input, "submission", "nonce"))
+				foreground <- promptForegroundResult{response: response, err: promptErr}
+			}()
+			awaitCorrectionSignal(t, held, "quiescence only")
+			state := live.activePromptState()
+			require.NotNil(t, state)
+			result := receiveCorrection(t, foreground, "foreground before quiescence")
+			if tc.input == "provider-failure" {
+				require.Error(t, result.err)
+			} else {
+				require.NoError(t, result.err)
+				want := acp.StopReasonEndTurn
+				if tc.cancel {
+					want = acp.StopReasonCancelled
+				}
+				require.Equal(t, want, result.response.StopReason)
+			}
+			require.Contains(t, ledger.snapshot(), "idle")
+			stored, err := store.Load(t.Context(), SessionKey{SessionID: string(id), Subpath: transcriptSubpath})
+			require.NoError(t, err)
+			require.NotEmpty(t, stored)
+			require.False(t, state.settled())
+			closed := make(chan error, 1)
+			go func() {
+				var closeErr error
+				if tc.delete {
+					_, closeErr = agent.UnstableDeleteSession(t.Context(), acp.UnstableDeleteSessionRequest{SessionId: id})
+				} else {
+					_, closeErr = agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: id})
+				}
+				closed <- closeErr
+			}()
+			awaitCorrectionSignal(t, state.cancelled, "close/delete joins full settlement")
+			select {
+			case <-closed:
+				t.Fatal("close/delete passed held quiescence")
+			default:
+			}
+			// Keep retries from reentering this one-shot barrier. The held callback
+			// has already captured all its state; completion joins it before cleanup.
+			unblock.Do(func() { close(release) })
+			awaitCorrectionSignal(t, state.completed, "full settlement")
+			closeErr := receiveCorrection(t, closed, "close/delete result")
+			if tc.fail {
+				require.ErrorIs(t, closeErr, outage)
+			} else {
+				require.NoError(t, closeErr)
+			}
+			if tc.panicDelivery {
+				require.ErrorIs(t, state.awaitSettlement(t.Context()).deliveryErr, errAgentGoroutinePanic)
+			}
+			agent.options.runtime.beforeTerminalDelivery = nil
+			gatedClient.fail.Store(false)
+		})
+	}
 }

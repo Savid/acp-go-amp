@@ -164,7 +164,7 @@ func TestLoadManifestErrorsAndListFilters(t *testing.T) {
 	if err := store.Replace(ctx, SessionKey{SessionID: "T-list", Subpath: SessionStoreMainSubpath}, []SessionStoreReplacement{{Key: SessionKey{SessionID: "T-list", Subpath: SessionStoreMainSubpath}, Entries: []SessionStoreEntry{manifest}}}); err != nil {
 		t.Fatal(err)
 	}
-	resp, err := newTestAgent(WithSessionStore(store)).ListSessions(ctx, acp.ListSessionsRequest{Cwd: acp.Ptr(absTestPath("other"))})
+	resp, err := newTestAgent(WithSessionStore(store)).ListSessions(ctx, acp.ListSessionsRequest{Cwd: new(absTestPath("other"))})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -276,7 +276,7 @@ func TestPromptInputAndEmitBranches(t *testing.T) {
 		acp.ImageBlock(validPNGBase64, "image/png"),
 		{ResourceLink: &acp.ContentBlockResourceLink{Name: "n", Uri: "file:///x", Title: &title, MimeType: &mime, Description: &desc}},
 		acp.ResourceBlock(acp.EmbeddedResourceResource{TextResourceContents: &acp.TextResourceContents{Uri: "file:///t", Text: "body", MimeType: &mime}}),
-		acp.ResourceBlock(acp.EmbeddedResourceResource{BlobResourceContents: &acp.BlobResourceContents{Uri: "file:///i", Blob: validPNGBase64, MimeType: acp.Ptr("image/png")}}),
+		acp.ResourceBlock(acp.EmbeddedResourceResource{BlobResourceContents: &acp.BlobResourceContents{Uri: "file:///i", Blob: validPNGBase64, MimeType: new("image/png")}}),
 		acp.ResourceBlock(acp.EmbeddedResourceResource{BlobResourceContents: &acp.BlobResourceContents{Uri: "file:///b", Blob: "YmxvYg==", MimeType: &mime}}),
 	}, defaultPolicy())
 	if err != nil {
@@ -365,7 +365,7 @@ func attachRecordingClient(t *testing.T, agent *Agent) (*recordingClient, func()
 
 func waitForRecorded(t *testing.T, ready func() bool) {
 	t.Helper()
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		if ready() {
 			return
 		}

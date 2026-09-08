@@ -3,6 +3,7 @@ package observer
 import (
 	"context"
 	"errors"
+	"maps"
 	"strings"
 	"sync"
 	"time"
@@ -454,9 +455,7 @@ func cloneEnv(env map[string]string) map[string]string {
 	}
 
 	out := make(map[string]string, len(env))
-	for key, value := range env {
-		out[key] = value
-	}
+	maps.Copy(out, env)
 
 	return out
 }

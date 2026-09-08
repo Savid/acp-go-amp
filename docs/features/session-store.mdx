@@ -23,9 +23,9 @@ err := ampacp.Serve(ctx, input, output,
 ```
 
 `WithSessionStoreLoadTimeout` bounds every store read — manifest and
-transcript loads plus `session/list` — with a default of `10s`, so a slow or
-hung backend never stalls a request. Store writes (`Replace`, `Delete`) run
-under a separate fixed `60s` bound.
+transcript loads plus `session/list` — with a default of `10s`. Store writes
+(`Replace`, `Delete`) use a separate fixed `60s` context deadline. A custom
+backend must honor these contexts for the deadlines to bound its calls.
 
 ## Format and layout
 
@@ -33,7 +33,7 @@ under a separate fixed `60s` bound.
 
 | Subpath | Contents |
 |---|---|
-| main | Manifest: `sessionId` (the adapter-minted ACP session ID), `nativeSessionId` (the Amp thread ID, absent until the first prompt turn creates the thread), `cwd`, `title`, selected `mode`, the complete session `env` including raw `PATH`, and Unix-millisecond create/update timestamps. |
+| main (empty subpath) | Manifest: `sessionId` (the adapter-minted ACP session ID), `nativeSessionId` (the Amp thread ID, absent until the first prompt turn creates the thread), `cwd`, `title`, selected `mode`, the complete session `env` including raw `PATH`, and Unix-millisecond create/update timestamps. |
 | `transcript` | The full ordered Amp stream-JSON frame mirror for every prompt turn, including what a cancelled or failed turn streamed before it ended. |
 | `_artifacts/images/<digest>.json` | Canonical typed image tool-result record containing embedded base64 and media type, or an HTTP(S) resource URI, plus native identity, checksum, and creation time. |
 
@@ -54,28 +54,18 @@ provider-auth residence contents are never written to the store.
 
 ### What a `Replace` generation may state
 
-Two rules bound every generation, and the shipped `InMemorySessionStore`
-enforces both **before it writes anything** — validation completes before the
-store takes its lock, so a refused generation deletes nothing, tombstones
-nothing, and leaves the generation the store already holds exactly as it was.
+`InMemorySessionStore` enforces these rules; a custom backend owes the same
+behavior:
 
-- **Every `Replace` is one session's.** A replacement key whose `SessionID`
-  differs from `main.SessionID` is refused, because one session's generation may
-  never rewrite or tombstone another session's rows.
-- **A generation states each key exactly once.** A duplicated
-  `{SessionID, Subpath}` is refused rather than resolved by slice order: if
-  position decided the row, the generation would not say what the caller wanted.
-
-Both errors name the offending key in full — `{sessionId: "…", subpath: "…"}` —
-because a subpath alone does not identify a row:
-
-```
-replacement key {sessionId: "T-2", subpath: "transcript"} does not belong to session "T-1"
-duplicate replacement key {sessionId: "T-1", subpath: "transcript"}
-```
-
-A store implemented over another backend owes both refusals on the same terms,
-and owes them before its first write.
+- The main key has an empty subpath and appears exactly once in the generation.
+- Every replacement belongs to `main.SessionID`, with no duplicate
+  `{SessionID, Subpath}`. Either violation names the offending key in full and
+  refuses the entire generation before any write.
+- Listed keys remain live even with zero entries. Unlisted existing subpaths
+  are tombstoned; explicitly listed subpaths have their own tombstones cleared.
+- A tombstone on the main key is final for the entire session. Later `Append`
+  and valid `Replace` calls write nothing, clear nothing, and return success.
+  `Append` also leaves individually tombstoned subpaths untouched.
 
 The first turn of a session publishes one additional generation the moment Amp
 reports the thread it just created: the manifest plus the state already
@@ -86,12 +76,8 @@ mid-turn can never leave a created server-side thread unrecorded.
 flight before its tombstone lands, so a turn settling alongside the delete can
 never write the deleted session back into the store.
 
-A tombstone is final in the store itself, not only in the adapter that wrote
-it. Over a key `Delete` tombstoned, both `Append` and `Replace` write nothing,
-clear nothing, and return success — the deleted state is already the caller's
-answer. A store implemented over another backend owes the same guarantee: a
-write already in flight when a delete lands reaches the backend regardless of
-what the adapter above it believes, so refusing it is the backend's job.
+The backend enforces main-key tombstone finality even for writes already in
+flight; the adapter's deletion marker alone cannot provide that guarantee.
 
 Ordinary transcript frames retain the exact native Amp stream JSON. An
 image-bearing tool-result frame is rewritten to stable artifact references
@@ -104,8 +90,7 @@ reproduces the same identities emitted during the live turn.
 Image records expire after 24 hours and are swept during initialization.
 Deleting a session removes every artifact subpath. A replay that needs a
 missing, expired, corrupt, or mismatched record fails with
-`stage: "image_output"` and `reason: "storage_failed"`; it never omits the
-image.
+`-32603` `{"error": "amp_restore_failed"}`; it never silently omits the image.
 
 <Warning>
 An HTTP(S) image result is stored with its original URI so replay can produce

@@ -110,7 +110,7 @@ func withAmpMessageIdentity(update acp.SessionUpdate, messageID string) acp.Sess
 		return update
 	}
 
-	update.AgentMessageChunk.MessageId = acp.Ptr(messageID)
+	update.AgentMessageChunk.MessageId = new(messageID)
 	update.AgentMessageChunk.Meta = ampMessageMeta(update.AgentMessageChunk.Meta, messageID)
 
 	return update
