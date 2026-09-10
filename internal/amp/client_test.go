@@ -35,6 +35,11 @@ func absTestPath(segments ...string) string {
 
 func newTestClient(t *testing.T, logger *slog.Logger, options Options) *Client {
 	t.Helper()
+
+	if options.StartNative == nil && options.OrdinaryEnvironment == nil {
+		options.OrdinaryEnvironment = CaptureOrdinaryEnvironment(os.Environ())
+	}
+
 	if options.TestOnlyAuthLoginPlatform == "" {
 		options.TestOnlyAuthLoginPlatform = "linux"
 	}

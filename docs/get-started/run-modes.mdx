@@ -32,7 +32,8 @@ process streams, or uncertain containment fails closed without an ordinary
 launch fallback.
 
 `NativeEnvironment()` supplies the managed base environment. Ordinary execution
-uses the live process environment. `WithEnv` overlays that base, then the
+uses the adapter's own process environment, or the block `WithAmbientEnvironment`
+supplies in its place, filtered the same way. `WithEnv` overlays that base, then the
 prompt's session environment overlays it, including a complete raw `PATH`.
 Other native operations receive only the session's `AMP_API_KEY` and `AMP_URL`
 over the static base. The adapter applies its fixed isolation values and

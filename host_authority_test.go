@@ -37,7 +37,7 @@ type recordingAuthority struct {
 }
 
 func newRecordingAuthority() *recordingAuthority {
-	return &recordingAuthority{prepared: map[string]bool{}, environment: nativeamp.CaptureOrdinaryEnvironment()}
+	return &recordingAuthority{prepared: map[string]bool{}, environment: nativeamp.CaptureOrdinaryEnvironment(os.Environ())}
 }
 
 func (a *recordingAuthority) NativeEnvironment() map[string]string {

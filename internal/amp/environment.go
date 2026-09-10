@@ -8,15 +8,12 @@ import (
 	"strings"
 )
 
-var (
-	ordinaryEnvironmentEntries = os.Environ
-	ordinaryEnvironmentGetwd   = os.Getwd
-)
+var ordinaryEnvironmentGetwd = os.Getwd
 
-func CaptureOrdinaryEnvironment() map[string]string {
+func CaptureOrdinaryEnvironment(entries []string) map[string]string {
 	base := map[string]string{}
 
-	for _, entry := range ordinaryEnvironmentEntries() {
+	for _, entry := range entries {
 		key, value, ok := strings.Cut(entry, "=")
 		if !ok {
 			continue

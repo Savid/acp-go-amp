@@ -206,7 +206,7 @@ func NewAgent(opts ...Option) *Agent {
 		log:                 log,
 		store:               store,
 		observe:             observe,
-		ordinaryEnvironment: nativeamp.CaptureOrdinaryEnvironment(),
+		ordinaryEnvironment: nativeamp.CaptureOrdinaryEnvironment(ambientEnvironmentEntries(options)),
 		nativeEnvironment:   nativeEnvironment,
 		sessions:            make(map[acp.SessionId]*agentSession),
 		deleted:             make(map[acp.SessionId]struct{}),
@@ -221,6 +221,7 @@ func NewAgent(opts ...Option) *Agent {
 		configurationErr: errors.Join(
 			authorityErr,
 			validateEnvironment(nativeEnvironment),
+			validateAmbientEnvironment(options.AmbientEnvironment),
 			validateContainmentOptions(options),
 			validateImageLimits(options.ImageLimits),
 			validateInputHandoffRoot(options.InputHandoffRoot),

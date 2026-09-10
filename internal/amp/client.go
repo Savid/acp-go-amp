@@ -110,10 +110,6 @@ func NewClient(log *slog.Logger, options Options) *Client {
 		options.MaxLineBytes = defaultMaxJSONLineBytes
 	}
 
-	if options.StartNative == nil && options.OrdinaryEnvironment == nil {
-		options.OrdinaryEnvironment = CaptureOrdinaryEnvironment()
-	}
-
 	checkAuthLoginSafety := CheckAuthLoginBrowserSafety
 
 	if options.TestOnlyAuthLoginPlatform != "" {

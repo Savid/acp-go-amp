@@ -35,6 +35,8 @@ see [Metadata](/docs/reference/meta).
 
 `WithEnv` is the static Agent-scoped environment. Names follow the session `env` rule with `PATH` allowed: a key is non-empty and free of `=` and NUL, the value is free of NUL, the injection names `NODE_OPTIONS`, `BASH_ENV`, `ENV`, and any `LD_` or `DYLD_` prefix are refused under the platform identity, the private adapter namespace is refused under every spelling, and two spellings of one Windows variable are refused; a refusal fails Agent construction.
 
+`WithAmbientEnvironment` replaces the adapter's own process environment as the block ordinary execution inherits from. The same scrub applies to it, and `WithEnv` and the session environment overlay it; a supplied map is folded in sorted key order. Nil inherits from the adapter's process; an empty map inherits nothing. An entry that could not be an environment entry fails Agent construction. Every mode validates it; managed execution reads nothing from it.
+
 ## Image limits
 
 `WithImageLimits` accepts `ImageLimits` with these decoded-byte budgets:

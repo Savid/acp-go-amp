@@ -156,7 +156,7 @@ func TestAgentCleanupResidenceResidualBranches(t *testing.T) {
 
 func TestCleanupResidenceContextReclaimRetainsPreparedRetry(t *testing.T) {
 	authority := &contextReclaimAuthority{
-		residualAuthority: residualAuthority{environment: nativeamp.CaptureOrdinaryEnvironment()},
+		residualAuthority: residualAuthority{environment: nativeamp.CaptureOrdinaryEnvironment(os.Environ())},
 		started:           make(chan struct{}),
 		exited:            make(chan struct{}),
 	}

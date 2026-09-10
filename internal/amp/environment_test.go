@@ -10,21 +10,17 @@ import (
 )
 
 func TestCaptureOrdinaryEnvironmentFiltersAndCanonicalizesEntries(t *testing.T) {
-	original := ordinaryEnvironmentEntries
-	t.Cleanup(func() { ordinaryEnvironmentEntries = original })
-	ordinaryEnvironmentEntries = func() []string {
-		return []string{
-			"BROKEN",
-			"PATH=/first",
-			"PATH=/last",
-			adapterPrivateEnvPrefix + "TOKEN=secret",
-			scrubbedTracebackEnv + "=crash",
-			scrubbedRedactionEnv + "=1",
-			"EMPTY=",
-		}
+	entries := []string{
+		"BROKEN",
+		"PATH=/first",
+		"PATH=/last",
+		adapterPrivateEnvPrefix + "TOKEN=secret",
+		scrubbedTracebackEnv + "=crash",
+		scrubbedRedactionEnv + "=1",
+		"EMPTY=",
 	}
 
-	require.Equal(t, map[string]string{"PATH": "/last", "EMPTY": ""}, CaptureOrdinaryEnvironment())
+	require.Equal(t, map[string]string{"PATH": "/last", "EMPTY": ""}, CaptureOrdinaryEnvironment(entries))
 }
 
 func TestOrdinaryWindowsExecutableExtensions(t *testing.T) {
