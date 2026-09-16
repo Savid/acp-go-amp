@@ -1,1576 +1,589 @@
-//nolint:nlreturn // Edge tests keep related contract branches together.
 package ampacp
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strings"
-	"sync"
+	"slices"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/coder/acp-go-sdk"
-	ampnative "github.com/savid/acp-go-amp/internal/amp"
+	acpcore "github.com/savid/acp-go-core"
+	"github.com/savid/acp-go-core/wire"
 	"github.com/stretchr/testify/require"
 )
 
-func TestAgentLifecycleErrorBranches(t *testing.T) {
-	ctx := context.Background()
-	path, _ := fakeAgentAmpPath(t, "")
-	if _, err := newTestAgent(WithExecutablePath(path)).NewSession(ctx, acp.NewSessionRequest{Meta: map[string]any{"amp": "bad"}}); err == nil {
-		t.Fatal("bad meta accepted")
+func TestWireTurnsHaveDistinctIncarnations(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	initialized := h.initialize(withLifecycle())
+	require.Empty(t, initialized.AuthMethods)
+	capability, ok := initialized.Meta[wire.LifecycleKey].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, false, capability["updatesOutsidePrompt"])
+	session := h.newSession(WithSessionRawEvents(true))
+	for i, text := range []string{"TOOL", "DUPLICATE"} {
+		response, err := h.prompt(session.SessionId, text, promptMeta(i))
+		require.NoError(t, err)
+		require.Equal(t, acp.StopReasonEndTurn, response.StopReason)
+		require.Equal(t, 13, response.Usage.TotalTokens)
 	}
-	if _, err := newTestAgent(WithExecutablePath(path), WithDefaultModel("model")).NewSession(ctx, NewSessionRequest(t.TempDir())); err == nil {
-		t.Fatal("default model accepted at session start")
+	require.NotContains(t, agentText(h.rec.snapshot()), "late output")
+	require.Positive(t, h.rec.rawEventCount())
+	streams := map[string]int{}
+	idle := 0
+	for _, notification := range h.rec.snapshot() {
+		if meta, ok := notification.Meta[wire.LifecycleKey].(map[string]any); ok {
+			stream, ok := meta["streamId"].(string)
+			require.True(t, ok)
+			streams[stream]++
+			event, ok := meta["event"].(map[string]any)
+			require.True(t, ok)
+			if event["type"] == "state_update" && event["state"] == "idle" {
+				idle++
+			}
+		}
 	}
-	if _, err := newTestAgent(WithExecutablePath(path)).NewSession(ctx, NewSessionRequest(t.TempDir(), WithSessionMCPServers(acp.McpServer{Sse: &acp.McpServerSseInline{Name: "s", Url: "u"}}))); err == nil {
-		t.Fatal("sse mcp accepted")
+	require.Len(t, streams, 2)
+	for _, count := range streams {
+		require.Equal(t, 4, count)
 	}
-	fileHome := filepath.Join(t.TempDir(), "home-file")
-	if err := os.WriteFile(fileHome, []byte("x"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := newTestAgent(WithExecutablePath(path), WithScratchDir(fileHome)).NewSession(ctx, NewSessionRequest(t.TempDir())); err == nil {
-		t.Fatal("file scratch dir accepted")
-	}
-	storeErr := &errorStore{loadErr: errors.New("load failed")}
-	if _, err := newTestAgent(WithExecutablePath(path), WithScratchDir(testScratchDir(t)), WithSessionStore(storeErr)).NewSession(ctx, NewSessionRequest(t.TempDir())); err == nil {
-		t.Fatal("persist load error ignored")
-	}
-	limited := newTestAgent(WithExecutablePath(path), WithScratchDir(testScratchDir(t)), WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1}))
-	if _, err := limited.NewSession(ctx, NewSessionRequest(t.TempDir())); err != nil {
-		t.Fatalf("first limited NewSession: %v", err)
-	}
-	if _, err := limited.NewSession(ctx, NewSessionRequest(t.TempDir())); err == nil || !strings.Contains(err.Error(), "backpressure") {
-		t.Fatalf("second limited NewSession = %v", err)
-	}
-	limited.closed = true
-	if err := limited.reserveSessionSlot(); err == nil {
-		t.Fatal("closed agent reserved slot")
-	}
-	limited.releaseSessionSlot("T-unused")
+	require.Equal(t, 2, idle)
 }
 
-func TestLoadResumeManifestAndConfigBranches(t *testing.T) {
-	ctx := context.Background()
-	path, _ := fakeAgentAmpPath(t, "")
+func TestNativeContinuationAndCarrierRestore(t *testing.T) {
+	t.Parallel()
+	store := acpcore.NewInMemorySessionStore()
+	native := t.TempDir()
+	options := []Option{WithSessionStore(store), WithEnv(map[string]string{"ACP_GO_AMP_TEST_NATIVE": native, "GORACE": "atexit_sleep_ms=0"})}
+	h := newHarness(t, options...)
+	h.initialize()
 	cwd := t.TempDir()
-	store := NewInMemorySessionStore()
-	manifest, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, SessionID: "T-load", NativeSessionID: "T-load", Cwd: cwd, Mode: "high", Env: map[string]string{}, CreatedAtUnixMilli: 1, UpdatedAtUnixMilli: 2})
-	if err := store.Replace(ctx, SessionKey{SessionID: "T-load", Subpath: SessionStoreMainSubpath}, []SessionStoreReplacement{
-		{Key: SessionKey{SessionID: "T-load", Subpath: SessionStoreMainSubpath}, Entries: []SessionStoreEntry{manifest}},
-		{Key: SessionKey{SessionID: "T-load", Subpath: transcriptSubpath}, Entries: []SessionStoreEntry{
-			json.RawMessage(`{"type":"assistant","message":{"content":[{"type":"text","text":"stored"}]},"session_id":"T-load"}`),
-			json.RawMessage(`{"type":"result","subtype":"success","is_error":false,"session_id":"T-load"}`),
-		}},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(testScratchDir(t)), WithSessionStore(store), WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 2}))
-	client, cleanup := attachRecordingClient(t, agent)
-	defer cleanup()
-	if _, err := agent.LoadSession(ctx, LoadSessionRequest("T-load", cwd, WithSessionRawEvents(true))); err != nil {
-		t.Fatalf("LoadSession: %v", err)
-	}
-	// Authoritative load replay emits session/update frames only. Raw events are
-	// live-turn only and are never replayed from the store, even with raw events
-	// enabled on the load request.
-	waitForRecorded(t, func() bool { return len(client.updatesSnapshot()) > 0 })
-	if len(client.updatesSnapshot()) == 0 {
-		t.Fatal("load did not replay transcript")
-	}
-	if len(client.rawSnapshot()) != 0 {
-		t.Fatalf("load replayed raw events: %d", len(client.rawSnapshot()))
-	}
-	before := len(client.updatesSnapshot())
-	if _, err := agent.ResumeSession(ctx, ResumeSessionRequest("T-load", cwd)); err != nil {
-		t.Fatalf("ResumeSession active: %v", err)
-	}
-	waitForRecorded(t, func() bool { return len(client.updatesSnapshot()) == before+1 })
-	updates := client.updatesSnapshot()
-	if len(updates) != before+1 || updates[len(updates)-1].Update.SessionInfoUpdate == nil {
-		t.Fatalf("resume did not emit exactly one identity-only checkpoint: before=%d updates=%#v", before, updates)
-	}
-
-	if _, setErr := agent.SetSessionConfigOption(ctx, SetConfigOptionRequest("T-load", "mode", "low")); setErr != nil {
-		t.Fatalf("set mode: %v", setErr)
-	}
-
-	// The config id is the only member this surface judges, and its refusal
-	// names the offending member in the uniform two-key shape.
-	_, err := agent.SetSessionConfigOption(ctx, SetConfigOptionRequest("T-load", "unknown", "x"))
-	requireUnsupportedField(t, err, fieldConfigID)
-	if _, err := agent.SetSessionConfigOption(ctx, SetConfigOptionRequest("T-missing", "mode", "low")); err == nil {
-		t.Fatal("unknown config session accepted")
-	}
-
-	for _, entry := range []SessionStoreEntry{json.RawMessage(`{`)} {
-		badStore := NewInMemorySessionStore()
-		if err := badStore.Replace(ctx, SessionKey{SessionID: "T-bad", Subpath: SessionStoreMainSubpath}, []SessionStoreReplacement{
-			{Key: SessionKey{SessionID: "T-bad", Subpath: SessionStoreMainSubpath}, Entries: []SessionStoreEntry{manifest}},
-			{Key: SessionKey{SessionID: "T-bad", Subpath: transcriptSubpath}, Entries: []SessionStoreEntry{entry}},
-		}); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := newTestAgent(WithExecutablePath(path), WithScratchDir(testScratchDir(t)), WithSessionStore(badStore)).LoadSession(ctx, LoadSessionRequest("T-bad", cwd)); err == nil {
-			t.Fatal("bad transcript replay accepted")
+	dirs := []string{filepath.Join(t.TempDir(), "bin")}
+	carrier := NewAmpOptions(WithAmpMode("ultra"), WithAmpEnv(map[string]string{"PATH": "/usr/bin", "HOME": t.TempDir(), "SESSION_VALUE": "chosen", "ACP_GO_AMP_INTERNAL_CALLER": "drop"}), WithAmpExtraPathDirs(dirs...))
+	session, err := h.conn.NewSession(h.ctx(), wire.NewSessionRequest(cwd, WithSessionAmpOptions(carrier)))
+	require.NoError(t, err)
+	_, err = h.prompt(session.SessionId, "remember first", nil)
+	require.NoError(t, err)
+	_, err = h.conn.CloseSession(h.ctx(), acp.CloseSessionRequest{SessionId: session.SessionId})
+	require.NoError(t, err)
+	path := filepath.Join(native, string(session.SessionId)+".json")
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	var snapshot nativeSnapshot
+	require.NoError(t, json.Unmarshal(data, &snapshot))
+	snapshot.Messages = append(snapshot.Messages, nativeMessage{ID: int64(len(snapshot.Messages) + 1), Role: "user", Content: []map[string]any{{"type": "text", "text": "native continuation"}}})
+	fakeSave(native, snapshot)
+	cold := newHarness(t, options...)
+	cold.initialize()
+	restored, err := cold.conn.LoadSession(cold.ctx(), wire.LoadSessionRequest(session.SessionId, cwd))
+	require.NoError(t, err)
+	require.Equal(t, acp.SessionConfigValueId("ultra"), restored.ConfigOptions[0].Select.CurrentValue)
+	require.Contains(t, agentText(cold.rec.snapshot()), "remember first")
+	var restoredUsage *acp.SessionUsageUpdate
+	for _, update := range cold.rec.snapshot() {
+		if update.Update.UsageUpdate != nil {
+			restoredUsage = update.Update.UsageUpdate
 		}
 	}
+	require.NotNil(t, restoredUsage)
+	require.Equal(t, 123456, restoredUsage.Size)
+	require.Equal(t, 13, restoredUsage.Used)
+	_, err = cold.prompt(session.SessionId, "ENV", nil)
+	require.NoError(t, err)
+	text := agentText(cold.rec.snapshot())
+	require.Contains(t, text, "chosen")
+	require.Contains(t, text, dirs[0]+":/usr/bin")
+	require.Contains(t, text, `"internal":""`)
+	rows, err := loadEntries(t.Context(), store, acpcore.SessionKey{SessionID: string(session.SessionId)})
+	require.NoError(t, err)
+	require.Contains(t, string(rows[0]), "native continuation")
+	_, err = cold.conn.CloseSession(cold.ctx(), acp.CloseSessionRequest{SessionId: session.SessionId})
+	require.NoError(t, err)
+	require.NoError(t, os.Remove(path))
+	_, err = cold.conn.LoadSession(cold.ctx(), wire.LoadSessionRequest(session.SessionId, cwd))
+	require.Equal(t, "amp_restore_failed", requestErrorData(t, err)["error"])
+	after, err := loadEntries(t.Context(), store, acpcore.SessionKey{SessionID: string(session.SessionId)})
+	require.NoError(t, err)
+	require.Equal(t, rows, after)
 }
 
-func TestLoadManifestErrorsAndListFilters(t *testing.T) {
-	ctx := context.Background()
-	agent := newTestAgent()
-	if _, err := agent.loadManifest(ctx, "T-missing"); err == nil {
-		t.Fatal("missing manifest accepted")
-	}
-	for _, entry := range []SessionStoreEntry{
-		json.RawMessage(`{`),
-		json.RawMessage(`{"format":"wrong","threadId":"T-bad"}`),
-		json.RawMessage(`{"format":"amp-thread-mirror-v1","sessionId":"other"}`),
-	} {
-		store := NewInMemorySessionStore()
-		if err := store.Replace(ctx, SessionKey{SessionID: "T-bad", Subpath: SessionStoreMainSubpath}, []SessionStoreReplacement{{Key: SessionKey{SessionID: "T-bad", Subpath: SessionStoreMainSubpath}, Entries: []SessionStoreEntry{entry}}}); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := newTestAgent(WithSessionStore(store)).loadManifest(ctx, "T-bad"); err == nil {
-			t.Fatalf("bad manifest accepted: %s", entry)
-		}
-	}
-	overlongID := acp.SessionId("T-" + strings.Repeat("x", ampnative.MaxThreadIDBytes))
-	overlong, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, SessionID: string(overlongID), NativeSessionID: string(overlongID), Env: map[string]string{}})
-	overlongStore := NewInMemorySessionStore()
-	if err := overlongStore.Replace(ctx, SessionKey{SessionID: string(overlongID)}, []SessionStoreReplacement{{
-		Key: SessionKey{SessionID: string(overlongID)}, Entries: []SessionStoreEntry{overlong},
-	}}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := newTestAgent(WithSessionStore(overlongStore)).loadManifest(ctx, overlongID); err == nil {
-		t.Fatal("overlong stored thread id admitted")
-	}
-	errStore := &errorStore{listErr: errors.New("list failed")}
-	if _, err := newTestAgent(WithSessionStore(errStore)).ListSessions(ctx, acp.ListSessionsRequest{}); err == nil {
-		t.Fatal("list error ignored")
-	}
-	store := NewInMemorySessionStore()
-	manifest, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, SessionID: "T-list", NativeSessionID: "T-list", Cwd: absTestPath("cwd"), Env: map[string]string{}, UpdatedAtUnixMilli: 0})
-	if err := store.Replace(ctx, SessionKey{SessionID: "T-list", Subpath: SessionStoreMainSubpath}, []SessionStoreReplacement{{Key: SessionKey{SessionID: "T-list", Subpath: SessionStoreMainSubpath}, Entries: []SessionStoreEntry{manifest}}}); err != nil {
-		t.Fatal(err)
-	}
-	resp, err := newTestAgent(WithSessionStore(store)).ListSessions(ctx, acp.ListSessionsRequest{Cwd: new(absTestPath("other"))})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(resp.Sessions) != 0 {
-		t.Fatalf("cwd filter failed: %#v", resp.Sessions)
-	}
-}
-
-func TestManifestRecoveryAndListingRejectNonCanonicalJSON(t *testing.T) {
-	ctx := context.Background()
-	entries := map[string]SessionStoreEntry{
-		"unknown field":              json.RawMessage(`{"format":"amp-thread-mirror-v1","sessionId":"T-bad","nativeSessionId":"T-bad","cwd":"/forged","title":"forged","env":{},"updatedAtUnixMilli":1,"createdAtUnixMilli":1,"unknown":true}`),
-		"duplicate field":            json.RawMessage(`{"format":"amp-thread-mirror-v1","format":"amp-thread-mirror-v1","sessionId":"T-bad","nativeSessionId":"T-bad","cwd":"/forged","title":"forged","env":{},"updatedAtUnixMilli":1,"createdAtUnixMilli":1}`),
-		"case alias":                 json.RawMessage(`{"Format":"amp-thread-mirror-v1","sessionId":"T-bad","nativeSessionId":"T-bad","cwd":"/forged","title":"forged","env":{},"updatedAtUnixMilli":1,"createdAtUnixMilli":1}`),
-		"trailing input":             json.RawMessage(`{"format":"amp-thread-mirror-v1","sessionId":"T-bad","nativeSessionId":"T-bad","cwd":"/forged","title":"forged","env":{},"updatedAtUnixMilli":1,"createdAtUnixMilli":1} {}`),
-		"duplicate nested env field": json.RawMessage(`{"format":"amp-thread-mirror-v1","sessionId":"T-bad","nativeSessionId":"T-bad","cwd":"/forged","title":"forged","env":{"AMP_API_KEY":"first","AMP_API_KEY":"second"},"updatedAtUnixMilli":1,"createdAtUnixMilli":1}`),
-		"case alias of nested field": json.RawMessage(`{"format":"amp-thread-mirror-v1","sessionId":"T-bad","nativeSessionId":"T-bad","cwd":"/forged","title":"forged","Env":{},"updatedAtUnixMilli":1,"createdAtUnixMilli":1}`),
-	}
-
-	for name, entry := range entries {
-		t.Run(name, func(t *testing.T) {
-			store := NewInMemorySessionStore()
-			key := SessionKey{SessionID: "T-bad", Subpath: SessionStoreMainSubpath}
-			if err := store.Replace(ctx, key, []SessionStoreReplacement{{Key: key, Entries: []SessionStoreEntry{entry}}}); err != nil {
-				t.Fatalf("seed manifest: %v", err)
+func TestCancelTimeoutCrashAndDelete(t *testing.T) {
+	t.Parallel()
+	for _, kind := range []string{"cancel", "timeout", "crash", "delete"} {
+		t.Run(kind, func(t *testing.T) {
+			t.Parallel()
+			var options []Option
+			if kind == "timeout" {
+				options = append(options, WithTurnTimeout(2*time.Second))
 			}
-
-			if _, err := newTestAgent(WithSessionStore(store)).loadManifest(ctx, "T-bad"); err == nil {
-				t.Fatal("recovery accepted non-canonical manifest")
+			h := newHarness(t, options...)
+			h.initialize()
+			session := h.newSession()
+			prompt := "SLOW"
+			if kind == "crash" {
+				prompt = "CRASH"
 			}
-
-			summaries, err := store.ListSessions(ctx)
-			if err != nil || len(summaries) != 1 {
-				t.Fatalf("list committed key: summaries=%#v err=%v", summaries, err)
+			type outcome struct {
+				response acp.PromptResponse
+				err      error
 			}
-			if summaries[0].Cwd != "" || summaries[0].Title != "" {
-				t.Fatalf("listing trusted non-canonical manifest: %#v", summaries[0])
+			done := make(chan outcome, 1)
+			go func() { response, err := h.prompt(session.SessionId, prompt, nil); done <- outcome{response, err} }()
+			h.rec.waitFor(t, func(updates []acp.SessionNotification) bool {
+				for _, u := range updates {
+					if u.Update.UserMessageChunk != nil {
+						return true
+					}
+				}
+
+				return false
+			})
+			switch kind {
+			case "cancel":
+				require.NoError(t, h.conn.Cancel(h.ctx(), wire.CancelRequest(session.SessionId)))
+			case "delete":
+				_, err := h.conn.UnstableDeleteSession(h.ctx(), wire.DeleteSessionRequest(session.SessionId))
+				require.NoError(t, err)
+			}
+			var result outcome
+			select {
+			case result = <-done:
+			case <-time.After(testTimeout):
+				t.Fatal("turn did not settle")
+			}
+			switch kind {
+			case "timeout":
+				require.Equal(t, wire.CauseTimeout, requestErrorData(t, result.err)["cause"])
+			case "crash":
+				require.Equal(t, wire.CauseProcessExit, requestErrorData(t, result.err)["cause"])
+			default:
+				require.NoError(t, result.err)
+				require.Equal(t, acp.StopReasonCancelled, result.response.StopReason)
+			}
+			if kind != "delete" {
+				_, err := h.prompt(session.SessionId, "next", nil)
+				require.NoError(t, err)
+			} else {
+				_, err := h.prompt(session.SessionId, "next", nil)
+				require.Error(t, err)
 			}
 		})
 	}
 }
 
-func TestRemainingAgentBranches(t *testing.T) {
-	ctx := context.Background()
-	path, _ := fakeAgentAmpPath(t, "")
-	agent := newTestAgent(WithExecutablePath(path))
-	if _, err := newAgentSession(ctx, agent, acp.SessionId("T-"+strings.Repeat("x", ampnative.MaxThreadIDBytes)), t.TempDir(), parsedSessionMeta{}, "", nil); err == nil {
-		t.Fatal("overlong thread id admitted")
-	}
-	if millisToRFC3339(0) != "" {
-		t.Fatal("zero millis formatted")
-	}
-	if _, err := agent.LoadSession(ctx, LoadSessionRequest("T-x", "", WithSessionMeta(map[string]any{"amp": "bad"}))); err == nil {
-		t.Fatal("load bad meta accepted")
-	}
-	if _, err := agent.ResumeSession(ctx, ResumeSessionRequest("T-x", "", WithSessionAmpOptions(AmpOptions{Model: "bad"}))); err == nil {
-		t.Fatal("resume bad options accepted")
-	}
-	if _, err := agent.LoadSession(ctx, LoadSessionRequest("T-x", t.TempDir(), WithSessionMCPServers(acp.McpServer{Acp: &acp.McpServerAcpInline{Name: "a", Id: "id"}}))); err == nil {
-		t.Fatal("load bad mcp accepted")
-	}
-	fileHome := filepath.Join(t.TempDir(), "file")
-	if err := os.WriteFile(fileHome, []byte("x"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	store := NewInMemorySessionStore()
-	manifest, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, SessionID: "T-file", NativeSessionID: "T-file", Cwd: t.TempDir(), Env: map[string]string{}})
-	if err := store.Replace(ctx, SessionKey{SessionID: "T-file", Subpath: ""}, []SessionStoreReplacement{{Key: SessionKey{SessionID: "T-file", Subpath: ""}, Entries: []SessionStoreEntry{manifest}}}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := newTestAgent(WithExecutablePath(path), WithScratchDir(fileHome), WithSessionStore(store)).LoadSession(ctx, LoadSessionRequest("T-file", t.TempDir())); err == nil {
-		t.Fatal("load with file scratch dir accepted")
-	}
-	activeLimited := newTestAgent(WithExecutablePath(path), WithScratchDir(testScratchDir(t)), WithSessionStore(store), WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 0}))
-	activeLimited.options.ConcurrencyLimits.MaxActiveSessions = 0
-	if _, _, _, use, err := activeLimited.loadOrResume(ctx, "T-file", t.TempDir(), nil, nil, nil); err != nil {
-		t.Fatalf("loadOrResume direct: %v", err)
-	} else {
-		activeLimited.finishSessionUse("T-file", use)
-	}
-	activeLimited.options.ConcurrencyLimits.MaxActiveSessions = 1
-	manifest2, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, SessionID: "T-file-2", NativeSessionID: "T-file-2", Cwd: t.TempDir(), Env: map[string]string{}})
-	if err := store.Replace(ctx, SessionKey{SessionID: "T-file-2", Subpath: ""}, []SessionStoreReplacement{{Key: SessionKey{SessionID: "T-file-2", Subpath: ""}, Entries: []SessionStoreEntry{manifest2}}}); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, _, _, err := activeLimited.loadOrResume(ctx, "T-file-2", t.TempDir(), nil, nil, nil); err == nil {
-		t.Fatal("active load backpressure not enforced")
-	}
-	agent.markDeleted("T-deleted")
-	// A tombstoned session is wire-indistinguishable from one that never
-	// existed: prompt/cancel/close all yield the uniform unknown-session shape.
-	for _, id := range []acp.SessionId{"T-deleted", "T-missing"} {
-		_, promptErr := agent.Prompt(ctx, TextPromptRequest(id, "test-turn", "x"))
-		requireUnknownSessionError(t, promptErr)
-		requireUnknownSessionError(t, agent.Cancel(ctx, acp.CancelNotification{SessionId: id}))
-		_, closeErr := agent.CloseSession(ctx, acp.CloseSessionRequest{SessionId: id})
-		requireUnknownSessionError(t, closeErr)
-	}
-	options := ampOptionsPayload(AmpOptions{Model: "m", OutputSchema: map[string]any{"type": "object"}})
-	if options["model"] != "m" || options["outputSchema"] == nil {
-		t.Fatalf("ampOptionsPayload missing fields: %#v", options)
+func TestImagesReplayFromNativeExport(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.initialize()
+	session := h.newSession(WithSessionRawEvents(true))
+	_, err := h.prompt(session.SessionId, "IMAGE", nil)
+	require.NoError(t, err)
+	require.Equal(t, 1, toolImages(h.rec.snapshot()))
+	_, err = h.conn.LoadSession(h.ctx(), wire.LoadSessionRequest(session.SessionId, sessionCwd(t, h, session.SessionId)))
+	require.NoError(t, err)
+	require.Equal(t, 2, toolImages(h.rec.snapshot()))
+	h.rec.mu.Lock()
+	defer h.rec.mu.Unlock()
+	for _, raw := range h.rec.raw {
+		require.NotContains(t, string(raw), "iVBOR")
 	}
 }
 
-func TestPromptInputAndEmitBranches(t *testing.T) {
-	title, mime, desc := "Title", "text/plain", "desc"
-	payload, err := promptInputWithPolicy(t.Context(), []acp.ContentBlock{
-		acp.TextBlock("text"),
-		acp.ImageBlock(validPNGBase64, "image/png"),
-		{ResourceLink: &acp.ContentBlockResourceLink{Name: "n", Uri: "file:///x", Title: &title, MimeType: &mime, Description: &desc}},
-		acp.ResourceBlock(acp.EmbeddedResourceResource{TextResourceContents: &acp.TextResourceContents{Uri: "file:///t", Text: "body", MimeType: &mime}}),
-		acp.ResourceBlock(acp.EmbeddedResourceResource{BlobResourceContents: &acp.BlobResourceContents{Uri: "file:///i", Blob: validPNGBase64, MimeType: new("image/png")}}),
-		acp.ResourceBlock(acp.EmbeddedResourceResource{BlobResourceContents: &acp.BlobResourceContents{Uri: "file:///b", Blob: "YmxvYg==", MimeType: &mime}}),
-	}, defaultPolicy())
-	if err != nil {
-		t.Fatal(err)
-	}
-	message, ok := payload["message"].(map[string]any)
-	if !ok {
-		t.Fatalf("message = %#v", payload["message"])
-	}
-	content, ok := message["content"].([]map[string]any)
-	if !ok {
-		t.Fatalf("content = %#v", message["content"])
-	}
-	if len(content) != 6 {
-		t.Fatalf("content len = %d", len(content))
-	}
-	// An unsupported content block (e.g. audio) is rejected fail-closed with the
-	// uniform -32602 shape {error:"unsupported", field:"prompt"}.
-	_, audioErr := promptInputWithPolicy(t.Context(), []acp.ContentBlock{acp.AudioBlock("audio", "audio/wav")}, defaultPolicy())
-	requireInvalidParamsData(t, audioErr, map[string]any{
-		jsonFieldError: valUnsupported,
-		jsonFieldField: "prompt",
-	})
-
-	// An embedded resource carrying neither text nor blob is the same refusal:
-	// the block a host must fix is the prompt member it arrived on.
-	_, resourceErr := promptInputWithPolicy(t.Context(), []acp.ContentBlock{acp.ResourceBlock(acp.EmbeddedResourceResource{})}, defaultPolicy())
-	requireInvalidParamsData(t, resourceErr, map[string]any{
-		jsonFieldError: valUnsupported,
-		jsonFieldField: fieldPrompt,
-	})
-	session := &agentSession{agent: newTestAgent(), id: "T-emit", rawEvents: true}
-	if err := session.emitUsage(context.Background(), nil); err != nil {
-		t.Fatal(err)
-	}
-	if err := session.emitUpdate(context.Background(), acp.UpdateAgentMessageText("no conn")); err != nil {
-		t.Fatal(err)
-	}
-	if err := session.emitRawEvent(context.Background(), "none", fakeAmpMessage{raw: map[string]any{"type": "x"}}); err != nil {
-		t.Fatal(err)
-	}
-	session.agent.setConnection(newClosedAgentConnection(t))
-	if err := session.emitUpdate(context.Background(), acp.UpdateAgentMessageText("fail")); err == nil {
-		t.Fatal("update failure ignored")
-	}
-	if err := session.emitRawEvent(context.Background(), "bad", fakeAmpMessage{raw: map[string]any{"bad": func() {}}}); err == nil {
-		t.Fatal("raw marshal failure ignored")
-	}
-	if usageFromAmp(nil) != nil {
-		t.Fatal("nil usage converted")
-	}
-	if err := classifyNativePromptError(nil); err != nil {
-		t.Fatalf("nil native error = %v", err)
-	}
-	if err := classifyNativePromptError(errors.New("plain")); err == nil || !strings.Contains(err.Error(), "plain") {
-		t.Fatalf("plain native error = %v", err)
-	}
-	if got := composeEnv(nil, nil); len(got) != 0 {
-		t.Fatalf("empty env = %#v", got)
-	}
-}
-
-type fakeAmpMessage struct{ raw map[string]any }
-
-func (m fakeAmpMessage) AmpType() string { return "fake" }
-
-func (m fakeAmpMessage) RawMessage() map[string]any { return m.raw }
-
-func (m fakeAmpMessage) RawJSON() string { return `{"type":"fake"}` }
-
-func attachRecordingClient(t *testing.T, agent *Agent) (*recordingClient, func()) {
+func sessionCwd(t *testing.T, h *harness, id acp.SessionId) string {
 	t.Helper()
-	c2aR, c2aW := io.Pipe()
-	a2cR, a2cW := io.Pipe()
-	client := &recordingClient{}
-	_ = acp.NewClientSideConnection(client, c2aW, a2cR)
-	conn := newLocalAgentConnection(agent, a2cW, c2aR)
-	agent.setConnection(conn)
-	return client, func() {
-		_ = c2aW.Close()
-		_ = c2aR.Close()
-		_ = a2cW.Close()
-		_ = a2cR.Close()
-	}
-}
-
-func waitForRecorded(t *testing.T, ready func() bool) {
-	t.Helper()
-	for range 100 {
-		if ready() {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatal("recorded notification did not arrive")
-}
-
-func newClosedAgentConnection(t *testing.T) *localAgentConnection {
-	t.Helper()
-	c2aR, c2aW := io.Pipe()
-	a2cR, a2cW := io.Pipe()
-	conn := newLocalAgentConnection(newTestAgent(), a2cW, c2aR)
-	_ = a2cR.Close()
-	t.Cleanup(func() {
-		_ = c2aW.Close()
-		_ = c2aR.Close()
-		_ = a2cW.Close()
-		_ = a2cR.Close()
-	})
-	return conn
-}
-
-type errorStore struct {
-	appendErr  error
-	loadErr    error
-	replaceErr error
-	deleteErr  error
-	listErr    error
-}
-
-func (s *errorStore) Append(context.Context, SessionKey, []SessionStoreEntry) error {
-	return s.appendErr
-}
-
-func (s *errorStore) Load(context.Context, SessionKey) ([]SessionStoreEntry, error) {
-	return nil, s.loadErr
-}
-
-func (s *errorStore) Replace(context.Context, SessionKey, []SessionStoreReplacement) error {
-	return s.replaceErr
-}
-
-func (s *errorStore) Delete(context.Context, SessionKey) error { return s.deleteErr }
-
-func (s *errorStore) ListSessions(context.Context) ([]SessionSummary, error) {
-	return nil, s.listErr
-}
-
-func (s *errorStore) ListSubkeys(context.Context, SessionKey) ([]string, error) { return nil, nil }
-
-type recordingStore struct {
-	appendCalls      int
-	replaceCalls     int
-	lastReplacements []SessionStoreReplacement
-	entries          []SessionStoreEntry
-}
-
-func (s *recordingStore) Append(context.Context, SessionKey, []SessionStoreEntry) error {
-	s.appendCalls++
-	return nil
-}
-
-func (s *recordingStore) Load(context.Context, SessionKey) ([]SessionStoreEntry, error) {
-	return cloneEntries(s.entries), nil
-}
-
-func (s *recordingStore) Replace(_ context.Context, _ SessionKey, replacements []SessionStoreReplacement) error {
-	s.replaceCalls++
-	s.lastReplacements = replacements
-	for _, replacement := range replacements {
-		if replacement.Key.Subpath == transcriptSubpath {
-			s.entries = cloneEntries(replacement.Entries)
+	list, err := h.conn.ListSessions(h.ctx(), wire.ListSessionsRequest())
+	require.NoError(t, err)
+	for _, s := range list.Sessions {
+		if s.SessionId == id {
+			return s.Cwd
 		}
 	}
-	return nil
+	t.Fatal("missing session")
+
+	return ""
 }
 
-func (s *recordingStore) Delete(context.Context, SessionKey) error { return nil }
-
-func (s *recordingStore) ListSessions(context.Context) ([]SessionSummary, error) { return nil, nil }
-
-func (s *recordingStore) ListSubkeys(context.Context, SessionKey) ([]string, error) { return nil, nil }
-
-// TestActiveLoadResumeValidation proves an already-active session cannot bypass
-// cold-path validation on session/load or session/resume.
-func TestActiveLoadResumeValidation(t *testing.T) {
-	ctx := context.Background()
-	path, _ := fakeAgentAmpPath(t, "")
-	cwd := t.TempDir()
-	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(testScratchDir(t)))
-	resp, err := agent.NewSession(ctx, NewSessionRequest(cwd))
-	if err != nil {
-		t.Fatalf("NewSession: %v", err)
-	}
-	id := resp.SessionId
-
-	if _, err := agent.LoadSession(ctx, LoadSessionRequest(id, cwd, WithSessionMeta(map[string]any{"amp": "bad"}))); err == nil {
-		t.Fatal("active load with bad _meta.amp accepted")
-	}
-	if _, err := agent.LoadSession(ctx, LoadSessionRequest(id, "relative/cwd")); err == nil {
-		t.Fatal("active load with relative cwd accepted")
-	}
-	if _, err := agent.ResumeSession(ctx, ResumeSessionRequest(id, cwd, WithSessionMCPServers(acp.McpServer{Sse: &acp.McpServerSseInline{Name: "sse", Url: "https://example.test/sse"}}))); err == nil {
-		t.Fatal("active resume with SSE MCP accepted")
-	}
-	if _, err := agent.ResumeSession(ctx, ResumeSessionRequest(id, cwd, WithSessionAmpOptions(AmpOptions{Model: "opus"}))); err == nil {
-		t.Fatal("active resume with non-empty model accepted")
-	}
-
-	before := len(agent.sessions)
-	if _, err := agent.LoadSession(ctx, LoadSessionRequest(id, cwd)); err != nil {
-		t.Fatalf("valid active reload: %v", err)
-	}
-	if len(agent.sessions) != before {
-		t.Fatalf("active reload changed session count %d -> %d (second native process?)", before, len(agent.sessions))
-	}
+type failingStore struct {
+	acpcore.SessionStore
+	fail atomic.Bool
 }
 
-// flakyReplaceStore fails the next failReplaces Replace calls, then delegates.
-type flakyReplaceStore struct {
-	*InMemorySessionStore
-	failReplaces int
+func (s *failingStore) Replace(ctx context.Context, key acpcore.SessionKey, entries []acpcore.SessionStoreReplacement) error {
+	if s.fail.Load() {
+		return errors.New("fixture store failure")
+	}
+
+	return s.SessionStore.Replace(ctx, key, entries)
 }
 
-func (s *flakyReplaceStore) Replace(ctx context.Context, main SessionKey, replacements []SessionStoreReplacement) error {
-	if s.failReplaces > 0 {
-		s.failReplaces--
-
-		return errors.New("replace unavailable")
-	}
-
-	return s.InMemorySessionStore.Replace(ctx, main, replacements)
+func TestCommitFailureCannotReportSuccess(t *testing.T) {
+	t.Parallel()
+	store := &failingStore{SessionStore: acpcore.NewInMemorySessionStore()}
+	h := newHarness(t, WithSessionStore(store))
+	h.initialize(withLifecycle())
+	session := h.newSession()
+	store.fail.Store(true)
+	_, err := h.prompt(session.SessionId, "HELLO", promptMeta(0))
+	require.Equal(t, "amp_turn_failed", requestErrorData(t, err)["error"])
+	kinds := lifecycleEventKinds(h.rec.snapshot())
+	require.Contains(t, kinds, "prompt_accepted", "the turn never reached the lifecycle stream")
+	require.NotContains(t, kinds, "state_update:idle", "a turn whose foreground commit failed published a terminal idle")
+	rows, err := loadEntries(t.Context(), store, acpcore.SessionKey{SessionID: string(session.SessionId)})
+	require.NoError(t, err)
+	require.NotContains(t, string(rows[0]), "HELLO")
+	store.fail.Store(false)
+	_, err = h.conn.CloseSession(h.ctx(), acp.CloseSessionRequest{SessionId: session.SessionId})
+	require.NoError(t, err)
+	rows, err = loadEntries(t.Context(), store, acpcore.SessionKey{SessionID: string(session.SessionId)})
+	require.NoError(t, err)
+	require.Contains(t, string(rows[0]), "HELLO")
 }
 
-// TestMirrorUnsyncedRetention proves a completed native turn
-// whose Replace fails is retained in memory, blocks the next prompt loudly, and
-// is durably re-committed on retry so load replay still contains the turn.
-func TestMirrorUnsyncedRetention(t *testing.T) {
-	ctx := context.Background()
-	path, _ := fakeAgentAmpPath(t, "")
-	cwd := t.TempDir()
-	store := &flakyReplaceStore{InMemorySessionStore: NewInMemorySessionStore()}
-	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(testScratchDir(t)), WithSessionStore(store))
-	resp, err := agent.NewSession(ctx, NewSessionRequest(cwd))
-	if err != nil {
-		t.Fatalf("NewSession: %v", err)
-	}
-	id := resp.SessionId
-
-	if _, err = agent.Prompt(ctx, TextPromptRequest(id, "test-turn", "seed thread")); err != nil {
-		t.Fatalf("seed prompt: %v", err)
-	}
-
-	// Fail the completed turn's persist and the first retry.
-	store.failReplaces = 2
-
-	if _, err = agent.Prompt(ctx, TextPromptRequest(id, "test-turn", "turn one")); err == nil {
-		t.Fatal("prompt with failing persist returned no error")
-	}
-	if _, err = agent.Prompt(ctx, TextPromptRequest(id, "test-turn", "blocked")); err == nil || !strings.Contains(err.Error(), "mirror_unsynced") {
-		t.Fatalf("second prompt not blocked with mirror_unsynced: %v", err)
-	}
-	// Third prompt: retry of the exact frames succeeds, then the new turn runs.
-	if _, err = agent.Prompt(ctx, TextPromptRequest(id, "test-turn", "turn three")); err != nil {
-		t.Fatalf("prompt after store recovery: %v", err)
-	}
-
-	entries, err := store.Load(ctx, SessionKey{SessionID: string(id), Subpath: transcriptSubpath})
-	if err != nil {
-		t.Fatalf("load transcript: %v", err)
-	}
-	results := 0
-	for _, entry := range entries {
-		if bytes.Contains(entry, []byte(`"type":"result"`)) {
-			results++
-		}
-	}
-	if results != 3 {
-		t.Fatalf("persisted transcript has %d result frames, want all three turns", results)
-	}
-
-	// Load replay on a fresh agent must succeed and see the retained turns.
-	restored := newTestAgent(WithExecutablePath(path), WithScratchDir(testScratchDir(t)), WithSessionStore(store))
-	if _, err := restored.LoadSession(ctx, LoadSessionRequest(id, cwd)); err != nil {
-		t.Fatalf("load replay after retention: %v", err)
-	}
-}
-
-// TestCloseCommitsRetainedUnsyncedFrames proves the close ladder's durable rung.
-// A settlement whose Replace failed keeps its frames mirror-unsynced rather than
-// dropping them, and the session that holds them is the only copy: a close that
-// reclaimed it would take a natively completed turn with it. The close retries
-// the exact frames, so a store that healed in the meantime ends up holding both
-// turns and a fresh agent replays both.
-func TestCloseCommitsRetainedUnsyncedFrames(t *testing.T) {
-	ctx := context.Background()
-	path, _ := fakeAgentAmpPath(t, "")
-	cwd := t.TempDir()
-	store := &flakyReplaceStore{InMemorySessionStore: NewInMemorySessionStore()}
-	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(testScratchDir(t)), WithSessionStore(store))
-	resp, err := agent.NewSession(ctx, NewSessionRequest(cwd))
-	if err != nil {
-		t.Fatalf("NewSession: %v", err)
-	}
-	id := resp.SessionId
-
-	if _, err = agent.Prompt(ctx, TextPromptRequest(id, "test-turn", "seed thread")); err != nil {
-		t.Fatalf("seed prompt: %v", err)
-	}
-
-	// Fail exactly the settlement commit of the second turn: the prompt fails and
-	// its frames are retained mirror-unsynced.
-	store.failReplaces = 1
-	if _, err = agent.Prompt(ctx, TextPromptRequest(id, "test-turn", "turn two")); err == nil {
-		t.Fatal("prompt with failing persist returned no error")
-	}
-
-	live, err := agent.session(id)
-	if err != nil {
-		t.Fatalf("session lookup: %v", err)
-	}
-	live.mu.Lock()
-	retained := len(live.unsyncedFrames)
-	live.mu.Unlock()
-	if retained == 0 {
-		t.Fatal("failed settlement retained no frames to commit")
-	}
-
-	// The store is healthy again. The close is the request that lands them.
-	if _, err = agent.CloseSession(ctx, acp.CloseSessionRequest{SessionId: id}); err != nil {
-		t.Fatalf("CloseSession: %v", err)
-	}
-
-	entries, err := store.Load(ctx, SessionKey{SessionID: string(id), Subpath: transcriptSubpath})
-	if err != nil {
-		t.Fatalf("load transcript: %v", err)
-	}
-	results := 0
-	for _, entry := range entries {
-		if bytes.Contains(entry, []byte(`"type":"result"`)) {
-			results++
-		}
-	}
-	if results != 2 {
-		t.Fatalf("durable transcript has %d result frames, want both natively completed turns", results)
-	}
-
-	restored := newTestAgent(WithExecutablePath(path), WithScratchDir(testScratchDir(t)), WithSessionStore(store))
-	if _, err := restored.LoadSession(ctx, LoadSessionRequest(id, cwd)); err != nil {
-		t.Fatalf("load replay after close commit: %v", err)
-	}
-}
-
-// TestCloseFailsWhileTheMirrorCannotCommit pins the other half of the same rung.
-// A close that cannot land the retained frames fails and reclaims nothing: the
-// session keeps its identity, its scratch, and its own unsynced frames, so the
-// retry the host makes once its store is back is a retry of this same close.
-func TestCloseFailsWhileTheMirrorCannotCommit(t *testing.T) {
-	ctx := context.Background()
-	path, _ := fakeAgentAmpPath(t, "")
-	cwd := t.TempDir()
-	store := &flakyReplaceStore{InMemorySessionStore: NewInMemorySessionStore()}
-	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(testScratchDir(t)), WithSessionStore(store))
-	resp, err := agent.NewSession(ctx, NewSessionRequest(cwd))
-	if err != nil {
-		t.Fatalf("NewSession: %v", err)
-	}
-	id := resp.SessionId
-
-	if _, err = agent.Prompt(ctx, TextPromptRequest(id, "test-turn", "seed thread")); err != nil {
-		t.Fatalf("seed prompt: %v", err)
-	}
-
-	// The settlement commit fails, and so does the close's retry of it.
-	store.failReplaces = 2
-	if _, err = agent.Prompt(ctx, TextPromptRequest(id, "test-turn", "turn two")); err == nil {
-		t.Fatal("prompt with failing persist returned no error")
-	}
-
-	live, err := agent.session(id)
-	if err != nil {
-		t.Fatalf("session lookup: %v", err)
-	}
-
-	if _, err = agent.CloseSession(ctx, acp.CloseSessionRequest{SessionId: id}); err == nil || !strings.Contains(err.Error(), "mirror_unsynced") {
-		t.Fatalf("close over an uncommittable mirror = %v, want mirror_unsynced", err)
-	}
-
-	if _, err = agent.session(id); err != nil {
-		t.Fatalf("session after a failed close is not addressable: %v", err)
-	}
-	if _, statErr := os.Stat(live.settingsDir); statErr != nil {
-		t.Fatalf("failed close reclaimed scratch state: %v", statErr)
-	}
-	live.mu.Lock()
-	retained := len(live.unsyncedFrames)
-	live.mu.Unlock()
-	if retained == 0 {
-		t.Fatal("failed close dropped the frames it could not commit")
-	}
-
-	// The store is back: the retried close is the one that commits and reclaims.
-	if _, err = agent.CloseSession(ctx, acp.CloseSessionRequest{SessionId: id}); err != nil {
-		t.Fatalf("retried CloseSession: %v", err)
-	}
-	if _, err = agent.session(id); err == nil {
-		t.Fatal("settled close left the session addressable")
-	}
-
-	entries, err := store.Load(ctx, SessionKey{SessionID: string(id), Subpath: transcriptSubpath})
-	if err != nil {
-		t.Fatalf("load transcript: %v", err)
-	}
-	results := 0
-	for _, entry := range entries {
-		if bytes.Contains(entry, []byte(`"type":"result"`)) {
-			results++
-		}
-	}
-	if results != 2 {
-		t.Fatalf("durable transcript has %d result frames, want both natively completed turns", results)
-	}
-}
-
-// TestCloseCommitsRetainedFramesOnADetachedContext pins the context the rung runs
-// on. A settlement commits on a context detached from the request's for the same
-// reason a close must: the frames are the only copy of a completed turn, and a
-// host that cancelled the call it made is not a reason to lose them. The store
-// here refuses a cancelled context outright, so a rung reusing the request's
-// would drop the turn and answer the close cleanly.
-func TestCloseCommitsRetainedFramesOnADetachedContext(t *testing.T) {
-	ctx := context.Background()
-	path, _ := fakeAgentAmpPath(t, "")
-	cwd := t.TempDir()
-	store := &flakyReplaceStore{InMemorySessionStore: NewInMemorySessionStore()}
-	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(testScratchDir(t)), WithSessionStore(store))
-	resp, err := agent.NewSession(ctx, NewSessionRequest(cwd))
-	if err != nil {
-		t.Fatalf("NewSession: %v", err)
-	}
-	id := resp.SessionId
-
-	if _, err = agent.Prompt(ctx, TextPromptRequest(id, "test-turn", "seed thread")); err != nil {
-		t.Fatalf("seed prompt: %v", err)
-	}
-
-	store.failReplaces = 1
-	if _, err = agent.Prompt(ctx, TextPromptRequest(id, "test-turn", "turn two")); err == nil {
-		t.Fatal("prompt with failing persist returned no error")
-	}
-
-	cancelled, cancel := context.WithCancel(ctx)
-	cancel()
-
-	if _, err = agent.CloseSession(cancelled, acp.CloseSessionRequest{SessionId: id}); err != nil {
-		t.Fatalf("close on a cancelled request context: %v", err)
-	}
-
-	entries, err := store.Load(ctx, SessionKey{SessionID: string(id), Subpath: transcriptSubpath})
-	if err != nil {
-		t.Fatalf("load transcript: %v", err)
-	}
-	results := 0
-	for _, entry := range entries {
-		if bytes.Contains(entry, []byte(`"type":"result"`)) {
-			results++
-		}
-	}
-	if results != 2 {
-		t.Fatalf("durable transcript has %d result frames, want both natively completed turns", results)
-	}
-}
-
-// TestCloseCommitsNothingOverADeleteFence pins how the close rung composes with a
-// delete. Replace clears the tombstone of every key it lists, so a session fenced
-// for delete commits nothing on close: it writes no retained frames and fails
-// the close boundary. The exact wrapper and frames stay retained so the session
-// cannot report itself clean over writes it was never allowed to make.
-func TestCloseCommitsNothingOverADeleteFence(t *testing.T) {
-	ctx := context.Background()
-	path, _ := fakeAgentAmpPath(t, "")
-	cwd := t.TempDir()
-	store := &flakyReplaceStore{InMemorySessionStore: NewInMemorySessionStore()}
-	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(testScratchDir(t)), WithSessionStore(store))
-	resp, err := agent.NewSession(ctx, NewSessionRequest(cwd))
-	if err != nil {
-		t.Fatalf("NewSession: %v", err)
-	}
-	id := resp.SessionId
-
-	if _, err = agent.Prompt(ctx, TextPromptRequest(id, "test-turn", "seed thread")); err != nil {
-		t.Fatalf("seed prompt: %v", err)
-	}
-
-	store.failReplaces = 1
-	if _, err = agent.Prompt(ctx, TextPromptRequest(id, "test-turn", "turn two")); err == nil {
-		t.Fatal("prompt with failing persist returned no error")
-	}
-
-	live, err := agent.session(id)
-	if err != nil {
-		t.Fatalf("session lookup: %v", err)
-	}
-
-	before, err := store.Load(ctx, SessionKey{SessionID: string(id), Subpath: transcriptSubpath})
-	if err != nil {
-		t.Fatalf("load transcript before: %v", err)
-	}
-
-	live.fencePersistence()
-	if _, err = agent.CloseSession(ctx, acp.CloseSessionRequest{SessionId: id}); !errors.Is(err, errPersistenceFenced) {
-		t.Fatalf("close over a delete fence = %v, want fenced boundary", err)
-	}
-
-	after, err := store.Load(ctx, SessionKey{SessionID: string(id), Subpath: transcriptSubpath})
-	if err != nil {
-		t.Fatalf("load transcript after: %v", err)
-	}
-	if len(after) != len(before) {
-		t.Fatalf("fenced close wrote %d frames over the row a delete is tombstoning (%d before)", len(after), len(before))
-	}
-	live.mu.Lock()
-	retained := len(live.unsyncedFrames)
-	live.mu.Unlock()
-	if retained == 0 {
-		t.Fatal("fenced close reported a clean mirror over frames it never wrote")
-	}
-	stillLive, lookupErr := agent.session(id)
-	if lookupErr != nil || stillLive != live {
-		t.Fatalf("fenced close ownership = %p err=%v, want exact %p", stillLive, lookupErr, live)
-	}
-	live.resumePersistence()
-	if closeErr := agent.Close(); closeErr != nil {
-		t.Fatalf("cleanup Agent.Close: %v", closeErr)
-	}
-}
-
-// TestDeleteLeavesNoRetainedFramesToResurrect closes the same composition from the
-// wire. A delete whose live session still holds retained frames tombstones the
-// row and nothing writes those frames back over it.
-func TestDeleteLeavesNoRetainedFramesToResurrect(t *testing.T) {
-	ctx := context.Background()
-	path, _ := fakeAgentAmpPath(t, "")
-	cwd := t.TempDir()
-	store := &flakyReplaceStore{InMemorySessionStore: NewInMemorySessionStore()}
-	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(testScratchDir(t)), WithSessionStore(store))
-	resp, err := agent.NewSession(ctx, NewSessionRequest(cwd))
-	if err != nil {
-		t.Fatalf("NewSession: %v", err)
-	}
-	id := resp.SessionId
-
-	if _, err = agent.Prompt(ctx, TextPromptRequest(id, "test-turn", "seed thread")); err != nil {
-		t.Fatalf("seed prompt: %v", err)
-	}
-
-	store.failReplaces = 1
-	if _, err = agent.Prompt(ctx, TextPromptRequest(id, "test-turn", "turn two")); err == nil {
-		t.Fatal("prompt with failing persist returned no error")
-	}
-
-	if _, err = agent.UnstableDeleteSession(ctx, DeleteSessionRequest(id)); err != nil {
-		t.Fatalf("UnstableDeleteSession: %v", err)
-	}
-
-	entries, err := store.Load(ctx, SessionKey{SessionID: string(id), Subpath: transcriptSubpath})
-	if err != nil {
-		t.Fatalf("load transcript after delete: %v", err)
-	}
-	if len(entries) != 0 {
-		t.Fatalf("delete left %d transcript frames behind the tombstone", len(entries))
-	}
-	if _, err = agent.LoadSession(ctx, LoadSessionRequest(id, cwd)); err == nil {
-		t.Fatal("a deleted session loaded again")
-	}
-}
-
-// TestCancelAlreadyCancelledBranch deterministically covers Cancel
-// on an already-cancelled active prompt returning nil without re-interrupting.
-func TestCancelAlreadyCancelledBranch(t *testing.T) {
-	session := &agentSession{agent: newTestAgent()}
-	state := newPromptTurnState()
-	state.cancel()
-
-	if err := session.admitPrompt(state); err != nil {
-		t.Fatalf("admit prompt = %v", err)
-	}
-
-	if err := session.Cancel(context.Background()); err != nil {
-		t.Fatalf("cancel on already-cancelled prompt = %v", err)
-	}
-}
-
-// TestTombstoneCascade proves a main-key tombstone hides future
-// subpath appends/loads/listings and is cleared only by a valid Replace.
-func TestTombstoneCascade(t *testing.T) {
-	ctx := context.Background()
-	store := NewInMemorySessionStore()
-	main := SessionKey{SessionID: "T-cascade", Subpath: SessionStoreMainSubpath}
-	manifest, _ := json.Marshal(ampManifest{Format: SessionStoreFormat, SessionID: "T-cascade", NativeSessionID: "T-cascade", Env: map[string]string{}})
-	if err := store.Replace(ctx, main, []SessionStoreReplacement{{Key: main, Entries: []SessionStoreEntry{manifest}}}); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Delete(ctx, main); err != nil {
-		t.Fatal(err)
-	}
-
-	future := SessionKey{SessionID: "T-cascade", Subpath: transcriptSubpath}
-	if err := store.Append(ctx, future, []SessionStoreEntry{json.RawMessage(`"x"`)}); err != nil {
-		t.Fatal(err)
-	}
-	if entries, err := store.Load(ctx, future); err != nil || len(entries) != 0 {
-		t.Fatalf("future subpath append survived main tombstone: entries=%d err=%v", len(entries), err)
-	}
-	if subkeys, err := store.ListSubkeys(ctx, SessionKey{SessionID: "T-cascade"}); err != nil || len(subkeys) != 0 {
-		t.Fatalf("tombstoned subkeys listed: %#v err=%v", subkeys, err)
-	}
-
-	// Re-publishing the main key does not lift the tombstone: the cascade holds
-	// over every subpath, and the append that follows it writes nothing either.
-	if err := store.Replace(ctx, main, []SessionStoreReplacement{{Key: main, Entries: []SessionStoreEntry{manifest}}}); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Append(ctx, future, []SessionStoreEntry{json.RawMessage(`"y"`)}); err != nil {
-		t.Fatal(err)
-	}
-	if entries, err := store.Load(ctx, future); err != nil || len(entries) != 0 {
-		t.Fatalf("a replacement resurrected a cascaded subpath: entries=%d err=%v", len(entries), err)
-	}
-	if entries, err := store.Load(ctx, main); err != nil || len(entries) != 0 {
-		t.Fatalf("a replacement resurrected a tombstoned session: entries=%d err=%v", len(entries), err)
-	}
-}
-
-func TestSessionDirectBranches(t *testing.T) {
-	ctx := context.Background()
-	fileScratch := filepath.Join(t.TempDir(), "file")
-	if err := os.WriteFile(fileScratch, []byte("x"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := newAgentSession(t.Context(), newTestAgent(WithScratchDir(fileScratch)), "T-1", "", parsedSessionMeta{}, "", nil); err == nil {
-		t.Fatal("newAgentSession with file scratch dir succeeded")
-	}
-	path, _ := fakeAgentAmpPath(t, "")
-	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(testScratchDir(t)))
-	session, err := newAgentSession(t.Context(), agent, "T-1", t.TempDir(), parsedSessionMeta{rawEvent: true}, "", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	session.turn <- struct{}{}
-	if _, err := session.acquireTurn(ctx); err == nil {
-		t.Fatal("expected session_prompt backpressure")
-	}
-	<-session.turn
-	cancelCtx, cancel := context.WithCancel(ctx)
-	cancel()
-	session.turn <- struct{}{}
-	if _, err := session.acquireTurn(cancelCtx); err == nil {
-		t.Fatal("expected canceled acquireTurn")
-	}
-	<-session.turn
-	session.poisonCause = "poisoned"
-	if err := session.ready(); err == nil {
-		t.Fatal("poisoned session ready")
-	}
-	session.poisonCause = ""
-	session.closed = true
-	if err := session.ready(); !errors.Is(err, errSessionClosed) {
-		t.Fatalf("closed ready = %v", err)
-	}
-	session.closed = false
-	if err := session.Cancel(ctx); err != nil {
-		t.Fatalf("Cancel without turn: %v", err)
-	}
-	if err := session.Close(ctx); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-	if err := session.Delete(ctx); err != nil {
-		t.Fatalf("Delete: %v", err)
-	}
-}
-
-// The marker prints the path it was resolved to, so a recorded run names the
-// exact file the native process found on the PATH it received.
-const carrierMarkerSource = `package main
-
-import (
-	"fmt"
-	"os"
-)
-
-func main() { fmt.Println(os.Args[0]) }
-`
-
-// carrierMarkerBinary compiles the marker once per test.
-func carrierMarkerBinary(t *testing.T) string {
-	t.Helper()
-
-	dir := t.TempDir()
-	source := filepath.Join(dir, "marker.go")
-
-	if err := os.WriteFile(source, []byte(carrierMarkerSource), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	binary := filepath.Join(dir, "marker")
-	if out, err := exec.Command("go", "build", "-o", binary, source).CombinedOutput(); err != nil {
-		t.Fatalf("build carrier marker: %v\n%s", err, out)
-	}
-
-	return binary
-}
-
-// carrierDirectory materializes one session-scoped operation directory: the
-// session's own marker command plus an amp stand-in that must never be chosen,
-// because executable resolution belongs to the static agent base. The stand-in
-// records its own launch before failing, so "was never selected" is an
-// observation rather than an inference from a passing turn.
-func carrierDirectory(t *testing.T, marker, name, state string) string {
-	t.Helper()
-
-	dir := t.TempDir()
-
-	data, err := os.ReadFile(marker)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if err := os.WriteFile(filepath.Join(dir, name), data, 0o700); err != nil { // #nosec G306 -- executable test marker.
-		t.Fatal(err)
-	}
-
-	shadow := "#!/bin/sh\nprintf '%s\\n' \"$0\" >> '" + filepath.Join(state, shadowLogName) + "'\n" +
-		"echo 'session PATH shadowed the amp harness' >&2\nexit 9\n"
-	if err := os.WriteFile(filepath.Join(dir, "amp"), []byte(shadow), 0o700); err != nil { // #nosec G306 -- executable test stub.
-		t.Fatal(err)
-	}
-
-	return dir
-}
-
-// shadowLogName is where a planted session-directory amp records that it ran.
-const shadowLogName = "shadow-amp.log"
-
-// requireNoShadowedHarness pins that the amp planted on a session PATH was
-// never launched at all.
-func requireNoShadowedHarness(t *testing.T, state string) {
-	t.Helper()
-
-	data, err := os.ReadFile(filepath.Join(state, shadowLogName))
-	if errors.Is(err, os.ErrNotExist) {
-		return
-	}
-
-	if err != nil {
-		t.Fatalf("read shadow harness log: %v", err)
-	}
-
-	t.Fatalf("the amp planted on a session PATH ran: %s", data)
-}
-
-// carrier is one logical session's complete session-scoped configuration. Amp
-// declares no ordered path option, so the raw env.PATH is the whole search path
-// its short-lived prompt process runs with.
-type carrier struct {
-	bearer string
-	dir    string
-	marker string
-}
-
-func (c carrier) env() map[string]string {
-	return map[string]string{
-		"AMP_API_KEY":        c.bearer,
-		"PATH":               c.dir,
-		"AMP_CARRIER_MARKER": c.marker,
-	}
-}
-
-type carrierRun struct {
-	Name     string `json:"name"`
-	Path     string `json:"path"`
-	Bearer   string `json:"bearer"`
-	Resolved string `json:"resolved"`
-	Output   string `json:"output"`
-	Error    string `json:"error"`
-	RunError string `json:"runError"`
-}
-
-func carrierRuns(t *testing.T, state string) []carrierRun {
-	t.Helper()
-
-	data, err := os.ReadFile(filepath.Join(state, "marker.jsonl"))
-	if err != nil {
-		t.Fatalf("read recorded marker runs: %v", err)
-	}
-
-	runs := make([]carrierRun, 0, 4)
-	for line := range strings.SplitSeq(strings.TrimSpace(string(data)), "\n") {
-		var run carrierRun
-		if err := json.Unmarshal([]byte(line), &run); err != nil {
-			t.Fatalf("decode recorded marker run %q: %v", line, err)
-		}
-
-		runs = append(runs, run)
-	}
-
-	return runs
-}
-
-// requireCarrierRuns pins that every native turn recorded since offset resolved
-// and ran its own session's marker out of its own raw PATH, and that no other
-// session's values appear anywhere in it.
-func requireCarrierRuns(t *testing.T, runs []carrierRun, offset int, want map[string]carrier) {
-	t.Helper()
-
-	seen := map[string]int{}
-
-	for _, run := range runs[offset:] {
-		expected, known := want[run.Bearer]
-		if !known {
-			t.Fatalf("a native turn carried unexpected bearer %q", run.Bearer)
-		}
-
-		if run.Error != "" || run.RunError != "" {
-			t.Fatalf("marker %q did not run: %s %s", run.Name, run.Error, run.RunError)
-		}
-
-		if run.Name != expected.marker {
-			t.Fatalf("bearer %q ran marker %q, want %q", run.Bearer, run.Name, expected.marker)
-		}
-
-		resolved := filepath.Join(expected.dir, expected.marker)
-		if run.Resolved != resolved || run.Output != resolved {
-			t.Fatalf("marker resolved to %q and reported %q, want %q", run.Resolved, run.Output, resolved)
-		}
-
-		// Amp owns no ordered path option, so the session's raw PATH is the
-		// whole search path and its first component is the operation directory.
-		components := filepath.SplitList(run.Path)
-		if run.Path != expected.dir || len(components) != 1 || components[0] != expected.dir {
-			t.Fatalf("bearer %q ran with PATH %q, want exactly %q", run.Bearer, run.Path, expected.dir)
-		}
-
-		seen[run.Bearer]++
-	}
-
-	for bearer := range want {
-		if seen[bearer] == 0 {
-			t.Fatalf("no native turn ran for bearer %q", bearer)
-		}
-	}
-}
-
-func newCarrierSession(t *testing.T, agent *Agent, c carrier) (acp.SessionId, string) {
-	t.Helper()
-
-	cwd := t.TempDir()
-
-	resp, err := agent.NewSession(context.Background(), NewSessionRequest(cwd, WithSessionAmpOptions(
-		NewAmpOptions(WithAmpEnv(c.env())),
-	)))
-	if err != nil {
-		t.Fatalf("prepare carrier session for %q: %v", c.bearer, err)
-	}
-
-	return resp.SessionId, cwd
-}
-
-func promptCarriersConcurrently(t *testing.T, agent *Agent, ids ...acp.SessionId) {
-	t.Helper()
-
-	var wait sync.WaitGroup
-
-	errs := make([]error, len(ids))
-
-	for index, id := range ids {
-		wait.Go(func() {
-			_, errs[index] = agent.Prompt(context.Background(), TextPromptRequest(id, "test-turn", "x"))
+func TestNativeTerminalClassification(t *testing.T) {
+	t.Parallel()
+	for _, prompt := range []string{"PROVIDER_ERROR", "TURN_LIMIT", "DRIFT"} {
+		t.Run(prompt, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness(t)
+			h.initialize()
+			session := h.newSession()
+			response, err := h.prompt(session.SessionId, prompt, nil)
+			switch prompt {
+			case "PROVIDER_ERROR":
+				require.Equal(t, wire.CauseProvider, requestErrorData(t, err)["cause"])
+			case "TURN_LIMIT":
+				require.NoError(t, err)
+				require.Equal(t, acp.StopReasonMaxTurnRequests, response.StopReason)
+			case "DRIFT":
+				require.Equal(t, wire.CauseTransport, requestErrorData(t, err)["cause"])
+				_, err = h.prompt(session.SessionId, "next", nil)
+				require.Equal(t, "amp_session_poisoned", requestErrorData(t, err)["error"])
+				require.NotContains(t, agentText(h.rec.snapshot()), "wrong")
+			}
 		})
 	}
+}
 
-	wait.Wait()
+func TestFailedActiveRestorePreservesCapturedGeneration(t *testing.T) {
+	t.Parallel()
+	store := &failingStore{SessionStore: acpcore.NewInMemorySessionStore()}
+	native := t.TempDir()
+	h := newHarness(t, WithSessionStore(store), WithEnv(map[string]string{"ACP_GO_AMP_TEST_NATIVE": native, "GORACE": "atexit_sleep_ms=0"}))
+	h.initialize()
+	session := h.newSession()
+	cwd := sessionCwd(t, h, session.SessionId)
+	store.fail.Store(true)
+	_, err := h.prompt(session.SessionId, "captured before failure", nil)
+	require.Error(t, err)
+	path := filepath.Join(native, string(session.SessionId)+".json")
+	require.NoError(t, os.Remove(path))
+	_, err = h.conn.LoadSession(h.ctx(), wire.LoadSessionRequest(session.SessionId, cwd))
+	require.Equal(t, "amp_restore_failed", requestErrorData(t, err)["error"])
+	store.fail.Store(false)
+	_, err = h.conn.CloseSession(h.ctx(), acp.CloseSessionRequest{SessionId: session.SessionId})
+	require.NoError(t, err)
+	rows, err := loadEntries(t.Context(), store, acpcore.SessionKey{SessionID: string(session.SessionId)})
+	require.NoError(t, err)
+	require.Contains(t, string(rows[0]), "captured before failure")
+}
 
-	for index, err := range errs {
-		if err != nil {
-			t.Fatalf("concurrent prompt %d: %v", index, err)
-		}
+func TestResumeRotatesCarrier(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.initialize()
+	session := h.newSession()
+	cwd := sessionCwd(t, h, session.SessionId)
+	dirs := []string{t.TempDir(), t.TempDir()}
+	_, err := h.conn.ResumeSession(h.ctx(), wire.ResumeSessionRequest(session.SessionId, cwd, WithSessionAmpOptions(NewAmpOptions(WithAmpEnv(map[string]string{"PATH": "/usr/bin", "SESSION_VALUE": "rotated"}), WithAmpExtraPathDirs(dirs...)))))
+	require.NoError(t, err)
+	_, err = h.prompt(session.SessionId, "ENV", nil)
+	require.NoError(t, err)
+	require.Contains(t, agentText(h.rec.snapshot()), "rotated")
+	require.Contains(t, agentText(h.rec.snapshot()), dirs[0]+":"+dirs[1]+":/usr/bin")
+}
+
+// A prompt or a restore arriving while a turn is in flight is refused as busy,
+// and the running turn still settles with end_turn.
+func TestPromptAdmissionRefusesConcurrentWork(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.initialize()
+	session := h.newSession()
+	cwd := sessionCwd(t, h, session.SessionId)
+	gate := filepath.Join(t.TempDir(), "release")
+	type outcome struct {
+		response acp.PromptResponse
+		err      error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		response, err := h.prompt(session.SessionId, "GATE "+gate, nil)
+		done <- outcome{response, err}
+	}()
+	waitForUserChunk(t, h, 0)
+	_, err := h.prompt(session.SessionId, "competing", nil)
+	require.Equal(t, "session_prompt", requestErrorData(t, err)["limit"])
+	_, err = h.conn.ResumeSession(h.ctx(), wire.ResumeSessionRequest(session.SessionId, cwd))
+	require.Equal(t, "session_restore", requestErrorData(t, err)["limit"])
+	require.NoError(t, os.WriteFile(gate, nil, 0o600))
+	select {
+	case result := <-done:
+		require.NoError(t, result.err)
+		require.Equal(t, acp.StopReasonEndTurn, result.response.StopReason)
+	case <-time.After(testTimeout):
+		t.Fatal("gated turn did not settle")
 	}
 }
 
-// TestAmpSessionCarrierRunsRealMarkersAndRotatesWithoutCrossing is the amp side
-// of the six-carrier session-CLI acceptance. Amp declares no ordered path
-// option, so one complete raw PATH in session env is the whole carrier. Two
-// sessions run concurrent turns that resolve and execute their own marker
-// command out of their own PATH, a second turn follows a resume, one carrier is
-// rotated on that same logical id across a close-and-re-prepare boundary, and
-// the retired values reach nothing afterwards. Each operation directory also holds an amp stand-in that
-// exits nonzero: a session PATH that could shadow the harness would fail every
-// turn instead of running the real one.
-func TestAmpSessionCarrierRunsRealMarkersAndRotatesWithoutCrossing(t *testing.T) {
-	harness, state := fakeAgentAmpPath(t, "record-env")
-
-	t.Setenv("AMP_API_KEY", "")
-
-	marker := carrierMarkerBinary(t)
-	first := carrier{bearer: "bearer-first", marker: "amp-marker-first"}
-	second := carrier{bearer: "bearer-second", marker: "amp-marker-second"}
-	rotated := carrier{bearer: "bearer-rotated", marker: "amp-marker-rotated"}
-
-	for _, c := range []*carrier{&first, &second, &rotated} {
-		c.dir = carrierDirectory(t, marker, c.marker, state)
+func TestCancelEndsTheTurnWithACancelledIdle(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.initialize(withLifecycle())
+	session := h.newSession()
+	type outcome struct {
+		response acp.PromptResponse
+		err      error
 	}
-
-	// The static agent base owns executable resolution: only this PATH may
-	// select the amp harness.
-	agent := newTestAgent(
-		WithScratchDir(testScratchDir(t)),
-		WithEnv(map[string]string{"PATH": filepath.Dir(harness)}),
-	)
-	t.Cleanup(func() { _ = agent.Close() })
-
-	ctx := context.Background()
-	firstID, firstCwd := newCarrierSession(t, agent, first)
-	secondID, secondCwd := newCarrierSession(t, agent, second)
-
-	promptCarriersConcurrently(t, agent, firstID, secondID)
-	requireCarrierRuns(t, carrierRuns(t, state), 0, map[string]carrier{
-		first.bearer: first, second.bearer: second,
-	})
-
-	// A second turn after a resume keeps each session on its own carrier.
-	settled := len(carrierRuns(t, state))
-	for id, request := range map[acp.SessionId]acp.ResumeSessionRequest{
-		firstID:  ResumeSessionRequest(firstID, firstCwd, WithSessionAmpOptions(NewAmpOptions(WithAmpEnv(first.env())))),
-		secondID: ResumeSessionRequest(secondID, secondCwd, WithSessionAmpOptions(NewAmpOptions(WithAmpEnv(second.env())))),
-	} {
-		if _, err := agent.ResumeSession(ctx, request); err != nil {
-			t.Fatalf("resume %s: %v", id, err)
-		}
+	done := make(chan outcome, 1)
+	go func() {
+		response, err := h.prompt(session.SessionId, "SLOW", promptMeta(0))
+		done <- outcome{response, err}
+	}()
+	waitForUserChunk(t, h, 0)
+	require.NoError(t, h.conn.Cancel(h.ctx(), wire.CancelRequest(session.SessionId)))
+	select {
+	case result := <-done:
+		require.NoError(t, result.err)
+		require.Equal(t, acp.StopReasonCancelled, result.response.StopReason)
+	case <-time.After(testTimeout):
+		t.Fatal("cancelled turn did not join")
 	}
-
-	promptCarriersConcurrently(t, agent, firstID, secondID)
-	requireCarrierRuns(t, carrierRuns(t, state), settled, map[string]carrier{
-		first.bearer: first, second.bearer: second,
-	})
-
-	predecessor, predecessorErr := agent.session(firstID)
-	if predecessorErr != nil {
-		t.Fatalf("rotation predecessor: %v", predecessorErr)
-	}
-	settled = len(carrierRuns(t, state))
-	settledChildren := len(childEnvironments(t, state))
-	if _, err := agent.ResumeSession(ctx, ResumeSessionRequest(firstID, firstCwd,
-		WithSessionAmpOptions(NewAmpOptions(WithAmpEnv(rotated.env()))),
-	)); err != nil {
-		t.Fatalf("rotate first session: %v", err)
-	}
-	successor, successorErr := agent.session(firstID)
-	if successorErr != nil || successor == predecessor {
-		t.Fatalf("rotation did not replace the first wrapper: successor=%p predecessor=%p err=%v", successor, predecessor, successorErr)
-	}
-
-	promptCarriersConcurrently(t, agent, secondID, firstID)
-	requireCarrierRuns(t, carrierRuns(t, state), settled, map[string]carrier{
-		second.bearer: second, rotated.bearer: rotated,
-	})
-
-	for _, entries := range childEnvironments(t, state)[settledChildren:] {
-		for _, value := range entries {
-			if strings.Contains(value, first.bearer) || strings.Contains(value, first.dir) {
-				t.Fatalf("a retired carrier value survived rotation: %q", value)
-			}
-		}
-	}
-
-	requireNoShadowedHarness(t, state)
-}
-
-// TestAmpStaticProbeEnvironmentIsSeparateFromThePromptCarrier is the Unix half
-// of the probe/prompt cut, stated by correlating each recorded argv with the
-// environment that exact child received. `amp version` and the startup
-// method-present probes run on the static agent PATH; only the prompt receives
-// the session's complete raw PATH. The session directory holds a real amp that
-// would record its own launch and fail the turn, and it never runs; the marker
-// command in that same directory is resolved and executed by the prompt child,
-// so the carrier is live rather than merely present.
-func TestAmpStaticProbeEnvironmentIsSeparateFromThePromptCarrier(t *testing.T) {
-	harness, state := fakeAgentAmpPath(t, "record-env")
-
-	t.Setenv("AMP_API_KEY", "")
-
-	agentDir := filepath.Dir(harness)
-	sessionDir := carrierDirectory(t, carrierMarkerBinary(t), "amp-marker", state)
-
-	agent := newTestAgent(
-		WithScratchDir(testScratchDir(t)),
-		WithEnv(map[string]string{"PATH": agentDir, "AMP_API_KEY": "agent-key"}),
-	)
-	t.Cleanup(func() { _ = agent.Close() })
-
-	ctx := context.Background()
-	resp, err := agent.NewSession(ctx, NewSessionRequest(t.TempDir(), WithSessionAmpOptions(NewAmpOptions(
-		WithAmpEnv(map[string]string{
-			"PATH":               sessionDir,
-			"AMP_API_KEY":        "session-key",
-			"AMP_CARRIER_MARKER": "amp-marker",
-		}),
-	))))
-	if err != nil {
-		t.Fatalf("NewSession: %v", err)
-	}
-
-	if _, promptErr := agent.Prompt(ctx, TextPromptRequest(resp.SessionId, "test-turn", "x")); promptErr != nil {
-		t.Fatalf("Prompt: %v", promptErr)
-	}
-
-	runs := childRuns(t, state)
-	requireProbeAndPromptPaths(t, runs, agentDir, sessionDir)
-
-	for _, run := range runs {
-		// The credential is a named operation value, so the authenticated
-		// probes and the prompt agree on the key admission approved.
-		requireChildEnv(t, run.Env, "AMP_API_KEY", "session-key")
-
-		if run.isPrompt() {
-			requireChildEnv(t, run.Env, "AMP_CARRIER_MARKER", "amp-marker")
-
+	idle := map[string]any{}
+	for _, notification := range h.rec.snapshot() {
+		meta, ok := notification.Meta[wire.LifecycleKey].(map[string]any)
+		if !ok {
 			continue
 		}
-
-		if values := childEnvValues(run.Env, "AMP_CARRIER_MARKER"); len(values) != 0 {
-			t.Fatalf("probe child %v received session-only values %#v", run.Args, values)
+		if event, ok := meta["event"].(map[string]any); ok && event["state"] == "idle" {
+			idle = event
 		}
 	}
+	require.Equal(t, "state_update", idle["type"])
+	require.Equal(t, "cancelled", idle["outcome"])
+	require.Equal(t, "cancelled", idle["stopReason"])
+}
 
-	// The harness that passed version and startup validation is retained, so a
-	// later launch runs that exact file and resolves nothing again. Repointing
-	// the static agent PATH at a decoy amp after the probe changes nothing: the
-	// next turn still runs the validated harness and the decoy never starts.
-	agent.options.Env["PATH"] = carrierDirectory(t, carrierMarkerBinary(t), "decoy-marker", state)
+// A close whose final commit fails reports the failure and still releases the
+// session, leaving the stored generation loadable.
+func TestFailedCloseReleasesTheSession(t *testing.T) {
+	t.Parallel()
+	store := &failingStore{SessionStore: acpcore.NewInMemorySessionStore()}
+	h := newHarness(t, WithSessionStore(store))
+	h.initialize()
+	session := h.newSession()
+	cwd := sessionCwd(t, h, session.SessionId)
+	_, err := h.prompt(session.SessionId, "durable", nil)
+	require.NoError(t, err)
+	store.fail.Store(true)
+	_, err = h.conn.CloseSession(h.ctx(), acp.CloseSessionRequest{SessionId: session.SessionId})
+	require.Equal(t, "amp_internal_failure", requestErrorData(t, err)["error"])
+	store.fail.Store(false)
+	_, err = h.conn.CloseSession(h.ctx(), acp.CloseSessionRequest{SessionId: session.SessionId})
+	require.Equal(t, "unknown session", requestErrorData(t, err)["error"])
+	list, err := h.conn.ListSessions(h.ctx(), wire.ListSessionsRequest())
+	require.NoError(t, err)
+	require.Len(t, list.Sessions, 1)
+	_, err = h.conn.LoadSession(h.ctx(), wire.LoadSessionRequest(session.SessionId, cwd))
+	require.NoError(t, err)
+	require.Contains(t, agentText(h.rec.snapshot()), "durable")
+}
 
-	if _, promptErr := agent.Prompt(ctx, TextPromptRequest(resp.SessionId, "test-turn", "again")); promptErr != nil {
-		t.Fatalf("Prompt after the static PATH moved: %v", promptErr)
-	}
+// waitForUserChunk blocks until the turn's own user message has been mirrored
+// back, which happens only once the native process is running the turn.
+func waitForUserChunk(t *testing.T, h *harness, after int) {
+	t.Helper()
+	h.rec.waitFor(t, func(updates []acp.SessionNotification) bool {
+		for _, update := range updates[min(after, len(updates)):] {
+			if update.Update.UserMessageChunk != nil {
+				return true
+			}
+		}
 
-	requireNoShadowedHarness(t, state)
-	requireCarrierRuns(t, carrierRuns(t, state), 0, map[string]carrier{
-		"session-key": {bearer: "session-key", dir: sessionDir, marker: "amp-marker"},
+		return false
 	})
 }
 
-// TestConsumerHeldBearerCarriesAcrossAgentRebuild pins the other half of the
-// carrier: a bearer a consumer holds and re-supplies through WithEnv survives
-// an Agent rebuild and a cold load, a session value overrides it consistently
-// in both the preflight gate and the child, and dropping it makes the stored
-// session unusable rather than falling back to anything.
-func TestConsumerHeldBearerCarriesAcrossAgentRebuild(t *testing.T) {
-	path, state := fakeAgentAmpPath(t, "record-env")
+// A turn abandoned on native identity drift reaches prompt_accepted and
+// publishes no terminal idle, because it attempts no commit.
+func TestIdentityDriftEndsTheIncarnationWithoutATerminalIdle(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.initialize(withLifecycle())
+	session := h.newSession()
+	_, err := h.prompt(session.SessionId, "DRIFT", promptMeta(0))
+	require.Equal(t, wire.CauseTransport, requestErrorData(t, err)["cause"])
+	kinds := lifecycleEventKinds(h.rec.snapshot())
+	require.Contains(t, kinds, "prompt_accepted", "the turn never reached the lifecycle stream")
+	require.NotContains(t, kinds, "state_update:idle", "a turn the store never received published a terminal idle")
+}
 
-	t.Setenv("AMP_API_KEY", "")
+// A failing mirror commit leaves the native provider cause in place instead of
+// relabelling the turn, even when the turn emitted an image.
+func TestCommitFailureKeepsTheNativeCause(t *testing.T) {
+	t.Parallel()
+	store := &failingStore{SessionStore: acpcore.NewInMemorySessionStore()}
+	h := newHarness(t, WithSessionStore(store))
+	h.initialize()
+	session := h.newSession()
+	store.fail.Store(true)
+	_, err := h.prompt(session.SessionId, "IMAGE_PROVIDER_ERROR", nil)
+	require.Equal(t, 1, toolImages(h.rec.snapshot()), "the turn emitted no image, so the storage verdict was never in reach")
+	data := requestErrorData(t, err)
+	require.Equal(t, wire.CauseProvider, data["cause"])
+	require.Contains(t, data["message"], "provider fixture refusal")
+	require.NotContains(t, data, "reason")
+}
 
-	store := NewInMemorySessionStore()
-	scratch := testScratchDir(t)
-	cwd := t.TempDir()
+// A frame the adapter refuses fails the turn with a transport cause naming the
+// frame, not with the killed child's exit status.
+func TestStreamErrorOutranksTheExitStatus(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.initialize()
+	session := h.newSession()
+	_, err := h.prompt(session.SessionId, "NO_IDENTITY", nil)
+	data := requestErrorData(t, err)
+	require.Equal(t, wire.CauseTransport, data["cause"])
+	require.Contains(t, data["message"], "native message lacks session identity")
+}
 
-	build := func(bearer string) *Agent {
-		options := []Option{WithExecutablePath(path), WithScratchDir(scratch), WithSessionStore(store)}
-		if bearer != "" {
-			options = append(options, WithEnv(map[string]string{"AMP_API_KEY": bearer}))
+// A resume of a live session turns raw events off when it omits the opt-in and
+// back on when it carries it.
+func TestRestoreAppliesTheRawEventOptIn(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.initialize()
+	session := h.newSession(WithSessionRawEvents(true))
+	cwd := sessionCwd(t, h, session.SessionId)
+	_, err := h.prompt(session.SessionId, "first", nil)
+	require.NoError(t, err)
+	enabled := h.rec.rawEventCount()
+	require.Positive(t, enabled)
+	_, err = h.conn.ResumeSession(h.ctx(), wire.ResumeSessionRequest(session.SessionId, cwd))
+	require.NoError(t, err)
+	_, err = h.prompt(session.SessionId, "second", nil)
+	require.NoError(t, err)
+	require.Equal(t, enabled, h.rec.rawEventCount(), "a restore that omitted the opt-in left raw events on")
+	_, err = h.conn.ResumeSession(h.ctx(), wire.ResumeSessionRequest(session.SessionId, cwd, WithSessionRawEvents(true)))
+	require.NoError(t, err)
+	_, err = h.prompt(session.SessionId, "third", nil)
+	require.NoError(t, err)
+	require.Greater(t, h.rec.rawEventCount(), enabled, "a restore that carried the opt-in left raw events off")
+}
+
+// A seed file the adapter must not overwrite refuses the caller by naming
+// seedFiles; a seed path it cannot write is a native-start internal failure.
+func TestSeedFileFailuresSeparateTheRefusalFromTheInternalFailure(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		damage func(t *testing.T, root string)
+		want   map[string]any
+	}{
+		{
+			// Removing the adapter's ownership record leaves the seeded file
+			// unmanaged, which is the state an operator-authored file has.
+			name: "unmanaged target",
+			damage: func(t *testing.T, root string) {
+				t.Helper()
+				require.NoError(t, os.Remove(filepath.Join(root, ".seed-manifest.json")))
+			},
+			want: map[string]any{wire.FieldError: "unsupported", wire.FieldField: "seedFiles"},
+		},
+		{
+			name: "unwritable path",
+			damage: func(t *testing.T, root string) {
+				t.Helper()
+				require.NoError(t, os.RemoveAll(filepath.Join(root, "nested")))
+				require.NoError(t, os.WriteFile(filepath.Join(root, "nested"), nil, 0o600))
+			},
+			want: map[string]any{wire.FieldError: "amp_internal_failure", wire.FieldClass: internalClassNativeStart},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			config := t.TempDir()
+			h := newHarness(t,
+				WithSeedFiles(map[string]string{"nested/settings.json": "{}"}),
+				WithEnv(map[string]string{"XDG_CONFIG_HOME": config, "ACP_GO_AMP_TEST_NATIVE": filepath.Join(t.TempDir(), "native"), "GORACE": "atexit_sleep_ms=0"}))
+			h.initialize()
+			session := h.newSession()
+			root := filepath.Join(config, vendor)
+			require.FileExists(t, filepath.Join(root, "nested", "settings.json"))
+			tc.damage(t, root)
+			_, err := h.prompt(session.SessionId, "seeded", nil)
+			data := requestErrorData(t, err)
+			for key, want := range tc.want {
+				require.Equal(t, want, data[key])
+			}
+		})
+	}
+}
+
+// A $/cancel_request ends only the addressed handler's context: the turn it
+// was driving stays the session's, completes successfully once, and the
+// session keeps serving prompts.
+func TestCancelRequestSettlesTheOriginalRequestOnce(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	h.initialize(withLifecycle())
+	session := h.newSession()
+
+	gate := filepath.Join(t.TempDir(), "release")
+	request := wire.TextPromptRequest(session.SessionId, "GATE "+gate)
+	request.Meta = promptMeta(1)
+	failed := make(chan error, 1)
+
+	go func() {
+		response, err := h.conn.Prompt(h.ctx(), request)
+		if err == nil && response.StopReason != acp.StopReasonEndTurn {
+			err = errors.New("request cancellation ended the native turn")
 		}
+		failed <- err
+	}()
 
-		agent := newTestAgent(options...)
-		t.Cleanup(func() { _ = agent.Close() })
+	h.rec.waitFor(t, func(updates []acp.SessionNotification) bool { return len(lifecycleEventKinds(updates)) >= 3 })
+	require.NoError(t, h.input.cancelPrompt())
 
-		return agent
-	}
+	_, busyErr := h.prompt(session.SessionId, "HELLO", promptMeta(2))
+	require.Equal(t, "backpressure", requestErrorData(t, busyErr)["error"])
+	require.NoError(t, os.WriteFile(gate, nil, 0o600))
+	h.rec.waitFor(t, func(updates []acp.SessionNotification) bool {
+		return slices.Contains(lifecycleEventKinds(updates), "state_update:idle")
+	})
 
-	ctx := context.Background()
-	held := build("consumer-key")
+	idles := 0
 
-	resp, err := held.NewSession(ctx, NewSessionRequest(cwd))
-	if err != nil {
-		t.Fatalf("NewSession: %v", err)
-	}
-	if _, promptErr := held.Prompt(ctx, TextPromptRequest(resp.SessionId, "test-turn", "x")); promptErr != nil {
-		t.Fatalf("Prompt: %v", promptErr)
-	}
-
-	rebuilt := build("consumer-key")
-	if _, loadErr := rebuilt.LoadSession(ctx, LoadSessionRequest(resp.SessionId, cwd)); loadErr != nil {
-		t.Fatalf("cold load with the consumer-held bearer: %v", loadErr)
-	}
-
-	settled := len(childEnvironments(t, state))
-	if _, promptErr := rebuilt.Prompt(ctx, TextPromptRequest(resp.SessionId, "test-turn", "again")); promptErr != nil {
-		t.Fatalf("Prompt after rebuild: %v", promptErr)
-	}
-
-	for _, entries := range childEnvironments(t, state)[settled:] {
-		requireChildEnv(t, entries, "AMP_API_KEY", "consumer-key")
-	}
-
-	// A session value outranks the consumer-held one in the same direction at
-	// the gate and in the child.
-	overridden, err := rebuilt.NewSession(ctx, NewSessionRequest(t.TempDir(), WithSessionAmpOptions(
-		NewAmpOptions(WithAmpEnv(map[string]string{"AMP_API_KEY": "session-key"})),
-	)))
-	if err != nil {
-		t.Fatalf("NewSession with a session bearer: %v", err)
-	}
-
-	settled = len(childEnvironments(t, state))
-	if _, promptErr := rebuilt.Prompt(ctx, TextPromptRequest(overridden.SessionId, "test-turn", "x")); promptErr != nil {
-		t.Fatalf("Prompt with a session bearer: %v", promptErr)
-	}
-
-	for _, entries := range childEnvironments(t, state)[settled:] {
-		requireChildEnv(t, entries, "AMP_API_KEY", "session-key")
-	}
-
-	// Dropping the consumer-held bearer cannot reuse the stored session.
-	_, err = build("").LoadSession(ctx, LoadSessionRequest(resp.SessionId, cwd))
-	requireInternalErrorData(t, err, map[string]any{jsonFieldError: errorInvalidOptions, jsonFieldField: optionEnvKey})
-}
-
-// TestAgentCloseCommitsRetainedUnsyncedFrames proves the shutdown ladder carries
-// the same durable rung a wire close does. The ladder applies identically to
-// `session/close`, `session/delete` and `Agent.Close`, and the retained frames an
-// embedded host holds at shutdown are the only copy of a natively completed turn:
-// dropping them with the wrapper would leave the store silently omitting a turn
-// the server-side thread already advanced past.
-func TestAgentCloseCommitsRetainedUnsyncedFrames(t *testing.T) {
-	ctx := context.Background()
-	path, _ := fakeAgentAmpPath(t, "")
-	cwd := t.TempDir()
-	store := &flakyReplaceStore{InMemorySessionStore: NewInMemorySessionStore()}
-	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(testScratchDir(t)), WithSessionStore(store))
-	resp, err := agent.NewSession(ctx, NewSessionRequest(cwd))
-	if err != nil {
-		t.Fatalf("NewSession: %v", err)
-	}
-	id := resp.SessionId
-
-	if _, err = agent.Prompt(ctx, TextPromptRequest(id, "test-turn", "seed thread")); err != nil {
-		t.Fatalf("seed prompt: %v", err)
-	}
-
-	// Fail exactly the settlement commit of the second turn: the prompt fails and
-	// its frames are retained mirror-unsynced on a session no wire close ever
-	// reclaims.
-	store.failReplaces = 1
-	if _, err = agent.Prompt(ctx, TextPromptRequest(id, "test-turn", "turn two")); err == nil {
-		t.Fatal("prompt with failing persist returned no error")
-	}
-
-	live, err := agent.session(id)
-	if err != nil {
-		t.Fatalf("session lookup: %v", err)
-	}
-	live.mu.Lock()
-	retained := len(live.unsyncedFrames)
-	live.mu.Unlock()
-	if retained == 0 {
-		t.Fatal("failed settlement retained no frames for shutdown to commit")
-	}
-
-	// The store is healthy again. Agent.Close is the ladder that lands them.
-	if closeErr := agent.Close(); closeErr != nil {
-		t.Fatalf("Agent.Close: %v", closeErr)
-	}
-
-	entries, err := store.Load(ctx, SessionKey{SessionID: string(id), Subpath: transcriptSubpath})
-	if err != nil {
-		t.Fatalf("load transcript: %v", err)
-	}
-	results := 0
-	for _, entry := range entries {
-		if bytes.Contains(entry, []byte(`"type":"result"`)) {
-			results++
+	for _, update := range h.rec.snapshot() {
+		envelope, _ := update.Meta[wire.LifecycleKey].(map[string]any)
+		event, _ := envelope["event"].(map[string]any)
+		if event["type"] == "state_update" && event["state"] == "idle" {
+			idles++
+			require.Equal(t, "success", event["outcome"])
+			require.Equal(t, string(acp.StopReasonEndTurn), event["stopReason"])
 		}
 	}
-	if results != 2 {
-		t.Fatalf("durable transcript has %d result frames, want both natively completed turns", results)
-	}
 
-	restored := newTestAgent(WithExecutablePath(path), WithScratchDir(testScratchDir(t)), WithSessionStore(store))
-	defer func() { _ = restored.Close() }()
-	if _, err := restored.LoadSession(ctx, LoadSessionRequest(id, cwd)); err != nil {
-		t.Fatalf("load replay after shutdown commit: %v", err)
-	}
-}
+	require.Equal(t, 1, idles, "the turn the cancelled request started settles exactly once")
+	require.NoError(t, <-failed)
 
-// TestAgentCloseIsLastWordOverAnUncommittableMirror pins embedded shutdown's
-// single last-word attempt. It reports the refused durability rung, releases
-// local state, removes every callable ownership path, and memoizes that exact
-// result instead of requiring a later Close for safety.
-func TestAgentCloseIsLastWordOverAnUncommittableMirror(t *testing.T) {
-	ctx := context.Background()
-	path, _ := fakeAgentAmpPath(t, "")
-	scratch := testScratchDir(t)
-	store := &flakyReplaceStore{InMemorySessionStore: NewInMemorySessionStore()}
-	agent := newTestAgent(WithExecutablePath(path), WithScratchDir(scratch), WithSessionStore(store))
-	resp, err := agent.NewSession(ctx, NewSessionRequest(t.TempDir()))
-	if err != nil {
-		t.Fatalf("NewSession: %v", err)
-	}
-	id := resp.SessionId
-
-	if _, err = agent.Prompt(ctx, TextPromptRequest(id, "test-turn", "seed thread")); err != nil {
-		t.Fatalf("seed prompt: %v", err)
-	}
-
-	// The settlement commit fails, and so does the shutdown retry of it.
-	store.failReplaces = 2
-	if _, err = agent.Prompt(ctx, TextPromptRequest(id, "test-turn", "turn two")); err == nil {
-		t.Fatal("prompt with failing persist returned no error")
-	}
-
-	live, err := agent.session(id)
-	if err != nil {
-		t.Fatalf("session lookup: %v", err)
-	}
-
-	closeErr := agent.Close()
-	if closeErr == nil || !strings.Contains(closeErr.Error(), "mirror_unsynced") {
-		t.Fatalf("Agent.Close over an uncommittable mirror = %v, want mirror_unsynced", closeErr)
-	}
-
-	// Local cleanup succeeds even though the durability rung does not.
-	if _, statErr := os.Stat(live.settingsDir); !os.IsNotExist(statErr) {
-		t.Fatalf("failed shutdown leaked the settings dir: %v", statErr)
-	}
-	sessionDirs, globErr := filepath.Glob(filepath.Join(scratch, "acp-go-amp-session-*"))
-	if globErr != nil || len(sessionDirs) != 0 {
-		t.Fatalf("failed shutdown leaked scratch state: %#v err=%v", sessionDirs, globErr)
-	}
-	agent.mu.Lock()
-	remaining := len(agent.sessions)
-	owners := len(agent.cleanupOwners)
-	residences := len(agent.cleanupResidences)
-	agent.mu.Unlock()
-	if remaining != 0 || owners != 0 || residences != 0 {
-		t.Fatalf("failed shutdown retained callable ownership: sessions=%d owners=%d residences=%d", remaining, owners, residences)
-	}
-	live.mu.Lock()
-	boundaryDone := live.closeBoundaryDone
-	commitDone := live.closeCommitDone
-	scratchDone := live.scratchDone
-	live.mu.Unlock()
-	if !boundaryDone || commitDone || !scratchDone {
-		t.Fatalf("failed shutdown rungs = boundary %t commit %t scratch %t", boundaryDone, commitDone, scratchDone)
-	}
-
-	memoized := agent.Close()
-	if memoized == nil || memoized.Error() != closeErr.Error() {
-		t.Fatalf("memoized Agent.Close = %v, want exact first failure %v", memoized, closeErr)
-	}
-	agent.mu.Lock()
-	remaining = len(agent.sessions)
-	agent.mu.Unlock()
-	if remaining != 0 {
-		t.Fatalf("memoized shutdown recreated %d sessions", remaining)
-	}
-}
-
-func TestSessionTeardownResidualBranches(t *testing.T) {
-	session := &agentSession{agent: NewAgent()}
-	session.teardownFlight = &sessionTeardownFlight{done: make(chan struct{})}
-	_, _, err := session.beginTeardown(residualCancelledContext())
-	require.ErrorIs(t, err, context.Canceled)
-
-	panicErr := errors.New("teardown panic")
-	done := make(chan struct{})
-	close(done)
-	session.teardownFlight = &sessionTeardownFlight{done: done, panicErr: panicErr}
-	_, _, err = session.beginTeardown(t.Context())
-	require.ErrorIs(t, err, panicErr)
-
-	err = session.closeForReplacement(withCallbackProvenance(t.Context(), session.agent, session.teardownFlight))
-	require.Error(t, err)
-}
-
-func TestNewSessionMCPWriteFailure(t *testing.T) {
-	original := writeFile
-	t.Cleanup(func() { writeFile = original })
-	writeFile = func(path string, data []byte, mode os.FileMode) error {
-		if filepath.Base(path) == "mcp.json" {
-			return errors.New("write MCP failed")
-		}
-
-		return original(path, data, mode)
-	}
-
-	agent := NewAgent(WithScratchDir(t.TempDir()))
-	_, err := newAgentSession(t.Context(), agent, "T-write-failure", t.TempDir(), parsedSessionMeta{}, "", nil)
-	require.ErrorContains(t, err, "write amp MCP config")
-}
-
-func TestVerifyContinuableRecordsIncompleteContainment(t *testing.T) {
-	agent := newTestAgent()
-	agent.options.runtime.exportThread = func(context.Context, *ampnative.Client, string) (json.RawMessage, error) {
-		return nil, fmt.Errorf("export: %w", ampnative.ErrContainmentIncomplete)
-	}
-	session := &agentSession{agent: agent, id: "T-containment", nativeID: "native-thread"}
-	require.Error(t, session.verifyContinuable(t.Context()))
-	require.ErrorIs(t, session.scratchContainmentError(), ampnative.ErrContainmentIncomplete)
+	resp, err := h.prompt(session.SessionId, "HELLO", promptMeta(3))
+	require.NoError(t, err)
+	require.Equal(t, acp.StopReasonEndTurn, resp.StopReason)
 }

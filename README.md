@@ -1,200 +1,169 @@
 # acp-go-amp
 
-Go ACP agent that exposes the Amp CLI as an [Agent Client Protocol](https://agentclientprotocol.com/) agent.
+`acp-go-amp` exposes the [Amp CLI](https://ampcode.com/docs/cli) through the
+[Agent Client Protocol](https://agentclientprotocol.com). It creates a native
+thread with `amp threads new`, then runs one `threads continue` process per
+prompt using stream-json input and output.
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/savid/acp-go-amp.svg)](https://pkg.go.dev/github.com/savid/acp-go-amp)
-[![CI](https://github.com/savid/acp-go-amp/actions/workflows/go-test.yml/badge.svg)](https://github.com/savid/acp-go-amp/actions/workflows/go-test.yml)
-[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
-
-Use it as either:
-
-- a standalone ACP subprocess: `acp-go-amp`
-- an embedded Go adapter through `ampacp.Serve`
-
-## Install
-
-Library:
+Continue the conversation after closing the adapter:
 
 ```sh
-go get github.com/savid/acp-go-amp
+amp threads continue NATIVE_SESSION_ID
 ```
 
-CLI:
+New, load, and resume responses and session-list entries expose the current
+native ID as `_meta.amp.nativeSessionId`. Use it for native CLI continuation.
+ACP requests continue to use the stable ACP `sessionId`. The store's configuration
+record saves both IDs with the matching native history.
+
+## Run and embed
 
 ```sh
 go install github.com/savid/acp-go-amp/cmd/acp-go-amp@latest
+acp-go-amp [-path amp] [-seed-file rel=host]... [-debug]
 ```
 
-For local development, run the command straight from a checkout:
-
-```sh
-go run ./cmd/acp-go-amp
-```
-
-The process speaks ACP over stdin/stdout and reserves stdout for ACP JSON-RPC;
-diagnostics go to stderr. In normal use an editor or ACP host launches it as a
-subprocess rather than a human-facing chat UI.
-
-## Quickstart
-
-The example programs run from a checkout of this repo, so clone it first:
-
-```sh
-git clone https://github.com/savid/acp-go-amp && cd acp-go-amp
-```
-
-Run a tiny local client that launches the agent, sends one prompt, and prints
-the reply (the prompt argument is optional):
-
-```sh
-go run ./examples/minimal-client "Reply with hello from ACP"
-```
-
-Or drive the agent from an interactive client session:
-
-```sh
-go run ./examples/interactive-chat
-```
-
-Load a stored Amp thread transcript and send one follow-up prompt against it:
-
-```sh
-go run ./examples/resume-from-file -file ./examples/resume-from-file/session.jsonl
-```
-
-## Embedded Go
+Requires Amp 0.0.1789432613 or newer and native Amp authentication. Run
+`amp login` separately. Native configuration and auth resolve from the inherited
+environment. `-version` prints the adapter version; `OTEL_*` variables configure
+telemetry exporters. `-home` and `-model` refuse nonempty values. `-scratch-dir` accepts a scratch parent. `-path` selects the executable, `-seed-file` seeds a relative native configuration file, and `-debug` enables stderr diagnostics.
 
 ```go
-package main
-
-import (
-	"context"
-	"log"
-	"os"
-
-	ampacp "github.com/savid/acp-go-amp"
+err := ampacp.Serve(ctx, os.Stdin, os.Stdout,
+    ampacp.WithSessionStore(store),
+    ampacp.WithTurnTimeout(5*time.Minute),
 )
-
-func main() {
-	err := ampacp.Serve(context.Background(), os.Stdin, os.Stdout,
-		ampacp.WithExecutablePath("amp"),
-		ampacp.WithSessionStore(ampacp.NewInMemorySessionStore()),
-	)
-	if err != nil {
-		log.Fatal(err)
-	}
-}
 ```
 
-See [Go API docs](docs/reference/go-api.mdx) for options such as the Amp
-executable path, the ephemeral scratch directory (`WithScratchDir`), the handoff
-read root (`WithInputHandoffRoot`), the provider-auth ledger root
-(`WithProviderAuthRoot`), session storage, image byte limits
-(`WithImageLimits`), and OpenTelemetry providers.
-Amp has no native config/auth root, so `WithHome`/`-home` is unsupported and
-rejects at session start.
+| Process option | Meaning |
+|---|---|
+| `WithExecutablePath` | Select the native executable. |
+| `WithHome` | Refuse nonempty values; native home selection uses the inherited environment. |
+| `WithEnv` | Overlay the inherited environment. |
+| `WithScratchDir` | Parent for temporary lifecycle bridge files. |
+| `WithSeedFiles` | Seed native configuration files without overwriting unmanaged files. |
+| `WithDefaultModel`, `WithConfiguredModels` | Refuse nonempty values; native Amp selects models through modes. |
+| `WithSessionStore`, `WithSessionStoreLoadTimeout` | Select the durability store and bound restore reads. |
+| `WithTurnTimeout`, `WithConcurrencyLimits` | Bound prompt duration and configurable concurrency. |
+| `WithImageLimits`, `WithInputHandoffRoot` | Set image byte limits and the root for image handoffs. |
+| `WithLogger` | Supply the structured logger. |
+| `WithTracerProvider`, `WithMeterProvider`, `WithTextMapPropagator` | Configure OpenTelemetry providers and context propagation. |
+| `WithAgentName`, `WithAgentTitle`, `WithAgentVersion` | Set the identity advertised at initialize. |
 
-## What It Provides
+## Sessions
 
-- ACP session lifecycle (create, prompt, cancel, close, list, load, resume).
-  The adapter mints UUID session ids; the server-side Amp thread is created
-  lazily by the session's first prompt turn and recorded in the session
-  manifest, so a session that is never prompted never owns a remote thread.
-- One short-lived amp process per prompt — a thread-less `amp -x` execute on
-  the first prompt, `amp threads continue` afterwards — run with
-  isolated native HOME/XDG state, an isolated settings file, and dedicated
-  stdout/stderr pipes.
-- Startup and discovery probes run from target-owned isolated HOME/XDG,
-  settings, and MCP paths below `WithScratchDir`; the adapter removes that
-  residence only after the selected process boundary settles.
-- Optional host authority for managed native execution. `WithHostAuthority`
-  delegates environment selection, residence preparation/reclaim, launch,
-  revocation, and whole-tree settlement to the embedding host. Omitting it runs
-  Amp ordinarily as the adapter's current identity.
-- Prompt streaming for assistant messages, tool calls, and thread results.
-- Ordered session lifecycle through the `acp-go.dev/lifecycle` extension when a
-  host offers it: one incarnation per prompt, opening on a snapshot, echoing the
-  prompt's submission identity, and settling on a terminal state with the
-  harness's own stop reason. Negotiation uses the exact scalar shape
-  `{"version":1}`; managed prompts publish process-containment quiescence only
-  after the host authority has settled the native lease.
-- Static PNG, JPEG, GIF, and WebP prompt input with structural validation before
-  Amp starts, as embedded base64 or — for a co-located host that sets
-  `WithInputHandoffRoot` — as a digest-verified local file handed over on disk.
-  `initialize` publishes the byte, pixel, and format bounds the adapter actually
-  enforces. Native inline tool images become typed ACP images; remote Painter
-  attachments become resource links without fetching.
-- Stable wrapper-derived message UUIDs on main-agent chunks and terminal prompt
-  responses, replayed from the durable Amp transcript mirror.
-- MCP stdio and streamable HTTP configuration; other MCP transports are
-  rejected because Amp exposes no supported path for them.
-- No ACP slash-command advertisement; `/review`, `/plan`, and similar text is
-  sent to Amp as ordinary prompt input.
-- No permission or elicitation bridging; Amp never asks the client for
-  permission, so the adapter never sends `session/request_permission`.
-- No fork surface; `_amp/session/fork` is unsupported and `session/fork`
-  returns method-not-found.
-- Owner-driven Amp account connection behind eight session-scoped `_amp/auth/*` methods,
-  advertised only while `WithProviderAuthRoot`/`-provider-auth-root` names a
-  usable durable directory. The one `amp` provider offers hosted account
-  sign-in and manual Amp API-key material. Hosted sign-in relays Amp's
-  paste-back URL; manual material is requested only after `authorize` mints a
-  secret interaction. Both return the same opaque account-key credential,
-  harvested once and redelivered as `AMP_API_KEY`. The broker
-  admits a keyless `session/new` for this flow, while the first prompt and all
-  load/resume paths remain credential-gated. `disconnect` releases the ledger
-  slot and promises no Amp-side revocation. Hosted authorization runs on
-  Darwin and Linux behind a PATH-shadowing launcher shim after a
-  per-executable audit of the account-login shape; Windows and unaudited
-  builds fail with `unsupported_variant` before `amp login` starts. The
-  manual method starts no native login child.
-- Durable mirroring through a host-provided `SessionStore`; ordinary frames are
-  retained under `transcript`, while image-bearing tool frames use canonical
-  artifact references backed by `_artifacts/images/` records. The manifest
-  retains the complete session environment, including raw `PATH`, so cold
-  load/resume reconstructs the original carrier without asking the caller to
-  resend it.
-- Native continuation requires the live server-side Amp thread and
-  `AMP_API_KEY`; when it is gone, `session/load` still replays local display
-  history and a later prompt returns a terminal `-32603`
-  `{"error": "amp_internal_failure", "class": "native_state_missing"}`.
-- Optional sanitized Amp stream notifications through `_amp/rawEvent`, plus
-  OpenTelemetry telemetry that records no prompt or tool secrets by default.
+Pass `_meta.amp.options` on new, load, or resume, or use `WithSessionAmpOptions`.
 
-## Docs
+| Field | Meaning |
+|---|---|
+| `mode` | Native built-in or plugin mode, forwarded unchanged |
+| `env` | Environment overlay for every command belonging to this session |
+| `extraPathDirs` | Absolute directories prepended to the session PATH in order |
 
-- [Overview](docs/overview.mdx)
-- [Run modes](docs/get-started/run-modes.mdx)
-- [Go API](docs/reference/go-api.mdx)
-- [ACP methods](docs/reference/acp-methods.mdx)
-- [Observability](docs/operations/observability.mdx)
-- [Go package reference](https://pkg.go.dev/github.com/savid/acp-go-amp)
+The only session config option is `mode`, a select over `low`, `medium`,
+`high`, and `ultra` plus the accepted value when it is outside that menu. No
+model selector is advertised, and `configId: "model"` is refused.
+
+The environment merges the adapter process, `WithEnv`, then session `env`.
+Only `ACP_GO_AMP_INTERNAL_*` markers are dropped. Executable resolution uses
+the base PATH before applying the session paths. Seed files are relative to
+the native settings directory and never overwrite an unmanaged file.
+
+The adapter installs a unique temporary plugin in Amp's system plugin directory
+under `XDG_CONFIG_HOME`, or `~/.config` when unset. It is inert in other launches
+and removed after its process is reaped. Other plugins and the inherited native
+configuration remain active. The plugin directory must be writable.
+
+`model`, `outputSchema`, nonempty `mcpServers`, and unknown owned fields are
+refused. Mode configuration applies to the next prompt; native `agent_mode`
+updates the accepted value. Amp keeps its native tool permission behavior.
+There is no ACP permission or elicitation bridge, model catalog, or slash
+command catalog. Slash-prefixed text is ordinary prompt input.
+
+Images use bounded inline base64 or validated file handoffs. Native inline
+tool images are validated; remote image URLs become resource links without
+fetching. The current native input ceiling is 5,138,022 bytes per image and
+8,000 pixels per dimension. Native Amp enforces the dimension limit.
+
+`_meta.amp.rawEvent.enabled` enables `_amp/rawEvent`. Image payloads are removed
+from this diagnostic channel. Optional lifecycle negotiation opens a fresh
+stream for each prompt process and reports acceptance and terminal state.
+
+## Persistence
+
+`session/new` runs `amp threads new`, creating an empty remote thread before
+the first prompt. `--stream-json-input` delivers prompts to that thread.
+
+`SessionStoreFormat` is `amp-thread-json-v1`. Each generation contains the raw
+native thread export and a `config` sidecar with cwd, additional directories,
+ACP and native session IDs, service origin, accepted mode, environment, ordered
+paths, update time, and historic message usage. The process exits
+and is reaped before export and atomic store publication. The mirror is durable
+before terminal lifecycle state and the prompt response; a turn the store never
+received ends its lifecycle incarnation without a terminal idle. A generation
+captured by a failed commit is published by the next successful commit,
+including the one at close. A failed close commit fails the close and still
+releases the session.
+
+A temporary native plugin observes `agent.end`, the native thread state, and
+message IDs and contents. Each prompt first attaches to the existing thread
+without input and refuses to submit while remote work is active. Cancellation
+calls the native thread's cancel API and waits for acknowledgement and a settled
+thread before stopping the local process. A disconnected process is reattached
+without input to discover whether the remote work actually stopped.
+
+Amp can finish a streamed turn before its export includes all completed messages.
+The adapter compares the raw export with the observed quiet thread, retrying
+with increasing delays under a 30-second deadline. Identical stale exports do
+not count as completion. Terminal lifecycle state and the prompt response wait
+for the verified export and atomic store commit. If reconciliation fails, the
+previous mirror survives and no terminal idle is emitted.
+
+Load attaches to the remote thread without submitting a prompt, verifies a
+current export against its native state and every shared mirror message, adopts
+newer messages, and replays history. Resume performs the same validation without
+replay. A confirmed missing remote thread is recovered into a new private thread
+through Amp's authenticated internal import API. Recovery attaches without input,
+verifies exported message identities, order, roles, content, and completion state,
+then commits the replacement native ID and history under the same ACP session ID.
+Historic usage remains in the configuration record when native import omits it.
+
+Shorter, conflicting, or inaccessible remote history fails restore. Authentication
+and network failures never authorize replacement. Failed verification or store
+publication preserves the previous committed generation and deletes the private
+destination thread recovery created and never bound; a process killed mid-recovery
+can still leave one behind. No other remote state is ever deleted.
+
+The importer is an internal Amp API and may change independently of CLI commands.
+Unsupported informational messages or a conversion that changes history fail
+recovery. Native timestamps and some metadata may change. Cross-account recovery
+and remote attachment access have not been verified.
+
+Amp compacts a thread on its own when the context window fills, inserting an
+informational summary message before the prompt that triggered it. A turn that
+compacts settles normally: the mirror keeps the summary, verification compares
+the conversation around it, and later prompts, loads, and resumes read past it.
+A compacted thread cannot be recovered after native deletion: the importer
+rejects summary messages, so restore fails and the backup stays intact.
+
+Close joins the current prompt process. Delete tombstones the adapter store
+first, then closes the session. Both leave the native remote thread intact.
+The default store is in memory; supply a durable store for adapter restarts.
 
 ## Development
 
 ```sh
+make test
 make audit
 make test-integration-smoke
-make test-integration-live
-make test-integration-cover
-make test-integration-attended
-make test-integration-keystore
+ACP_GO_AMP_MODE=medium make test-integration-live
 ```
 
-`test-integration-attended` drives one real Amp login on Linux and needs a human to
-approve it; `test-integration-keystore` proves where a brokered credential is
-resident and needs a container runtime. Neither joins `make audit`, and each
-fails rather than skips once its own gate is set.
-
-Live integration tests require a local authenticated `amp` CLI. The live target
-sets `ACP_GO_AMP_RUN_INTEGRATION=1` and `ACP_GO_AMP_RUN_LIVE_TOKENS=1` and may
-spend model tokens. Live tests always launch Amp with isolated native HOME/XDG
-state; `AMP_API_KEY` and `AMP_URL` are injected from explicit policy or
-option values. Session environment values are durable, so the store is
-secret-bearing when they include credentials. If the required credentials are
-absent, live tests fail instead of launching
-against the developer's real Amp home.
-
-## License
-
-[GNU General Public License v3.0](LICENSE).
+Unit tests use a native subprocess fixture and need no credentials. Smoke tests
+exercise native creation/export/restore without model calls and skip when the
+native binary is missing; `ACP_GO_AMP_HARNESS_PATH` overrides which binary they
+resolve. Live tests spend
+model tokens and test ACP → native CLI → ACP continuation, fresh local state,
+PATH changes, cancellation, and deletion. Integration tests link the native
+secret store into temporary XDG directories so credential refresh updates the
+original store.

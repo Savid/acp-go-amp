@@ -8,75 +8,48 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
-	"strings"
 
 	ampacp "github.com/savid/acp-go-amp"
+	"github.com/savid/acp-go-core/process"
 )
-
-var serve = ampacp.Serve
-var exit = os.Exit
-var shutdownOpenTelemetry = shutdownTelemetry
-var agentVersion = version
 
 func main() {
 	if code := run(context.Background(), os.Args[1:], os.Stdin, os.Stdout, os.Stderr); code != 0 {
-		exit(code)
+		os.Exit(code)
 	}
 }
 
 func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer) int {
-	var (
-		path                   string
-		home                   string
-		model                  string
-		scratchDir             string
-		providerAuthRoot       string
-		providerAuthDirectHome string
-		debug                  bool
-		ampDirectAPI           bool
-		showVersion            bool
-		seedFiles              = seedFileFlag{}
-	)
-
 	flags := flag.NewFlagSet("acp-go-amp", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	flags.StringVar(&path, "path", "", "native amp executable path")
-	flags.StringVar(&home, "home", "", "native config/auth root; unsupported by Amp and rejected at session start")
-	flags.StringVar(&model, "model", "", "default model; unsupported by Amp and rejected at session start")
-	flags.StringVar(&scratchDir, "scratch-dir", "", "parent directory for ephemeral session scratch; empty means the system temp directory")
-	flags.StringVar(&providerAuthRoot, "provider-auth-root", "", "durable directory for the provider-auth ledger; without it no provider-auth method is advertised")
-	flags.StringVar(&providerAuthDirectHome, "provider-auth-direct-home", "", "unsupported: Amp's disconnect releases only the ledger slot a connection owns, so no leg acts on a canonical native home; a non-empty value is rejected at session start")
-	flags.BoolVar(&debug, "debug", false, "enable debug logging")
-	flags.BoolVar(&ampDirectAPI, "amp-direct-api", true, "enable on-demand quota reads with the effective Amp API key")
-	flags.BoolVar(&showVersion, "version", false, "print adapter version and exit")
-	flags.Var(&seedFiles, "seed-file", "seed file as <relpath>=<hostpath>, written into each session's isolated native root; repeatable")
+
+	ampPath := flags.String("path", "", "amp executable; a bare name is searched on PATH")
+	home := flags.String("home", "", "unsupported for Amp; leave empty")
+	scratchDir := flags.String("scratch-dir", "", "parent directory for ephemeral adapter state; empty means the system temp directory")
+	model := flags.String("model", "", "unsupported for Amp; use per-session mode")
+	seedFiles := &process.SeedFileFlag{}
+	flags.Var(seedFiles, "seed-file", "file seeded into Amp's config root as <relpath>=<hostpath>; repeatable")
+	debug := flags.Bool("debug", false, "write debug logs to stderr")
+	printVersion := flags.Bool("version", false, "print adapter version and exit")
 
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
 
-	agentVer := agentVersion()
-	if showVersion {
-		_, _ = fmt.Fprintln(stdout, agentVer)
+	if *printVersion {
+		_, _ = fmt.Fprintln(stdout, version())
 
 		return 0
 	}
 
-	seeds, err := seedFiles.contents()
-	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "acp-go-amp: %v\n", err)
-
-		return 2
-	}
-
-	level := slog.LevelInfo
-	if debug {
+	level := slog.LevelWarn
+	if *debug {
 		level = slog.LevelDebug
 	}
 
 	logger := slog.New(slog.NewTextHandler(stderr, &slog.HandlerOptions{Level: level}))
 
-	telemetry, err := configureTelemetry(ctx, logger, agentVer)
+	telemetry, err := configureTelemetry(ctx, logger, version())
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "acp-go-amp: configure OpenTelemetry: %v\n", err)
 
@@ -85,51 +58,25 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 
 	logger = telemetry.logger
 
-	signals := forwardedSignals()
-	receivedSignals := make(chan os.Signal, 1)
-	handledSignals := make(chan os.Signal, 1)
+	ctx, stop := signal.NotifyContext(ctx, forwardedSignals()...)
+	defer stop()
 
-	// One consumer owns both cancellation and the recorded signal. Registering
-	// an independent NotifyContext would let its cancellation race ahead of the
-	// channel that preserves the conventional signal exit code.
-	signal.Notify(receivedSignals, signals...)
-	defer signal.Stop(receivedSignals)
-
-	ctx, cancelSignal := context.WithCancel(ctx)
-	defer cancelSignal()
-
-	go func() {
-		select {
-		case sig := <-receivedSignals:
-			handledSignals <- sig
-
-			cancelSignal()
-		case <-ctx.Done():
-		}
-	}()
-
-	serveOptions := make([]ampacp.Option, 0, 7+len(telemetry.options))
-
-	serveOptions = append(serveOptions,
-		ampacp.WithExecutablePath(path),
-		ampacp.WithHome(home),
-		ampacp.WithDefaultModel(model),
-		ampacp.WithScratchDir(scratchDir),
-		ampacp.WithAmpDirectAPI(ampDirectAPI),
-		ampacp.WithProviderAuthRoot(providerAuthRoot),
-		ampacp.WithProviderAuthDirectHome(providerAuthDirectHome),
+	options := []ampacp.Option{
+		ampacp.WithAgentVersion(version()),
+		ampacp.WithExecutablePath(*ampPath),
+		ampacp.WithHome(*home),
+		ampacp.WithScratchDir(*scratchDir),
+		ampacp.WithDefaultModel(*model),
 		ampacp.WithLogger(logger),
-		ampacp.WithAgentVersion(agentVer),
-	)
-
-	if len(seeds) > 0 {
-		serveOptions = append(serveOptions, ampacp.WithSeedFiles(seeds))
+	}
+	if len(seedFiles.Files) > 0 {
+		options = append(options, ampacp.WithSeedFiles(seedFiles.Files))
 	}
 
-	serveOptions = append(serveOptions, telemetry.options...)
+	options = append(options, telemetry.options...)
 
-	serveErr := serve(ctx, stdin, stdout, serveOptions...)
-	shutdownErr := shutdownOpenTelemetry(context.Background(), telemetry.shutdown)
+	serveErr := ampacp.Serve(ctx, stdin, stdout, options...)
+	shutdownErr := telemetry.shutdown(context.Background())
 
 	if serveErr != nil && ctx.Err() == nil {
 		_, _ = fmt.Fprintf(stderr, "acp-go-amp: %v\n", serveErr)
@@ -143,62 +90,5 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 		return 1
 	}
 
-	if sig := pendingSignal(handledSignals); sig != nil {
-		return signalCode(sig)
-	}
-
 	return 0
-}
-
-// seedFileFlag collects repeatable -seed-file <relpath>=<hostpath> values. Each
-// relpath maps to the contents read from its host file, which the agent writes
-// into every session's isolated native root via WithSeedFiles.
-type seedFileFlag struct {
-	relPaths  []string
-	hostPaths map[string]string
-}
-
-func (f *seedFileFlag) String() string { return strings.Join(f.relPaths, ",") }
-
-func (f *seedFileFlag) Set(value string) error {
-	relPath, hostPath, ok := strings.Cut(value, "=")
-	if !ok || relPath == "" || hostPath == "" {
-		return fmt.Errorf("invalid -seed-file %q: want <relpath>=<hostpath>", value)
-	}
-
-	if f.hostPaths == nil {
-		f.hostPaths = map[string]string{}
-	}
-
-	if _, exists := f.hostPaths[relPath]; !exists {
-		f.relPaths = append(f.relPaths, relPath)
-	}
-
-	f.hostPaths[relPath] = hostPath
-
-	return nil
-}
-
-func (f *seedFileFlag) contents() (map[string]string, error) {
-	seeds := make(map[string]string, len(f.relPaths))
-
-	for _, relPath := range f.relPaths {
-		data, err := os.ReadFile(f.hostPaths[relPath])
-		if err != nil {
-			return nil, fmt.Errorf("read -seed-file %q: %w", relPath, err)
-		}
-
-		seeds[relPath] = string(data)
-	}
-
-	return seeds, nil
-}
-
-func pendingSignal(signals <-chan os.Signal) os.Signal {
-	select {
-	case sig := <-signals:
-		return sig
-	default:
-		return nil
-	}
 }

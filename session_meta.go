@@ -1,176 +1,256 @@
 package ampacp
 
 import (
+	"maps"
+	"slices"
+	"strings"
+
 	"github.com/coder/acp-go-sdk"
+
+	"github.com/savid/acp-go-core/lifecycle"
+	"github.com/savid/acp-go-core/wire"
 )
 
-type parsedSessionMeta struct {
-	options       AmpOptions
-	optionFields  ampOptionFields
-	rawEvent      bool
-	rawEventField bool
+const (
+	metaOptionsKey       = "options"
+	metaRawEventKey      = "rawEvent"
+	metaModelKey         = "model"
+	metaEnvKey           = "env"
+	metaExtraPathDirsKey = "extraPathDirs"
+	metaOutputSchemaKey  = "outputSchema"
+	metaEnabledKey       = "enabled"
+	metaModeKey          = "mode"
+)
+
+// AmpOptions is the per-session options struct carried at _meta.amp.options.
+type AmpOptions struct {
+	// Mode selects a native built-in or plugin mode.
+	Mode string `json:"mode,omitempty"`
+	// Model is unsupported by Amp; use Mode.
+	Model string `json:"model,omitempty"`
+	// Env overlays the session's amp process environment.
+	Env map[string]string `json:"env,omitempty"`
+	// ExtraPathDirs are absolute directories prepended, in order, to the PATH
+	// of this session's amp process.
+	ExtraPathDirs []string `json:"extraPathDirs,omitempty"`
+	// OutputSchema is unsupported by Amp.
+	OutputSchema map[string]any `json:"outputSchema,omitempty"`
 }
 
-type ampOptionFields struct {
-	env  bool
-	mode bool
-}
+// AmpOption configures AmpOptions values.
+type AmpOption func(*AmpOptions)
 
-func parseSessionMeta(meta map[string]any) (parsedSessionMeta, error) {
-	result := parsedSessionMeta{}
-
-	for key, value := range meta {
-		switch key {
-		case ampMetaKey:
-			ampMeta, ok := value.(map[string]any)
-			if !ok {
-				return result, unsupportedField("_meta.amp")
-			}
-
-			for ampKey, ampValue := range ampMeta {
-				switch ampKey {
-				case ampOptionsKey:
-					options, fields, err := parseAmpOptionsWithPresence(ampValue)
-					if err != nil {
-						return result, err
-					}
-
-					result.options = options
-					result.optionFields = fields
-				case metaRawEventKey:
-					enabled, err := parseRawEventMeta(ampValue)
-					if err != nil {
-						return result, err
-					}
-
-					result.rawEvent = enabled
-					result.rawEventField = true
-				default:
-					return result, unsupportedField("_meta.amp." + ampKey)
-				}
-			}
-		case "traceparent", "tracestate", "baggage":
-		default:
-			// A session lifecycle request never carries the lifecycle extension:
-			// the extension is a different thing and rides none of them, so the
-			// family literal is rejected here rather than ignored as another
-			// namespace's business.
-			if refusal := rejectLifecycleMeta(map[string]any{key: value}); refusal != nil {
-				return result, refusal
-			}
-		}
-	}
-
-	return result, nil
-}
-
-func parseAmpOptionsWithPresence(value any) (AmpOptions, ampOptionFields, error) {
-	raw, ok := value.(map[string]any)
-	if !ok {
-		return AmpOptions{}, ampOptionFields{}, unsupportedField("_meta.amp.options")
-	}
-
+// NewAmpOptions constructs AmpOptions from functional options.
+func NewAmpOptions(opts ...AmpOption) AmpOptions {
 	options := AmpOptions{}
-	fields := ampOptionFields{}
-
-	for key, value := range raw {
-		switch key {
-		case optionModelKey:
-			model, ok := value.(string)
-			if !ok {
-				return options, fields, unsupportedField(ampModelOptionPath)
-			}
-
-			options.Model = model
-		case optionEnvKey:
-			fields.env = true
-			switch env := value.(type) {
-			case map[string]any:
-				options.Env = map[string]string{}
-
-				for k, v := range env {
-					str, ok := v.(string)
-					if !ok {
-						return options, fields, unsupportedField(ampEnvOptionPath + "." + k)
-					}
-
-					options.Env[k] = str
-				}
-			case map[string]string:
-				options.Env = cloneStringMap(env)
-			default:
-				return options, fields, unsupportedField(ampEnvOptionPath)
-			}
-		case metaOutputSchemaKey:
-			return options, fields, unsupportedField(ampOutputSchemaOptionPath)
-		case optionModeKey:
-			fields.mode = true
-
-			mode, ok := value.(string)
-			if !ok {
-				return options, fields, unsupportedField("_meta.amp.options.mode")
-			}
-
-			// An absent mode and a present-but-empty one are different requests,
-			// and this is the only place that can tell them apart. Absence never
-			// reaches this arm: it states no selection, the session takes its
-			// advertised default, and that is the ordinary way to establish one.
-			// A key that did arrive states a selection and names none, which is
-			// the same shape defect as a mode that is not a string — refused on
-			// the member, not measured against a list this adapter no longer
-			// keeps. Accepting it would file a request the host did make under
-			// the answer for one it did not.
-			if mode == "" {
-				return options, fields, unsupportedField("_meta.amp.options.mode")
-			}
-
-			options.Mode = mode
-		default:
-			return options, fields, unsupportedField("_meta.amp.options." + key)
-		}
+	for _, opt := range opts {
+		opt(&options)
 	}
 
-	return options, fields, nil
+	return options.clone()
 }
 
-func parseRawEventMeta(value any) (bool, error) {
-	raw, ok := value.(map[string]any)
+// WithAmpModel sets the model field, which Amp refuses at session start: the
+// native CLI selects models through its modes.
+func WithAmpModel(model string) AmpOption {
+	return func(options *AmpOptions) { options.Model = model }
+}
+
+// WithAmpEnv configures the session environment overlay.
+func WithAmpEnv(env map[string]string) AmpOption {
+	cloned := maps.Clone(env)
+
+	return func(options *AmpOptions) { options.Env = maps.Clone(cloned) }
+}
+
+// WithAmpExtraPathDirs configures the directories prepended to the session PATH.
+func WithAmpExtraPathDirs(dirs ...string) AmpOption {
+	cloned := slices.Clone(dirs)
+
+	return func(options *AmpOptions) { options.ExtraPathDirs = slices.Clone(cloned) }
+}
+
+// WithAmpOutputSchema sets an unsupported field; non-nil schemas are refused.
+func WithAmpOutputSchema(schema map[string]any) AmpOption {
+	cloned := wire.CloneMap(schema)
+
+	return func(options *AmpOptions) { options.OutputSchema = wire.CloneMap(cloned) }
+}
+
+// Meta returns exactly {"amp": {"options": {...}}} with the selected fields.
+func (options AmpOptions) Meta() map[string]any {
+	values := map[string]any{}
+	if options.Mode != "" {
+		values[metaModeKey] = options.Mode
+	}
+
+	if options.Model != "" {
+		values[metaModelKey] = options.Model
+	}
+
+	if options.Env != nil {
+		values[metaEnvKey] = maps.Clone(options.Env)
+	}
+
+	if options.ExtraPathDirs != nil {
+		values[metaExtraPathDirsKey] = slices.Clone(options.ExtraPathDirs)
+	}
+
+	if options.OutputSchema != nil {
+		values[metaOutputSchemaKey] = wire.CloneMap(options.OutputSchema)
+	}
+
+	return map[string]any{vendor: map[string]any{metaOptionsKey: values}}
+}
+
+func (options AmpOptions) clone() AmpOptions {
+	cloned := options
+	cloned.Env = maps.Clone(options.Env)
+	cloned.ExtraPathDirs = slices.Clone(options.ExtraPathDirs)
+	cloned.OutputSchema = wire.CloneMap(options.OutputSchema)
+
+	return cloned
+}
+
+// ValidateAmpSessionMeta runs the owned-namespace parsing of a session
+// lifecycle request's _meta without an Agent and returns the same refusal.
+func ValidateAmpSessionMeta(meta map[string]any) error {
+	_, err := parseSessionMeta(meta)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// sessionMeta is what one session lifecycle request's _meta.amp carried.
+type sessionMeta struct {
+	options   AmpOptions
+	rawEvents bool
+	// present records which carrier fields the request named, so a load or
+	// resume inherits the stored value only for fields it left out.
+	presentEnv           bool
+	presentExtraPathDirs bool
+}
+
+// parseSessionMeta validates the owned _meta.amp namespace of one session
+// lifecycle request. Unknown own-namespace keys fail closed; foreign
+// namespaces are ignored; the lifecycle literal is refused by name.
+func parseSessionMeta(meta map[string]any) (sessionMeta, *acp.RequestError) {
+	if refusal := lifecycle.RejectKey(meta); refusal != nil {
+		return sessionMeta{}, wire.ParamRefusal(refusal)
+	}
+
+	raw, exists := meta[vendor]
+	if !exists {
+		return sessionMeta{}, nil
+	}
+
+	vendorMeta, ok := raw.(map[string]any)
 	if !ok {
-		return false, unsupportedField("_meta.amp.rawEvent")
+		return sessionMeta{}, wire.Unsupported("_meta." + vendor)
 	}
 
-	enabled := false
+	parsed := sessionMeta{}
 
-	for key, value := range raw {
+	for key := range vendorMeta {
 		switch key {
-		case metaEnabledKey:
-			parsed, ok := value.(bool)
-			if !ok {
-				return false, unsupportedField("_meta.amp.rawEvent.enabled")
-			}
-
-			enabled = parsed
+		case metaOptionsKey, metaRawEventKey:
 		default:
-			return false, unsupportedField("_meta.amp.rawEvent." + key)
+			return sessionMeta{}, wire.Unsupported("_meta." + vendor + "." + key)
 		}
 	}
 
-	return enabled, nil
-}
+	if rawEvent, ok := vendorMeta[metaRawEventKey]; ok {
+		values, ok := rawEvent.(map[string]any)
+		if !ok {
+			return sessionMeta{}, wire.Unsupported("_meta." + vendor + "." + metaRawEventKey)
+		}
 
-func unsupportedField(path string) error {
-	return acp.NewInvalidParams(map[string]any{jsonFieldError: valUnsupported, jsonFieldField: path})
-}
+		for key, item := range values {
+			enabled, ok := item.(bool)
+			if key != metaEnabledKey || !ok {
+				return sessionMeta{}, wire.Unsupported("_meta." + vendor + "." + metaRawEventKey + "." + key)
+			}
 
-// activeRequestEnv drops the adapter-managed residence phase from a composed
-// environment so an active request is compared on the caller-supplied values
-// alone. The managed keys are already canonical, so the deletion covers every
-// spelling the caller could have used.
-func activeRequestEnv(env map[string]string) map[string]string {
-	out := cloneStringMap(env)
-	for key := range managedSessionEnv("", "", "", "", "") {
-		delete(out, key)
+			parsed.rawEvents = enabled
+		}
 	}
 
-	return out
+	rawOptions, hasOptions := vendorMeta[metaOptionsKey]
+	if !hasOptions {
+		return parsed, nil
+	}
+
+	values, isObject := rawOptions.(map[string]any)
+	if !isObject {
+		return sessionMeta{}, wire.Unsupported(wire.MetaOptionPath(vendor, ""))
+	}
+
+	options, err := parseAmpOptions(values)
+	if err != nil {
+		return sessionMeta{}, err
+	}
+
+	parsed.options = options
+	_, parsed.presentEnv = values[metaEnvKey]
+	_, parsed.presentExtraPathDirs = values[metaExtraPathDirsKey]
+
+	return parsed, nil
 }
+
+func parseAmpOptions(values map[string]any) (AmpOptions, *acp.RequestError) {
+	options := AmpOptions{}
+
+	for key, item := range values {
+		switch key {
+		case metaModeKey:
+			value, ok := item.(string)
+			if !ok || value == "" {
+				return AmpOptions{}, wire.Unsupported(wire.MetaOptionPath(vendor, key))
+			}
+
+			options.Mode = value
+		case metaEnvKey:
+			env, err := wire.StringMapOption(item, wire.MetaOptionPath(vendor, key))
+			if err != nil {
+				return AmpOptions{}, err
+			}
+
+			options.Env = env
+		case metaExtraPathDirsKey:
+			dirs, err := wire.StringSliceOption(item, wire.MetaOptionPath(vendor, key))
+			if err != nil {
+				return AmpOptions{}, err
+			}
+
+			options.ExtraPathDirs = dirs
+		case metaOutputSchemaKey:
+			schema, ok := item.(map[string]any)
+			if !ok {
+				return AmpOptions{}, wire.Unsupported(wire.MetaOptionPath(vendor, key))
+			}
+
+			options.OutputSchema = wire.CloneMap(schema)
+		default:
+			return AmpOptions{}, wire.Unsupported(wire.MetaOptionPath(vendor, key))
+		}
+	}
+
+	return options, validateAmpOptions(options)
+}
+
+func validateAmpOptions(options AmpOptions) *acp.RequestError {
+	if options.OutputSchema != nil {
+		return wire.Unsupported(wire.MetaOptionPath(vendor, metaOutputSchemaKey))
+	}
+
+	if strings.ContainsRune(options.Mode, '\x00') || (options.Mode != "" && strings.TrimSpace(options.Mode) == "") {
+		return wire.Unsupported(wire.MetaOptionPath(vendor, metaModeKey))
+	}
+
+	return wire.ValidateSessionEnvironment(options.Env, options.ExtraPathDirs, wire.MetaOptionPath(vendor, ""))
+}
+
+// WithAmpMode selects a native built-in or plugin mode.
+func WithAmpMode(mode string) AmpOption { return func(o *AmpOptions) { o.Mode = mode } }

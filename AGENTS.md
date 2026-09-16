@@ -2,89 +2,69 @@
 
 ## Purpose
 
-Expose the local Amp CLI as a Go ACP agent over stdio or embedded Go. Each
-prompt owns one short-lived process: thread-less `amp -x` creates the remote
-thread; later prompts use `amp threads continue` for that same thread.
+This module exposes the local Amp CLI through ACP. Native `threads new` creates
+the durable thread ID. Each prompt owns one `threads continue` stream-json
+process with a temporary native lifecycle plugin; restore also attaches without
+input to read remote state. The remote thread remains available to the native
+CLI after close.
 
 ## Project Map
 
-- Root `ampacp`: agent/session ownership, validation, auth, media, configuration,
-  and session-store API.
-- `internal/amp`: processes, stream-JSON, environment, interruption, browser safety.
-- `internal/lifecycle`: negotiation, decoding, reducer, and ordered emission.
-- `cmd/acp-go-amp`: stdio CLI; flags belong in `docs/reference/cli.mdx`.
-- `examples`: embedded hosts with ordinary unit coverage.
-- `integration`: explicitly gated installed-Amp tests.
-- `testdata/lifecycle`: canonical reducer vectors, preserved verbatim.
-- `docs`, `docs.json`: self-contained public documentation and navigation.
+- `agent*.go`, `options.go`, `request_builders.go`: agent construction,
+  environment options, session admission, store coordination, and the vendor
+  session-request options that ride core's request builders.
+- `session*.go`: prompt process ownership, event projection, lifecycle,
+  mode configuration, images, native export reconciliation, and replay.
+- `internal/amp`: native commands, process and pipe ownership, frames, version.
+- `cmd/acp-go-amp`: stdio entrypoint, flags, signals, and telemetry setup.
+- `integration`: installed CLI tests behind explicit gates.
+- `examples`: runnable clients using the public API.
 
 ## Commands
 
-- `make test`: race-enabled, shuffled ordinary unit tests.
-- `make coverage-check`: race-enabled, shuffled suite and coverage report.
-- `make lint`: pinned golangci-lint; do not substitute a global binary.
-- `make modernize-check`: inspect actual `go fix -diff` proposals.
-- `make docs-audit`: public docs, examples, flags, and documented Amp behavior.
-- `make audit`: combined release gate; inspect its targets before running.
-- `make test-portable-runtime`: execute portable ordinary behavior on a supported
-  non-Unix host. Cross-compilation alone is not runtime evidence.
-- Native targets: `make test-integration-smoke`, `test-integration-live`,
-  `test-integration-attended`, `test-integration-keystore`, and
-  `test-integration-native-browser`. Run only when already authorized by the
-  task; environment gates and installed credentials do not grant authorization.
+```sh
+make build
+make test
+make lint
+make audit
+make test-integration-smoke
+make test-integration-live
+```
+
+`make test` runs race detection and shuffled order. `make audit` is the complete
+local gate. Native smoke requires an authenticated Amp installation; live tests
+spend model tokens and require explicit operator intent.
 
 ## Coding Rules
 
-- Preserve the supported public API and existing error identities. Keep Amp
-  mode-only, with no permission bridge, command catalog, model option, fork, or
-  elicitation unless the task authorizes a public-surface change.
-- Keep stdout for ACP; preserve Go context and wrapped-error conventions.
-- Metadata builders merge caller maps and refuse every reserved `acp-go.dev/*`
-  literal. Preserve owned raw lifecycle metadata through typed wire decoding;
-  validate it at the existing semantic stage, including unknown extensions.
-- Prompt admission and close/delete fencing share one lock. One settlement owner
-  retains native cleanup, owed commit, terminal delivery, and exact retries.
-  Commit plus idle releases the foreground result; later quiescence belongs to
-  full completion, which close/delete join. Native failure is not boundary failure.
-- Delete fences writes before tombstoning; a main-key store delete is final even
-  against writes in flight. Load/resume never clear deletion markers and tear
-  down a prepared replacement that loses installation. Preserve exact commit
-  generations and retained unsynced frames. See `docs/features/session-store.mdx`.
+- Shared behavior comes from `github.com/savid/acp-go-core`.
+- Keep native protocol details under `internal/amp` and ACP projection beside
+  its handler. Every child and pipe reader has a joined lifetime.
+- Merge the inherited environment, agent overlay, and session overlay. Drop
+  only `ACP_GO_AMP_INTERNAL_*` markers. Resolve the executable before applying
+  session PATH directories. `WithHome` is unsupported.
+- Wait for the native end receipt and quiet thread state before verifying the
+  export. Cancellation calls the native thread API before stopping the observer.
+  Reattach without input after disconnection; active remote work refuses another
+  prompt. Repeated stale exports never prove completion.
+- Mirror verified raw native thread exports atomically with accepted configuration.
+  Remote state must agree at every shared message. Recover a confirmed missing
+  thread through the native internal importer; verify its exported history before
+  atomically publishing the new native binding under the stable ACP ID.
+- Native state is never deleted by the adapter, except the private destination
+  thread a failed recovery created and never bound. Delete tombstones the store
+  before closing active work.
+- Native tool permissions remain Amp's responsibility. There is no ACP
+  permission, elicitation, model, or slash-command discovery surface.
+- Unit tests use the test binary as a scripted Amp process.
+- Comments describe current behavior or constraints, never history or plans.
 
-## Testing Rules
+## Verification
 
-- Add focused regressions at observable boundaries; synchronize concurrent tests
-  with explicit barriers. Run relevant failure/race cases during edits and the
-  combined gate once changes settle. Review coverage without padding tests or
-  production seams for a percentage.
-- Keep strict `_meta.amp`, mode-only configuration, absent fork/elicitation,
-  command silence, MCP acceptance/refusal, and backpressure regressions.
-- Run every lifecycle vector, including `postRefusal`, with exact-equality
-  projections. Never edit, reorder, or delete canonical fixture bytes. Render,
-  marshal, decode, then reduce emitted notifications through the same reducer.
-- Fake binaries and generated files belong in `t.TempDir()` or ignored scratch.
-  Deterministic fakes prove wrapper behavior; native claims need real-native
-  evidence. Live prompts require explicit authorization and both integration
-  and live-token environment gates.
+Run `make audit` after Go changes settle. Run native smoke after changes to
+the native boundary, and the live continuation tests when authorized.
 
-## Security And Boundaries
+## Boundaries
 
-- Managed launches use host authority exclusively, dedicated stdout/stderr pipes,
-  and isolated settings. Materialize settings, MCP, seeds, and launchers before
-  preparation. Every failed prepare remains opaque and fences admission; only
-  successful reclaim restores adapter access. Never fall back to direct execution.
-- Advertise vacancy/quiescence only when the configured authority proves them.
-  Keep a managed handoff descriptor disjoint from the complete scratch domain;
-  the host preserves directory identities and disjointness across its lifetime.
-- Hosted login is ordinary-only: managed selectors cannot be locally audited.
-  Managed provider auth retains the manual API-key flow. Preserve the ordinary
-  browser audit and explicit provider-auth boundaries.
-- Never persist native settings or provider-auth ledger/residence contents.
-  Persist the complete session environment including raw `PATH`; credentials
-  such as `AMP_API_KEY` make the store secret-bearing. Credential harvest must
-  settle before reading and recheck flow/session ownership before one-shot delivery.
-- Preserve ordinary transcript bytes. Image tool results use canonical artifact
-  references; omit base64/signed URLs from transcripts and diagnostics. Artifact
-  storage failure is fatal; replay failure uses `amp_restore_failed` and keeps
-  the session. Load replays local display history; resume omits replay. Neither
-  creates a remote thread, and remote-thread loss never deletes the local mirror.
+- Never log credentials, prompts, tool bodies, or raw events by default.
+- Native permissions remain native; never synthesize approval on the host's behalf.
