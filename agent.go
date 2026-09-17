@@ -1,6 +1,7 @@
 package ampacp
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -62,8 +63,6 @@ type Agent struct {
 	sessions     map[acp.SessionId]*session
 	deleted      map[acp.SessionId]struct{}
 	incarnations uint64
-
-	executable process.Executable
 }
 
 var (
@@ -405,15 +404,20 @@ func (a *Agent) nextIncarnation() uint64 {
 	return a.incarnations
 }
 
+// ensureExecutable resolves the amp executable against the base
+// environment, so a session directory can never shadow it.
 func (a *Agent) ensureExecutable(ctx context.Context) (string, error) {
-	executable, err := a.executable.Resolve(ctx, a.environment(nil, nil), a.options.ExecutablePath, vendor, amp.MinimumVersion, amp.ProbeVersion)
-	if err != nil {
-		a.log.ErrorContext(ctx, "amp version probe failed", slog.String("reason", err.Error()))
-
-		return "", wire.InternalFailure(vendor, internalClassNativeStart)
+	base, err := a.environment(nil, nil).Base()
+	if err == nil {
+		var executable string
+		if executable, err = process.ResolveExecutable(cmp.Or(a.options.ExecutablePath, vendor), base); err == nil {
+			return executable, nil
+		}
 	}
 
-	return executable, nil
+	a.log.ErrorContext(ctx, "amp executable resolution failed", slog.String("reason", err.Error()))
+
+	return "", wire.InternalFailure(vendor, internalClassNativeStart)
 }
 
 // environment merges the inherited environment with the two caller overlays.

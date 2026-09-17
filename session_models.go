@@ -53,7 +53,7 @@ func (s *session) setConfigOption(ctx context.Context, id acp.SessionConfigId, v
 		return nil, wire.Unsupported("value")
 	}
 
-	release, err := s.acquireGate("session_config")
+	release, err := s.acquireGate(limitSessionPrompt)
 	if err != nil {
 		return nil, err
 	}

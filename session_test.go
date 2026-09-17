@@ -112,16 +112,12 @@ func TestNativeContinuationAndCarrierRestore(t *testing.T) {
 	require.Equal(t, rows, after)
 }
 
-func TestCancelTimeoutCrashAndDelete(t *testing.T) {
+func TestCancelCrashAndDelete(t *testing.T) {
 	t.Parallel()
-	for _, kind := range []string{"cancel", "timeout", "crash", "delete"} {
+	for _, kind := range []string{"cancel", "crash", "delete"} {
 		t.Run(kind, func(t *testing.T) {
 			t.Parallel()
-			var options []Option
-			if kind == "timeout" {
-				options = append(options, WithTurnTimeout(2*time.Second))
-			}
-			h := newHarness(t, options...)
+			h := newHarness(t)
 			h.initialize()
 			session := h.newSession()
 			prompt := "SLOW"
@@ -157,8 +153,6 @@ func TestCancelTimeoutCrashAndDelete(t *testing.T) {
 				t.Fatal("turn did not settle")
 			}
 			switch kind {
-			case "timeout":
-				require.Equal(t, wire.CauseTimeout, requestErrorData(t, result.err)["cause"])
 			case "crash":
 				require.Equal(t, wire.CauseProcessExit, requestErrorData(t, result.err)["cause"])
 			default:

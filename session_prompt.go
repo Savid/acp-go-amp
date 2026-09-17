@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-amp/internal/amp"
@@ -140,19 +139,6 @@ func (s *session) prompt(ctx context.Context, params acp.PromptRequest, raw json
 		return acp.PromptResponse{}, err
 	}
 
-	if timeout := s.agent.options.TurnTimeout; timeout > 0 {
-		timer := time.AfterFunc(timeout, func() {
-			s.mu.Lock()
-			if s.turn == t && !t.settling && !t.cancelled {
-				t.timedOut = true
-
-				cancelTurn()
-			}
-			s.mu.Unlock()
-		})
-		defer timer.Stop()
-	}
-
 	evidence, result, stderr, runErr := amp.RunAttached(turnCtx, request, s.agent.options.ScratchDir, s.nativeID, input, func(view amp.View) error {
 		if len(s.rows) != 1 {
 			return errors.New("missing stored export")
@@ -224,10 +210,10 @@ func (s *session) consumeFrame(ctx context.Context, t *turn, data []byte) error 
 func (s *session) finishTurn(ctx context.Context, t *turn, params acp.PromptRequest, result process.Result, stderr string, runErr error) (acp.PromptResponse, error) {
 	s.mu.Lock()
 	t.settling = true
-	cancelled, timedOut := t.cancelled, t.timedOut
+	cancelled := t.cancelled
 	s.mu.Unlock()
 
-	reason, failure := turnVerdict(t, result, stderr, runErr, cancelled, timedOut)
+	reason, failure := turnVerdict(t, result, stderr, runErr, cancelled)
 
 	settleCtx, finish := context.WithTimeout(context.WithoutCancel(ctx), nativeCommandTimeout)
 	defer finish()
@@ -290,14 +276,12 @@ func nativeFailure(cause, message string) *acp.RequestError {
 	return wire.TurnFailed(vendor, wire.TurnFailure{Cause: cause, Message: message})
 }
 
-func turnVerdict(t *turn, result process.Result, stderr string, runErr error, cancelled, timedOut bool) (acp.StopReason, error) {
+func turnVerdict(t *turn, result process.Result, stderr string, runErr error, cancelled bool) (acp.StopReason, error) {
 	reason := acp.StopReasonEndTurn
 
 	var failure error
 
 	switch {
-	case timedOut:
-		failure = nativeFailure(wire.CauseTimeout, "Amp turn exceeded its timeout")
 	case cancelled && t.evidence.Receipt == nil:
 		reason = acp.StopReasonCancelled
 	case errors.Is(runErr, errIdentityDrift):

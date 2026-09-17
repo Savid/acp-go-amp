@@ -47,9 +47,6 @@ func fakeFlagsMatch(subcommand string, args []string) bool {
 }
 
 func fakeAmp(root string, args []string) int {
-	if slices.Contains(args, "--version") {
-		return fakeVersion()
-	}
 	index := slices.Index(args, "threads")
 	if index < 0 || index+1 >= len(args) {
 		return 2
@@ -386,16 +383,6 @@ func fakeInput() (input struct {
 	ok = json.Unmarshal(scanner.Bytes(), &input) == nil
 
 	return input, scanner, ok
-}
-
-func fakeVersion() int {
-	version := os.Getenv("ACP_GO_AMP_TEST_VERSION")
-	if version == "" {
-		version = amp.MinimumVersion + "-gfixture"
-	}
-	fmt.Println(version)
-
-	return 0
 }
 
 func fakeWrite(path string, data []byte) {

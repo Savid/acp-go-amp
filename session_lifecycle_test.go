@@ -109,20 +109,19 @@ func TestDisconnectReconcilesRemoteStateBeforeAnotherPrompt(t *testing.T) {
 func TestNativeReceiptControlsCancellationVerdict(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
-		name, status        string
-		requested, timedOut bool
-		want                acp.StopReason
-		failure             bool
+		name, status string
+		requested    bool
+		want         acp.StopReason
+		failure      bool
 	}{
-		{"native cancellation", "cancelled", true, false, acp.StopReasonCancelled, false},
-		{"external cancellation", "cancelled", false, false, acp.StopReasonCancelled, false},
-		{"native completed before cancel", "done", true, false, acp.StopReasonEndTurn, false},
-		{"timeout cancels natively", "cancelled", false, true, acp.StopReasonEndTurn, true},
+		{"native cancellation", "cancelled", true, acp.StopReasonCancelled, false},
+		{"external cancellation", "cancelled", false, acp.StopReasonCancelled, false},
+		{"native completed before cancel", "done", true, acp.StopReasonEndTurn, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			turn := &turn{evidence: amp.Outcome{Receipt: &amp.Receipt{Status: tc.status}, Stopped: true}, state: cycleState{terminal: true, failed: tc.status != amp.StatusDone, errorMessage: "User cancelled (SIGINT/SIGTERM)"}}
-			reason, err := turnVerdict(turn, process.Result{}, "", nil, tc.requested, tc.timedOut)
+			reason, err := turnVerdict(turn, process.Result{}, "", nil, tc.requested)
 			require.Equal(t, tc.want, reason)
 			if tc.failure {
 				require.Error(t, err)
@@ -147,7 +146,7 @@ func TestMissingCompletionEvidenceFailsThePrompt(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			current := &turn{evidence: amp.Outcome{Receipt: tc.receipt, Stopped: true}, state: cycleState{terminal: tc.terminal, failed: tc.failed}}
-			_, err := turnVerdict(current, process.Result{}, "", nil, false, false)
+			_, err := turnVerdict(current, process.Result{}, "", nil, false)
 			require.Equal(t, wire.CauseTransport, requestErrorData(t, err)["cause"])
 		})
 	}

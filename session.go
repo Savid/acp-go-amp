@@ -47,7 +47,6 @@ type session struct {
 type turn struct {
 	cancelNative context.CancelFunc
 	cancelled    bool
-	timedOut     bool
 	settling     bool
 	accepted     bool
 	started      bool

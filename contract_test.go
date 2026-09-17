@@ -2,6 +2,8 @@ package ampacp
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -93,4 +95,38 @@ func TestNativeNoiseCannotCorruptACPStdout(t *testing.T) {
 	list, err := h.conn.ListSessions(h.ctx(), wire.ListSessionsRequest())
 	require.NoError(t, err)
 	require.Len(t, list.Sessions, 1)
+}
+
+func TestProtocolAdmission(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	initialized := h.initialize()
+	require.NotContains(t, initialized.AgentCapabilities.Meta["amp"], wire.AccountUsageCapabilityKey)
+
+	for _, method := range []string{"_amp/anything", "_amp/accountUsage"} {
+		_, err := h.conn.CallExtension(h.ctx(), method, map[string]any{})
+		require.Equal(t, -32601, requestErrorCode(t, err), method)
+	}
+
+	_, err := h.conn.SetSessionMode(h.ctx(), acp.SetSessionModeRequest{SessionId: "x", ModeId: "plan"})
+	require.Equal(t, -32601, requestErrorCode(t, err))
+
+	_, err = h.conn.Authenticate(h.ctx(), acp.AuthenticateRequest{MethodId: "oauth"})
+	require.Equal(t, -32602, requestErrorCode(t, err))
+	require.Equal(t, "oauth", requestErrorData(t, err)["methodId"])
+
+	_, err = h.conn.Logout(h.ctx(), acp.LogoutRequest{})
+	require.Equal(t, -32601, requestErrorCode(t, err))
+}
+
+func TestDefaultExecutableResolvesFromTheBasePath(t *testing.T) {
+	t.Parallel()
+
+	bin := t.TempDir()
+	require.NoError(t, os.Symlink(os.Args[0], filepath.Join(bin, vendor)))
+
+	h := newHarness(t, WithExecutablePath(""), WithEnv(map[string]string{"PATH": bin, "ACP_GO_AMP_TEST_NATIVE": filepath.Join(t.TempDir(), "native")}))
+	h.initialize()
+	h.newSession()
 }

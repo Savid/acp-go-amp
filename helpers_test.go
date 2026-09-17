@@ -301,6 +301,16 @@ func lifecycleEventKinds(updates []acp.SessionNotification) []string {
 	return kinds
 }
 
+// requestErrorCode is the code of a JSON-RPC error.
+func requestErrorCode(t *testing.T, err error) int {
+	t.Helper()
+
+	var reqErr *acp.RequestError
+	require.ErrorAs(t, err, &reqErr)
+
+	return reqErr.Code
+}
+
 // requestErrorData decodes the data member of a JSON-RPC error.
 func requestErrorData(t *testing.T, err error) map[string]any {
 	t.Helper()

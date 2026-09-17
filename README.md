@@ -23,7 +23,7 @@ go install github.com/savid/acp-go-amp/cmd/acp-go-amp@latest
 acp-go-amp [-path amp] [-seed-file rel=host]... [-debug]
 ```
 
-Requires Amp 0.0.1789432613 or newer and native Amp authentication. Run
+Verified against Amp 0.0.1789432613-gd97f0d; requires native Amp authentication. Run
 `amp login` separately. Native configuration and auth resolve from the inherited
 environment. `-version` prints the adapter version; `OTEL_*` variables configure
 telemetry exporters. `-home` and `-model` refuse nonempty values. `-scratch-dir` accepts a scratch parent. `-path` selects the executable, `-seed-file` seeds a relative native configuration file, and `-debug` enables stderr diagnostics.
@@ -31,7 +31,6 @@ telemetry exporters. `-home` and `-model` refuse nonempty values. `-scratch-dir`
 ```go
 err := ampacp.Serve(ctx, os.Stdin, os.Stdout,
     ampacp.WithSessionStore(store),
-    ampacp.WithTurnTimeout(5*time.Minute),
 )
 ```
 
@@ -43,8 +42,8 @@ err := ampacp.Serve(ctx, os.Stdin, os.Stdout,
 | `WithScratchDir` | Parent for temporary lifecycle bridge files. |
 | `WithSeedFiles` | Seed native configuration files without overwriting unmanaged files. |
 | `WithDefaultModel`, `WithConfiguredModels` | Refuse nonempty values; native Amp selects models through modes. |
-| `WithSessionStore`, `WithSessionStoreLoadTimeout` | Select the durability store and bound restore reads. |
-| `WithTurnTimeout`, `WithConcurrencyLimits` | Bound prompt duration and configurable concurrency. |
+| `WithSessionStore` | Select the durability store. |
+| `WithConcurrencyLimits` | Configurable concurrency. |
 | `WithImageLimits`, `WithInputHandoffRoot` | Set image byte limits and the root for image handoffs. |
 | `WithLogger` | Supply the structured logger. |
 | `WithTracerProvider`, `WithMeterProvider`, `WithTextMapPropagator` | Configure OpenTelemetry providers and context propagation. |

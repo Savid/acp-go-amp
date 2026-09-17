@@ -15,10 +15,9 @@ CLI after close.
   session-request options that ride core's request builders.
 - `session*.go`: prompt process ownership, event projection, lifecycle,
   mode configuration, images, native export reconciliation, and replay.
-- `internal/amp`: native commands, process and pipe ownership, frames, version.
+- `internal/amp`: native commands, process and pipe ownership, and frames.
 - `cmd/acp-go-amp`: stdio entrypoint, flags, signals, and telemetry setup.
 - `integration`: installed CLI tests behind explicit gates.
-- `examples`: runnable clients using the public API.
 
 ## Commands
 
