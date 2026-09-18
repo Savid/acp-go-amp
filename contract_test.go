@@ -2,8 +2,10 @@ package ampacp
 
 import (
 	"encoding/json"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -19,9 +21,7 @@ func TestUnsupportedOptionsAndMCP(t *testing.T) {
 		_, err := a.Initialize(t.Context(), acp.InitializeRequest{})
 		require.Equal(t, "amp_invalid_options", requestErrorData(t, err)["error"])
 	}
-	for _, options := range []AmpOptions{NewAmpOptions(WithAmpModel("model")), NewAmpOptions(WithAmpOutputSchema(map[string]any{}))} {
-		require.Error(t, ValidateAmpSessionMeta(options.Meta()))
-	}
+	require.Error(t, ValidateAmpSessionMeta(NewAmpOptions(WithAmpModel("model")).Meta()))
 	h := newHarness(t)
 	h.initialize()
 	request := wire.NewSessionRequest(t.TempDir())
@@ -129,4 +129,196 @@ func TestDefaultExecutableResolvesFromTheBasePath(t *testing.T) {
 	h := newHarness(t, WithExecutablePath(""), WithEnv(map[string]string{"PATH": bin, "ACP_GO_AMP_TEST_NATIVE": filepath.Join(t.TempDir(), "native")}))
 	h.initialize()
 	h.newSession()
+}
+
+func TestInitializeShape(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	resp := h.initialize(withLifecycle(), func(request *acp.InitializeRequest) {
+		request.ClientCapabilities.PositionEncodings = []acp.PositionEncodingKind{acp.PositionEncodingKindUtf8}
+	})
+
+	require.Empty(t, resp.AuthMethods)
+	require.True(t, resp.AgentCapabilities.LoadSession)
+	require.True(t, resp.AgentCapabilities.PromptCapabilities.Image)
+	require.True(t, resp.AgentCapabilities.PromptCapabilities.EmbeddedContext)
+	require.False(t, resp.AgentCapabilities.PromptCapabilities.Audio)
+	require.False(t, resp.AgentCapabilities.McpCapabilities.Http)
+	require.Nil(t, resp.AgentCapabilities.Nes)
+	require.Nil(t, resp.AgentCapabilities.Providers)
+	require.Nil(t, resp.AgentCapabilities.SessionCapabilities.Fork)
+	require.NotNil(t, resp.AgentCapabilities.SessionCapabilities.Close)
+	require.NotNil(t, resp.AgentCapabilities.SessionCapabilities.Delete)
+	require.NotNil(t, resp.AgentCapabilities.SessionCapabilities.List)
+	require.NotNil(t, resp.AgentCapabilities.SessionCapabilities.Resume)
+	require.NotNil(t, resp.AgentCapabilities.SessionCapabilities.AdditionalDirectories)
+	require.Equal(t, acp.PositionEncodingKindUtf8, *resp.AgentCapabilities.PositionEncoding)
+
+	encoded, err := json.Marshal(resp.AgentCapabilities)
+	require.NoError(t, err)
+
+	var members map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(encoded, &members))
+	require.Equal(t, []string{"_meta", "auth", "loadSession", "mcpCapabilities", "positionEncoding", "promptCapabilities", "sessionCapabilities"}, slices.Sorted(maps.Keys(members)))
+
+	answer, ok := resp.Meta[wire.LifecycleKey].(map[string]any)
+	require.True(t, ok)
+	require.EqualValues(t, 1, answer["version"])
+	require.Equal(t, false, answer["updatesOutsidePrompt"])
+	require.Equal(t, []any{}, answer["activityKinds"])
+	require.NotContains(t, resp.AgentCapabilities.Meta, wire.LifecycleKey)
+
+	_, err = h.conn.UnstableForkSession(h.ctx(), acp.UnstableForkSessionRequest{SessionId: "x", Cwd: t.TempDir()})
+	require.Equal(t, -32601, requestErrorCode(t, err))
+
+	plain := newHarness(t).initialize()
+	require.Nil(t, plain.Meta)
+	require.Equal(t, acp.PositionEncodingKindUtf16, *plain.AgentCapabilities.PositionEncoding)
+}
+
+func TestSessionMetaStrictness(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name  string
+		meta  map[string]any
+		field string
+	}{
+		{"unknown own key", map[string]any{vendor: map[string]any{"bogus": 1}}, "_meta.amp.bogus"},
+		{"unknown option", map[string]any{vendor: map[string]any{"options": map[string]any{"bogus": 1}}}, "_meta.amp.options.bogus"},
+		{"model", map[string]any{vendor: map[string]any{"options": map[string]any{"model": "provider/id"}}}, "_meta.amp.options.model"},
+		{"relative path dir", map[string]any{vendor: map[string]any{"options": map[string]any{"extraPathDirs": []any{"rel"}}}}, "_meta.amp.options.extraPathDirs[0]"},
+		{"bad env name", map[string]any{vendor: map[string]any{"options": map[string]any{"env": map[string]any{"A=B": "x"}}}}, "_meta.amp.options.env.A=B"},
+		{"lifecycle literal", map[string]any{wire.LifecycleKey: map[string]any{"version": 1}}, `_meta["` + wire.LifecycleKey + `"]`},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			h := newHarness(t)
+			h.initialize()
+
+			request := wire.NewSessionRequest(t.TempDir())
+			request.Meta = tc.meta
+
+			_, err := h.conn.NewSession(h.ctx(), request)
+			require.Equal(t, -32602, requestErrorCode(t, err))
+
+			data := requestErrorData(t, err)
+			require.Equal(t, "unsupported", data["error"])
+			require.Equal(t, tc.field, data["field"])
+		})
+	}
+}
+
+func TestForeignMetaIgnored(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	h.initialize()
+
+	session := h.newSession(wire.WithSessionMeta(map[string]any{"other": map[string]any{"x": 1}, "traceparent": "00-1-2-01"}))
+	require.NotEmpty(t, session.SessionId)
+}
+
+func TestUniformRejections(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	h.initialize()
+
+	_, err := h.conn.NewSession(h.ctx(), acp.NewSessionRequest{Cwd: "relative", McpServers: []acp.McpServer{}})
+	require.Equal(t, -32602, requestErrorCode(t, err))
+	require.Equal(t, "cwd", requestErrorData(t, err)["field"])
+
+	session := h.newSession()
+
+	_, err = h.conn.Prompt(h.ctx(), wire.PromptRequest(session.SessionId))
+	require.Equal(t, -32602, requestErrorCode(t, err))
+	require.Equal(t, "prompt", requestErrorData(t, err)["field"])
+
+	_, err = h.conn.Prompt(h.ctx(), wire.PromptRequest(session.SessionId, acp.ContentBlock{Audio: &acp.ContentBlockAudio{Data: "x", MimeType: "audio/wav"}}))
+	require.Equal(t, -32602, requestErrorCode(t, err))
+	require.Equal(t, "prompt", requestErrorData(t, err)["field"])
+
+	const unknown acp.SessionId = "00000000-0000-4000-8000-000000000000"
+
+	_, err = h.conn.Prompt(h.ctx(), wire.TextPromptRequest(unknown, "hi"))
+	require.Equal(t, -32602, requestErrorCode(t, err))
+	require.Equal(t, "unknown session", requestErrorData(t, err)["error"])
+
+	require.NoError(t, h.conn.Cancel(h.ctx(), wire.CancelRequest(unknown)))
+}
+
+func TestPromptCorrelationGate(t *testing.T) {
+	t.Parallel()
+
+	t.Run("required when negotiated", func(t *testing.T) {
+		t.Parallel()
+
+		h := newHarness(t)
+		h.initialize(withLifecycle())
+		session := h.newSession()
+
+		_, err := h.prompt(session.SessionId, "HELLO", nil)
+		data := requestErrorData(t, err)
+		require.Equal(t, "missing", data["error"])
+		require.Equal(t, `_meta["`+wire.LifecycleKey+`"]`, data["field"])
+
+		_, err = h.prompt(session.SessionId, "HELLO", map[string]any{wire.LifecycleKey: map[string]any{"version": 1, "submission": map[string]any{"submissionId": "", "clientNonce": "n"}}})
+		data = requestErrorData(t, err)
+		require.Equal(t, "unsupported", data["error"])
+		require.Contains(t, data["field"], "submissionId")
+	})
+
+	t.Run("refused when omitted", func(t *testing.T) {
+		t.Parallel()
+
+		h := newHarness(t)
+		h.initialize()
+		session := h.newSession()
+
+		_, err := h.prompt(session.SessionId, "HELLO", promptMeta(1))
+		data := requestErrorData(t, err)
+		require.Equal(t, "unsupported", data["error"])
+		require.Equal(t, `_meta["`+wire.LifecycleKey+`"]`, data["field"])
+	})
+
+	t.Run("fraction version refused over the wire", func(t *testing.T) {
+		t.Parallel()
+
+		h := newHarness(t)
+		h.initialize(withLifecycle())
+		session := h.newSession()
+
+		_, err := h.prompt(session.SessionId, "HELLO", map[string]any{wire.LifecycleKey: map[string]any{"version": json.Number("1.0"), "submission": map[string]any{"submissionId": "s", "clientNonce": "n"}}})
+		require.Equal(t, "unsupported", requestErrorData(t, err)["error"])
+	})
+}
+
+func TestActiveSessionLimit(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t, WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1}))
+	h.initialize()
+	h.newSession()
+
+	_, err := h.conn.NewSession(h.ctx(), wire.NewSessionRequest(t.TempDir()))
+	require.Equal(t, -32600, requestErrorCode(t, err))
+	require.Equal(t, "backpressure", requestErrorData(t, err)["error"])
+	require.Equal(t, "active_sessions", requestErrorData(t, err)["limit"])
+}
+
+func TestClosedAgentRefusesRequests(t *testing.T) {
+	t.Parallel()
+
+	agent := NewAgent(testOptions(t)...)
+	require.NoError(t, agent.Close())
+	require.NoError(t, agent.Close())
+
+	_, err := agent.NewSession(t.Context(), wire.NewSessionRequest(t.TempDir()))
+	require.Equal(t, -32600, requestErrorCode(t, err))
+	require.Equal(t, "agent closed", requestErrorData(t, err)["error"])
 }

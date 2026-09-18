@@ -115,8 +115,8 @@ func applyOptions(opts []Option) Options {
 		options.ImageLimits = ImageLimits{
 			MaxInputBytesPerImage:     limits.MaxInputBytesPerImage,
 			MaxInputBytesPerPrompt:    limits.MaxInputBytesPerPrompt,
-			MaxOutputBytesPerImage:    image.DefaultLimitBytes,
-			MaxOutputBytesPerToolCall: image.DefaultLimitBytes,
+			MaxOutputBytesPerImage:    limits.MaxOutputBytesPerImage,
+			MaxOutputBytesPerToolCall: limits.MaxOutputBytesPerToolCall,
 		}
 	}
 

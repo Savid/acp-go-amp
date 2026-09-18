@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/savid/acp-go-core/wire"
-
 	"github.com/coder/acp-go-sdk"
+
 	"github.com/savid/acp-go-amp/internal/amp"
+	"github.com/savid/acp-go-core/wire"
 )
 
 const (

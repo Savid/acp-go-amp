@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"maps"
 	"os"
 	"slices"
 	"sync"
@@ -117,6 +118,7 @@ func (a *Agent) validateOptions() *acp.RequestError {
 		err   error
 	}{
 		{"home", refuseNonempty(options.Home)},
+		{"scratchDir", process.ValidateOptionalAbsolutePath(options.ScratchDir)},
 		{"inputHandoffRoot", image.ValidateHandoffRoot(options.InputHandoffRoot)},
 		{"defaultModel", refuseNonempty(options.DefaultModel)},
 		{"configuredModels", validateConfiguredModels(options.ConfiguredModels)},
@@ -219,18 +221,13 @@ func (a *Agent) Close() error {
 	}
 
 	a.closed = true
-	sessions := slices.Collect(func(yield func(*session) bool) {
-		for _, s := range a.sessions {
-			if !yield(s) {
-				return
-			}
-		}
-	})
-	a.conn = nil
+	sessions := slices.Collect(maps.Values(a.sessions))
 	a.mu.Unlock()
 
 	var errs []error
 
+	// The ladder's terminal events still need the connection, so it is cleared
+	// only once every session has run its own shutdown.
 	for _, s := range sessions {
 		if err := s.close(context.Background()); err != nil {
 			errs = append(errs, err)
@@ -239,6 +236,7 @@ func (a *Agent) Close() error {
 
 	a.mu.Lock()
 	clear(a.sessions)
+	a.conn = nil
 	a.mu.Unlock()
 
 	return errors.Join(errs...)

@@ -23,7 +23,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 	flags := flag.NewFlagSet("acp-go-amp", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 
-	ampPath := flags.String("path", "", "amp executable; a bare name is searched on PATH")
+	executablePath := flags.String("path", "", "amp executable; a bare name is searched on PATH")
 	home := flags.String("home", "", "unsupported for Amp; leave empty")
 	scratchDir := flags.String("scratch-dir", "", "parent directory for ephemeral adapter state; empty means the system temp directory")
 	model := flags.String("model", "", "unsupported for Amp; use per-session mode")
@@ -49,21 +49,21 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 
 	logger := slog.New(slog.NewTextHandler(stderr, &slog.HandlerOptions{Level: level}))
 
-	telemetry, err := configureTelemetry(ctx, logger, version())
+	telemetry, telemetryOptions, err := configureTelemetry(ctx, logger, version())
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "acp-go-amp: configure OpenTelemetry: %v\n", err)
 
 		return 1
 	}
 
-	logger = telemetry.logger
+	logger = telemetry.Logger
 
 	ctx, stop := signal.NotifyContext(ctx, forwardedSignals()...)
 	defer stop()
 
 	options := []ampacp.Option{
 		ampacp.WithAgentVersion(version()),
-		ampacp.WithExecutablePath(*ampPath),
+		ampacp.WithExecutablePath(*executablePath),
 		ampacp.WithHome(*home),
 		ampacp.WithScratchDir(*scratchDir),
 		ampacp.WithDefaultModel(*model),
@@ -73,10 +73,10 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 		options = append(options, ampacp.WithSeedFiles(seedFiles.Files))
 	}
 
-	options = append(options, telemetry.options...)
+	options = append(options, telemetryOptions...)
 
 	serveErr := ampacp.Serve(ctx, stdin, stdout, options...)
-	shutdownErr := telemetry.shutdown(context.Background())
+	shutdownErr := telemetry.Shutdown(context.Background())
 
 	if serveErr != nil && ctx.Err() == nil {
 		_, _ = fmt.Fprintf(stderr, "acp-go-amp: %v\n", serveErr)

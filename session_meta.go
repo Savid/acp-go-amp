@@ -17,7 +17,6 @@ const (
 	metaModelKey         = "model"
 	metaEnvKey           = "env"
 	metaExtraPathDirsKey = "extraPathDirs"
-	metaOutputSchemaKey  = "outputSchema"
 	metaEnabledKey       = "enabled"
 	metaModeKey          = "mode"
 )
@@ -33,8 +32,6 @@ type AmpOptions struct {
 	// ExtraPathDirs are absolute directories prepended, in order, to the PATH
 	// of this session's amp process.
 	ExtraPathDirs []string `json:"extraPathDirs,omitempty"`
-	// OutputSchema is unsupported by Amp.
-	OutputSchema map[string]any `json:"outputSchema,omitempty"`
 }
 
 // AmpOption configures AmpOptions values.
@@ -70,13 +67,6 @@ func WithAmpExtraPathDirs(dirs ...string) AmpOption {
 	return func(options *AmpOptions) { options.ExtraPathDirs = slices.Clone(cloned) }
 }
 
-// WithAmpOutputSchema sets an unsupported field; non-nil schemas are refused.
-func WithAmpOutputSchema(schema map[string]any) AmpOption {
-	cloned := wire.CloneMap(schema)
-
-	return func(options *AmpOptions) { options.OutputSchema = wire.CloneMap(cloned) }
-}
-
 // Meta returns exactly {"amp": {"options": {...}}} with the selected fields.
 func (options AmpOptions) Meta() map[string]any {
 	values := map[string]any{}
@@ -96,10 +86,6 @@ func (options AmpOptions) Meta() map[string]any {
 		values[metaExtraPathDirsKey] = slices.Clone(options.ExtraPathDirs)
 	}
 
-	if options.OutputSchema != nil {
-		values[metaOutputSchemaKey] = wire.CloneMap(options.OutputSchema)
-	}
-
 	return map[string]any{vendor: map[string]any{metaOptionsKey: values}}
 }
 
@@ -107,7 +93,6 @@ func (options AmpOptions) clone() AmpOptions {
 	cloned := options
 	cloned.Env = maps.Clone(options.Env)
 	cloned.ExtraPathDirs = slices.Clone(options.ExtraPathDirs)
-	cloned.OutputSchema = wire.CloneMap(options.OutputSchema)
 
 	return cloned
 }
@@ -225,13 +210,7 @@ func parseAmpOptions(values map[string]any) (AmpOptions, *acp.RequestError) {
 			}
 
 			options.ExtraPathDirs = dirs
-		case metaOutputSchemaKey:
-			schema, ok := item.(map[string]any)
-			if !ok {
-				return AmpOptions{}, wire.Unsupported(wire.MetaOptionPath(vendor, key))
-			}
 
-			options.OutputSchema = wire.CloneMap(schema)
 		default:
 			return AmpOptions{}, wire.Unsupported(wire.MetaOptionPath(vendor, key))
 		}
@@ -241,10 +220,6 @@ func parseAmpOptions(values map[string]any) (AmpOptions, *acp.RequestError) {
 }
 
 func validateAmpOptions(options AmpOptions) *acp.RequestError {
-	if options.OutputSchema != nil {
-		return wire.Unsupported(wire.MetaOptionPath(vendor, metaOutputSchemaKey))
-	}
-
 	if strings.ContainsRune(options.Mode, '\x00') || (options.Mode != "" && strings.TrimSpace(options.Mode) == "") {
 		return wire.Unsupported(wire.MetaOptionPath(vendor, metaModeKey))
 	}

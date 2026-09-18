@@ -8,13 +8,7 @@ import (
 
 // WithSessionAmpOptions merges Amp-specific options into _meta.amp.options.
 func WithSessionAmpOptions(options AmpOptions) wire.SessionRequestOption {
-	return wire.WithSessionMetaValue(options.clone().Meta())
-}
-
-// WithSessionOutputSchema sets structured output, which Amp refuses at
-// session start.
-func WithSessionOutputSchema(schema map[string]any) wire.SessionRequestOption {
-	return wire.WithSessionMetaValue(AmpOptions{OutputSchema: wire.CloneMap(schema)}.Meta())
+	return wire.WithSessionMetaValue(options.Meta())
 }
 
 // WithSessionRawEvents toggles raw Amp event emission for the session.

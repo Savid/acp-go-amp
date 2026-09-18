@@ -424,12 +424,6 @@ func (s *session) replay(ctx context.Context, rows [][]byte) error {
 }
 
 func nativeTokens(usage map[string]any, key string) int {
-	if value, ok := usage[key].(json.Number); ok {
-		number, _ := value.Int64()
-
-		return max(0, int(number))
-	}
-
 	value, _ := usage[key].(float64)
 
 	return max(0, int(value))
