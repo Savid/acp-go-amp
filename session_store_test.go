@@ -162,3 +162,32 @@ func TestNativeBindingSurvivesLoadAndResume(t *testing.T) {
 	require.Equal(t, record.NativeSessionID, after.NativeSessionID)
 	require.Equal(t, string(id), after.SessionID)
 }
+
+type firstMirrorFailureStore struct {
+	acpcore.SessionStore
+	calls atomic.Int32
+}
+
+func (s *firstMirrorFailureStore) Replace(ctx context.Context, key acpcore.SessionKey, rows []acpcore.SessionStoreReplacement) error {
+	if s.calls.Add(1) == 1 {
+		return errors.New("initial mirror unavailable")
+	}
+
+	return s.SessionStore.Replace(ctx, key, rows)
+}
+
+func TestFailedNewSessionDoesNotPersistDuringCleanup(t *testing.T) {
+	t.Parallel()
+	store := &firstMirrorFailureStore{SessionStore: acpcore.NewInMemorySessionStore()}
+	h := newHarness(t, WithSessionStore(store))
+	h.initialize()
+	response, err := h.conn.NewSession(h.ctx(), wire.NewSessionRequest(t.TempDir()))
+	require.Error(t, err)
+	require.Empty(t, response.SessionId)
+	rows, err := store.ListSessions(h.ctx())
+	require.NoError(t, err)
+	require.Empty(t, rows)
+	listed, err := h.conn.ListSessions(h.ctx(), wire.ListSessionsRequest())
+	require.NoError(t, err)
+	require.Empty(t, listed.Sessions)
+}

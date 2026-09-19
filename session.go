@@ -34,6 +34,7 @@ type session struct {
 	title                 string
 	updatedAt             string
 	turn                  *turn
+	persisted             bool
 	closing               bool
 	closeDone             chan struct{}
 	closeErr              error
@@ -126,7 +127,15 @@ func (s *session) close(ctx context.Context) error {
 	commitCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), nativeCommandTimeout)
 	defer cancel()
 
-	err := s.commitMirror(commitCtx)
+	s.mu.Lock()
+	persisted := s.persisted
+	s.mu.Unlock()
+
+	var err error
+	if persisted {
+		err = s.commitMirror(commitCtx)
+	}
+
 	s.fenceStream()
 	s.mu.Lock()
 	s.closeErr = err
