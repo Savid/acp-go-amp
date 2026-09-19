@@ -147,7 +147,7 @@ func run(ctx context.Context, request process.Request, write func(*process.Proce
 	}
 
 	writeErr := <-writeDone
-	stderr := p.StderrLastLine()
+	stderr := p.StderrTail()
 
 	close(readDone)
 	<-stopDone
