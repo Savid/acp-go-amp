@@ -1,9 +1,10 @@
-//go:build integration
-
-// Package integration contains live Amp CLI integration coverage.
+// Package integration holds the tests that run against an installed Amp.
 //
-// Run with both the integration build tag and ACP_GO_AMP_RUN_INTEGRATION=1.
-// These tests launch the real local amp binary and require an authenticated
-// Amp installation. Token-spending live tests additionally require
-// ACP_GO_AMP_RUN_LIVE_TOKENS=1.
+// The tests are behind the integration build tag and ACP_GO_AMP_RUN_INTEGRATION=1.
+// The smoke tier spends no model tokens; ACP_GO_AMP_RUN_LIVE_TOKENS=1 enables
+// prompts that do.
+//
+// ACP_GO_AMP_HARNESS_PATH selects the harness binary, which otherwise comes
+// from PATH; an absent binary skips. ACP_GO_AMP_MODE selects the mode for live
+// tests.
 package integration
