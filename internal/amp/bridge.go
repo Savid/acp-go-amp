@@ -75,6 +75,7 @@ type bridgeEvent struct {
 func (e bridgeEvent) view() View {
 	return View{ThreadID: e.ThreadID, State: e.State, Messages: e.Messages}
 }
+
 func (e bridgeEvent) receipt() Receipt {
 	return Receipt{ID: e.ID, Status: e.Status, Messages: e.Messages}
 }

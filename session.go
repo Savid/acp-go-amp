@@ -60,17 +60,18 @@ func (s *session) admissionError() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.poison != "" {
+	switch {
+	case s.poison != "":
 		return wire.SessionPoisoned(vendor, s.poison)
-	}
-
-	if s.closing {
+	case s.closing:
 		return wire.UnknownSession()
+	default:
+		return nil
 	}
-
-	return nil
 }
 
+// acquireGate admits one foreground operation. limit names the backpressure
+// token a refusal carries.
 func (s *session) acquireGate(limit string) (func(), error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -155,7 +156,7 @@ func (s *session) nativeRequest(ctx context.Context, args []string) (process.Req
 	if len(s.agent.options.SeedFiles) > 0 {
 		root := ampConfigRoot(env, s.cwd)
 		if err := process.WriteSeedFiles(root, s.agent.options.SeedFiles); err != nil {
-			s.agent.log.ErrorContext(ctx, "Amp seed files rejected", slog.String("reason", err.Error()))
+			s.agent.log.ErrorContext(ctx, "amp seed files rejected", slog.String("reason", err.Error()))
 
 			if refusal := wire.SeedFileRefusal(err); refusal != nil {
 				return process.Request{}, refusal
@@ -218,7 +219,7 @@ func (s *session) command(ctx context.Context, args ...string) ([]byte, error) {
 func (s *session) createNative(ctx context.Context, options ...string) error {
 	output, err := s.command(ctx, append([]string{"threads", "new"}, options...)...)
 	if err != nil {
-		s.agent.log.ErrorContext(ctx, "Amp thread creation failed", slog.String("reason", err.Error()))
+		s.agent.log.ErrorContext(ctx, "amp thread creation failed", slog.String("reason", err.Error()))
 
 		return wire.InternalFailure(vendor, internalClassNativeStart)
 	}
@@ -242,7 +243,7 @@ func (s *session) createNative(ctx context.Context, options ...string) error {
 
 	rows, err := s.exportNative(ctx)
 	if err != nil {
-		s.agent.log.ErrorContext(ctx, "Amp initial export failed", slog.String("reason", err.Error()))
+		s.agent.log.ErrorContext(ctx, "amp initial export failed", slog.String("reason", err.Error()))
 
 		return wire.InternalFailure(vendor, internalClassNativeStart)
 	}
@@ -272,9 +273,18 @@ func (s *session) sessionInfo() acp.SessionInfo {
 	return result
 }
 
-func (s *session) emit(ctx context.Context, update acp.SessionUpdate) error {
-	if conn := s.agent.connection(); conn != nil {
-		return conn.SessionUpdate(ctx, acp.SessionNotification{SessionId: s.id, Update: update})
+func (s *session) emit(ctx context.Context, updates ...acp.SessionUpdate) error {
+	conn := s.agent.connection()
+	if conn == nil {
+		return nil
+	}
+
+	ctx = context.WithoutCancel(ctx)
+
+	for _, update := range updates {
+		if err := conn.SessionUpdate(ctx, acp.SessionNotification{SessionId: s.id, Update: update}); err != nil {
+			return err
+		}
 	}
 
 	return nil

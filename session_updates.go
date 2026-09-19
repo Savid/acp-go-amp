@@ -252,7 +252,7 @@ func (s *session) emitPlan(ctx context.Context, input any) error {
 }
 
 func (s *session) emitRawEvent(ctx context.Context, data []byte) {
-	if s.rawEvents == nil || !s.rawEvents.Enabled() {
+	if !s.rawEvents.Enabled() {
 		return
 	}
 

@@ -183,7 +183,7 @@ func fakeContinue(root, id string, data []byte, mode string) int {
 	}
 	reply := "hello " + text
 	if text == "ENV" {
-		data, err := json.Marshal(map[string]string{"env": os.Getenv("SESSION_VALUE"), "path": os.Getenv("PATH"), "home": os.Getenv("HOME"), "internal": os.Getenv("ACP_GO_AMP_INTERNAL_CALLER")})
+		data, err := json.Marshal(map[string]string{"env": os.Getenv("SESSION_VALUE"), "path": os.Getenv("PATH"), "homeDir": os.Getenv("HOME"), "internal": os.Getenv("ACP_GO_AMP_INTERNAL_CALLER")})
 		if err != nil {
 			panic(err)
 		}

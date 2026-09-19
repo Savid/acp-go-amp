@@ -103,7 +103,7 @@ func (s *session) discardUnbound(ctx context.Context, record sessionRecord) {
 	}
 
 	if _, err := s.command(context.WithoutCancel(ctx), "threads", "delete", unbound); err != nil {
-		s.agent.log.WarnContext(ctx, "Amp recovery destination was not deleted",
+		s.agent.log.WarnContext(ctx, "amp recovery destination was not deleted",
 			slog.String("native_id", unbound), slog.String("reason", err.Error()))
 	}
 

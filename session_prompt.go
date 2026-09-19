@@ -157,8 +157,6 @@ func (s *session) consumeFrame(ctx context.Context, t *turn, data []byte) error 
 		return err
 	}
 
-	s.emitRawEvent(context.WithoutCancel(ctx), data)
-
 	if !t.started {
 		t.started = true
 
@@ -166,6 +164,8 @@ func (s *session) consumeFrame(ctx context.Context, t *turn, data []byte) error 
 			return err
 		}
 	}
+
+	s.emitRawEvent(context.WithoutCancel(ctx), data)
 
 	if frame.SessionID != "" && frame.SessionID != s.nativeID {
 		_ = s.poisonSession("native_session_identity_drift")

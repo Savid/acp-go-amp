@@ -1,6 +1,8 @@
 package ampacp
 
 import (
+	"cmp"
+	"context"
 	"encoding/json"
 	"maps"
 	"os"
@@ -10,22 +12,73 @@ import (
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
-	"github.com/savid/acp-go-core/wire"
 	"github.com/stretchr/testify/require"
+
+	"github.com/savid/acp-go-core/wire"
 )
 
-func TestUnsupportedOptionsAndMCP(t *testing.T) {
+func TestInvalidOptionsVerdict(t *testing.T) {
 	t.Parallel()
-	for _, option := range []Option{WithHome("/tmp/home"), WithDefaultModel("model"), WithConfiguredModels([]string{"model"})} {
-		a := NewAgent(option)
-		_, err := a.Initialize(t.Context(), acp.InitializeRequest{})
-		require.Equal(t, "amp_invalid_options", requestErrorData(t, err)["error"])
+
+	cases := []struct {
+		name, field string
+		option      Option
+	}{
+		{"", "home", WithHome("/tmp/home")},
+		{"", "scratchDir", WithScratchDir("relative")},
+		{"", "inputHandoffRoot", WithInputHandoffRoot("relative")},
+		{"", "defaultModel", WithDefaultModel("model")},
+		{"", "configuredModels", WithConfiguredModels([]string{"model"})},
+		{"", "env", WithEnv(map[string]string{"": "x"})},
+		{"", "concurrencyLimits", WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: -1})},
+		{"", "imageLimits", WithImageLimits(ImageLimits{MaxInputBytesPerImage: -1})},
 	}
+
+	for _, tc := range cases {
+		field, option := tc.field, tc.option
+
+		t.Run(cmp.Or(tc.name, tc.field), func(t *testing.T) {
+			t.Parallel()
+
+			agent := NewAgent(testOptions(t, option)...)
+			t.Cleanup(func() { _ = agent.Close() })
+
+			_, err := agent.Initialize(context.Background(), acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber})
+			require.Equal(t, -32603, requestErrorCode(t, err))
+
+			data := requestErrorData(t, err)
+			require.Equal(t, "amp_invalid_options", data["error"])
+			require.Equal(t, field, data["field"])
+
+			_, err = agent.NewSession(context.Background(), wire.NewSessionRequest(t.TempDir()))
+			require.Equal(t, "amp_invalid_options", requestErrorData(t, err)["error"])
+		})
+	}
+}
+
+func TestNegativeClientCallLimitReturnsOptionsError(t *testing.T) {
+	t.Parallel()
+
+	agent := NewAgent(WithConcurrencyLimits(ConcurrencyLimits{MaxConcurrentClientCalls: -1}))
+	defer agent.Close()
+
+	_, err := agent.Initialize(t.Context(), acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber})
+	require.Equal(t, "amp_invalid_options", requestErrorData(t, err)["error"])
+}
+
+// A non-empty mcpServers list is refused naming the field, and the model
+// option is refused before any session exists.
+func TestMCPServersRefused(t *testing.T) {
+	t.Parallel()
+
 	require.Error(t, ValidateAmpSessionMeta(NewAmpOptions(WithAmpModel("model")).Meta()))
+
 	h := newHarness(t)
 	h.initialize()
+
 	request := wire.NewSessionRequest(t.TempDir())
 	require.NoError(t, json.Unmarshal([]byte(`[{"name":"forbidden","command":"no","args":[],"env":[]}]`), &request.McpServers))
+
 	_, err := h.conn.NewSession(h.ctx(), request)
 	require.Equal(t, "mcpServers", requestErrorData(t, err)["field"])
 }
@@ -309,6 +362,10 @@ func TestActiveSessionLimit(t *testing.T) {
 	require.Equal(t, -32600, requestErrorCode(t, err))
 	require.Equal(t, "backpressure", requestErrorData(t, err)["error"])
 	require.Equal(t, "active_sessions", requestErrorData(t, err)["limit"])
+
+	listed, err := h.conn.ListSessions(h.ctx(), wire.ListSessionsRequest())
+	require.NoError(t, err)
+	require.Len(t, listed.Sessions, 1)
 }
 
 func TestClosedAgentRefusesRequests(t *testing.T) {
@@ -318,7 +375,193 @@ func TestClosedAgentRefusesRequests(t *testing.T) {
 	require.NoError(t, agent.Close())
 	require.NoError(t, agent.Close())
 
-	_, err := agent.NewSession(t.Context(), wire.NewSessionRequest(t.TempDir()))
+	t.Run("Initialize", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := agent.Initialize(t.Context(), acp.InitializeRequest{})
+		require.Equal(t, -32600, requestErrorCode(t, err))
+		require.Equal(t, map[string]any{"error": "agent closed"}, requestErrorData(t, err))
+	})
+
+	t.Run("Authenticate", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := agent.Authenticate(t.Context(), acp.AuthenticateRequest{})
+		require.Equal(t, -32600, requestErrorCode(t, err))
+		require.Equal(t, map[string]any{"error": "agent closed"}, requestErrorData(t, err))
+	})
+
+	t.Run("Logout", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := agent.Logout(t.Context(), acp.LogoutRequest{})
+		require.Equal(t, -32600, requestErrorCode(t, err))
+		require.Equal(t, map[string]any{"error": "agent closed"}, requestErrorData(t, err))
+	})
+
+	t.Run("NewSession", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := agent.NewSession(t.Context(), acp.NewSessionRequest{})
+		require.Equal(t, -32600, requestErrorCode(t, err))
+		require.Equal(t, map[string]any{"error": "agent closed"}, requestErrorData(t, err))
+	})
+
+	t.Run("LoadSession", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := agent.LoadSession(t.Context(), acp.LoadSessionRequest{})
+		require.Equal(t, -32600, requestErrorCode(t, err))
+		require.Equal(t, map[string]any{"error": "agent closed"}, requestErrorData(t, err))
+	})
+
+	t.Run("ResumeSession", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := agent.ResumeSession(t.Context(), acp.ResumeSessionRequest{})
+		require.Equal(t, -32600, requestErrorCode(t, err))
+		require.Equal(t, map[string]any{"error": "agent closed"}, requestErrorData(t, err))
+	})
+
+	t.Run("ListSessions", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := agent.ListSessions(t.Context(), acp.ListSessionsRequest{})
+		require.Equal(t, -32600, requestErrorCode(t, err))
+		require.Equal(t, map[string]any{"error": "agent closed"}, requestErrorData(t, err))
+	})
+
+	t.Run("Prompt", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := agent.Prompt(t.Context(), acp.PromptRequest{})
+		require.Equal(t, -32600, requestErrorCode(t, err))
+		require.Equal(t, map[string]any{"error": "agent closed"}, requestErrorData(t, err))
+	})
+
+	t.Run("CloseSession", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := agent.CloseSession(t.Context(), acp.CloseSessionRequest{})
+		require.Equal(t, -32600, requestErrorCode(t, err))
+		require.Equal(t, map[string]any{"error": "agent closed"}, requestErrorData(t, err))
+	})
+
+	t.Run("UnstableDeleteSession", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := agent.UnstableDeleteSession(t.Context(), acp.UnstableDeleteSessionRequest{})
+		require.Equal(t, -32600, requestErrorCode(t, err))
+		require.Equal(t, map[string]any{"error": "agent closed"}, requestErrorData(t, err))
+	})
+
+	t.Run("SetSessionConfigOption", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := agent.SetSessionConfigOption(t.Context(), acp.SetSessionConfigOptionRequest{})
+		require.Equal(t, -32600, requestErrorCode(t, err))
+		require.Equal(t, map[string]any{"error": "agent closed"}, requestErrorData(t, err))
+	})
+
+	t.Run("SetSessionMode", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := agent.SetSessionMode(t.Context(), acp.SetSessionModeRequest{})
+		require.Equal(t, -32600, requestErrorCode(t, err))
+		require.Equal(t, map[string]any{"error": "agent closed"}, requestErrorData(t, err))
+	})
+
+	t.Run("extension", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := agent.HandleExtensionMethod(t.Context(), "_unknown/read", json.RawMessage(`{}`))
+		require.Equal(t, -32600, requestErrorCode(t, err))
+		require.Equal(t, map[string]any{"error": "agent closed"}, requestErrorData(t, err))
+	})
+
+	t.Run("cancel", func(t *testing.T) {
+		t.Parallel()
+
+		err := agent.Cancel(t.Context(), acp.CancelNotification{})
+		require.Equal(t, -32600, requestErrorCode(t, err))
+		require.Equal(t, map[string]any{"error": "agent closed"}, requestErrorData(t, err))
+	})
+}
+
+func TestInitializeLifecycleAnswer(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	resp := h.initialize(withLifecycle())
+
+	answer, ok := resp.Meta[wire.LifecycleKey].(map[string]any)
+	require.True(t, ok)
+	require.EqualValues(t, 1, answer["version"])
+	require.Equal(t, false, answer["updatesOutsidePrompt"])
+	require.Equal(t, []any{}, answer["activityKinds"])
+	require.NotContains(t, resp.AgentCapabilities.Meta, wire.LifecycleKey)
+}
+
+func TestInitializeLifecycleStrictness(t *testing.T) {
+	t.Parallel()
+
+	cases := map[string]any{
+		"string version": map[string]any{"version": "1"},
+		"fraction":       map[string]any{"version": json.Number("1.0")},
+		"other version":  map[string]any{"version": 2},
+		"unknown member": map[string]any{"version": 1, "extra": true},
+		"non-object":     true,
+	}
+
+	for name, value := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			h := newHarness(t)
+			meta := map[string]any{wire.LifecycleKey: value}
+
+			_, err := h.conn.Initialize(h.ctx(), acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber, Meta: meta})
+			require.Equal(t, -32602, requestErrorCode(t, err))
+
+			data := requestErrorData(t, err)
+			require.Equal(t, "unsupported", data["error"])
+			require.Contains(t, data["field"], wire.LifecycleKey)
+		})
+	}
+}
+
+func TestInitializeWithoutHandoffOmitsAdvertisement(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	resp := h.initialize()
+	require.NotContains(t, resp.AgentCapabilities.Meta, wire.HandoffKey)
+	require.Equal(t, acp.PositionEncodingKindUtf16, *resp.AgentCapabilities.PositionEncoding)
+}
+
+func TestPromptBackpressure(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	h.initialize(withLifecycle())
+	session := h.newSession()
+
+	done := make(chan error, 1)
+
+	go func() {
+		_, err := h.prompt(session.SessionId, "SLOW", promptMeta(1))
+		done <- err
+	}()
+
+	h.rec.waitFor(t, func(updates []acp.SessionNotification) bool {
+		return slices.Contains(lifecycleEventKinds(updates), "prompt_accepted")
+	})
+
+	_, err := h.prompt(session.SessionId, "HELLO", promptMeta(2))
 	require.Equal(t, -32600, requestErrorCode(t, err))
-	require.Equal(t, "agent closed", requestErrorData(t, err)["error"])
+	require.Equal(t, "backpressure", requestErrorData(t, err)["error"])
+	require.Equal(t, "session_prompt", requestErrorData(t, err)["limit"])
+
+	require.NoError(t, h.conn.Cancel(h.ctx(), wire.CancelRequest(session.SessionId)))
+	require.NoError(t, <-done)
 }

@@ -256,7 +256,7 @@ func (s *session) settleExport(ctx context.Context, view *amp.View) ([][]byte, e
 
 	rows, err := s.reconcileNative(ctx, s.rows, *view)
 	if err != nil {
-		s.agent.log.ErrorContext(ctx, "Amp turn export failed",
+		s.agent.log.ErrorContext(ctx, "amp turn export failed",
 			slog.String("session_id", string(s.id)), slog.String("reason", err.Error()))
 
 		return nil, err
@@ -383,7 +383,7 @@ func storedTitle(id string, rows [][]byte) string {
 }
 
 func (a *Agent) restoreRefused(ctx context.Context, id acp.SessionId, err error) error {
-	a.log.ErrorContext(ctx, "Amp session restore failed", slog.String("session_id", string(id)), slog.String("reason", err.Error()))
+	a.log.ErrorContext(ctx, "amp session restore failed", slog.String("session_id", string(id)), slog.String("reason", err.Error()))
 
 	return wire.RestoreFailed(vendor)
 }

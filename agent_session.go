@@ -90,7 +90,7 @@ func (a *Agent) install(ctx context.Context, s *session) error {
 	switch {
 	case a.closed:
 		refusal = wire.AgentClosed()
-	case isDeleted(a.deleted, s.id):
+	case a.deleted[s.id]:
 		refusal = wire.UnknownSession()
 	case a.sessions[s.id] != nil:
 		refusal = wire.InternalFailure(vendor, internalClassNativeStart)
@@ -112,14 +112,12 @@ func (a *Agent) install(ctx context.Context, s *session) error {
 	return nil
 }
 
-func isDeleted(deleted map[acp.SessionId]struct{}, id acp.SessionId) bool {
-	_, ok := deleted[id]
-
-	return ok
-}
-
 // NewSession creates a native Amp thread.
 func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (resp acp.NewSessionResponse, err error) {
+	if openErr := a.ensureOpen(); openErr != nil {
+		return acp.NewSessionResponse{}, openErr
+	}
+
 	if transport := a.transportRef(); transport != nil {
 		ctx = transport.RequestContext(ctx, params.Meta)
 	}
@@ -140,7 +138,7 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (r
 
 	s.rawEvents = wire.NewRawEvents(vendor, string(s.id), vendor, start.meta.rawEvents)
 
-	release, _ := wire.AcquireSessionGate(s.gate, limitSessionRestore)
+	release := wire.HoldSessionGate(s.gate)
 	defer release()
 
 	if err := a.install(ctx, s); err != nil {
@@ -163,6 +161,10 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (r
 
 // LoadSession restores a session and replays its history.
 func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) (resp acp.LoadSessionResponse, err error) {
+	if openErr := a.ensureOpen(); openErr != nil {
+		return acp.LoadSessionResponse{}, openErr
+	}
+
 	if transport := a.transportRef(); transport != nil {
 		ctx = transport.RequestContext(ctx, params.Meta)
 	}
@@ -182,6 +184,10 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 
 // ResumeSession restores a session without replaying its history.
 func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionRequest) (resp acp.ResumeSessionResponse, err error) {
+	if openErr := a.ensureOpen(); openErr != nil {
+		return acp.ResumeSessionResponse{}, openErr
+	}
+
 	if transport := a.transportRef(); transport != nil {
 		ctx = transport.RequestContext(ctx, params.Meta)
 	}
@@ -210,6 +216,10 @@ func (a *Agent) restore(
 	meta map[string]any,
 	replay bool,
 ) (*session, func(), error) {
+	if sessionID == "" {
+		return nil, nil, wire.UnknownSession()
+	}
+
 	start, err := a.validateStart(params, mcpServers, meta)
 	if err != nil {
 		return nil, nil, err
@@ -222,7 +232,7 @@ func (a *Agent) restore(
 	defer releaseRestore()
 
 	a.mu.Lock()
-	deleted := isDeleted(a.deleted, sessionID)
+	deleted := a.deleted[sessionID]
 	active := a.sessions[sessionID]
 	a.mu.Unlock()
 
@@ -267,7 +277,7 @@ func (a *Agent) restore(
 	}
 
 	s.rows = rows
-	release, _ := wire.AcquireSessionGate(s.gate, limitSessionRestore)
+	release := wire.HoldSessionGate(s.gate)
 
 	transferred := false
 	defer func() {
@@ -422,15 +432,15 @@ func inheritCarrier(meta sessionMeta, record sessionRecord) AmpOptions {
 
 // ListSessions lists live sessions and stored sessions, newest first.
 func (a *Agent) ListSessions(ctx context.Context, params acp.ListSessionsRequest) (resp acp.ListSessionsResponse, err error) {
+	if openErr := a.ensureOpen(); openErr != nil {
+		return acp.ListSessionsResponse{}, openErr
+	}
+
 	ctx, finish := a.observe.StartACP(ctx, params.Meta, acp.AgentMethodSessionList)
 	defer func() { finish(err) }()
 
 	if refusal := lifecycle.RejectKey(params.Meta); refusal != nil {
 		return acp.ListSessionsResponse{}, wire.ParamRefusal(refusal)
-	}
-
-	if openErr := a.ensureOpen(); openErr != nil {
-		return acp.ListSessionsResponse{}, openErr
 	}
 
 	filter := ""
@@ -446,7 +456,7 @@ func (a *Agent) ListSessions(ctx context.Context, params acp.ListSessionsRequest
 	active := make([]*session, 0, len(a.sessions))
 
 	for id, s := range a.sessions {
-		if !isDeleted(a.deleted, id) && (filter == "" || filter == s.cwd) {
+		if !a.deleted[id] && (filter == "" || filter == s.cwd) {
 			active = append(active, s)
 		}
 	}
@@ -512,6 +522,10 @@ func (a *Agent) ListSessions(ctx context.Context, params acp.ListSessionsRequest
 
 // Prompt sends one turn to Amp and streams updates until it settles.
 func (a *Agent) Prompt(ctx context.Context, params acp.PromptRequest) (resp acp.PromptResponse, err error) {
+	if openErr := a.ensureOpen(); openErr != nil {
+		return acp.PromptResponse{}, openErr
+	}
+
 	if a.restores.Pending(params.SessionId) {
 		return acp.PromptResponse{}, wire.Backpressure(limitSessionPrompt)
 	}
@@ -527,32 +541,9 @@ func (a *Agent) Prompt(ctx context.Context, params acp.PromptRequest) (resp acp.
 	}
 
 	ctx, finish := a.observe.StartPrompt(ctx, params.Meta, s.currentModel())
-	defer func() { finish(promptResult(resp, err, s)) }()
+	defer func() { finish(observer.PromptResultFrom(resp, err, s.currentModel(), "")) }()
 
 	return s.prompt(ctx, params, raw)
-}
-
-func promptResult(resp acp.PromptResponse, err error, s *session) observer.PromptResult {
-	result := observer.PromptResult{Err: err, Model: s.currentModel(), StopReason: string(resp.StopReason)}
-	if provider, _, found := strings.Cut(result.Model, "/"); found {
-		result.Provider = provider
-	}
-
-	if resp.Usage != nil {
-		result.InputTokens = resp.Usage.InputTokens
-		result.OutputTokens = resp.Usage.OutputTokens
-		result.TotalTokens = resp.Usage.TotalTokens
-
-		if resp.Usage.CachedReadTokens != nil {
-			result.CachedReadTokens = *resp.Usage.CachedReadTokens
-		}
-
-		if resp.Usage.CachedWriteTokens != nil {
-			result.CachedWriteTokens = *resp.Usage.CachedWriteTokens
-		}
-	}
-
-	return result
 }
 
 func (s *session) currentModel() string {
@@ -565,6 +556,10 @@ func (s *session) currentModel() string {
 // Cancel interrupts the session's in-flight turn. It is wire-silent on an
 // unknown session or with no turn in flight.
 func (a *Agent) Cancel(ctx context.Context, params acp.CancelNotification) (err error) {
+	if openErr := a.ensureOpen(); openErr != nil {
+		return openErr
+	}
+
 	_, finish := a.observe.StartACP(ctx, params.Meta, acp.AgentMethodSessionCancel)
 	defer func() { finish(err) }()
 
@@ -584,6 +579,10 @@ func (a *Agent) Cancel(ctx context.Context, params acp.CancelNotification) (err 
 
 // CloseSession runs the shutdown ladder for one session.
 func (a *Agent) CloseSession(ctx context.Context, params acp.CloseSessionRequest) (resp acp.CloseSessionResponse, err error) {
+	if openErr := a.ensureOpen(); openErr != nil {
+		return acp.CloseSessionResponse{}, openErr
+	}
+
 	ctx, finish := a.observe.StartACP(ctx, params.Meta, acp.AgentMethodSessionClose)
 	defer func() { finish(err) }()
 
@@ -609,6 +608,10 @@ func (a *Agent) CloseSession(ctx context.Context, params acp.CloseSessionRequest
 // UnstableDeleteSession tombstones the session first, then closes any live
 // session with the same id. The native thread remains on Amp's service.
 func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDeleteSessionRequest) (resp acp.UnstableDeleteSessionResponse, err error) {
+	if openErr := a.ensureOpen(); openErr != nil {
+		return acp.UnstableDeleteSessionResponse{}, openErr
+	}
+
 	ctx, finish := a.observe.StartACP(ctx, params.Meta, acp.AgentMethodSessionDelete)
 	defer func() { finish(err) }()
 
@@ -616,12 +619,15 @@ func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDe
 		return acp.UnstableDeleteSessionResponse{}, wire.ParamRefusal(refusal)
 	}
 
-	if err := a.store.Delete(ctx, acpcore.SessionKey{SessionID: string(params.SessionId)}); err != nil {
+	deleteCtx, cancel := context.WithTimeout(ctx, acpcore.SessionStoreTimeout)
+	defer cancel()
+
+	if err := a.store.Delete(deleteCtx, acpcore.SessionKey{SessionID: string(params.SessionId)}); err != nil {
 		return acp.UnstableDeleteSessionResponse{}, wire.InternalFailure(vendor, "")
 	}
 
 	a.mu.Lock()
-	a.deleted[params.SessionId] = struct{}{}
+	a.deleted[params.SessionId] = true
 	s := a.sessions[params.SessionId]
 	a.mu.Unlock()
 
@@ -641,6 +647,10 @@ func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDe
 
 // SetSessionConfigOption applies one select value.
 func (a *Agent) SetSessionConfigOption(ctx context.Context, params acp.SetSessionConfigOptionRequest) (resp acp.SetSessionConfigOptionResponse, err error) {
+	if openErr := a.ensureOpen(); openErr != nil {
+		return acp.SetSessionConfigOptionResponse{}, openErr
+	}
+
 	var meta map[string]any
 
 	switch {
@@ -686,7 +696,7 @@ func (a *Agent) session(sessionID acp.SessionId) (*session, error) {
 	}
 
 	s := a.sessions[sessionID]
-	if s == nil || isDeleted(a.deleted, sessionID) {
+	if s == nil || a.deleted[sessionID] {
 		a.mu.Unlock()
 
 		return nil, wire.UnknownSession()
@@ -701,7 +711,7 @@ func (a *Agent) deletedSession(id acp.SessionId) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	return isDeleted(a.deleted, id)
+	return a.deleted[id]
 }
 
 // detach removes a session from the active map while it still resolves to
