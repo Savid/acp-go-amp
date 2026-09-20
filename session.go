@@ -299,13 +299,23 @@ func (s *session) emit(ctx context.Context, updates ...acp.SessionUpdate) error 
 	return nil
 }
 
-func (s *session) poisonSession(cause string) error {
+// poisonSession fences every operation but close and delete. The first cause
+// wins, so the cause a host already saw never changes.
+func (s *session) poisonSession(ctx context.Context, cause string) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
-	s.poison = cause
+	first := s.poison == ""
+	if first {
+		s.poison = cause
+	}
+	s.mu.Unlock()
 
-	return wire.SessionPoisoned(vendor, cause)
+	if !first {
+		return
+	}
+
+	s.agent.log.ErrorContext(ctx, "amp session poisoned",
+		slog.String("session_id", string(s.id)), slog.String("cause", cause))
 }
 
 func (s *session) lifecycleNegotiated() lifecycle.Negotiated { return s.agent.lifecycleNegotiated() }

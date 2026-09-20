@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/coder/acp-go-sdk"
@@ -139,7 +140,14 @@ func (s *session) prompt(ctx context.Context, params acp.PromptRequest, raw json
 		return acp.PromptResponse{}, err
 	}
 
-	evidence, result, stderr, runErr := amp.RunAttached(turnCtx, request, s.agent.options.ScratchDir, s.nativeID, input, func(view amp.View) error {
+	bridgeDir, err := s.agent.scratchDir("bridge")
+	if err != nil {
+		s.agent.log.ErrorContext(turnCtx, "amp bridge scratch unavailable", slog.String("session_id", string(s.id)), slog.String("reason", err.Error()))
+
+		return acp.PromptResponse{}, wire.InternalFailure(vendor, internalClassNativeStart)
+	}
+
+	evidence, result, stderr, runErr := amp.RunAttached(turnCtx, request, bridgeDir, s.nativeID, input, func(view amp.View) error {
 		if len(s.rows) != 1 {
 			return errors.New("missing stored export")
 		}
@@ -147,6 +155,8 @@ func (s *session) prompt(ctx context.Context, params acp.PromptRequest, raw json
 		return amp.VerifyMirror(s.rows[0], view)
 	}, func(data []byte) error { return s.consumeFrame(turnCtx, t, data) })
 	t.evidence = evidence
+
+	s.agent.observe.RecordProcessExit(turnCtx, "exited", nil)
 
 	return s.finishTurn(turnCtx, t, params, result, stderr, runErr)
 }
@@ -168,7 +178,7 @@ func (s *session) consumeFrame(ctx context.Context, t *turn, data []byte) error 
 	s.emitRawEvent(context.WithoutCancel(ctx), data)
 
 	if frame.SessionID != "" && frame.SessionID != s.nativeID {
-		_ = s.poisonSession("native_session_identity_drift")
+		s.poisonSession(ctx, "native_session_identity_drift")
 
 		return errIdentityDrift
 	}
@@ -234,10 +244,12 @@ func (s *session) finishTurn(ctx context.Context, t *turn, params acp.PromptRequ
 		// A commit failure is reported only when the turn itself did not
 		// already fail, so it never relabels a real native cause.
 		if exportErr != nil && failure == nil {
-			failure = nativeFailure(wire.CauseTransport, "session mirror commit failed: "+exportErr.Error())
+			s.agent.log.ErrorContext(settleCtx, "session mirror commit failed", slog.String("session_id", string(s.id)), slog.String("reason", exportErr.Error()))
+
+			failure = nativeFailure(wire.CauseTransport, "session mirror commit failed")
 
 			if t.state.imagesEmitted {
-				failure = wire.TurnFailed(vendor, wire.TurnFailure{Cause: wire.CauseTransport, Stage: image.OutputStage, Reason: image.ReasonStorageFailed, Message: "the session mirror commit failed, so emitted image output cannot be replayed"})
+				failure = wire.TurnFailed(vendor, wire.TurnFailure{Cause: wire.CauseTransport, Stage: image.OutputStage, Reason: image.ReasonStorageFailed, Message: "image output is no longer available from the artifact store"})
 			}
 		}
 	}

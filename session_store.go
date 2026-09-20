@@ -279,7 +279,14 @@ func (s *session) observeNative(ctx context.Context) (*amp.View, error) {
 		return nil, err
 	}
 
-	outcome, _, _, err := amp.RunAttached(ctx, request, s.agent.options.ScratchDir, s.nativeID, nil, nil, func([]byte) error { return nil })
+	bridgeDir, err := s.agent.scratchDir("bridge")
+	if err != nil {
+		return nil, err
+	}
+
+	outcome, _, _, err := amp.RunAttached(ctx, request, bridgeDir, s.nativeID, nil, nil, func([]byte) error { return nil })
+	s.agent.observe.RecordProcessExit(ctx, "exited", nil)
+
 	if err != nil {
 		return nil, err
 	}

@@ -191,3 +191,56 @@ func TestFailedNewSessionDoesNotPersistDuringCleanup(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, listed.Sessions)
 }
+
+type blockedLoadStore struct {
+	acpcore.SessionStore
+	block            atomic.Bool
+	entered, release chan struct{}
+}
+
+func (s *blockedLoadStore) Load(ctx context.Context, sessionID string) (map[string][]acpcore.SessionStoreEntry, error) {
+	rows, err := s.SessionStore.Load(ctx, sessionID)
+	if err == nil && s.block.CompareAndSwap(true, false) {
+		close(s.entered)
+		select {
+		case <-s.release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+
+	return rows, err
+}
+
+func TestDeleteWinsAgainstPreparedLoad(t *testing.T) {
+	t.Parallel()
+	store := &blockedLoadStore{SessionStore: acpcore.NewInMemorySessionStore(), entered: make(chan struct{}), release: make(chan struct{})}
+	h := newHarness(t, WithSessionStore(store))
+	h.initialize()
+	cwd := t.TempDir()
+	session, err := h.conn.NewSession(h.ctx(), wire.NewSessionRequest(cwd))
+	require.NoError(t, err)
+	_, err = h.prompt(session.SessionId, "HELLO", nil)
+	require.NoError(t, err)
+	_, err = h.conn.CloseSession(h.ctx(), acp.CloseSessionRequest{SessionId: session.SessionId})
+	require.NoError(t, err)
+	store.block.Store(true)
+	done := make(chan error, 1)
+	ctx := h.ctx()
+	go func() {
+		_, loadErr := h.conn.LoadSession(ctx, wire.LoadSessionRequest(session.SessionId, cwd))
+		done <- loadErr
+	}()
+	select {
+	case <-store.entered:
+	case <-ctx.Done():
+		t.Fatal("load did not reach stored configuration")
+	}
+	_, err = h.conn.UnstableDeleteSession(h.ctx(), acp.UnstableDeleteSessionRequest{SessionId: session.SessionId})
+	close(store.release)
+	require.NoError(t, err)
+	require.Equal(t, "unknown session", requestErrorData(t, <-done)["error"])
+	list, err := h.conn.ListSessions(h.ctx(), acp.ListSessionsRequest{})
+	require.NoError(t, err)
+	require.Empty(t, list.Sessions)
+}

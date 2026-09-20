@@ -88,17 +88,17 @@ type bridge struct {
 }
 
 // installBridge preserves the inherited configuration and other native plugins.
-// Unique entry files are removed only after their owning process has been reaped.
-func installBridge(request *process.Request, scratch, thread string) (*bridge, error) {
-	if scratch != "" {
-		if err := os.MkdirAll(scratch, 0o700); err != nil {
-			return nil, err
-		}
-	}
-
-	directory, err := os.MkdirTemp(scratch, "acp-go-amp-")
+// directory is this run's own scratch directory, which the bridge owns and
+// removes. Unique entry files are removed only after their owning process has
+// been reaped.
+func installBridge(request *process.Request, directory, thread string) (*bridge, error) {
+	directory, err := filepath.Abs(directory)
 	if err != nil {
 		return nil, err
+	}
+
+	if mkdirErr := os.MkdirAll(directory, 0o700); mkdirErr != nil {
+		return nil, mkdirErr
 	}
 
 	b := &bridge{directory: directory}
@@ -109,13 +109,6 @@ func installBridge(request *process.Request, scratch, thread string) (*bridge, e
 			b.close()
 		}
 	}()
-
-	directory, err = filepath.Abs(directory)
-	if err != nil {
-		return nil, err
-	}
-
-	b.directory = directory
 
 	b.events, err = os.OpenFile(filepath.Join(directory, "events"), os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
 	if err != nil {
@@ -215,13 +208,14 @@ func (b *bridge) read() ([]bridgeEvent, error) {
 
 // RunAttached observes the existing thread before submitting input, then joins
 // native cancellation and terminal receipts before closing its local observer.
+// directory is the run's own scratch directory, removed when the run ends.
 // Nil input reads native state without submitting a prompt or spending tokens.
-func RunAttached(ctx context.Context, request process.Request, scratch, thread string, input []byte, prepare func(View) error, consume func([]byte) error) (Outcome, process.Result, string, error) {
+func RunAttached(ctx context.Context, request process.Request, directory, thread string, input []byte, prepare func(View) error, consume func([]byte) error) (Outcome, process.Result, string, error) {
 	if err := ctx.Err(); err != nil {
 		return Outcome{}, process.Result{}, "", err
 	}
 
-	b, err := installBridge(&request, scratch, thread)
+	b, err := installBridge(&request, directory, thread)
 	if err != nil {
 		return Outcome{}, process.Result{}, "", err
 	}

@@ -17,11 +17,11 @@ func TestBridgeOwnsOnlyItsTemporaryPlugin(t *testing.T) {
 	user := filepath.Join(plugins, "user.ts")
 	require.NoError(t, os.WriteFile(user, []byte("user plugin"), 0o600))
 	request := process.Request{Dir: t.TempDir(), Env: []string{"XDG_CONFIG_HOME=" + root, "AMP_SETTINGS_FILE=" + filepath.Join(t.TempDir(), "settings.json")}}
-	first, err := installBridge(&request, scratch, "thread-one")
+	first, err := installBridge(&request, filepath.Join(scratch, "one"), "thread-one")
 	require.NoError(t, err)
 	defer first.close()
 	secondRequest := process.Request{Dir: request.Dir, Env: []string{"XDG_CONFIG_HOME=" + root}}
-	second, err := installBridge(&secondRequest, scratch, "thread-two")
+	second, err := installBridge(&secondRequest, filepath.Join(scratch, "two"), "thread-two")
 	require.NoError(t, err)
 	defer second.close()
 	require.Equal(t, plugins, filepath.Dir(first.plugin))
