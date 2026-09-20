@@ -64,7 +64,7 @@ func (s *session) fenceStream() { s.lc.Fence() }
 
 func (s *session) deliverLifecycle(ctx context.Context, envelope map[string]any) error {
 	if conn := s.agent.connection(); conn != nil {
-		return conn.SessionUpdate(context.WithoutCancel(ctx), acp.SessionNotification{Meta: map[string]any{wire.LifecycleKey: envelope}, SessionId: s.id, Update: acp.SessionUpdate{SessionInfoUpdate: &acp.SessionSessionInfoUpdate{}}})
+		return conn.SessionUpdate(ctx, acp.SessionNotification{Meta: map[string]any{wire.LifecycleKey: envelope}, SessionId: s.id, Update: acp.SessionUpdate{SessionInfoUpdate: &acp.SessionSessionInfoUpdate{}}})
 	}
 
 	return nil
