@@ -3,14 +3,19 @@ package amp
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	_ "embed"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/savid/acp-go-core/process"
@@ -18,6 +23,10 @@ import (
 
 //go:embed bridge.ts
 var bridgeSource string
+
+// pluginPrefix names every bridge plugin file so a later adapter start can
+// recognise and sweep one an earlier, now-dead adapter left behind.
+const pluginPrefix = "acp-go-amp-plugin-"
 
 const (
 	bridgeTimeout = 30 * time.Second
@@ -134,6 +143,8 @@ func installBridge(request *process.Request, directory, thread string) (*bridge,
 		return nil, mkdirErr
 	}
 
+	sweepOrphanPlugins(root)
+
 	file, err := os.CreateTemp(root, ".acp-go-amp-*")
 	if err != nil {
 		return nil, err
@@ -142,14 +153,14 @@ func installBridge(request *process.Request, directory, thread string) (*bridge,
 	temporary := file.Name()
 	defer func() { _ = os.Remove(temporary) }()
 
-	token := filepath.Base(temporary)
+	token := pluginToken()
 
 	_, writeErr := file.WriteString(strings.ReplaceAll(bridgeSource, "ACP_GO_AMP_LAUNCH_TOKEN", token))
 	if err := errors.Join(writeErr, file.Close()); err != nil {
 		return nil, err
 	}
 
-	plugin := filepath.Join(root, token[1:]+".ts")
+	plugin := filepath.Join(root, token+".ts")
 	if err := os.Link(temporary, plugin); err != nil {
 		return nil, err
 	}
@@ -161,6 +172,61 @@ func installBridge(request *process.Request, directory, thread string) (*bridge,
 	complete = true
 
 	return b, nil
+}
+
+// pluginToken names one plugin file uniquely for this run, tagged with the
+// adapter's process id so an orphan it leaves behind can be recognised later.
+func pluginToken() string {
+	var random [8]byte
+
+	_, _ = rand.Read(random[:])
+
+	return fmt.Sprintf("%s%d-%s", pluginPrefix, os.Getpid(), hex.EncodeToString(random[:]))
+}
+
+// sweepOrphanPlugins removes bridge plugins a dead adapter left in the native
+// plugin directory. It never removes a file whose process is still alive,
+// including this adapter's own concurrent runs.
+func sweepOrphanPlugins(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+
+	self := os.Getpid()
+
+	for _, entry := range entries {
+		name := entry.Name()
+		if !strings.HasPrefix(name, pluginPrefix) || !strings.HasSuffix(name, ".ts") {
+			continue
+		}
+
+		pidText, _, ok := strings.Cut(strings.TrimSuffix(strings.TrimPrefix(name, pluginPrefix), ".ts"), "-")
+		if !ok {
+			continue
+		}
+
+		pid, err := strconv.Atoi(pidText)
+		if err != nil || pid == self || processAlive(pid) {
+			continue
+		}
+
+		_ = os.Remove(filepath.Join(dir, name))
+	}
+}
+
+// processAlive reports whether a process id is live. Only a definitively
+// absent process (ESRCH) is treated as dead, so a live process another user
+// owns is never swept.
+func processAlive(pid int) bool {
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+
+	err = proc.Signal(syscall.Signal(0))
+
+	return !errors.Is(err, syscall.ESRCH) && !errors.Is(err, os.ErrProcessDone)
 }
 
 func (b *bridge) close() {

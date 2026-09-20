@@ -2,7 +2,9 @@ package amp
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/savid/acp-go-core/process"
@@ -62,4 +64,28 @@ func TestBridgeWaitsForACompleteReceiptLine(t *testing.T) {
 	require.Len(t, events, 1)
 	require.Equal(t, StatusDone, events[0].Status)
 	require.Len(t, events[0].Messages, 1)
+}
+
+func TestSweepRemovesOnlyDeadAdapterPlugins(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	// A plugin left by a process that has already exited.
+	cmd := exec.Command("true")
+	require.NoError(t, cmd.Run())
+	deadPID := cmd.Process.Pid
+	orphan := filepath.Join(dir, pluginPrefix+strconv.Itoa(deadPID)+"-abc.ts")
+	require.NoError(t, os.WriteFile(orphan, []byte("orphan"), 0o600))
+
+	// A plugin owned by this live process, and a foreign file.
+	live := filepath.Join(dir, pluginPrefix+strconv.Itoa(os.Getpid())+"-def.ts")
+	require.NoError(t, os.WriteFile(live, []byte("live"), 0o600))
+	foreign := filepath.Join(dir, "user.ts")
+	require.NoError(t, os.WriteFile(foreign, []byte("user"), 0o600))
+
+	sweepOrphanPlugins(dir)
+
+	require.NoFileExists(t, orphan, "a dead adapter's plugin is swept")
+	require.FileExists(t, live, "a live adapter's own plugin is kept")
+	require.FileExists(t, foreign, "a foreign plugin is untouched")
 }
