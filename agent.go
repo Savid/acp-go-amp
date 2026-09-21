@@ -59,10 +59,13 @@ type Agent struct {
 	closed    bool
 	// lifecycle is the answer this connection gave at initialize. An absent
 	// answer leaves the extension dormant for every session on it.
-	lifecycle    lifecycle.Negotiated
-	restores     wire.SessionRequests
-	sessions     map[acp.SessionId]*session
-	deleted      map[acp.SessionId]bool
+	lifecycle lifecycle.Negotiated
+	restores  wire.SessionRequests
+	sessions  map[acp.SessionId]*session
+	deleted   map[acp.SessionId]bool
+	// ephemeral holds the ids the host opened as ephemeral, kept past close so
+	// their delete never touches the store.
+	ephemeral    map[acp.SessionId]bool
 	incarnations uint64
 }
 
@@ -102,6 +105,7 @@ func NewAgent(opts ...Option) *Agent {
 		store:      store,
 		sessions:   make(map[acp.SessionId]*session),
 		deleted:    make(map[acp.SessionId]bool),
+		ephemeral:  make(map[acp.SessionId]bool),
 	}
 	agent.optionErr = agent.validateOptions()
 

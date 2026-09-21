@@ -64,6 +64,10 @@ func (r sessionRecord) validate(id string) error {
 }
 
 func (s *session) commitMirror(ctx context.Context) error {
+	if s.ephemeral {
+		return nil
+	}
+
 	ctx, finish := s.agent.observe.StartSessionStore(ctx, "replace")
 	err := sessionlog.Commit(ctx, s.agent.store, string(s.id), s.rows, s.record())
 	finish(err)

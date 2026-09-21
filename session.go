@@ -39,6 +39,9 @@ type session struct {
 	closeDone             chan struct{}
 	closeErr              error
 	poison                string
+	// ephemeral marks a session the host deletes without needing it back: it
+	// is never written to the store and never listed.
+	ephemeral bool
 	// rows are protected by the foreground gate; close takes it after joining the turn.
 	rows      [][]byte
 	rawEvents *wire.RawEvents
