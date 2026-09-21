@@ -2,132 +2,381 @@ package ampacp
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
-	"runtime"
+	"strings"
+	"sync"
 	"testing"
+	"time"
+
+	acpcore "github.com/savid/acp-go-core"
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/stretchr/testify/require"
+
+	"github.com/savid/acp-go-core/wire"
 )
 
-// absTestPath builds a host-absolute path from POSIX-looking segments, so a
-// test states "an absolute working directory" rather than a spelling only
-// one platform accepts.
-func absTestPath(segments ...string) string {
-	root := "/"
-	if runtime.GOOS == "windows" {
-		root = `C:\`
-	}
+const testTimeout = 20 * time.Second
 
-	return filepath.Join(append([]string{root}, segments...)...)
-}
-
-// hostFilePerm maps a POSIX file mode onto the permission bits the host
-// actually records. Windows keeps no POSIX mode: os.Chmod there sets only the
-// read-only attribute, so a writable file reports 0666 and a read-only one
-// 0444 whatever mode created it. Restriction on Windows is the inherited ACL,
-// which these bits do not describe.
-func hostFilePerm(perm os.FileMode) os.FileMode {
-	if runtime.GOOS != "windows" {
-		return perm
-	}
-
-	if perm&0o200 == 0 {
-		return 0o444
-	}
-
-	return 0o666
-}
-
-// hostDirPerm is hostFilePerm for a directory, which Windows always reports as
-// 0777 because the read-only attribute does not apply to one.
-func hostDirPerm(perm os.FileMode) os.FileMode {
-	if runtime.GOOS != "windows" {
-		return perm
-	}
-
-	return 0o777
-}
-
-// testExecutableName spells a harness file name the way the host resolves
-// executables. Windows honours PATHEXT, so a name with no extension is not an
-// executable there however it is written to disk.
-func testExecutableName(base string) string {
-	if runtime.GOOS == "windows" {
-		return base + ".exe"
-	}
-
-	return base
-}
-
-// testHarnessPath stands in for the absolute harness a real probe resolves and
-// validates. The agent retains whatever a probe answers, so a stubbed probe
-// must answer an absolute path; the tests that use this one never launch a
-// child from it.
-func testHarnessPath(t *testing.T) string {
+// testOptions configures an agent that launches the test binary as the amp
+// executable, against a scripted native thread store under a temp directory.
+func testOptions(t *testing.T, extra ...Option) []Option {
 	t.Helper()
 
-	return filepath.Join(t.TempDir(), testExecutableName("amp"))
+	options := make([]Option, 0, 5+len(extra))
+	options = append(options,
+		WithExecutablePath(os.Args[0]),
+		WithEnv(map[string]string{"ACP_GO_AMP_TEST_NATIVE": filepath.Join(t.TempDir(), "native"), "GORACE": "atexit_sleep_ms=0"}),
+		WithScratchDir(filepath.Join(t.TempDir(), "scratch")),
+		WithLogger(slog.New(slog.DiscardHandler)),
+	)
+
+	options = append(options, extra...)
+	config := t.TempDir()
+
+	return append(options, func(options *Options) {
+		if options.Env["XDG_CONFIG_HOME"] == "" {
+			options.Env["XDG_CONFIG_HOME"] = config
+		}
+	})
 }
 
-// testScratchDir is a scratch parent the isolated identity can enter. Trees
-// generated under it are handed to that identity, and the handoff walks the
-// whole ancestry: a t.TempDir leaf sits under a 0700 directory no other
-// identity may traverse, so every such handoff is refused.
-func testScratchDir(t *testing.T) string {
+// recorder is the ACP client the tests observe the agent through.
+type recorder struct {
+	mu      sync.Mutex
+	updates []acp.SessionNotification
+	raw     []json.RawMessage
+	changed chan struct{}
+}
+
+var (
+	_ acp.Client                 = (*recorder)(nil)
+	_ acp.ExtensionMethodHandler = (*recorder)(nil)
+)
+
+func newRecorder() *recorder {
+	return &recorder{changed: make(chan struct{}, 1)}
+}
+
+func (r *recorder) signal() {
+	select {
+	case r.changed <- struct{}{}:
+	default:
+	}
+}
+
+func (r *recorder) SessionUpdate(_ context.Context, params acp.SessionNotification) error {
+	r.mu.Lock()
+	r.updates = append(r.updates, params)
+	r.mu.Unlock()
+	r.signal()
+
+	return nil
+}
+
+// RequestPermission exists because acp.Client requires it. Amp has no
+// permission surface and never sends one.
+func (*recorder) RequestPermission(context.Context, acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error) {
+	return acp.RequestPermissionResponse{}, errors.New("unsupported")
+}
+
+func (r *recorder) HandleExtensionMethod(_ context.Context, method string, params json.RawMessage) (any, error) {
+	if method == RawEventMethod {
+		r.mu.Lock()
+		r.raw = append(r.raw, append(json.RawMessage(nil), params...))
+		r.mu.Unlock()
+		r.signal()
+	}
+
+	return map[string]any{}, nil
+}
+
+func (*recorder) NotifyExtension(context.Context, string, any) error { return nil }
+
+func (*recorder) ReadTextFile(context.Context, acp.ReadTextFileRequest) (acp.ReadTextFileResponse, error) {
+	return acp.ReadTextFileResponse{}, errors.New("unsupported")
+}
+
+func (*recorder) WriteTextFile(context.Context, acp.WriteTextFileRequest) (acp.WriteTextFileResponse, error) {
+	return acp.WriteTextFileResponse{}, errors.New("unsupported")
+}
+
+func (*recorder) CreateTerminal(context.Context, acp.CreateTerminalRequest) (acp.CreateTerminalResponse, error) {
+	return acp.CreateTerminalResponse{}, errors.New("unsupported")
+}
+
+func (*recorder) KillTerminal(context.Context, acp.KillTerminalRequest) (acp.KillTerminalResponse, error) {
+	return acp.KillTerminalResponse{}, errors.New("unsupported")
+}
+
+func (*recorder) TerminalOutput(context.Context, acp.TerminalOutputRequest) (acp.TerminalOutputResponse, error) {
+	return acp.TerminalOutputResponse{}, errors.New("unsupported")
+}
+
+func (*recorder) ReleaseTerminal(context.Context, acp.ReleaseTerminalRequest) (acp.ReleaseTerminalResponse, error) {
+	return acp.ReleaseTerminalResponse{}, errors.New("unsupported")
+}
+
+func (*recorder) WaitForTerminalExit(context.Context, acp.WaitForTerminalExitRequest) (acp.WaitForTerminalExitResponse, error) {
+	return acp.WaitForTerminalExitResponse{}, errors.New("unsupported")
+}
+
+// snapshot returns the notifications recorded so far.
+func (r *recorder) snapshot() []acp.SessionNotification {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return append([]acp.SessionNotification(nil), r.updates...)
+}
+
+// waitFor blocks until condition holds over the recorded notifications.
+func (r *recorder) waitFor(t *testing.T, condition func([]acp.SessionNotification) bool) {
 	t.Helper()
-	scratch, err := os.MkdirTemp("", "acp-go-amp-scratch-")
-	if err != nil {
-		t.Fatalf("create traversable scratch dir: %v", err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(scratch) })
-	if err = os.Chmod(scratch, 0o711); err != nil {
-		t.Fatalf("make scratch dir traversable: %v", err)
-	}
 
-	return scratch
+	deadline := time.After(testTimeout)
+
+	for {
+		if condition(r.snapshot()) {
+			return
+		}
+
+		select {
+		case <-r.changed:
+		case <-deadline:
+			t.Fatalf("condition not met; %d notifications recorded", len(r.snapshot()))
+		}
+	}
 }
 
-func testContainmentOptions(options []Option) []Option {
-	options = append(options, func(options *Options) {
-		options.testOnlyNoCredential = true
-		if options.testOnlyAuthLoginPlatform == "" {
-			options.testOnlyAuthLoginPlatform = platformLinux
+// harness serves an agent over pipes to a recording client.
+type harness struct {
+	input *requestWriter
+	t     *testing.T
+	conn  *acp.ClientSideConnection
+	rec   *recorder
+}
+
+func newHarness(t *testing.T, extra ...Option) *harness {
+	t.Helper()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	clientReader, agentWriter := io.Pipe()
+	agentReader, clientWriter := io.Pipe()
+	rec := newRecorder()
+	served := make(chan error, 1)
+
+	go func() { served <- Serve(ctx, agentReader, agentWriter, testOptions(t, extra...)...) }()
+
+	input := &requestWriter{Writer: clientWriter}
+	conn := acp.NewClientSideConnection(rec, input, clientReader)
+	conn.SetLogger(slog.New(slog.DiscardHandler))
+
+	h := &harness{t: t, conn: conn, rec: rec, input: input}
+
+	t.Cleanup(func() {
+		cancel()
+		_ = clientWriter.Close()
+
+		select {
+		case <-served:
+		case <-time.After(testTimeout):
+			t.Error("Serve did not return")
 		}
 	})
 
-	return options
+	return h
 }
 
-func newTestAgent(options ...Option) *Agent {
-	return NewAgent(testContainmentOptions(options)...)
-}
-
-func serveTest(ctx context.Context, input io.Reader, output io.Writer, options ...Option) error {
-	return Serve(ctx, input, output, testContainmentOptions(options)...)
-}
-
-func requireInvalidParamsData(t *testing.T, err error, want map[string]any) {
-	t.Helper()
-	var reqErr *acp.RequestError
-	require.ErrorAs(t, err, &reqErr)
-	require.Equal(t, -32602, reqErr.Code)
-	require.Equal(t, want, reqErr.Data)
-}
-
-func requireInternalErrorData(t *testing.T, err error, want map[string]any) {
-	t.Helper()
-	var reqErr *acp.RequestError
-	require.ErrorAs(t, err, &reqErr)
-	require.Equal(t, -32603, reqErr.Code)
-	require.Equal(t, want, reqErr.Data)
-}
-
-func residualCancelledContext() context.Context {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
+func (h *harness) ctx() context.Context {
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	h.t.Cleanup(cancel)
 
 	return ctx
+}
+
+func (h *harness) initialize(opts ...func(*acp.InitializeRequest)) acp.InitializeResponse {
+	h.t.Helper()
+
+	request := acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber}
+	for _, opt := range opts {
+		opt(&request)
+	}
+
+	resp, err := h.conn.Initialize(h.ctx(), request)
+	require.NoError(h.t, err)
+
+	return resp
+}
+
+func withLifecycle() func(*acp.InitializeRequest) {
+	return func(request *acp.InitializeRequest) {
+		request.Meta = map[string]any{wire.LifecycleKey: map[string]any{"version": 1}}
+	}
+}
+
+func (h *harness) newSession(opts ...wire.SessionRequestOption) acp.NewSessionResponse {
+	h.t.Helper()
+
+	resp, err := h.conn.NewSession(h.ctx(), wire.NewSessionRequest(h.t.TempDir(), opts...))
+	require.NoError(h.t, err)
+
+	return resp
+}
+
+func (h *harness) prompt(sessionID acp.SessionId, text string, meta map[string]any) (acp.PromptResponse, error) {
+	h.t.Helper()
+
+	request := wire.TextPromptRequest(sessionID, text)
+	request.Meta = meta
+
+	return h.conn.Prompt(h.ctx(), request)
+}
+
+// promptMeta stamps the lifecycle prompt correlation.
+func promptMeta(n int) map[string]any {
+	return map[string]any{wire.LifecycleKey: map[string]any{
+		"version": 1, "submission": map[string]any{"submissionId": fmt.Sprintf("sub-%d", n), "clientNonce": fmt.Sprintf("non-%d", n)},
+	}}
+}
+
+// rawEventCount returns the number of raw native events recorded.
+func (r *recorder) rawEventCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return len(r.raw)
+}
+
+// toolImages counts the image blocks carried by recorded tool-call updates.
+func toolImages(updates []acp.SessionNotification) int {
+	count := 0
+
+	for _, update := range updates {
+		tool := update.Update.ToolCallUpdate
+		if tool == nil {
+			continue
+		}
+
+		for _, part := range tool.Content {
+			if part.Content != nil && part.Content.Content.Image != nil {
+				count++
+			}
+		}
+	}
+
+	return count
+}
+
+// lifecycleEventKinds names every lifecycle event carried by the recorded
+// notifications, in order, distinguishing a state update by the state it
+// asserts.
+func lifecycleEventKinds(updates []acp.SessionNotification) []string {
+	kinds := make([]string, 0, len(updates))
+
+	for _, update := range updates {
+		meta, ok := update.Meta[wire.LifecycleKey].(map[string]any)
+		if !ok {
+			continue
+		}
+
+		event, ok := meta["event"].(map[string]any)
+		if !ok {
+			continue
+		}
+
+		kind, _ := event["type"].(string)
+		if state, ok := event["state"].(string); ok {
+			kind += ":" + state
+		}
+
+		kinds = append(kinds, kind)
+	}
+
+	return kinds
+}
+
+// requestErrorCode is the code of a JSON-RPC error.
+func requestErrorCode(t *testing.T, err error) int {
+	t.Helper()
+
+	var reqErr *acp.RequestError
+	require.ErrorAs(t, err, &reqErr)
+
+	return reqErr.Code
+}
+
+// requestErrorData decodes the data member of a JSON-RPC error.
+func requestErrorData(t *testing.T, err error) map[string]any {
+	t.Helper()
+
+	var reqErr *acp.RequestError
+	require.ErrorAs(t, err, &reqErr)
+
+	data, ok := reqErr.Data.(map[string]any)
+	if !ok {
+		encoded, marshalErr := json.Marshal(reqErr.Data)
+		require.NoError(t, marshalErr)
+		require.NoError(t, json.Unmarshal(encoded, &data))
+	}
+
+	return data
+}
+
+// agentText concatenates streamed agent message text.
+func agentText(updates []acp.SessionNotification) string {
+	var text strings.Builder
+
+	for _, update := range updates {
+		if chunk := update.Update.AgentMessageChunk; chunk != nil && chunk.Content.Text != nil {
+			text.WriteString(chunk.Content.Text.Text)
+		}
+	}
+
+	return text.String()
+}
+
+func loadEntries(ctx context.Context, store acpcore.SessionStore, key acpcore.SessionKey) ([]acpcore.SessionStoreEntry, error) {
+	generation, err := store.Load(ctx, key.SessionID)
+
+	return generation[key.Subpath], err
+}
+
+// requestWriter retains the wire JSON-RPC id of the latest prompt so a test
+// can cancel that request without also sending session/cancel.
+type requestWriter struct {
+	io.Writer
+	mu       sync.Mutex
+	promptID json.RawMessage
+}
+
+func (w *requestWriter) Write(data []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	var frame struct {
+		ID     json.RawMessage `json:"id"`
+		Method string          `json:"method"`
+	}
+	if json.Unmarshal(data, &frame) == nil && frame.Method == acp.AgentMethodSessionPrompt {
+		w.promptID = frame.ID
+	}
+
+	return w.Writer.Write(data)
+}
+
+func (w *requestWriter) cancelPrompt() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	data, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "method": "$/cancel_request", "params": map[string]any{"requestId": w.promptID}})
+	if err != nil {
+		return err
+	}
+	_, err = w.Writer.Write(append(data, '\n'))
+
+	return err
 }

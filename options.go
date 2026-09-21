@@ -1,59 +1,83 @@
 package ampacp
 
 import (
-	"context"
-	"encoding/json"
-	"errors"
-	"fmt"
 	"log/slog"
 	"maps"
-	"path/filepath"
-	"runtime"
 	"slices"
-	"strings"
-	"time"
 
-	acp "github.com/coder/acp-go-sdk"
-	nativeamp "github.com/savid/acp-go-amp/internal/amp"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
+
+	acpcore "github.com/savid/acp-go-core"
+	"github.com/savid/acp-go-core/image"
 )
 
-const (
-	platformDarwin   = "darwin"
-	platformLinux    = "linux"
-	platformWindows  = "windows"
-	privateEnvPrefix = "ACP_GO_AMP_INTERNAL_"
-)
-
-var runtimeGOOS = runtime.GOOS
-
-const (
-	defaultAgentName             = "acp-go-amp"
-	defaultAgentTitle            = "acp-go-amp"
-	defaultAgentVersion          = "0.1.0"
-	defaultSessionStoreTimeout   = 10 * time.Second
-	sessionStoreWriteTimeout     = 60 * time.Second
-	defaultMaxActiveSessions     = 32
-	defaultMaxConcurrentCalls    = 16
-	defaultNativeCancelTimeout   = 5 * time.Second
-	defaultNativeCloseTurnWait   = 5 * time.Second
-	defaultNativeCommandTimeout  = 30 * time.Second
-	defaultNativePromptLineLimit = 10 * 1024 * 1024
-	defaultImageLimitBytes       = 6 * 1024 * 1024
-)
-
-// Option configures an Agent.
+// Option configures the amp ACP agent.
 type Option func(*Options)
 
-// ConcurrencyLimits configures ACP backpressure limits.
+// Options configures the ACP agent process and the native Amp prompt processes.
+type Options struct {
+	// AgentName is the protocol identifier advertised during ACP initialize.
+	AgentName string
+	// AgentTitle is the human-readable agent name advertised during ACP initialize.
+	AgentTitle string
+	// AgentVersion is the agent version advertised during ACP initialize.
+	AgentVersion string
+
+	// ExecutablePath selects the amp executable. A bare name is searched on the
+	// base PATH; a path containing a separator is used as given. Empty means
+	// "amp".
+	ExecutablePath string
+	// Home is unsupported; Amp resolves its native files from the inherited environment.
+	Home string
+	// ScratchDir is the parent directory for ephemeral adapter state. Empty
+	// means the system temp directory.
+	ScratchDir string
+	// InputHandoffRoot is the absolute directory under which handoff-form
+	// prompt images are read. Empty rejects the handoff form.
+	InputHandoffRoot string
+	// DefaultModel is unsupported; use the native mode option.
+	DefaultModel string
+	// ConfiguredModels is unsupported because Amp has no model catalog.
+	ConfiguredModels []string
+	// Env is the static agent-scoped overlay on the inherited process
+	// environment every amp process runs with.
+	Env map[string]string
+
+	// Logger receives structured diagnostic logs. If nil, the default logger is used.
+	Logger *slog.Logger
+	// TracerProvider records adapter spans. If nil, tracing is a no-op.
+	TracerProvider trace.TracerProvider
+	// MeterProvider records adapter metrics. If nil, metrics are no-ops.
+	MeterProvider metric.MeterProvider
+	// TextMapPropagator extracts trace context from ACP _meta. If nil, W3C
+	// trace context plus baggage propagation is used.
+	TextMapPropagator propagation.TextMapPropagator
+
+	// SessionStore is the durability boundary for session rows. Nil installs a
+	// fresh in-memory store.
+	SessionStore acpcore.SessionStore
+	// ConcurrencyLimits controls process-local backpressure.
+	ConcurrencyLimits ConcurrencyLimits
+	// SeedFiles maps paths relative to amp's config root to file contents
+	// written there before each launch.
+	SeedFiles map[string]string
+	// ImageLimits bounds decoded image bytes on prompt input and emitted
+	// output. Every field defaults to 6 MiB when the option is omitted.
+	ImageLimits ImageLimits
+
+	imageLimitsSet bool
+}
+
+// ConcurrencyLimits controls per-agent backpressure. Zero fields use defaults.
 type ConcurrencyLimits struct {
 	MaxActiveSessions        int
 	MaxConcurrentClientCalls int
 }
 
-// ImageLimits configures decoded image byte limits.
+// ImageLimits bounds decoded image bytes. A zero field disables that policy
+// limit; the frame clamp still applies.
 type ImageLimits struct {
 	MaxInputBytesPerImage     int64
 	MaxInputBytesPerPrompt    int64
@@ -61,537 +85,145 @@ type ImageLimits struct {
 	MaxOutputBytesPerToolCall int64
 }
 
-// Options contains package-level agent configuration.
-type Options struct {
-	AgentName    string
-	AgentTitle   string
-	AgentVersion string
-
-	ExecutablePath        string
-	HostAuthority         HostAuthority
-	hostAuthoritySupplied bool
-	// Home is unsupported: Amp has no native config/auth root, so a non-empty
-	// value is rejected at every session start. See WithHome and WithScratchDir.
-	Home         string
-	DefaultModel string
-	// ScratchDir is the sole parent for all ephemeral on-disk materialization
-	// (per-session isolated HOME/XDG dirs, startup probe dirs, any temp). Empty
-	// falls back to the system temp directory. See WithScratchDir.
-	ScratchDir string
-	// InputHandoffRoot is the read root for the local handoff input form. It
-	// materializes nothing, so it is not a materialization root. Empty rejects
-	// every handoff-form image block. See WithInputHandoffRoot.
-	InputHandoffRoot string
-	// ProviderAuthRoot is the absolute, host-owned, durable directory that
-	// houses the values-free provider-auth ledger. It is not ephemeral
-	// materialization: the ledger deliberately outlives every session and every
-	// isolated home, which is the one class of state a scratch parent must not
-	// hold. Without it no provider-auth method is advertised at all.
-	ProviderAuthRoot string
-	// ProviderAuthDirectHome is unsupported: Amp's disconnect releases the one
-	// ledger slot a connection owns and performs no native removal, so there is
-	// no canonical operator home for an exact-home gate to authorize. A
-	// non-empty value is rejected at every session start.
-	ProviderAuthDirectHome string
-	Env                    map[string]string
-	// AmbientEnvironment replaces the adapter's own process environment as the
-	// block ordinary execution inherits from. Its names are judged exactly as
-	// inherited names are; WithEnv and session environments overlay it. Nil
-	// inherits from the adapter's process. Managed execution never reads it.
-	AmbientEnvironment map[string]string
-	DirectAPI          bool
-
-	Logger            *slog.Logger
-	TracerProvider    trace.TracerProvider
-	MeterProvider     metric.MeterProvider
-	TextMapPropagator propagation.TextMapPropagator
-
-	SessionStore              SessionStore
-	SessionStoreLoadTimeout   time.Duration
-	ConcurrencyLimits         ConcurrencyLimits
-	ImageLimits               ImageLimits
-	SeedFiles                 map[string]string
-	TurnTimeout               time.Duration
-	testOnlyNoCredential      bool
-	testOnlyAuthLoginPlatform string
-	runtime                   runtimeOptions
+func (l ImageLimits) core() image.Limits {
+	return image.Limits{
+		MaxInputBytesPerImage:     l.MaxInputBytesPerImage,
+		MaxInputBytesPerPrompt:    l.MaxInputBytesPerPrompt,
+		MaxOutputBytesPerImage:    l.MaxOutputBytesPerImage,
+		MaxOutputBytesPerToolCall: l.MaxOutputBytesPerToolCall,
+	}
 }
 
-type runtimeOptions struct {
-	nativeCancelTimeout  time.Duration
-	nativeCloseTurnWait  time.Duration
-	nativeCommandTimeout time.Duration
-	maxJSONLineBytes     int
-	// startupProbe validates the harness and answers the absolute path it
-	// validated, which the agent retains for every launch that follows.
-	startupProbe func(context.Context, *nativeamp.Client) (string, error)
-	// executeThread launches the thread-less `amp -x` turn that lazily creates
-	// the server-side thread on a session's first prompt.
-	executeThread  func(context.Context, *nativeamp.Client, any) (*nativeamp.Turn, error)
-	continueThread func(context.Context, *nativeamp.Client, string, any) (*nativeamp.Turn, error)
-	exportThread   func(context.Context, *nativeamp.Client, string) (json.RawMessage, error)
-	// settleTurn completes the prompt's native boundary. Production closes the
-	// real native process and therefore waits through the host authority.
-	settleTurn func(*nativeamp.Turn) error
-	// afterColdSessionPrepared is an internal launch barrier used by deterministic
-	// ownership tests after a cold wrapper has transferred to its use and before
-	// store replay continues. Production leaves it nil.
-	afterColdSessionPrepared func(*agentSession)
-	// afterSessionUseAdmitted is the matching internal barrier for an admitted
-	// active load/resume use. It runs before native export and is nil in
-	// production.
-	afterSessionUseAdmitted func(*agentSessionUse)
-	// afterReplacementPredecessorClosed is an internal boundary barrier used by
-	// deterministic tests after the old residence is fully reclaimed and before
-	// the successor is constructed. Production leaves it nil.
-	afterReplacementPredecessorClosed func(*agentSession)
-	// beforePersistenceReplace, beforeDeleteTombstone, and
-	// beforeTerminalDelivery are internal ordering barriers for deterministic
-	// lifecycle tests. Production leaves them nil.
-	beforePersistenceReplace func()
-	beforeDeleteTombstone    func()
-	beforeTerminalDelivery   func(acp.SessionNotification)
-	// newTurnTimer builds the per-turn deadline channel. It is a seam so tests
-	// can drive the timeout branch deterministically against a coincident
-	// cancel; production always uses a real time.Timer.
-	newTurnTimer func(d time.Duration) (<-chan time.Time, func())
-}
-
-// newRealTurnTimer is the production turn-deadline source: a real time.Timer
-// whose channel fires after d, paired with a stop func for the caller to defer.
-func newRealTurnTimer(d time.Duration) (<-chan time.Time, func()) {
-	timer := time.NewTimer(d)
-
-	return timer.C, func() { timer.Stop() }
-}
+const (
+	defaultMaxActiveSessions        = 32
+	defaultMaxConcurrentClientCalls = 16
+)
 
 func applyOptions(opts []Option) Options {
 	options := Options{
-		AgentName:               defaultAgentName,
-		AgentTitle:              defaultAgentTitle,
-		AgentVersion:            defaultAgentVersion,
-		DirectAPI:               true,
-		SessionStoreLoadTimeout: defaultSessionStoreTimeout,
-		ImageLimits: ImageLimits{
-			MaxInputBytesPerImage:     defaultImageLimitBytes,
-			MaxInputBytesPerPrompt:    defaultImageLimitBytes,
-			MaxOutputBytesPerImage:    defaultImageLimitBytes,
-			MaxOutputBytesPerToolCall: defaultImageLimitBytes,
-		},
-		runtime: runtimeOptions{
-			nativeCancelTimeout:  defaultNativeCancelTimeout,
-			nativeCloseTurnWait:  defaultNativeCloseTurnWait,
-			nativeCommandTimeout: defaultNativeCommandTimeout,
-			maxJSONLineBytes:     defaultNativePromptLineLimit,
-			newTurnTimer:         newRealTurnTimer,
-			startupProbe: func(ctx context.Context, client *nativeamp.Client) (string, error) {
-				return client.StartupProbe(ctx)
-			},
-			executeThread: func(ctx context.Context, client *nativeamp.Client, input any) (*nativeamp.Turn, error) {
-				return client.Execute(ctx, input)
-			},
-			continueThread: func(ctx context.Context, client *nativeamp.Client, threadID string, input any) (*nativeamp.Turn, error) {
-				return client.Continue(ctx, threadID, input)
-			},
-			exportThread: func(ctx context.Context, client *nativeamp.Client, threadID string) (json.RawMessage, error) {
-				return client.ExportThread(ctx, threadID)
-			},
-			settleTurn: func(turn *nativeamp.Turn) error { return turn.Close() },
-		},
+		AgentName:    "acp-go-amp",
+		AgentTitle:   "acp-go-amp",
+		AgentVersion: "0.1.0",
 	}
 
 	for _, opt := range opts {
-		if opt != nil {
-			opt(&options)
+		opt(&options)
+	}
+
+	if !options.imageLimitsSet {
+		limits := image.DefaultLimits()
+		options.ImageLimits = ImageLimits{
+			MaxInputBytesPerImage:     limits.MaxInputBytesPerImage,
+			MaxInputBytesPerPrompt:    limits.MaxInputBytesPerPrompt,
+			MaxOutputBytesPerImage:    limits.MaxOutputBytesPerImage,
+			MaxOutputBytesPerToolCall: limits.MaxOutputBytesPerToolCall,
 		}
 	}
 
-	if options.Env == nil {
-		options.Env = map[string]string{}
+	if options.ConcurrencyLimits.MaxActiveSessions == 0 {
+		options.ConcurrencyLimits.MaxActiveSessions = defaultMaxActiveSessions
+	}
+
+	if options.ConcurrencyLimits.MaxConcurrentClientCalls == 0 {
+		options.ConcurrencyLimits.MaxConcurrentClientCalls = defaultMaxConcurrentClientCalls
 	}
 
 	return options
 }
 
-// WithLogger sets the agent's structured logger.
+// WithLogger configures structured diagnostic logging.
 func WithLogger(logger *slog.Logger) Option {
-	return func(options *Options) {
-		options.Logger = logger
-	}
+	return func(options *Options) { options.Logger = logger }
 }
 
-// WithAgentName overrides the advertised agent name.
+// WithAgentName sets the protocol identifier advertised during ACP initialize.
 func WithAgentName(name string) Option {
-	return func(options *Options) {
-		if name != "" {
-			options.AgentName = name
-		}
-	}
+	return func(options *Options) { options.AgentName = name }
 }
 
-// WithAgentTitle overrides the advertised agent title.
+// WithAgentTitle sets the human-readable agent name advertised during ACP initialize.
 func WithAgentTitle(title string) Option {
-	return func(options *Options) {
-		if title != "" {
-			options.AgentTitle = title
-		}
-	}
+	return func(options *Options) { options.AgentTitle = title }
 }
 
-// WithAgentVersion overrides the advertised agent version.
+// WithAgentVersion sets the agent version advertised during ACP initialize.
 func WithAgentVersion(version string) Option {
-	return func(options *Options) {
-		if version != "" {
-			options.AgentVersion = version
-		}
-	}
+	return func(options *Options) { options.AgentVersion = version }
 }
 
-// WithExecutablePath sets the Amp CLI path.
+// WithExecutablePath selects the amp executable.
 func WithExecutablePath(path string) Option {
-	return func(options *Options) {
-		options.ExecutablePath = path
-	}
+	return func(options *Options) { options.ExecutablePath = path }
 }
 
-// WithHostAuthority routes native processes and tree ownership through authority.
-func WithHostAuthority(authority HostAuthority) Option {
-	return func(options *Options) {
-		options.hostAuthoritySupplied = true
-		options.HostAuthority = authority
-	}
-}
-
-// WithHome records a native config/auth root, but Amp has no such root: it runs
-// each session inside an ephemeral isolated home under WithScratchDir instead.
-// The option stays in the surface for symmetry; a non-empty value is rejected
-// fail-closed at every session start with the uniform unsupported "home" field
-// error. Use WithScratchDir to control where the ephemeral state is
-// materialized.
+// WithHome is unsupported by Amp. A nonempty path fails initialization.
 func WithHome(path string) Option {
-	return func(options *Options) {
-		options.Home = path
-	}
+	return func(options *Options) { options.Home = path }
 }
 
-// WithScratchDir sets the sole parent directory for all ephemeral on-disk
-// materialization: the per-session isolated HOME/XDG settings directories, the
-// startup/discovery probes' isolated HOME/XDG/settings/MCP residence, and any
-// other temporary state. An empty value falls back to the system temp directory.
-// The directory is created 0700 when it does not yet exist.
+// WithScratchDir sets the parent directory for ephemeral adapter state.
 func WithScratchDir(dir string) Option {
-	return func(options *Options) {
-		options.ScratchDir = dir
-	}
+	return func(options *Options) { options.ScratchDir = dir }
 }
 
-// WithInputHandoffRoot sets the read root for the local handoff input form. An
-// image content block may arrive with empty data, a file URI naming a path under
-// this directory, and an _meta "acp-go.dev/handoff" envelope carrying the sha256
-// digest and byte size of the referenced file; the wrapper then reads and
-// verifies those bytes instead of decoding embedded base64. The directory must
-// be absolute.
-//
-// It is a read root only: the wrapper never writes, moves, or removes anything
-// under it. Managed execution pins its descriptor before preparation and
-// requires it to be disjoint from the entire WithScratchDir domain (or system
-// temp directory when omitted). The host must preserve directory identities and
-// disjointness, including mount aliases and native ancestor replacement, for
-// the Agent's lifetime. Leaving it unset withholds the handoff capability
-// advertisement at initialize and rejects every handoff-form block with the
-// uniform invalid_handoff input error.
+// WithInputHandoffRoot sets the absolute directory under which handoff-form
+// prompt images are read. The adapter never writes there.
 func WithInputHandoffRoot(dir string) Option {
-	return func(options *Options) {
-		options.InputHandoffRoot = dir
-	}
+	return func(options *Options) { options.InputHandoffRoot = dir }
 }
 
-// WithProviderAuthRoot sets the durable directory that houses the values-free
-// provider-auth ledger. The path must be absolute; a relative path is rejected
-// at agent construction. The directory is created 0700 when missing and ledger
-// entries are written 0600. Omitting the option, or supplying a root that is
-// not a writable directory, leaves every provider-auth method unadvertised and
-// answering method-not-found: a leg that cannot record what it did is never
-// offered. The root carries no config or auth-resolution semantics and is never
-// a scratch parent.
-func WithProviderAuthRoot(path string) Option {
-	return func(options *Options) {
-		options.ProviderAuthRoot = path
-	}
-}
-
-// WithProviderAuthDirectHome is unsupported. Amp's disconnect bumps the binding
-// generation and releases the ledger slot a connection owns; it performs no
-// native removal and reads no operator home, so there is nothing for an
-// exact-home consent gate to authorize. Establishing a session with a non-empty
-// value is rejected as an unsupported option.
-func WithProviderAuthDirectHome(path string) Option {
-	return func(options *Options) {
-		options.ProviderAuthDirectHome = path
-	}
-}
-
-// WithDefaultModel records a default model, but Amp does not support model
-// selection. Amp advertises no default model at initialize; instead, when a
-// default model is set every session start is rejected fail-closed with the
-// uniform unsupported "model" field error.
+// WithDefaultModel is unsupported by Amp.
 func WithDefaultModel(model string) Option {
-	return func(options *Options) {
-		options.DefaultModel = model
-	}
+	return func(options *Options) { options.DefaultModel = model }
 }
 
-// WithEnv sets base environment variables for spawned Amp processes.
+// WithConfiguredModels is unsupported by Amp.
+func WithConfiguredModels(ids []string) Option {
+	return func(options *Options) { options.ConfiguredModels = slices.Clone(ids) }
+}
+
+// WithEnv sets the static agent-scoped environment overlay applied to every
+// amp process after the inherited environment and before the session env.
 func WithEnv(env map[string]string) Option {
-	return func(options *Options) {
-		options.Env = cloneStringMap(env)
-	}
+	return func(options *Options) { options.Env = maps.Clone(env) }
 }
 
-// WithAmbientEnvironment supplies the block ordinary execution inherits from in
-// place of the adapter's own process environment. Entries are filtered like
-// inherited entries; an entry that could not be an environment entry fails
-// Agent construction. Managed execution reads nothing from it.
-func WithAmbientEnvironment(env map[string]string) Option {
-	return func(options *Options) {
-		options.AmbientEnvironment = cloneStringMap(env)
-	}
-}
-
-// WithAmpDirectAPI enables on-demand quota reads using the effective Amp API
-// key and native-resolved deployment. It defaults to true; false disables these reads.
-func WithAmpDirectAPI(enabled bool) Option {
-	return func(options *Options) {
-		options.DirectAPI = enabled
-	}
-}
-
-// WithTracerProvider sets the OpenTelemetry tracer provider.
+// WithTracerProvider configures the OpenTelemetry tracer provider.
 func WithTracerProvider(provider trace.TracerProvider) Option {
-	return func(options *Options) {
-		options.TracerProvider = provider
-	}
+	return func(options *Options) { options.TracerProvider = provider }
 }
 
-// WithMeterProvider sets the OpenTelemetry meter provider.
+// WithMeterProvider configures the OpenTelemetry meter provider.
 func WithMeterProvider(provider metric.MeterProvider) Option {
-	return func(options *Options) {
-		options.MeterProvider = provider
-	}
+	return func(options *Options) { options.MeterProvider = provider }
 }
 
-// WithTextMapPropagator sets the OpenTelemetry context propagator.
+// WithTextMapPropagator configures trace-context extraction from ACP _meta.
 func WithTextMapPropagator(propagator propagation.TextMapPropagator) Option {
-	return func(options *Options) {
-		options.TextMapPropagator = propagator
-	}
+	return func(options *Options) { options.TextMapPropagator = propagator }
 }
 
-// WithSessionStore sets the durable session store.
-func WithSessionStore(store SessionStore) Option {
-	return func(options *Options) {
-		options.SessionStore = store
-	}
+// WithSessionStore configures the session store.
+func WithSessionStore(store acpcore.SessionStore) Option {
+	return func(options *Options) { options.SessionStore = store }
 }
 
-// WithSessionStoreLoadTimeout sets the session-store load timeout.
-func WithSessionStoreLoadTimeout(timeout time.Duration) Option {
-	return func(options *Options) {
-		options.SessionStoreLoadTimeout = timeout
-	}
-}
-
-// WithConcurrencyLimits sets ACP backpressure limits.
+// WithConcurrencyLimits sets process-local backpressure limits.
 func WithConcurrencyLimits(limits ConcurrencyLimits) Option {
-	return func(options *Options) {
-		options.ConcurrencyLimits = limits
-	}
+	return func(options *Options) { options.ConcurrencyLimits = limits }
 }
 
-// WithImageLimits sets decoded image byte limits.
+// WithImageLimits bounds decoded image bytes. A zero field disables that
+// policy limit; a negative field fails construction.
 func WithImageLimits(limits ImageLimits) Option {
 	return func(options *Options) {
 		options.ImageLimits = limits
+		options.imageLimitsSet = true
 	}
 }
 
-// WithTurnTimeout sets a per-turn native deadline. The default of 0 means no
-// deadline. When positive, a prompt turn that has not completed within the
-// duration aborts the native turn and returns the uniform turn-failure error
-// with cause "timeout" — a timeout is a failure, never a cancellation.
-func WithTurnTimeout(timeout time.Duration) Option {
-	return func(options *Options) {
-		options.TurnTimeout = timeout
-	}
-}
-
-// WithSeedFiles registers relative-path file contents that the wrapper writes
-// into each session's resolved native root before the amp CLI launches, so the
-// short-lived amp process reads them as its own on-disk state. See
-// writeSeedFiles for the chosen anchor and path-confinement rules. The map is
-// cloned like WithEnv so later caller mutation cannot change agent state.
+// WithSeedFiles registers files written into amp's config root before each
+// launch. Keys are paths relative to that root; values are the contents.
 func WithSeedFiles(files map[string]string) Option {
-	return func(options *Options) { options.SeedFiles = cloneStringMap(files) }
-}
-
-func cloneStringMap(in map[string]string) map[string]string {
-	if in == nil {
-		return nil
-	}
-
-	out := make(map[string]string, len(in))
-	maps.Copy(out, in)
-
-	return out
-}
-
-// AmpOptions contains per-session Amp configuration accepted under _meta.amp.options.
-type AmpOptions struct {
-	Model        string            `json:"model,omitempty"`
-	Env          map[string]string `json:"env,omitempty"`
-	OutputSchema map[string]any    `json:"outputSchema,omitempty"`
-	Mode         string            `json:"mode,omitempty"`
-}
-
-// AmpOption configures AmpOptions.
-type AmpOption func(*AmpOptions)
-
-// NewAmpOptions builds AmpOptions from functional options, cloning caller-owned
-// maps so the result shares no memory with the caller.
-func NewAmpOptions(opts ...AmpOption) AmpOptions {
-	options := AmpOptions{}
-
-	for _, opt := range opts {
-		if opt != nil {
-			opt(&options)
-		}
-	}
-
-	options.Env = cloneStringMap(options.Env)
-	options.OutputSchema = cloneAnyMap(options.OutputSchema)
-
-	return options
-}
-
-// Meta renders the AmpOptions as an _meta.amp.options payload.
-func (options AmpOptions) Meta() map[string]any {
-	return map[string]any{ampMetaKey: map[string]any{ampOptionsKey: ampOptionsPayload(options)}}
-}
-
-// WithAmpModel sets the per-session model.
-func WithAmpModel(model string) AmpOption {
-	return func(options *AmpOptions) {
-		options.Model = model
-	}
-}
-
-// WithAmpEnv sets per-session environment overrides.
-func WithAmpEnv(env map[string]string) AmpOption {
-	return func(options *AmpOptions) {
-		options.Env = cloneStringMap(env)
-	}
-}
-
-// WithAmpOutputSchema sets the per-session structured-output schema.
-func WithAmpOutputSchema(schema map[string]any) AmpOption {
-	return func(options *AmpOptions) {
-		options.OutputSchema = cloneAnyMap(schema)
-	}
-}
-
-// WithAmpMode sets the per-session mode.
-func WithAmpMode(mode string) AmpOption {
-	return func(options *AmpOptions) {
-		options.Mode = mode
-	}
-}
-
-func cloneAnyMap(in map[string]any) map[string]any {
-	if in == nil {
-		return nil
-	}
-
-	out := make(map[string]any, len(in))
-	for key, value := range in {
-		out[key] = cloneAny(value)
-	}
-
-	return out
-}
-
-func cloneAny(value any) any {
-	switch typed := value.(type) {
-	case map[string]any:
-		return cloneAnyMap(typed)
-	case map[string]string:
-		return cloneStringMap(typed)
-	case []any:
-		return cloneAnySlice(typed)
-	default:
-		return value
-	}
-}
-
-func cloneAnySlice(in []any) []any {
-	if in == nil {
-		return nil
-	}
-
-	out := make([]any, len(in))
-	for index, value := range in {
-		out[index] = cloneAny(value)
-	}
-
-	return out
-}
-
-func validateContainmentOptions(options Options) error {
-	return validateEnvironment(options.Env)
-}
-
-// validateEnvironment applies the session name rule to the static Agent-scoped
-// environment. A refusal fails Agent construction.
-func validateEnvironment(environment map[string]string) error {
-	for _, key := range slices.Sorted(maps.Keys(environment)) {
-		if invalidEnvName(key) || strings.IndexByte(environment[key], 0) >= 0 {
-			return fmt.Errorf("environment key %q is not a valid variable name", key)
-		}
-
-		if blockedAgentEnvKey(key) {
-			return fmt.Errorf("environment key %q is reserved", key)
-		}
-	}
-
-	if previous, key := ambiguousEnvKeys(environment); key != "" {
-		return fmt.Errorf("environment keys %q and %q name the same variable", previous, key)
-	}
-
-	return nil
-}
-
-// validateInputHandoffRoot rejects a relative handoff read root. Containment
-// checks are meaningless against a root whose meaning depends on the process
-// working directory, so a relative value is a configuration error rather than a
-// per-block verdict.
-func validateInputHandoffRoot(root string) error {
-	if root != "" && !filepath.IsAbs(root) {
-		return errors.New("input handoff root must be an absolute path")
-	}
-
-	return nil
-}
-
-func validateImageLimits(limits ImageLimits) error {
-	switch {
-	case limits.MaxInputBytesPerImage < 0:
-		return errors.New("max input bytes per image must be non-negative")
-	case limits.MaxInputBytesPerPrompt < 0:
-		return errors.New("max input bytes per prompt must be non-negative")
-	case limits.MaxOutputBytesPerImage < 0:
-		return errors.New("max output bytes per image must be non-negative")
-	case limits.MaxOutputBytesPerToolCall < 0:
-		return errors.New("max output bytes per tool call must be non-negative")
-	default:
-		return nil
-	}
+	return func(options *Options) { options.SeedFiles = maps.Clone(files) }
 }
