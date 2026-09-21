@@ -2,7 +2,6 @@ package ampacp
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-core/lifecycle"
@@ -17,7 +16,7 @@ func (s *session) openStream(ctx context.Context) error {
 
 	s.lc.Fence()
 
-	return s.lc.Open(ctx, fmt.Sprintf("%s:%d", s.id, s.agent.nextIncarnation()), negotiated, s.deliverLifecycle)
+	return s.lc.Open(ctx, lifecycle.NewIncarnation(string(s.id)), negotiated, s.deliverLifecycle)
 }
 
 func (s *session) acceptTurn(ctx context.Context, t *turn) error {

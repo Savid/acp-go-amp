@@ -65,8 +65,7 @@ type Agent struct {
 	deleted   map[acp.SessionId]bool
 	// ephemeral holds the ids the host opened as ephemeral, kept past close so
 	// their delete never touches the store.
-	ephemeral    map[acp.SessionId]bool
-	incarnations uint64
+	ephemeral map[acp.SessionId]bool
 }
 
 var (
@@ -407,17 +406,6 @@ func (a *Agent) lifecycleNegotiated() lifecycle.Negotiated {
 	defer a.mu.Unlock()
 
 	return a.lifecycle
-}
-
-// nextIncarnation mints a stream identity no earlier incarnation of any
-// session on this agent used.
-func (a *Agent) nextIncarnation() uint64 {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
-	a.incarnations++
-
-	return a.incarnations
 }
 
 // ensureExecutable resolves the amp executable against the base
