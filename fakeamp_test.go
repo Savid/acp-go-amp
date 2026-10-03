@@ -63,7 +63,16 @@ func fakeAmp(root string, args []string) int {
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		panic(err)
 	}
+	fakeAppend(filepath.Join(root, "launches"), args[index+1])
 	if args[index+1] == "new" {
+		if gate := os.Getenv("ACP_GO_AMP_TEST_NEW_GATE"); gate != "" {
+			fakeWaitForGate(gate)
+		}
+		if os.Getenv("ACP_GO_AMP_TEST_NEW_FAIL") != "" {
+			fmt.Fprintln(os.Stderr, "thread creation refused")
+
+			return 1
+		}
 		id := "T-" + fakeUUID()
 		snapshot := nativeSnapshot{ID: id, Messages: []nativeMessage{}}
 		fakeSave(root, snapshot)
@@ -391,20 +400,25 @@ func fakeWrite(path string, data []byte) {
 	}
 }
 
+// fakeAppend adds one line to the file at path.
+func fakeAppend(path, line string) {
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		panic(err)
+	}
+	if _, err = file.WriteString(line + "\n"); err != nil {
+		panic(err)
+	}
+	if err = file.Close(); err != nil {
+		panic(err)
+	}
+}
+
 func fakeExport(root, id string, data []byte) int {
 	path := filepath.Join(root, id+".stale")
 	if stale, err := os.ReadFile(path); err == nil {
 		data = stale
-		file, err := os.OpenFile(path+".reads", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
-		if err != nil {
-			panic(err)
-		}
-		if _, err = file.WriteString("read\n"); err != nil {
-			panic(err)
-		}
-		if err = file.Close(); err != nil {
-			panic(err)
-		}
+		fakeAppend(path+".reads", "read")
 	}
 	fmt.Println(string(data))
 
