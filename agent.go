@@ -66,6 +66,9 @@ type Agent struct {
 	// ephemeral holds the ids the host opened as ephemeral, kept past close so
 	// their delete never touches the store.
 	ephemeral map[acp.SessionId]bool
+	// starting counts establishing requests holding an active-session slot
+	// before their session is installed.
+	starting int
 }
 
 var (

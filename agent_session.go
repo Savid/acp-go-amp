@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/coder/acp-go-sdk"
@@ -85,6 +86,26 @@ func (a *Agent) newSession(start sessionStart) *session {
 	return s
 }
 
+// reserveSlot claims an active-session slot for one establishing request
+// before any native work. The returned release is idempotent; once install
+// has published the session, releasing hands the slot over without a gap.
+func (a *Agent) reserveSlot() (func(), error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if a.closed {
+		return nil, wire.AgentClosed()
+	}
+
+	if len(a.sessions)+a.starting >= a.options.ConcurrencyLimits.MaxActiveSessions {
+		return nil, wire.Backpressure(limitActiveSessions)
+	}
+
+	a.starting++
+
+	return sync.OnceFunc(func() { a.mu.Lock(); a.starting--; a.mu.Unlock() }), nil
+}
+
 // install publishes a configured session under its ACP id.
 func (a *Agent) install(ctx context.Context, s *session) error {
 	a.mu.Lock()
@@ -98,8 +119,6 @@ func (a *Agent) install(ctx context.Context, s *session) error {
 		refusal = wire.UnknownSession()
 	case a.sessions[s.id] != nil:
 		refusal = wire.InternalFailure(vendor, internalClassNativeStart)
-	case len(a.sessions) >= a.options.ConcurrencyLimits.MaxActiveSessions:
-		refusal = wire.Backpressure(limitActiveSessions)
 	}
 
 	if refusal == nil {
@@ -145,6 +164,12 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (r
 
 	start.ephemeral = hostMeta.Ephemeral
 
+	releaseSlot, err := a.reserveSlot()
+	if err != nil {
+		return acp.NewSessionResponse{}, err
+	}
+	defer releaseSlot()
+
 	s := a.newSession(start)
 
 	if err := s.createNative(ctx); err != nil {
@@ -159,6 +184,8 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (r
 	if err := a.install(ctx, s); err != nil {
 		return acp.NewSessionResponse{}, err
 	}
+
+	releaseSlot()
 
 	if err := s.commitMirror(ctx); err != nil {
 		a.log.ErrorContext(ctx, "initial mirror commit failed",
@@ -292,6 +319,12 @@ func (a *Agent) restore(
 		return nil, nil, wire.UnknownSession()
 	}
 
+	releaseSlot, err := a.reserveSlot()
+	if err != nil {
+		return nil, nil, err
+	}
+	defer releaseSlot()
+
 	s := a.restoreCandidate(start, sessionID, stored)
 
 	rows, err := s.hydrate(ctx, stored)
@@ -318,6 +351,8 @@ func (a *Agent) restore(
 	if err := a.install(ctx, s); err != nil {
 		return nil, nil, err
 	}
+
+	releaseSlot()
 
 	if replay {
 		if err := s.replay(ctx, rows); err != nil {
