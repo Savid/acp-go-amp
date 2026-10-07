@@ -166,3 +166,9 @@ model tokens and test ACP → native CLI → ACP continuation, fresh local state
 PATH changes, cancellation, and deletion. Integration tests link the native
 secret store into temporary XDG directories so credential refresh updates the
 original store.
+
+## Context compaction
+
+The native plugin lifecycle exposes no explicit compaction event, so the
+adapter emits no `acp-go.dev/compaction` notification. Compaction summaries
+remain in the native thread export.
